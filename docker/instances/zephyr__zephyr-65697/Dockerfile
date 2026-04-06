@@ -43,6 +43,10 @@ RUN ARCH=$(uname -m) \
 RUN west packages pip --install 2>/dev/null \
     || pip install -r scripts/requirements.txt
 
+# Install run_tests.sh into PATH so the agent can call it as `run_tests`.
+COPY run_tests.sh /usr/local/bin/run_tests
+RUN chmod +x /usr/local/bin/run_tests
+
 # Apply the test-only patch: adds the new failing tests but NOT the fix.
 # After this, the repo is in the "broken state with known-failing tests" state.
 COPY test_patch.diff /tmp/
