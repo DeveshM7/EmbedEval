@@ -243,7 +243,7 @@ def build_task(meta: dict) -> str:
 
     cd /testbed && west build && run_tests
 
-Full rebuild if needed: cd /testbed && rm -rf build && west build -b {meta["platform"]} {meta["test_path"]}
+Full rebuild if needed: cd /testbed && rm -rf build && {meta["build_command"]}
 
 Once all target tests PASS in run_tests output, submit with this command ALONE:
     echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT

@@ -1,27 +1,50 @@
 #!/usr/bin/env bash
-# Builds the per-instance Docker image for zephyr__zephyr-65697.
-# Requires: embedbench-zephyr-base:latest already built, and
-#           test_patch.diff already generated (run generate_test_patch.sh first).
+# Builds per-instance Docker images for all instances under docker/instances/.
+# Requires: embedbench-zephyr-base:latest already built.
+# Each instance directory must contain a Dockerfile, test_patch.diff, and metadata.json.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-INSTANCE_DIR="${REPO_ROOT}/docker/instances/zephyr__zephyr-65697"
+INSTANCES_DIR="${REPO_ROOT}/docker/instances"
 
-if [ ! -f "${INSTANCE_DIR}/test_patch.diff" ]; then
-    echo "ERROR: test_patch.diff not found."
-    echo "Run scripts/generate_test_patch.sh first."
-    exit 1
-fi
+# Optional: build only a specific instance if passed as argument
+FILTER="${1:-}"
 
-echo "Building embedbench:zephyr-65697 ..."
-docker build \
-    --build-arg BASE_COMMIT=41b7c17ac4bd0198fc9bb3a0e55aa8d5e2fae96e \
-    --build-arg ZEPHYR_SDK_VERSION=0.16.8 \
-    --build-arg PLATFORM=qemu_x86 \
-    --build-arg TEST_PATH=tests/posix/common \
-    -t embedbench:zephyr-65697 \
-    "${INSTANCE_DIR}"
+for INSTANCE_DIR in "${INSTANCES_DIR}"/*/; do
+    INSTANCE_ID="$(basename "${INSTANCE_DIR}")"
 
-echo "Done: embedbench:zephyr-65697"
+    if [ -n "${FILTER}" ] && [ "${INSTANCE_ID}" != "${FILTER}" ]; then
+        continue
+    fi
+
+    if [ ! -f "${INSTANCE_DIR}/Dockerfile" ]; then
+        echo "SKIP: ${INSTANCE_ID} (no Dockerfile)"
+        continue
+    fi
+    if [ ! -f "${INSTANCE_DIR}/test_patch.diff" ]; then
+        echo "ERROR: ${INSTANCE_ID} missing test_patch.diff — skipping"
+        continue
+    fi
+    if [ ! -f "${INSTANCE_DIR}/metadata.json" ]; then
+        echo "ERROR: ${INSTANCE_ID} missing metadata.json — skipping"
+        continue
+    fi
+
+    # Read fields from metadata.json
+    BASE_COMMIT=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['base_commit'])")
+    DOCKER_IMAGE=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['docker_image'])")
+    PLATFORM=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['platform'])")
+    TEST_PATH=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['test_path'])")
+
+    echo "Building ${DOCKER_IMAGE} (${INSTANCE_ID}) ..."
+    docker build \
+        --build-arg BASE_COMMIT="${BASE_COMMIT}" \
+        --build-arg PLATFORM="${PLATFORM}" \
+        --build-arg TEST_PATH="${TEST_PATH}" \
+        -t "${DOCKER_IMAGE}" \
+        "${INSTANCE_DIR}"
+
+    echo "Done: ${DOCKER_IMAGE}"
+done

@@ -1,0 +1,23 @@
+{
+    "instance_id": "zephyr__zephyr-43405",
+    "project": "zephyr",
+    "repo": "https://github.com/zephyrproject-rtos/zephyr",
+    "base_commit": "af0158d693d581678429d10ffbd9da8adecf95df",
+    "fix_commit": "658123bb211c445fc6ce7d72bb6f5911fc3fcff4",
+    "test_commit": "0fa26efe77b001ec81ddc41cf163f94dc3659378",
+    "problem_statement": "The Zephyr logging subsystem's log_init() enables backends immediately after calling their init() callback, without checking whether the backend is actually ready to receive messages. Backends like USB CDC_ACM require additional time to become operational (e.g. waiting for a USB host connection), so messages logged early in boot are lost or cause errors.\n\nThe fix requires two changes:\n1. Add an optional `is_ready` function pointer to `struct log_backend_api` in `include/zephyr/logging/log_backend.h`. It should return 0 if the backend is ready, or -EBUSY if not.\n2. Add two static inline helpers in the same header: `log_backend_init()` wrapping `backend->api->init(backend)`, and `log_backend_is_ready()` wrapping `backend->api->is_ready(backend)` (returning 0 if is_ready is NULL, meaning always ready).\n3. Refactor `log_init()` in `subsys/logging/log_core.c` into a new static function `z_log_init(bool blocking, bool can_sleep)`. This function must:\n   - Call `log_backend_init()` for each autostart backend instead of calling api->init directly.\n   - Only enable backends immediately if `log_backend_is_ready()` returns 0; otherwise track them in a bitmask.\n   - If `blocking` is true, poll with `activate_foreach_backend()` until all pending backends are ready.\n   - In `log_process_thread_func()`, call `z_log_init(false, false)` and then periodically re-check the pending mask using a 50ms timeout instead of K_FOREVER.\n\nThe failing test creates two backends with 500ms and 1000ms activation delays. Without the fix, both backends are enabled immediately so both receive all log messages. With the fix, backend2 misses the first log message (it was not yet ready), and only receives the second.",
+    "platform": "qemu_x86",
+    "test_path": "tests/subsys/logging/log_backend_init",
+    "test_scenario": "logging.log_backend_initialization",
+    "build_command": "west build -b qemu_x86 tests/subsys/logging/log_backend_init",
+    "run_command": "west build -t run",
+    "docker_image": "embedbench:zephyr-43405",
+    "fail_to_pass": [
+        "test_log_backends_initialization"
+    ],
+    "pass_to_pass": [],
+    "files_changed_by_fix": [
+        "include/zephyr/logging/log_backend.h",
+        "subsys/logging/log_core.c"
+    ]
+}
