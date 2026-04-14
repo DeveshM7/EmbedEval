@@ -1,0 +1,358 @@
+diff --git a/crypto/mbedtls/CMakeLists.txt b/crypto/mbedtls/CMakeLists.txt
+index b7e5ee28..9d956181 100644
+--- a/crypto/mbedtls/CMakeLists.txt
++++ b/crypto/mbedtls/CMakeLists.txt
+@@ -74,7 +74,7 @@ if(CONFIG_CRYPTO_MBEDTLS)
+   # ############################################################################
+ 
+   nuttx_add_library(mbedtls STATIC)
+-
++  nuttx_export_header(TARGET mbedtls INCLUDE_DIRECTORIES ${MBEDTLS_DIR}/include)
+   target_sources(mbedtls PRIVATE ${CSRCS})
+   target_include_directories(mbedtls PRIVATE ${INCDIR})
+   target_compile_definitions(mbedtls PRIVATE __unix__)
+diff --git a/examples/camera/camera_main.c b/examples/camera/camera_main.c
+index 81c7f8d7..759ffc57 100644
+--- a/examples/camera/camera_main.c
++++ b/examples/camera/camera_main.c
+@@ -35,6 +35,7 @@
+ #include <unistd.h>
+ 
+ #include <nuttx/video/video.h>
++#include <nuttx/video/v4l2_cap.h>
+ 
+ #include "camera_fileutil.h"
+ #include "camera_bkgd.h"
+@@ -59,6 +60,8 @@
+ #define APP_STATE_UNDER_CAPTURE   (1)
+ #define APP_STATE_AFTER_CAPTURE   (2)
+ 
++#define CAMERA_DEV_PATH "/dev/video10"
++
+ /****************************************************************************
+  * Private Types
+  ****************************************************************************/
+@@ -500,7 +503,7 @@ int main(int argc, FAR char *argv[])
+ 
+   /* Initialize video driver to create a device file */
+ 
+-  ret = video_initialize("/dev/video");
++  ret = capture_initialize(CAMERA_DEV_PATH);
+   if (ret != 0)
+     {
+       printf("ERROR: Failed to initialize video: errno = %d\n", errno);
+@@ -758,7 +761,7 @@ exit_this_app:
+   free_buffer(buffers_still, STILL_BUFNUM);
+ 
+ exit_without_cleaning_buffer:
+-  video_uninitialize("/dev/video");
++  capture_uninitialize(CAMERA_DEV_PATH);
+ 
+ exit_without_cleaning_videodriver:
+ #ifdef CONFIG_EXAMPLES_CAMERA_OUTPUT_LCD
+diff --git a/netutils/connectedhomeip/CMakeLists.txt b/netutils/connectedhomeip/CMakeLists.txt
+index 52b82181..32e25092 100644
+--- a/netutils/connectedhomeip/CMakeLists.txt
++++ b/netutils/connectedhomeip/CMakeLists.txt
+@@ -151,12 +151,13 @@ if(CONFIG_MATTER)
+   include(${COMMON_CMAKE_SOURCE_DIR}/chip_gn.cmake)
+ 
+   set(nuttx_include_dirs)
+-  get_target_property(include_dirs nuttx NUTTX_INCLUDE_DIRECTORIES)
+-  list(APPEND nuttx_include_dirs ${include_dirs})
+-  get_target_property(include_dirs nuttx INCLUDE_DIRECTORIES)
+-  list(APPEND nuttx_include_dirs ${include_dirs})
+-  get_target_property(include_dirs mbedtls INCLUDE_DIRECTORIES)
+-  list(APPEND nuttx_include_dirs ${include_dirs})
++  get_target_property(include_dirs nuttx NUTTX_CXX_INCLUDE_DIRECTORIES)
++  if(include_dirs)
++    list(APPEND nuttx_include_dirs ${include_dirs})
++  endif()
++  list(APPEND nuttx_include_dirs ${NUTTX_DIR}/include
++       ${CMAKE_BINARY_DIR}/include ${CMAKE_BINARY_DIR}/include_arch)
++  list(APPEND nuttx_include_dirs ${NUTTX_APPS_BINDIR}/include/mbedtls)
+ 
+   set(MATTER_INCDIR
+       ${nuttx_include_dirs}
+diff --git a/testing/cmocka/0006-fix-linux-risc-v-compile-error-list_initialize.patch b/testing/cmocka/0006-fix-linux-risc-v-compile-error-list_initialize.patch
+new file mode 100644
+index 00000000..154b09ca
+--- /dev/null
++++ b/testing/cmocka/0006-fix-linux-risc-v-compile-error-list_initialize.patch
+@@ -0,0 +1,31 @@
++From 69f394f331d7b5f3e9d6f54ab789baba4608519f Mon Sep 17 00:00:00 2001
++From: zhangchao53 <zhangchao53@xiaomi.com>
++Date: Fri, 15 Mar 2024 15:44:08 +0800
++Subject: [PATCH] fix linux risc-v compile error:list_initialize
++
++VELAPLATFO-28608
++
++Change-Id: I3155358a9fac328d13697b87b426467a570ad305
++Signed-off-by: zhangchao53 <zhangchao53@xiaomi.com>
++---
++ src/cmocka.c | 4 ++++
++ 1 file changed, 4 insertions(+)
++
++diff --git a/src/cmocka.c b/src/cmocka.c
++index 8214d6e..4df687c 100644
++--- a/src/cmocka.c
+++++ cmocka/src/cmocka.c
++@@ -99,6 +99,10 @@
++ #define MAX(a,b) ((a) < (b) ? (b) : (a))
++ #endif
++ 
+++#ifdef list_initialize
+++#undef list_initialize
+++#endif
+++
++ /**
++  * POSIX has sigsetjmp/siglongjmp, while Windows only has setjmp/longjmp.
++  */
++-- 
++2.25.1
++
+diff --git a/testing/cmocka/Makefile b/testing/cmocka/Makefile
+index 0193db42..c2694f6c 100644
+--- a/testing/cmocka/Makefile
++++ b/testing/cmocka/Makefile
+@@ -46,6 +46,7 @@ cmocka.zip:
+ 	$(Q) patch -p0 < 0003-cmocka-update-method-for-strmatch-to-regex-and-add-list-all-testcases-function.patch
+ 	$(Q) patch -p0 < 0004-cmocka-xml-report.patch
+ 	$(Q) patch -p0 < 0005-cmocka-cmocka_private-fix-warning-in-cmocka_private.patch
++	$(Q) patch -p0 < 0006-fix-linux-risc-v-compile-error-list_initialize.patch
+ 
+ context:: cmocka.zip
+ 
+diff --git a/testing/getprime/getprime_main.c b/testing/getprime/getprime_main.c
+index 198f4a5c..910aef79 100644
+--- a/testing/getprime/getprime_main.c
++++ b/testing/getprime/getprime_main.c
+@@ -102,8 +102,7 @@ static FAR void *thread_func(FAR void *param)
+   printf("thread #%d finished, found %d primes, last one was %d\n",
+          no, count, last);
+ 
+-  pthread_exit(NULL);
+-  return NULL; /* To keep some compilers happy */
++  return NULL;
+ }
+ 
+ /****************************************************************************
+@@ -141,6 +140,14 @@ static void get_prime_in_parallel(int n)
+   printf("Set thread policy to SCHED_FIFO\n");
+ #endif
+ 
++  /* Zero threads, do work from main thread instead. */
++
++  if (n == 0)
++    {
++        arg[0] = n;
++        thread_func((FAR void *)&arg[0]);
++    }
++
+   for (i = 0; i < n; i++)
+     {
+       arg[i] = i;
+@@ -161,6 +168,19 @@ static void get_prime_in_parallel(int n)
+   UNUSED(status);
+ }
+ 
++/****************************************************************************
++ * Name: usage
++ ****************************************************************************/
++
++static void usage(void)
++{
++    printf("\nUsage: getprime [<num_threads>]\n");
++    printf("\nWhere:\n");
++    printf("  <num_threads> is integer from 0 to %d (default 1).\n",
++           MAX_THREADS);
++    exit(0);
++}
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -180,9 +200,14 @@ int main(int argc, FAR char *argv[])
+   if (argc == 2)
+     {
+       n = (int)strtol(argv[1], &endp, 10);
+-      ASSERT(argv[1] != endp);
+-
+-      ASSERT(0 < n && n <= MAX_THREADS);
++      if (argv[1] == endp || n < 0 || n > MAX_THREADS)
++        {
++            usage();
++        }
++    }
++  else if (argc > 2)
++    {
++      usage();
+     }
+ 
+   clock_gettime(CLOCK_REALTIME, &ts0);
+diff --git a/testing/ostest/CMakeLists.txt b/testing/ostest/CMakeLists.txt
+index 3aa8a677..f0f882c7 100644
+--- a/testing/ostest/CMakeLists.txt
++++ b/testing/ostest/CMakeLists.txt
+@@ -20,7 +20,14 @@
+ 
+ if(CONFIG_TESTING_OSTEST)
+ 
+-  set(SRCS getopt.c restart.c sigprocmask.c sighand.c signest.c sighelper.c)
++  set(SRCS
++      getopt.c
++      libc_memmem.c
++      restart.c
++      sigprocmask.c
++      sighand.c
++      signest.c
++      sighelper.c)
+ 
+   if(CONFIG_DEV_NULL)
+     list(APPEND SRCS dev_null.c)
+diff --git a/testing/ostest/Makefile b/testing/ostest/Makefile
+index 88dffd92..9f472194 100644
+--- a/testing/ostest/Makefile
++++ b/testing/ostest/Makefile
+@@ -29,8 +29,9 @@ MODULE = $(CONFIG_TESTING_OSTEST)
+ 
+ # NuttX OS Test
+ 
+-CSRCS   = getopt.c restart.c sigprocmask.c sighand.c signest.c
+-CSRCS  += sighelper.c
++CSRCS   = getopt.c libc_memmem.c restart.c sigprocmask.c sighand.c \
++          signest.c sighelper.c
++
+ MAINSRC = ostest_main.c
+ 
+ ifeq ($(CONFIG_DEV_NULL),y)
+diff --git a/testing/ostest/cancel.c b/testing/ostest/cancel.c
+index c0c41b07..3c228593 100644
+--- a/testing/ostest/cancel.c
++++ b/testing/ostest/cancel.c
+@@ -607,7 +607,7 @@ void cancel_test(void)
+       printf("cancel_test: ERROR pthread_join succeeded\n");
+       ASSERT(false);
+     }
+-  else if (status != ESRCH)
++  else if (status != EINVAL)
+     {
+       printf("cancel_test:"
+              " ERROR pthread_join failed but with wrong status=%d\n",
+@@ -616,7 +616,7 @@ void cancel_test(void)
+     }
+   else
+     {
+-      printf("cancel_test: PASS pthread_join failed with status=ESRCH\n");
++      printf("cancel_test: PASS pthread_join failed with status=EINVAL\n");
+     }
+ 
+   /* Test 4: Non-cancelable threads *****************************************/
+diff --git a/testing/ostest/libc_memmem.c b/testing/ostest/libc_memmem.c
+new file mode 100644
+index 00000000..25d38c7b
+--- /dev/null
++++ b/testing/ostest/libc_memmem.c
+@@ -0,0 +1,70 @@
++/****************************************************************************
++ * apps/testing/ostest/libc_memmem.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++#include <assert.h>
++#include <string.h>
++
++#include "ostest.h"
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++int memmem_test(void)
++{
++  char *haystack = "hello";
++  char *s;
++
++  s = memmem(haystack, 5, "hel", 3);
++  ASSERT(s == haystack);
++
++  s = memmem(haystack, 5, "lo", 2);
++  ASSERT(s == haystack + 3);
++
++  s = memmem(haystack, 5, "hello", 5);
++  ASSERT(s == haystack);
++
++  /* Compare '\0' bytes at string ends. */
++
++  s = memmem(haystack, 6, "o", 2);
++  ASSERT(s == haystack + 4);
++
++  /* Must not find needle that is right after end of haystack. */
++
++  s = memmem("helloX", 5, "X", 1);
++  ASSERT(s == NULL);
++
++  /* Too long needle should return NULL. */
++
++  s = memmem(haystack, 5, "hellohello", 10);
++  ASSERT(s == NULL);
++
++  /* Zero length needle is deemed to reside at start of haystack. */
++
++  s = memmem(haystack, 5, "", 0);
++  ASSERT(s == haystack);
++
++  return OK;
++}
+diff --git a/testing/ostest/ostest.h b/testing/ostest/ostest.h
+index e169f4b7..5f6c8d45 100644
+--- a/testing/ostest/ostest.h
++++ b/testing/ostest/ostest.h
+@@ -91,6 +91,10 @@
+ 
+ int getopt_test(void);
+ 
++/* libc_memmem.c ************************************************************/
++
++int memmem_test(void);
++
+ /* setvbuf.c ****************************************************************/
+ 
+ #ifndef CONFIG_STDIO_DISABLE_BUFFERING
+diff --git a/testing/ostest/ostest_main.c b/testing/ostest/ostest_main.c
+index 18ef0d9c..b7697d24 100644
+--- a/testing/ostest/ostest_main.c
++++ b/testing/ostest/ostest_main.c
+@@ -260,6 +260,12 @@ static int user_main(int argc, char *argv[])
+   getopt_test();
+   check_test_memory_usage();
+ 
++  /* Test misc libc functions. */
++
++  printf("\nuser_main: libc tests\n");
++  memmem_test();
++  check_test_memory_usage();
++
+   /* If retention of child status is enable, then suppress it for this task.
+    * This task may produce many, many children (especially if
+    * CONFIG_TESTING_OSTEST_LOOPS) and it does not harvest their exit status.
