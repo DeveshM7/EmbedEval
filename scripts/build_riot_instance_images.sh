@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds per-instance Docker images for Zephyr instances under docker/instances/.
-# Requires: embedbench-zephyr-base:latest already built.
+# Builds per-instance Docker images for RIOT instances under docker/instances/.
+# Requires: embedbench-riot-base:latest already built.
 # Each instance directory must contain a Dockerfile, test_patch.diff, and metadata.json.
 
 set -euo pipefail
@@ -32,25 +32,26 @@ for INSTANCE_DIR in "${INSTANCES_DIR}"/*/; do
         continue
     fi
 
-    # Read common fields from metadata.json
     PROJECT=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['project'])")
     BASE_COMMIT=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['base_commit'])")
     DOCKER_IMAGE=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['docker_image'])")
 
-    if [ "${PROJECT}" != "zephyr" ]; then
-        echo "SKIP: ${INSTANCE_ID} (project=${PROJECT}; handled by scripts/build_riot_instance_images.sh)"
+    if [ "${PROJECT}" != "riot" ]; then
+        echo "SKIP: ${INSTANCE_ID} (project=${PROJECT}; handled by scripts/build_instance_images.sh)"
         continue
     fi
 
+    BOARD=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d.get('board', 'native'))")
+    UNIT_TESTS=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(' '.join(d.get('extra_make_args', [])))" \
+        | sed 's/UNIT_TESTS=//')
+
     echo "Building ${DOCKER_IMAGE} (${INSTANCE_ID}, project=${PROJECT}) ..."
 
-    PLATFORM=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['platform'])")
-    TEST_PATH=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d['test_path'])")
-
     docker build \
+        --platform linux/amd64 \
         --build-arg BASE_COMMIT="${BASE_COMMIT}" \
-        --build-arg PLATFORM="${PLATFORM}" \
-        --build-arg TEST_PATH="${TEST_PATH}" \
+        --build-arg BOARD="${BOARD}" \
+        --build-arg UNIT_TESTS="${UNIT_TESTS}" \
         -t "${DOCKER_IMAGE}" \
         "${INSTANCE_DIR}"
 

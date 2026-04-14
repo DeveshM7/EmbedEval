@@ -52,8 +52,10 @@ embedbench-pro/
 │   ├── run_batch.py                   # Parallel batch runner
 │   └── evaluate.py                    # Apply patch, run tests, report pass/fail
 ├── scripts/
-│   ├── build_base_images.sh           # Build base Docker images
-│   ├── build_instance_images.sh       # Build all per-instance Docker images
+│   ├── build_base_images.sh           # Build the Zephyr base image
+│   ├── build_riot_base_images.sh      # Build the RIOT base image
+│   ├── build_instance_images.sh       # Build Zephyr per-instance Docker images
+│   ├── build_riot_instance_images.sh  # Build RIOT per-instance Docker images
 │   ├── generate_instance.py           # Given a PR, generate instance dir
 │   └── validate_instance.py           # Verify fail-then-pass behavior
 └── paper/
