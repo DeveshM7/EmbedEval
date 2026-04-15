@@ -27,6 +27,9 @@ RUN ARCH=$(uname -m) \
 COPY run_tests.sh /usr/local/bin/run_tests
 RUN chmod +x /usr/local/bin/run_tests
 
+# Zephyr reference guide for the agent.
+COPY ZEPHYR_GUIDE.md /testbed/ZEPHYR_GUIDE.md
+
 # Apply the test-only patch: adds the new failing tests but NOT the fix.
 COPY test_patch.diff /tmp/
 RUN git apply /tmp/test_patch.diff

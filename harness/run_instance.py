@@ -202,6 +202,12 @@ Other useful commands:
 - Find code: `grep -rn "name" --include="*.c" --include="*.h" /testbed`
 - ctags index: `grep "function_name" /testbed/tags`
 
+## Zephyr Reference Guide
+
+A reference guide is available at `/testbed/ZEPHYR_GUIDE.md`. Read it if you need
+help with the Zephyr repo layout, west build commands, test framework, or common
+code patterns. Usage: `cat /testbed/ZEPHYR_GUIDE.md`
+
 <system_information>
 {{system}} {{release}} {{machine}}
 </system_information>

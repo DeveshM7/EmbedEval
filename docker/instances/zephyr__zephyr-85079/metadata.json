@@ -1,0 +1,26 @@
+{
+    "instance_id": "zephyr__zephyr-85079",
+    "project": "zephyr",
+    "repo": "https://github.com/zephyrproject-rtos/zephyr",
+    "base_commit": "491bbcfcbd35b5012ee9a1929eabeaa06ae556e4",
+    "fix_commit": "2a046004b991bd507ce01b98e73eac70db34ff47",
+    "test_commit": "fce85d300cebb377ee849fafacf1d8523c33a645",
+    "problem_statement": "The internal counter (cq_count) used to track RTIO completion queue events is only ever incremented and never decreases. This counter is used by rtio_submit() to determine when a submission has completed.\n\nA typical RTIO I2C transaction produces 2 CQE events. At 50 I2C transactions per second, cq_count overflows in ~250 days (2^31 / 50 / 2 / 86400). At overflow, the wait loop in rtio_submit() either exits immediately or loops forever, depending on signedness:\n\n  cq_count = INT32_MAX + 1;  // wraps to INT32_MIN\n  while (INT32_MIN < target) { ... }  // wrong behavior\n\nThis affects the non-semaphore code path (CONFIG_RTIO_SUBMIT_SEM=n). The cq_count overflow is not properly handled — it should either be detected and dealt with, or the increment should use well-defined unsigned wrapping.\n\nThe bug is in include/zephyr/rtio/rtio.h in the rtio_cqe_submit() and z_impl_rtio_submit() functions.\n\nSee: https://github.com/zephyrproject-rtos/zephyr/issues/81802",
+    "platform": "native_sim/native/64",
+    "test_path": "tests/subsys/rtio/rtio_api",
+    "test_scenario": "rtio.api",
+    "build_command": "west build -b native_sim/native/64 tests/subsys/rtio/rtio_api -- -DCONFIG_RTIO_SUBMIT_SEM=n",
+    "run_command": "west build -t run",
+    "docker_image": "embedbench:zephyr-85079",
+    "fail_to_pass": [
+        "test_rtio_cqe_count_overflow"
+    ],
+    "pass_to_pass": [
+        "test_rtio_simple",
+        "test_rtio_multiple_small",
+        "test_rtio_transaction"
+    ],
+    "files_changed_by_fix": [
+        "include/zephyr/rtio/rtio.h"
+    ]
+}
