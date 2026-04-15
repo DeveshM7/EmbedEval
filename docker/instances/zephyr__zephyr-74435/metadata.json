@@ -1,0 +1,40 @@
+{
+    "instance_id": "zephyr__zephyr-74435",
+    "project": "zephyr",
+    "repo": "https://github.com/zephyrproject-rtos/zephyr",
+    "base_commit": "4d0a8c1e8b8316ec5071a3fcc98cd292d3bc4e6d",
+    "fix_commit": "00a3be90d73094fd1f52d17364dea34fae16cc7d",
+    "test_commit": "f4147d12d1e30ceb36c92920cc177fa843ba5716",
+    "problem_statement": "The Sensor Async Read API (sensor_read_async_mempool) is documented as asynchronous and non-blocking, but the execution path is synchronous for most (if not all) in-tree driver implementations. The sensor driver submit callbacks block on the calling thread, making the API unsuitable for time-sensitive contexts.\n\nExamples of synchronous behavior in current drivers:\n  - ICM42688 RTIO driver: submit callback performs I2C/SPI transactions synchronously\n  - AKM09918C async driver: blocks on bus read in submit path\n  - BMA4XX sensor driver: synchronous channel fetch in submit\n  - BME280 async driver: synchronous bus read in submit\n\nThe solution is to decouple the sensor read request from its execution by introducing an RTIO Work-queues service. This service uses a priority-aware work queue pool (P4WQ) with pre-allocated work items to process sensor requests asynchronously on dedicated threads.\n\nRequired changes:\n1. Create the RTIO work-queue service: a new header (include/zephyr/rtio/work.h), Kconfig options (CONFIG_RTIO_WORKQ, CONFIG_RTIO_WORKQ_THREADS_POOL, CONFIG_RTIO_WORKQ_PRIO_MED), and implementation (subsys/rtio/rtio_workq.c)\n2. Update the default RTIO sensor fallback (drivers/sensor/default_rtio_sensor.c) to use the work queue\n3. Update individual sensor drivers (akm09918c, bma4xx, bme280, icm42688) to use rtio_work_req_alloc() and rtio_work_req_submit() in their submit callbacks\n4. Add necessary Kconfig dependencies in driver and subsys Kconfig files\n5. Update the sensor header (include/zephyr/drivers/sensor.h) for RTIO semaphore enablement\n\nSee: https://github.com/zephyrproject-rtos/zephyr/issues/73676",
+    "platform": "native_sim_64",
+    "test_path": "tests/subsys/rtio/workq",
+    "test_scenario": "rtio.workq",
+    "build_command": "west build -b native_sim_64 tests/subsys/rtio/workq",
+    "run_command": "west build -t run",
+    "docker_image": "embedbench:zephyr-74435",
+    "fail_to_pass": [
+        "test_work_decouples_submission",
+        "test_work_supports_batching_submissions",
+        "test_work_supports_preempting_on_higher_prio_submissions",
+        "test_used_count_keeps_track_of_alloc_items"
+    ],
+    "pass_to_pass": [],
+    "files_changed_by_fix": [
+        "drivers/sensor/Kconfig",
+        "drivers/sensor/asahi_kasei/akm09918c/Kconfig",
+        "drivers/sensor/asahi_kasei/akm09918c/akm09918c_async.c",
+        "drivers/sensor/bosch/bma4xx/Kconfig",
+        "drivers/sensor/bosch/bma4xx/bma4xx.c",
+        "drivers/sensor/bosch/bme280/Kconfig",
+        "drivers/sensor/bosch/bme280/bme280_async.c",
+        "drivers/sensor/default_rtio_sensor.c",
+        "drivers/sensor/tdk/icm42688/Kconfig",
+        "drivers/sensor/tdk/icm42688/icm42688_rtio.c",
+        "include/zephyr/drivers/sensor.h",
+        "include/zephyr/rtio/work.h",
+        "subsys/rtio/CMakeLists.txt",
+        "subsys/rtio/Kconfig",
+        "subsys/rtio/Kconfig.workq",
+        "subsys/rtio/rtio_workq.c"
+    ]
+}

@@ -1,0 +1,160 @@
+diff --git a/include/zephyr/logging/log_backend_std.h b/include/zephyr/logging/log_backend_std.h
+index df26131c3e8..b053ad96884 100644
+--- a/include/zephyr/logging/log_backend_std.h
++++ b/include/zephyr/logging/log_backend_std.h
+@@ -33,6 +33,10 @@ static inline uint32_t log_backend_std_get_flags(void)
+ 		flags |= LOG_OUTPUT_FLAG_FORMAT_TIMESTAMP;
+ 	}
+ 
++	if (IS_ENABLED(CONFIG_LOG_THREAD_ID_PREFIX)) {
++		flags |= LOG_OUTPUT_FLAG_THREAD;
++	}
++
+ 	return flags;
+ }
+ 
+diff --git a/include/zephyr/logging/log_output.h b/include/zephyr/logging/log_output.h
+index 04816333e52..224ed699f50 100644
+--- a/include/zephyr/logging/log_output.h
++++ b/include/zephyr/logging/log_output.h
+@@ -50,6 +50,9 @@ extern "C" {
+  */
+ #define LOG_OUTPUT_FLAG_FORMAT_SYSLOG		BIT(6)
+ 
++/** @brief Flag forcing thread ID prefix. */
++#define LOG_OUTPUT_FLAG_THREAD			BIT(7)
++
+ /**@} */
+ 
+ /** @brief Supported backend logging format types for use
+@@ -144,6 +147,7 @@ void log_output_msg_process(const struct log_output *log_output,
+  * @param timestamp	Timestamp.
+  * @param domain	Domain name string. Can be NULL.
+  * @param source	Source name string. Can be NULL.
++ * @param tid		Thread ID pointer. Can be NULL.
+  * @param level		Criticality level.
+  * @param package	Cbprintf package with a logging message string.
+  * @param data		Data passed to hexdump API. Can bu NULL.
+@@ -154,6 +158,7 @@ void log_output_process(const struct log_output *log_output,
+ 			log_timestamp_t timestamp,
+ 			const char *domain,
+ 			const char *source,
++			void *tid,
+ 			uint8_t level,
+ 			const uint8_t *package,
+ 			const uint8_t *data,
+diff --git a/subsys/logging/Kconfig.formatting b/subsys/logging/Kconfig.formatting
+index 96bfe881b7f..d75dab08a0a 100644
+--- a/subsys/logging/Kconfig.formatting
++++ b/subsys/logging/Kconfig.formatting
+@@ -19,6 +19,14 @@ config LOG_FUNC_NAME_PREFIX_DBG
+ 	bool "Debug messages prepended"
+ 	default y
+ 
++config LOG_THREAD_ID_PREFIX
++	bool "Thread ID prefix"
++	default n
++	help
++	  When enabled, log messages are prefixed with the thread ID or
++	  thread name (if CONFIG_THREAD_NAME is enabled) of the calling
++	  thread.
++
+ endmenu
+ 
+ menuconfig LOG_MIPI_SYST_ENABLE
+@@ -174,4 +182,12 @@ config LOG_OUTPUT_FORMAT_CUSTOM_TIMESTAMP
+ 	  Enable support for custom formatter for the timestamp.
+ 	  It will be applied to all backends.
+ 
++config LOG_THREAD_ID_PREFIX
++	bool "Thread ID prefix"
++	default n
++	help
++	  When enabled, log messages are prefixed with the thread ID or
++	  thread name (if CONFIG_THREAD_NAME is enabled) of the calling
++	  thread.
++
+ endmenu
+diff --git a/subsys/logging/log_output.c b/subsys/logging/log_output.c
+index 3b77f6f5560..ff6a481e47c 100644
+--- a/subsys/logging/log_output.c
++++ b/subsys/logging/log_output.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <zephyr/logging/log_output.h>
++#include <zephyr/kernel.h>
+ #include <zephyr/logging/log_ctrl.h>
+ #include <zephyr/logging/log_output_custom.h>
+ #include <zephyr/logging/log.h>
+@@ -325,8 +326,10 @@ static void color_postfix(const struct log_output *output,
+ static int ids_print(const struct log_output *output,
+ 		     bool level_on,
+ 		     bool func_on,
++		     bool thread_on,
+ 		     const char *domain,
+ 		     const char *source,
++		     void *tid,
+ 		     uint32_t level)
+ {
+ 	int total = 0;
+@@ -335,6 +338,15 @@ static int ids_print(const struct log_output *output,
+ 		total += print_formatted(output, "<%s> ", severity[level]);
+ 	}
+ 
++	if (thread_on && tid != NULL) {
++#if defined(CONFIG_THREAD_NAME)
++		total += print_formatted(output, "[%s] ",
++					  k_thread_name_get((k_tid_t)tid));
++#else
++		total += print_formatted(output, "[%p] ", tid);
++#endif
++	}
++
+ 	if (domain) {
+ 		total += print_formatted(output, "%s/", domain);
+ 	}
+@@ -430,6 +442,7 @@ static uint32_t prefix_print(const struct log_output *output,
+ 			     log_timestamp_t timestamp,
+ 			     const char *domain,
+ 			     const char *source,
++			     void *tid,
+ 			     uint8_t level)
+ {
+ 	__ASSERT_NO_MSG(level <= LOG_LEVEL_DBG);
+@@ -475,7 +488,8 @@ static uint32_t prefix_print(const struct log_output *output,
+ 		color_prefix(output, colors_on, level);
+ 	}
+ 
+-	length += ids_print(output, level_on, func_on, domain, source, level);
++	bool thread_on = flags & LOG_OUTPUT_FLAG_THREAD;
++	length += ids_print(output, level_on, func_on, thread_on, domain, source, tid, level);
+ 
+ 	return length;
+ }
+@@ -492,6 +506,7 @@ void log_output_process(const struct log_output *output,
+ 			log_timestamp_t timestamp,
+ 			const char *domain,
+ 			const char *source,
++			void *tid,
+ 			uint8_t level,
+ 			const uint8_t *package,
+ 			const uint8_t *data,
+@@ -503,7 +518,7 @@ void log_output_process(const struct log_output *output,
+ 	cbprintf_cb cb;
+ 
+ 	if (!raw_string) {
+-		prefix_offset = prefix_print(output, flags, 0, timestamp, domain, source, level);
++		prefix_offset = prefix_print(output, flags, 0, timestamp, domain, source, tid, level);
+ 		cb = out_func;
+ 	} else {
+ 		prefix_offset = 0;
+@@ -560,7 +575,7 @@ void log_output_msg_process(const struct log_output *output,
+ 	uint8_t *package = log_msg_get_package(msg, &plen);
+ 	uint8_t *data = log_msg_get_data(msg, &dlen);
+ 
+-	log_output_process(output, timestamp, NULL, sname, level,
++	log_output_process(output, timestamp, NULL, sname, NULL, level,
+ 			   plen > 0 ? package : NULL, data, dlen, flags);
+ }
+ 

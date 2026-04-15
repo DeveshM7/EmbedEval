@@ -1,0 +1,210 @@
+diff --git a/include/zephyr/logging/log_msg.h b/include/zephyr/logging/log_msg.h
+index f49fab7cdfe..0549dc750d7 100644
+--- a/include/zephyr/logging/log_msg.h
++++ b/include/zephyr/logging/log_msg.h
+@@ -68,6 +68,11 @@ union log_msg_source {
+ };
+ 
+ struct log_msg_hdr {
++#include <zephyr/kernel.h>
++#ifdef CONFIG_LOG_THREAD_ID_PREFIX
++	k_tid_t thread;
++#endif
++
+ 	struct log_msg_desc desc;
+ /* Attempting to keep best alignment. When address is 64 bit and timestamp 32
+  * swap the order to have 16 byte header instead of 24 byte.
+@@ -86,11 +91,14 @@ struct log_msg_hdr {
+ 
+ #define Z_LOG_MSG_PADDING \
+ 	((sizeof(struct log_msg_hdr) % Z_LOG_MSG_ALIGNMENT) > 0 ? \
++#include <zephyr/kernel.h>
+ 	(Z_LOG_MSG_ALIGNMENT - (sizeof(struct log_msg_hdr) % Z_LOG_MSG_ALIGNMENT)) : \
++#include <zephyr/kernel.h>
+ 		0)
+ 
+ struct log_msg {
+ 	struct log_msg_hdr hdr;
++#include <zephyr/kernel.h>
+ 	/* Adding padding to ensure that cbprintf package that follows is
+ 	 * properly aligned.
+ 	 */
+@@ -690,6 +698,7 @@ static inline uint8_t *log_msg_get_package(struct log_msg *msg, size_t *len)
+  */
+ 
+ #include <syscalls/log_msg.h>
++#include <zephyr/kernel.h>
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/include/zephyr/logging/log_output.h b/include/zephyr/logging/log_output.h
+index 04816333e52..1502da6e324 100644
+--- a/include/zephyr/logging/log_output.h
++++ b/include/zephyr/logging/log_output.h
+@@ -36,6 +36,10 @@ extern "C" {
+ 
+ /** @brief Flag forcing timestamp formatting. */
+ #define LOG_OUTPUT_FLAG_FORMAT_TIMESTAMP	BIT(2)
++#ifdef CONFIG_LOG_THREAD_ID_PREFIX
++#define LOG_OUTPUT_FLAG_THREAD        BIT(5)
++#endif
++
+ 
+ /** @brief Flag forcing severity level prefix. */
+ #define LOG_OUTPUT_FLAG_LEVEL			BIT(3)
+@@ -150,7 +154,7 @@ void log_output_msg_process(const struct log_output *log_output,
+  * @param data_len	Data length.
+  * @param flags		Formatting flags. See @ref LOG_OUTPUT_FLAGS.
+  */
+-void log_output_process(const struct log_output *log_output,
++void log_output_process(const struct log_output *log_output, k_tid_t thread_id,
+ 			log_timestamp_t timestamp,
+ 			const char *domain,
+ 			const char *source,
+diff --git a/subsys/logging/Kconfig.formatting b/subsys/logging/Kconfig.formatting
+index 96bfe881b7f..675ea5db9e7 100644
+--- a/subsys/logging/Kconfig.formatting
++++ b/subsys/logging/Kconfig.formatting
+@@ -19,6 +19,15 @@ config LOG_FUNC_NAME_PREFIX_DBG
+ 	bool "Debug messages prepended"
+ 	default y
+ 
++config LOG_THREAD_ID_PREFIX
++	bool "Prepend log messages with thread ID/name"
++	depends on LOG_OUTPUT
++	help
++	  Enable this option to prepend log messages with the ID or name of
++	  the thread that generated the message. If CONFIG_THREAD_NAME is
++	  enabled, the thread name will be used; otherwise, the thread ID
++	  (raw pointer) will be used.
++
+ endmenu
+ 
+ menuconfig LOG_MIPI_SYST_ENABLE
+@@ -123,8 +132,7 @@ config LOG_IMMEDIATE_CLEAN_OUTPUT
+ 
+ config LOG_BACKEND_SHOW_COLOR
+ 	bool "Colors in the backend"
+-	depends on LOG_BACKEND_UART || LOG_BACKEND_NATIVE_POSIX || LOG_BACKEND_RTT \
+-	           || LOG_BACKEND_SWO || LOG_BACKEND_XTENSA_SIM
++	depends on LOG_BACKEND_UART || LOG_BACKEND_NATIVE_POSIX || LOG_BACKEND_RTT || LOG_BACKEND_SWO || LOG_BACKEND_XTENSA_SIM
+ 	default y
+ 	help
+ 	  When enabled selected backend prints errors in red and warning in yellow.
+@@ -153,9 +161,7 @@ config LOG_TAG_DEFAULT
+ 
+ config LOG_BACKEND_FORMAT_TIMESTAMP
+ 	bool "Timestamp formatting in the backend"
+-	depends on LOG_BACKEND_UART || LOG_BACKEND_NATIVE_POSIX || LOG_BACKEND_RTT \
+-	           || LOG_BACKEND_SWO || LOG_BACKEND_XTENSA_SIM || LOG_BACKEND_FS \
+-	           || LOG_BACKEND_ADSP || LOG_BACKEND_ADSP_HDA || LOG_BACKEND_ADSP_MTRACE
++	depends on LOG_BACKEND_UART || LOG_BACKEND_NATIVE_POSIX || LOG_BACKEND_RTT || LOG_BACKEND_SWO || LOG_BACKEND_XTENSA_SIM || LOG_BACKEND_FS || LOG_BACKEND_ADSP || LOG_BACKEND_ADSP_HDA || LOG_BACKEND_ADSP_MTRACE
+ 	default y
+ 	help
+ 	  When enabled timestamp is formatted to hh:mm:ss:ms,us.
+@@ -174,4 +180,13 @@ config LOG_OUTPUT_FORMAT_CUSTOM_TIMESTAMP
+ 	  Enable support for custom formatter for the timestamp.
+ 	  It will be applied to all backends.
+ 
++config LOG_THREAD_ID_PREFIX
++	bool "Prepend log messages with thread ID/name"
++	depends on LOG_OUTPUT
++	help
++	  Enable this option to prepend log messages with the ID or name of
++	  the thread that generated the message. If CONFIG_THREAD_NAME is
++	  enabled, the thread name will be used; otherwise, the thread ID
++	  (raw pointer) will be used.
++
+ endmenu
+diff --git a/subsys/logging/log_msg.c b/subsys/logging/log_msg.c
+index 3ca3a5d6399..c55d59ebb40 100644
+--- a/subsys/logging/log_msg.c
++++ b/subsys/logging/log_msg.c
+@@ -20,6 +20,7 @@ BUILD_ASSERT(sizeof(struct log_msg_desc) == sizeof(uint32_t),
+ 	!(IS_ENABLED(CONFIG_LOG_FRONTEND) && \
+ 	 (IS_ENABLED(CONFIG_LOG_FRONTEND_ONLY) || log_backend_count_get() == 0))
+ 
++#include <zephyr/kernel.h>
+ void z_log_msg_finalize(struct log_msg *msg, const void *source,
+ 			 const struct log_msg_desc desc, const void *data)
+ {
+@@ -36,6 +37,10 @@ void z_log_msg_finalize(struct log_msg *msg, const void *source,
+ 	}
+ 
+ 	msg->hdr.desc = desc;
++#ifdef CONFIG_LOG_THREAD_ID_PREFIX
++	msg->hdr.thread = k_current_get();
++#endif
++
+ 	msg->hdr.source = source;
+ 	z_log_msg_commit(msg);
+ }
+@@ -89,6 +94,7 @@ void z_impl_z_log_msg_static_create(const void *source,
+ 		msg = z_log_msg_alloc(log_msg_get_total_wlen(out_desc));
+ 	}
+ 
++#include <zephyr/kernel.h>
+ 	z_log_msg_finalize(msg, source, out_desc, data);
+ }
+ 
+@@ -148,6 +154,7 @@ void z_impl_z_log_msg_runtime_vcreate(uint8_t domain_id, const void *source,
+ 	}
+ 
+ 	if (BACKENDS_IN_USE()) {
++#include <zephyr/kernel.h>
+ 		z_log_msg_finalize(msg, source, desc, data);
+ 	}
+ }
+diff --git a/subsys/logging/log_output.c b/subsys/logging/log_output.c
+index 3b77f6f5560..433c6517817 100644
+--- a/subsys/logging/log_output.c
++++ b/subsys/logging/log_output.c
+@@ -1,3 +1,4 @@
++#include <zephyr/kernel.h>
+ /*
+  * Copyright (c) 2018 Nordic Semiconductor ASA
+  *
+@@ -488,7 +489,7 @@ static void postfix_print(const struct log_output *output,
+ 	newline_print(output, flags);
+ }
+ 
+-void log_output_process(const struct log_output *output,
++void log_output_process(const struct log_output *output, k_tid_t thread_id,
+ 			log_timestamp_t timestamp,
+ 			const char *domain,
+ 			const char *source,
+@@ -501,6 +502,25 @@ void log_output_process(const struct log_output *output,
+ 	bool raw_string = (level == LOG_LEVEL_INTERNAL_RAW_STRING);
+ 	uint32_t prefix_offset;
+ 	cbprintf_cb cb;
++#ifdef CONFIG_LOG_THREAD_ID_PREFIX
++	char tname_buf[CONFIG_THREAD_MAX_NAME_LEN + 32];
++	size_t tname_len = 0;
++
++#ifdef CONFIG_THREAD_NAME
++	const char *thread_name = k_thread_get_name(thread_id);
++
++	if (thread_name != NULL) {
++		tname_len = snprintk(tname_buf, sizeof(tname_buf), "[%s] ", thread_name);
++	} else {
++		tname_len = snprintk(tname_buf, sizeof(tname_buf), "[%p] ", (void *)thread_id);
++	}
++#else /* !CONFIG_THREAD_NAME */
++	tname_len = snprintk(tname_buf, sizeof(tname_buf), "[%p] ", (void *)thread_id);
++#endif /* CONFIG_THREAD_NAME */
++
++	output->func(output, tname_buf, tname_len);
++#endif /* CONFIG_LOG_THREAD_ID_PREFIX */
++
+ 
+ 	if (!raw_string) {
+ 		prefix_offset = prefix_print(output, flags, 0, timestamp, domain, source, level);
+@@ -560,7 +580,7 @@ void log_output_msg_process(const struct log_output *output,
+ 	uint8_t *package = log_msg_get_package(msg, &plen);
+ 	uint8_t *data = log_msg_get_data(msg, &dlen);
+ 
+-	log_output_process(output, timestamp, NULL, sname, level,
++	log_output_process(output, log_msg_get_thread(msg), timestamp, NULL, sname, level,
+ 			   plen > 0 ? package : NULL, data, dlen, flags);
+ }
+ 

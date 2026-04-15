@@ -99,11 +99,12 @@ def evaluate_patch(instance_id: str, patch_path: Path, timeout: int = 300) -> di
             return result
         result["patch_applied"] = True
 
-        # Touch all files modified by the patch so cmake detects changes
-        # and doesn't skip the rebuild using stale cached objects.
-        touch_cmd = "cd /testbed && git diff --name-only | xargs -r touch"
+        # Clean the build directory so CMake re-configures from scratch.
+        # This is necessary when the agent adds new Kconfig options or
+        # CMakeLists changes that a stale cache wouldn't pick up.
         subprocess.run(
-            ["docker", "exec", container_id, "bash", "-c", touch_cmd],
+            ["docker", "exec", container_id, "bash", "-c",
+             "rm -rf /testbed/build"],
             capture_output=True, text=True, timeout=10,
         )
 

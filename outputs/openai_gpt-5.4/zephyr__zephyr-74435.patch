@@ -1,0 +1,244 @@
+diff --git a/drivers/sensor/asahi_kasei/akm09918c/akm09918c_async.c b/drivers/sensor/asahi_kasei/akm09918c/akm09918c_async.c
+index 6fb5d901ec4..b111bbcaa32 100644
+--- a/drivers/sensor/asahi_kasei/akm09918c/akm09918c_async.c
++++ b/drivers/sensor/asahi_kasei/akm09918c/akm09918c_async.c
+@@ -4,13 +4,16 @@
+  */
+ 
+ #include <zephyr/logging/log.h>
++#include <zephyr/rtio/work.h>
+ 
+ #include "akm09918c.h"
+ 
+ LOG_MODULE_DECLARE(AKM09918C, CONFIG_SENSOR_LOG_LEVEL);
+ 
+-void akm09918c_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
++static void akm09918c_submit_worker(struct rtio_iodev_sqe *iodev_sqe)
+ {
++	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
++	const struct device *dev = cfg->sensor;
+ 	uint32_t min_buf_len = sizeof(struct akm09918c_encoded_data);
+ 	int rc;
+ 	uint8_t *buf;
+@@ -38,3 +41,16 @@ void akm09918c_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe
+ 
+ 	rtio_iodev_sqe_ok(iodev_sqe, 0);
+ }
++
++void akm09918c_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
++{
++	ARG_UNUSED(dev);
++	struct rtio_work_req *req = rtio_work_req_alloc();
++
++	if (req == NULL) {
++		rtio_iodev_sqe_err(iodev_sqe, -ENOMEM);
++		return;
++	}
++
++	rtio_work_req_submit(req, iodev_sqe, akm09918c_submit_worker);
++}
+diff --git a/drivers/sensor/bosch/bma4xx/bma4xx.c b/drivers/sensor/bosch/bma4xx/bma4xx.c
+index 1d1609c64b3..c485c8e1680 100644
+--- a/drivers/sensor/bosch/bma4xx/bma4xx.c
++++ b/drivers/sensor/bosch/bma4xx/bma4xx.c
+@@ -11,6 +11,7 @@
+ #include <zephyr/sys/byteorder.h>
+ #include <zephyr/sys/__assert.h>
+ #include <zephyr/logging/log.h>
++#include <zephyr/rtio/work.h>
+ #include <zephyr/pm/device.h>
+ 
+ LOG_MODULE_REGISTER(bma4xx, CONFIG_SENSOR_LOG_LEVEL);
+@@ -338,7 +339,10 @@ static int bma4xx_temp_fetch(const struct device *dev, int8_t *temp)
+  * RTIO submit and encoding
+  */
+ 
+-static void bma4xx_submit_one_shot(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
++static void bma4xx_submit_one_shot_worker(struct rtio_iodev_sqe *iodev_sqe)
++{
++	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
++	const struct device *dev = cfg->sensor
+ {
+ 	struct bma4xx_data *bma4xx = dev->data;
+ 
+@@ -431,7 +435,14 @@ static void bma4xx_submit(const struct device *dev, struct rtio_iodev_sqe *iodev
+ 
+ 	/* TODO: Add streaming support */
+ 	if (!cfg->is_streaming) {
+-		bma4xx_submit_one_shot(dev, iodev_sqe);
++		struct rtio_work_req *req = rtio_work_req_alloc();
++
++		if (req == NULL) {
++			rtio_iodev_sqe_err(iodev_sqe, -ENOMEM);
++			return;
++		}
++
++		rtio_work_req_submit(req, iodev_sqe, bma4xx_submit_one_shot_worker);
+ 	} else {
+ 		rtio_iodev_sqe_err(iodev_sqe, -ENOTSUP);
+ 	}
+diff --git a/drivers/sensor/bosch/bme280/bme280_async.c b/drivers/sensor/bosch/bme280/bme280_async.c
+index 780a7a28c1e..4febec09e60 100644
+--- a/drivers/sensor/bosch/bme280/bme280_async.c
++++ b/drivers/sensor/bosch/bme280/bme280_async.c
+@@ -4,13 +4,16 @@
+  */
+ 
+ #include <zephyr/logging/log.h>
++#include <zephyr/rtio/work.h>
+ 
+ #include "bme280.h"
+ 
+ LOG_MODULE_DECLARE(BME280, CONFIG_SENSOR_LOG_LEVEL);
+ 
+-void bme280_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
++static void bme280_submit_worker(struct rtio_iodev_sqe *iodev_sqe)
+ {
++	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
++	const struct device *dev = cfg->sensor;
+ 	uint32_t min_buf_len = sizeof(struct bme280_encoded_data);
+ 	int rc;
+ 	uint8_t *buf;
+@@ -57,3 +60,16 @@ void bme280_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
+ 
+ 	rtio_iodev_sqe_ok(iodev_sqe, 0);
+ }
++
++void bme280_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
++{
++	ARG_UNUSED(dev);
++	struct rtio_work_req *req = rtio_work_req_alloc();
++
++	if (req == NULL) {
++		rtio_iodev_sqe_err(iodev_sqe, -ENOMEM);
++		return;
++	}
++
++	rtio_work_req_submit(req, iodev_sqe, bme280_submit_worker);
++}
+diff --git a/drivers/sensor/default_rtio_sensor.c b/drivers/sensor/default_rtio_sensor.c
+index c6b45e3e173..297cd760570 100644
+--- a/drivers/sensor/default_rtio_sensor.c
++++ b/drivers/sensor/default_rtio_sensor.c
+@@ -7,6 +7,7 @@
+ #include <errno.h>
+ 
+ #include <zephyr/drivers/sensor.h>
++#include <zephyr/rtio/work.h>
+ #include <zephyr/dsp/types.h>
+ #include <zephyr/logging/log.h>
+ 
+@@ -19,6 +20,7 @@ LOG_MODULE_REGISTER(sensor_compat, CONFIG_SENSOR_LOG_LEVEL);
+ BUILD_ASSERT((sizeof(struct sensor_data_generic_header) % sizeof(struct sensor_chan_spec)) == 0);
+ 
+ static void sensor_submit_fallback(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe);
++static void sensor_submit_fallback_worker(struct rtio_iodev_sqe *iodev_sqe);
+ 
+ static void sensor_iodev_submit(struct rtio_iodev_sqe *iodev_sqe)
+ {
+@@ -105,14 +107,29 @@ static inline int check_header_contains_channel(const struct sensor_data_generic
+ 	return -1;
+ }
+ 
++static void sensor_submit_fallback(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
++{
++	ARG_UNUSED(dev);
++	struct rtio_work_req *req = rtio_work_req_alloc();
++
++	if (req == NULL) {
++		rtio_iodev_sqe_err(iodev_sqe, -ENOMEM);
++		return;
++	}
++
++	rtio_work_req_submit(req, iodev_sqe, sensor_submit_fallback_worker);
++}
++
+ /**
+  * @brief Fallback function for retrofiting old drivers to rtio
+  *
+  * @param[in] dev The sensor device to read
+  * @param[in] iodev_sqe The read submission queue event
+  */
+-static void sensor_submit_fallback(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
++static void sensor_submit_fallback_worker(struct rtio_iodev_sqe *iodev_sqe)
+ {
++	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
++	const struct device *dev = cfg->sensor;
+ 	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
+ 	const struct sensor_chan_spec *const channels = cfg->channels;
+ 	const int num_output_samples = compute_num_samples(channels, cfg->count);
+diff --git a/drivers/sensor/tdk/icm42688/Kconfig b/drivers/sensor/tdk/icm42688/Kconfig
+index aea3cc6480f..f0aafd0f86d 100644
+--- a/drivers/sensor/tdk/icm42688/Kconfig
++++ b/drivers/sensor/tdk/icm42688/Kconfig
+@@ -55,7 +55,6 @@ config ICM42688_STREAM
+ 	select ICM42688_TRIGGER
+ 	default y
+ 	depends on SPI_RTIO
+-	depends on SENSOR_ASYNC_API
+ 	help
+ 	  Use this config option to enable streaming sensor data via RTIO subsystem.
+ 
+diff --git a/drivers/sensor/tdk/icm42688/icm42688_rtio.c b/drivers/sensor/tdk/icm42688/icm42688_rtio.c
+index b9e86c3d9a1..2f82128879e 100644
+--- a/drivers/sensor/tdk/icm42688/icm42688_rtio.c
++++ b/drivers/sensor/tdk/icm42688/icm42688_rtio.c
+@@ -12,6 +12,7 @@
+ #include "icm42688_spi.h"
+ 
+ #include <zephyr/logging/log.h>
++#include <zephyr/rtio/work.h>
+ LOG_MODULE_REGISTER(ICM42688_RTIO, CONFIG_SENSOR_LOG_LEVEL);
+ 
+ static int icm42688_rtio_sample_fetch(const struct device *dev, int16_t readings[7])
+@@ -43,7 +44,10 @@ static int icm42688_rtio_sample_fetch(const struct device *dev, int16_t readings
+ 	return 0;
+ }
+ 
+-static void icm42688_submit_one_shot(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
++static void icm42688_submit_one_shot_worker(struct rtio_iodev_sqe *iodev_sqe)
++{
++	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
++	const struct device *dev = cfg->sensor
+ {
+ 	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
+ 	const struct sensor_chan_spec *const channels = cfg->channels;
+@@ -82,7 +86,14 @@ void icm42688_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)
+ 	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
+ 
+ 	if (!cfg->is_streaming) {
+-		icm42688_submit_one_shot(dev, iodev_sqe);
++		struct rtio_work_req *req = rtio_work_req_alloc();
++
++		if (req == NULL) {
++			rtio_iodev_sqe_err(iodev_sqe, -ENOMEM);
++			return;
++		}
++
++		rtio_work_req_submit(req, iodev_sqe, icm42688_submit_one_shot_worker);
+ 	} else if (IS_ENABLED(CONFIG_ICM42688_STREAM)) {
+ 		icm42688_submit_stream(dev, iodev_sqe);
+ 	} else {
+diff --git a/subsys/rtio/CMakeLists.txt b/subsys/rtio/CMakeLists.txt
+index d48958614a9..0bb5e9280fb 100644
+--- a/subsys/rtio/CMakeLists.txt
++++ b/subsys/rtio/CMakeLists.txt
+@@ -11,4 +11,5 @@ if(CONFIG_RTIO)
+ 	zephyr_library_sources(rtio_executor.c)
+ 	zephyr_library_sources(rtio_init.c)
+ 	zephyr_library_sources_ifdef(CONFIG_USERSPACE rtio_handlers.c)
++	zephyr_library_sources_ifdef(CONFIG_RTIO_WORKQ rtio_workq.c)
+ endif()
+diff --git a/subsys/rtio/Kconfig b/subsys/rtio/Kconfig
+index 7231d6fefbb..dfe39a7b90e 100644
+--- a/subsys/rtio/Kconfig
++++ b/subsys/rtio/Kconfig
+@@ -31,6 +31,8 @@ config RTIO_SYS_MEM_BLOCKS
+ 	  without a pre-allocated memory buffer. Instead the buffer will be taken
+ 	  from the allocated memory pool associated with the RTIO context.
+ 
++source "subsys/rtio/Kconfig.workq"
++
+ module = RTIO
+ module-str = RTIO
+ module-help = Sets log level for RTIO support

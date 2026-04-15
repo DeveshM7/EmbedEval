@@ -1,0 +1,22 @@
+{
+    "instance_id": "zephyr__zephyr-82272",
+    "project": "zephyr",
+    "repo": "https://github.com/zephyrproject-rtos/zephyr",
+    "base_commit": "2f583a8369ef5b67c4438c40d17721d31db952a0",
+    "fix_commit": "70514f53882cd3d5e472d754d613330c6be3d061",
+    "test_commit": "1643092e6492342da355e64ea53d585c3f87ab44",
+    "problem_statement": "k_sleep() returns incorrect remaining time after approximately 12 days of continuous uptime (or sooner depending on tick frequency). The issue manifests when the 32-bit kernel tick counter wraps around.\n\nWhen a thread calls k_sleep() with a timeout and is woken early by k_wakeup(), the return value should indicate the remaining sleep time. However, after the 32-bit tick counter wraps (2^32 ticks), the return value becomes corrupted — it may return 0 instead of the correct remaining time.\n\nThe root cause is in z_tick_sleep() in kernel/sched.c. The calculation:\n\n  ticks = (k_ticks_t)expected_wakeup_ticks - sys_clock_tick_get_32();\n\nfails because both expected_wakeup_ticks and sys_clock_tick_get_32() are uint32_t values that may independently wrap. When one wraps but the other hasn't, the subtraction result (a uint32_t) is then cast to k_ticks_t (which may be 64-bit), producing a corrupted value.\n\nThe calculation must be performed using 32-bit unsigned integer semantics to handle wraparound properly before any widening conversion.\n\nReproduction timing depends on tick frequency:\n  - 4096 ticks/sec (production LSE): ~12 days\n  - 50000 ticks/sec (Cortex-M Systick): ~24 hours\n  - 100 Hz test tick: ~497 days (but can be forced by setting the tick counter)\n\nSee: https://github.com/zephyrproject-rtos/zephyr/issues/79863",
+    "platform": "native_sim/native/64",
+    "test_path": "tests/kernel/sched/wraparound",
+    "test_scenario": "kernel.scheduler.wraparound",
+    "build_command": "west build -b native_sim/native/64 tests/kernel/sched/wraparound",
+    "run_command": "west build -t run",
+    "docker_image": "embedbench:zephyr-82272",
+    "fail_to_pass": [
+        "test_tick_wraparound_in_sleep"
+    ],
+    "pass_to_pass": [],
+    "files_changed_by_fix": [
+        "kernel/sched.c"
+    ]
+}
