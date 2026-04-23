@@ -45,10 +45,16 @@ for INSTANCE_DIR in "${INSTANCES_DIR}"/*/; do
     UNIT_TESTS=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(' '.join(d.get('extra_make_args', [])))" \
         | sed 's/UNIT_TESTS=//')
 
+    DOCKER_PLATFORM=$(python3 -c "import json; d=json.load(open('${INSTANCE_DIR}/metadata.json')); print(d.get('docker_platform', ''))")
+    PLATFORM_FLAG=""
+    if [ -n "${DOCKER_PLATFORM}" ]; then
+        PLATFORM_FLAG="--platform ${DOCKER_PLATFORM}"
+    fi
+
     echo "Building ${DOCKER_IMAGE} (${INSTANCE_ID}, project=${PROJECT}) ..."
 
     docker build \
-        --platform linux/amd64 \
+        ${PLATFORM_FLAG} \
         --build-arg BASE_COMMIT="${BASE_COMMIT}" \
         --build-arg BOARD="${BOARD}" \
         --build-arg UNIT_TESTS="${UNIT_TESTS}" \

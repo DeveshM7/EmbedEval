@@ -15,3 +15,13 @@ docker build \
     "${REPO_ROOT}/docker/bases/"
 
 echo "Done: embedbench-riot-base:latest"
+
+echo ""
+echo "Building embedbench-riot-legacy-base:latest ..."
+docker build \
+    --platform linux/amd64 \
+    -f "${REPO_ROOT}/docker/bases/riot_legacy.Dockerfile" \
+    -t embedbench-riot-legacy-base:latest \
+    "${REPO_ROOT}/docker/bases/"
+
+echo "Done: embedbench-riot-legacy-base:latest"
