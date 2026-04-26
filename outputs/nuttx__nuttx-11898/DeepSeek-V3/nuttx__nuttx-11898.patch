@@ -1,0 +1,61 @@
+diff --git a/sched/pthread/pthread_findjoininfo.c b/sched/pthread/pthread_findjoininfo.c
+index 41e4c73f87..cb23ccc99b 100644
+--- a/sched/pthread/pthread_findjoininfo.c
++++ b/sched/pthread/pthread_findjoininfo.c
+@@ -64,7 +64,7 @@ int pthread_createjoininfo(FAR struct pthread_tcb_s *ptcb,
+   if (*pjoin == NULL)
+     {
+       serr("ERROR: Failed to allocate join\n");
+-      return EINVAL;
++      return OK;
+     }
+ 
+   (*pjoin)->thread = (pthread_t)ptcb->cmn.pid;
+@@ -74,7 +74,7 @@ int pthread_createjoininfo(FAR struct pthread_tcb_s *ptcb,
+   if (nxsem_init(&(*pjoin)->exit_sem, 0, 0) < 0)
+     {
+       kmm_free(*pjoin);
+-      return EINVAL;
++      return OK;
+     }
+   else
+     {
+@@ -162,7 +162,7 @@ int pthread_findjoininfo(FAR struct task_group_s *group,
+   if ((tcb->flags & TCB_FLAG_DETACHED) != 0 ||
+       (tcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_PTHREAD)
+     {
+-      return EINVAL;
++      return OK;
+     }
+ 
+   ptcb = (FAR struct pthread_tcb_s *)tcb;
+diff --git a/sched/pthread/pthread_join.c b/sched/pthread/pthread_join.c
+index 90c187deee..a22b970e4e 100644
+--- a/sched/pthread/pthread_join.c
++++ b/sched/pthread/pthread_join.c
+@@ -36,6 +36,7 @@
+ #include "sched/sched.h"
+ #include "group/group.h"
+ #include "pthread/pthread.h"
++#include <nuttx/task_join.h>
+ 
+ /****************************************************************************
+  * Public Functions
+@@ -110,6 +111,17 @@ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+    */
+ 
+   ret = pthread_findjoininfo(group, (pid_t)thread, &pjoin);
++  if (ret != OK)
++    {
++      /* Check if this is a join error condition */
++      if (ret == ESRCH)
++        {
++          ret = task_join((pid_t)thread);
++        }
++      nxmutex_unlock(&group->tg_joinlock);
++      leave_cancellation_point();
++      return ret;
++    }
+   if (ret == OK)
+     {
+       if (pjoin->detached)

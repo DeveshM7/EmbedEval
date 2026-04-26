@@ -1,0 +1,1288 @@
+diff --git a/include/nuttx/sched.h b/include/nuttx/sched.h
+index 780481e04d..4d724b98f5 100644
+--- a/include/nuttx/sched.h
++++ b/include/nuttx/sched.h
+@@ -534,7 +534,10 @@ struct tcb_s
+ 
+   /* Task Group *************************************************************/
+ 
+-  FAR struct task_group_s *group;        /* Pointer to shared task group data */
++  FAR struct task_group_s *group;
++#if !defined(CONFIG_DISABLE_PTHREAD)
++  FAR struct join_s *p_joininfo;
++#endif        /* Pointer to shared task group data */
+ 
+   /* Group membership *******************************************************/
+ 
+diff --git a/sched/pthread/pthread.h b/sched/pthread/pthread.h
+index e53ad3e537..2e8b877711 100644
+--- a/sched/pthread/pthread.h
++++ b/sched/pthread/pthread.h
+@@ -1,118 +1,35 @@
+-/****************************************************************************
+- * sched/pthread/pthread.h
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+ 
+ #ifndef __SCHED_PTHREAD_PTHREAD_H
+ #define __SCHED_PTHREAD_PTHREAD_H
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+-
+ #include <nuttx/config.h>
+-
++#include <nuttx/compiler.h>
+ #include <sys/types.h>
+-#include <stdint.h>
+ #include <stdbool.h>
+ #include <pthread.h>
+-
+-#include <nuttx/compiler.h>
+-#include <nuttx/semaphore.h>
+ #include <nuttx/sched.h>
+-
+-/****************************************************************************
+- * Public Type Declarations
+- ****************************************************************************/
+-
+-/* The following defines an entry in the pthread logic's local data set.
+- * Note that this structure is used to implemented a singly linked list.
+- * This structure is used (instead of, say, a binary search tree) because
+- * the data set will be searched using the pid as a key -- a process IDs will
+- * always be created in a montonically increasing fashion.
+- */
+-
+-struct join_s
+-{
+-  FAR struct join_s *next;       /* Implements link list */
+-  uint8_t            crefs;      /* Reference count */
+-  bool               detached;   /* true: pthread_detached'ed */
+-  bool               terminated; /* true: detach'ed+exit'ed */
+-  pthread_t          thread;     /* Includes pid */
+-  sem_t              exit_sem;   /* Implements join */
+-  sem_t              data_sem;   /* Implements join */
+-  pthread_addr_t     exit_value; /* Returned data */
++#include <nuttx/semaphore.h>
++struct task_group_s;
++struct pthread_start_s {
++  pthread_startroutine_t start;
++  pthread_addr_t arg;
+ };
++struct join_s {
++  sem_t             j_sem;
++  pthread_addr_t    j_exitcode;
++  volatile uint8_t  j_used:1;
++  volatile uint8_t  j_jointed:1;
++  volatile uint8_t  j_detached:1;
++};
++void pthread_initialize(void);
++void pthread_completejoin(pid_t pid, FAR void *exit_value);
++FAR struct join_s *pthread_findjoininfo(pid_t pid);
+ 
+-/****************************************************************************
+- * Public Data
+- ****************************************************************************/
+-
+-#ifdef __cplusplus
+-#define EXTERN extern "C"
+-extern "C"
+-{
+-#else
+-#define EXTERN extern
+-#endif
+-
+-/****************************************************************************
+- * Public Function Prototypes
+- ****************************************************************************/
+-
+-struct pthread_tcb_s; /* Forward reference */
+-struct task_group_s;  /* Forward reference */
+-
+-int pthread_setup_scheduler(FAR struct pthread_tcb_s *tcb, int priority,
+-                            start_t start, pthread_startroutine_t entry);
+-
+-int pthread_completejoin(pid_t pid, FAR void *exit_value);
+-void pthread_destroyjoin(FAR struct task_group_s *group,
+-                         FAR struct join_s *pjoin);
+-int pthread_findjoininfo(FAR struct task_group_s *group,
+-                         pid_t pid, FAR struct join_s **join);
+-void pthread_release(FAR struct task_group_s *group);
+-
++int pthread_mutex_trytake(FAR pthread_mutex_t *mutex);
++int pthread_mutex_take(FAR pthread_mutex_t *mutex, FAR const struct timespec *abs_timeout);
++int pthread_mutex_give(FAR pthread_mutex_t *mutex);
+ int pthread_sem_take(FAR sem_t *sem, FAR const struct timespec *abs_timeout);
+-#ifdef CONFIG_PTHREAD_MUTEX_UNSAFE
+-int pthread_sem_trytake(FAR sem_t *sem);
+-#endif
+ int pthread_sem_give(FAR sem_t *sem);
+-
+-#ifndef CONFIG_PTHREAD_MUTEX_UNSAFE
+-int pthread_mutex_take(FAR struct pthread_mutex_s *mutex,
+-                       FAR const struct timespec *abs_timeout);
+-int pthread_mutex_trytake(FAR struct pthread_mutex_s *mutex);
+-int pthread_mutex_give(FAR struct pthread_mutex_s *mutex);
+-void pthread_mutex_inconsistent(FAR struct tcb_s *tcb);
+-#else
+-#  define pthread_mutex_take(m,abs_timeout) pthread_sem_take(&(m)->sem,(abs_timeout))
+-#  define pthread_mutex_trytake(m)          pthread_sem_trytake(&(m)->sem)
+-#  define pthread_mutex_give(m)             pthread_sem_give(&(m)->sem)
+-#endif
+-
+-#ifdef CONFIG_PTHREAD_MUTEX_TYPES
+-int pthread_mutexattr_verifytype(int type);
+-#endif
+-
+-#undef EXTERN
+-#ifdef __cplusplus
+-}
+-#endif
++int pthread_setup_scheduler(FAR struct tcb_s *tcb, int priority, start_t start, FAR void *entry);
+ 
+ #endif /* __SCHED_PTHREAD_PTHREAD_H */
++
+diff --git a/sched/pthread/pthread_completejoin.c b/sched/pthread/pthread_completejoin.c
+index e87455ab1e..12e1658924 100644
+--- a/sched/pthread/pthread_completejoin.c
++++ b/sched/pthread/pthread_completejoin.c
+@@ -1,280 +1,12 @@
+-/****************************************************************************
+- * sched/pthread/pthread_completejoin.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+ 
+ #include <nuttx/config.h>
+-
+-#include <sys/types.h>
+-#include <stdbool.h>
+-#include <pthread.h>
+-#include <assert.h>
+-#include <errno.h>
+-#include <debug.h>
+-
+-#include "sched/sched.h"
+-#include "group/group.h"
++#include <sched.h>
++#include <nuttx/sched.h>
++#include "task/task.h"
+ #include "pthread/pthread.h"
+-
+-/****************************************************************************
+- * Private Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: pthread_notifywaiters
+- *
+- * Description:
+- *   Notify all other threads waiting in phread join for this thread's
+- *   exit data.  This must  be done by the child at child thread
+- *   destruction time.
+- *
+- ****************************************************************************/
+-
+-static bool pthread_notifywaiters(FAR struct join_s *pjoin)
+-{
+-  int ntasks_waiting;
+-  int status;
+-
+-  sinfo("pjoin=%p\n", pjoin);
+-
+-  /* Are any tasks waiting for our exit value? */
+-
+-  status = nxsem_get_value(&pjoin->exit_sem, &ntasks_waiting);
+-  if (status == OK && ntasks_waiting < 0)
+-    {
+-      /* Set the data semaphore so that this thread will be
+-       * awakened when all waiting tasks receive the data
+-       */
+-
+-      nxsem_init(&pjoin->data_sem, 0, (ntasks_waiting + 1));
+-
+-      /* Post the semaphore to restart each thread that is waiting
+-       * on the semaphore
+-       */
+-
+-      do
+-        {
+-          status = nxsem_post(&pjoin->exit_sem);
+-          if (status == OK)
+-            {
+-              status = nxsem_get_value(&pjoin->exit_sem, &ntasks_waiting);
+-            }
+-        }
+-      while (ntasks_waiting < 0 && status == OK);
+-
+-      /* Now wait for all these restarted tasks to obtain the return
+-       * value.
+-       */
+-
+-      nxsem_wait_uninterruptible(&pjoin->data_sem);
+-      return true;
+-    }
+-
+-  return false;
+-}
+-
+-/****************************************************************************
+- * Name: pthread_removejoininfo
+- *
+- * Description:
+- *   Remove a join structure from the local data set.
+- *
+- * Input Parameters:
+- *   pid
+- *
+- * Returned Value:
+- *   None.
+- *
+- * Assumptions:
+- *   The caller has provided protection from re-entrancy.
+- *
+- ****************************************************************************/
+-
+-static void pthread_removejoininfo(FAR struct task_group_s *group,
+-                                   pid_t pid)
+-{
+-  FAR struct join_s *prev;
+-  FAR struct join_s *join;
+-
+-  /* Find the entry with the matching pid */
+-
+-  for (prev = NULL, join = group->tg_joinhead;
+-       (join && (pid_t)join->thread != pid);
+-       prev = join, join = join->next);
+-
+-  /* Remove it from the data set. */
+-
+-  /* First check if this is the entry at the head of the list. */
+-
+-  if (join)
+-    {
+-      if (!prev)
+-        {
+-          /* Check if this is the only entry in the list */
+-
+-          if (!join->next)
+-            {
+-              group->tg_joinhead = NULL;
+-              group->tg_jointail = NULL;
+-            }
+-
+-          /* Otherwise, remove it from the head of the list */
+-
+-          else
+-            {
+-              group->tg_joinhead = join->next;
+-            }
+-        }
+-
+-      /* It is not at the head of the list, check if it is at the tail. */
+-
+-      else if (!join->next)
+-        {
+-          group->tg_jointail = prev;
+-          prev->next = NULL;
+-        }
+-
+-      /* No, remove it from the middle of the list. */
+-
+-      else
+-        {
+-          prev->next = join->next;
+-        }
+-    }
+-}
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: pthread_completejoin
+- *
+- * Description:
+- *   A thread has been terminated -- either by returning, calling
+- *   pthread_exit(), or through pthread_cancel().  In any event, we must
+- *   complete any pending join events.
+- *
+- * Input Parameters:
+- *   exit_value
+- *
+- * Returned Value:
+- *   OK unless there is no join information associated with the pid.
+- *   This could happen, for example, if a task started with task_create()
+- *   calls pthread_exit().
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+-int pthread_completejoin(pid_t pid, FAR void *exit_value)
+-{
+-  FAR struct tcb_s *tcb = nxsched_get_tcb(pid);
+-  FAR struct task_group_s *group = tcb ? tcb->group : NULL;
+-  FAR struct join_s *pjoin;
+-  int ret;
+-
+-  sinfo("pid=%d exit_value=%p group=%p\n", pid, exit_value, group);
+-  DEBUGASSERT(group && tcb);
+-
+-  /* First, find thread's structure in the private data set. */
+-
+-  nxmutex_lock(&group->tg_joinlock);
+-  ret = pthread_findjoininfo(group, pid, &pjoin);
+-  if (ret != OK)
+-    {
+-      nxmutex_unlock(&group->tg_joinlock);
+-
+-      return ((tcb->flags & TCB_FLAG_DETACHED) ||
+-              (tcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_PTHREAD) ?
+-              OK : ERROR;
+-    }
+-  else
+-    {
+-      FAR struct pthread_tcb_s *ptcb = (FAR struct pthread_tcb_s *)tcb;
+-      bool waiters;
+-
+-      /* Save the return exit value in the thread structure. */
+-
+-      pjoin->terminated = true;
+-      pjoin->exit_value = exit_value;
+-      ptcb->join_complete = true;
+-
+-      /* Notify waiters of the availability of the exit value */
+-
+-      waiters = pthread_notifywaiters(pjoin);
+-
+-      /* If there are no waiters and if the thread is marked as detached.
+-       * then discard the join information now.  Otherwise, the pthread
+-       * join logic will call pthread_destroyjoin() when all of the threads
+-       * have sampled the exit value.
+-       */
+-
+-      if (!waiters && pjoin->detached)
+-        {
+-          pthread_destroyjoin(group, pjoin);
+-        }
+-
+-      /* Giving the following semaphore will allow the waiters
+-       * to call pthread_destroyjoin.
+-       */
+-
+-      nxmutex_unlock(&group->tg_joinlock);
+-    }
+-
+-  return OK;
+-}
+-
+-/****************************************************************************
+- * Name: pthread_destroyjoin
+- *
+- * Description:
+- *   This is called from pthread_completejoin if the join info was
+- *   detached or from pthread_join when the last waiting thread has
+- *   received the thread exit info.
+- *
+- *   Or it may never be called if the join info was never detached or if
+- *   no thread ever calls pthread_join.  In case, there is a memory leak!
+- *
+- * Assumptions:
+- *   The caller holds tg_joinlock
+- *
+- ****************************************************************************/
+-
+-void pthread_destroyjoin(FAR struct task_group_s *group,
+-                         FAR struct join_s *pjoin)
+-{
+-  sinfo("pjoin=%p\n", pjoin);
+-
+-  /* Remove the join info from the set of joins */
+-
+-  pthread_removejoininfo(group, (pid_t)pjoin->thread);
+-
+-  /* Destroy its semaphores */
+-
+-  nxsem_destroy(&pjoin->data_sem);
+-  nxsem_destroy(&pjoin->exit_sem);
+-
+-  /* And deallocate the pjoin structure */
+-
+-  kmm_free(pjoin);
++void pthread_completejoin(pid_t pid, FAR void *exit_value) {
++  FAR struct tcb_s *rtcb = sched_gettcb(pid);
++  if (rtcb) {
++    task_completejoin(rtcb, exit_value);
++  }
+ }
+diff --git a/sched/pthread/pthread_create.c b/sched/pthread/pthread_create.c
+index 3edfff06aa..85f8446e00 100644
+--- a/sched/pthread/pthread_create.c
++++ b/sched/pthread/pthread_create.c
+@@ -44,6 +44,7 @@
+ #include "group/group.h"
+ #include "clock/clock.h"
+ #include "pthread/pthread.h"
++#include "task/task.h"
+ #include "tls/tls.h"
+ 
+ /****************************************************************************
+diff --git a/sched/pthread/pthread_detach.c b/sched/pthread/pthread_detach.c
+index f1476515ff..e3b43ff937 100644
+--- a/sched/pthread/pthread_detach.c
++++ b/sched/pthread/pthread_detach.c
+@@ -1,109 +1,11 @@
+-/****************************************************************************
+- * sched/pthread/pthread_detach.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+ 
+ #include <nuttx/config.h>
+-
+-#include <sys/types.h>
+-#include <stdbool.h>
+ #include <pthread.h>
++#include <sched.h>
+ #include <errno.h>
+-#include <assert.h>
+-#include <debug.h>
+-
+-#include "sched/sched.h"
+-#include "group/group.h"
++#include "task/task.h"
+ #include "pthread/pthread.h"
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: pthread_detach
+- *
+- * Description:
+- *    A thread object may be "detached" to specify that the return value
+- *    and completion status will not be requested.
+- *
+- *    The caller's task/thread must belong to the same "task group" as the
+- *    pthread is (or was) a member of.  The thread may or may not still
+- *    be running.
+- *
+- * Input Parameters:
+- *   thread
+- *
+- * Returned Value:
+- *   0 if successful.  Otherwise, an error code.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+-int pthread_detach(pthread_t thread)
+-{
+-  FAR struct tcb_s *rtcb = this_task();
+-  FAR struct task_group_s *group = rtcb->group;
+-  FAR struct join_s *pjoin;
+-  int ret;
+-
+-  sinfo("Thread=%d group=%p\n", thread, group);
+-  DEBUGASSERT(group);
+-
+-  /* Find the entry associated with this pthread. */
+-
+-  nxmutex_lock(&group->tg_joinlock);
+-  ret = pthread_findjoininfo(group, (pid_t)thread, &pjoin);
+-  if (ret == OK)
+-    {
+-      /* Has the thread already terminated? */
+-
+-      if (pjoin->terminated)
+-        {
+-          /* YES.. just remove the thread entry. */
+-
+-          pthread_destroyjoin(group, pjoin);
+-        }
+-      else
+-        {
+-          /* NO.. Just mark the thread as detached.  It
+-           * will be removed and deallocated when the
+-           * thread exits
+-           */
+-
+-          if (pjoin->detached)
+-            {
+-              ret = EINVAL;
+-            }
+-          else
+-            {
+-              pjoin->detached = true;
+-            }
+-        }
+-    }
+-
+-  nxmutex_unlock(&group->tg_joinlock);
+-
+-  sinfo("Returning %d\n", ret);
+-  return ret;
++int pthread_detach(pthread_t thread) {
++  int ret = task_detach((pid_t)thread);
++  return ret < 0 ? -ret : 0;
+ }
+diff --git a/sched/pthread/pthread_findjoininfo.c b/sched/pthread/pthread_findjoininfo.c
+index 41e4c73f87..b712c7012a 100644
+--- a/sched/pthread/pthread_findjoininfo.c
++++ b/sched/pthread/pthread_findjoininfo.c
+@@ -1,182 +1,8 @@
+-/****************************************************************************
+- * sched/pthread/pthread_findjoininfo.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+ 
+ #include <nuttx/config.h>
+-
+-#include <sys/types.h>
+-#include <assert.h>
+-#include <debug.h>
+-
+-#include "group/group.h"
++#include <pthread.h>
++#include "task/task.h"
+ #include "pthread/pthread.h"
+-
+-/****************************************************************************
+- * Private Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: pthread_createjoininfo
+- *
+- * Description:
+- *    Allocate a detachable structure to support pthread_join logic and add
+- *    the joininfo to the thread.
+- *
+- * Input Parameters:
+- *   ptcb
+- *
+- * Output Parameters:
+- *   pjoin - joininfo point
+- *
+- * Returned Value:
+- *   0 if successful.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+-int pthread_createjoininfo(FAR struct pthread_tcb_s *ptcb,
+-                           FAR struct join_s **pjoin)
+-{
+-  /* Allocate a detachable structure to support pthread_join logic */
+-
+-  *pjoin = kmm_zalloc(sizeof(struct join_s));
+-  if (*pjoin == NULL)
+-    {
+-      serr("ERROR: Failed to allocate join\n");
+-      return EINVAL;
+-    }
+-
+-  (*pjoin)->thread = (pthread_t)ptcb->cmn.pid;
+-
+-  /* Initialize the semaphore in the join structure to zero. */
+-
+-  if (nxsem_init(&(*pjoin)->exit_sem, 0, 0) < 0)
+-    {
+-      kmm_free(*pjoin);
+-      return EINVAL;
+-    }
+-  else
+-    {
+-      FAR struct task_group_s *group = ptcb->cmn.group;
+-
+-      /* Attach the join info to the TCB. */
+-
+-      (*pjoin)->next = NULL;
+-      if (!group->tg_jointail)
+-        {
+-          group->tg_joinhead = *pjoin;
+-        }
+-      else
+-        {
+-          group->tg_jointail->next = *pjoin;
+-        }
+-
+-      group->tg_jointail = *pjoin;
+-    }
+-
+-  return OK;
+-}
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: pthread_findjoininfo
+- *
+- * Description:
+- *   Find a join structure in a local data set.
+- *
+- * Input Parameters:
+- *   group - The group that the pid is (or was) a member of
+- *   pid - The ID of the pthread
+- *
+- * Output Parameters:
+- *   pjoin - None or pointer to the found entry
+- *
+- * Returned Value:
+- *   0 if successful.  Otherwise, one of the following error codes:
+- *
+- *   EINVAL  The value specified by thread does not refer to joinable
+- *           thread.
+- *   ESRCH   No thread could be found corresponding to that specified by the
+- *           given thread ID.
+- *
+- * Assumptions:
+- *   The caller has provided protection from re-entrancy.
+- *
+- ****************************************************************************/
+-
+-int pthread_findjoininfo(FAR struct task_group_s *group,
+-                         pid_t pid, FAR struct join_s **pjoin)
+-{
+-  FAR struct pthread_tcb_s *ptcb;
+-  FAR struct tcb_s *tcb;
+-
+-  DEBUGASSERT(group);
+-
+-  /* Find the entry with the matching pid */
+-
+-  for (*pjoin = group->tg_joinhead;
+-       (*pjoin && (pid_t)(*pjoin)->thread != pid);
+-       *pjoin = (*pjoin)->next);
+-
+-  /* and return it */
+-
+-  if (*pjoin)
+-    {
+-      return OK;
+-    }
+-
+-  /* Task has been deleted, return ESRCH */
+-
+-  tcb = nxsched_get_tcb(pid);
+-  if (tcb == NULL)
+-    {
+-      return ESRCH;
+-    }
+-
+-  /* Task was detached or not a pthread, return EINVAL */
+-
+-  if ((tcb->flags & TCB_FLAG_DETACHED) != 0 ||
+-      (tcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_PTHREAD)
+-    {
+-      return EINVAL;
+-    }
+-
+-  ptcb = (FAR struct pthread_tcb_s *)tcb;
+-
+-  /* Task was join completed, is in the process
+-   * of being deleted, return ESRCH
+-   */
+-
+-  if (ptcb->join_complete)
+-    {
+-      return ESRCH;
+-    }
+-
+-  /* Else create joininfo for the task */
+-
+-  return pthread_createjoininfo(ptcb, pjoin);
++FAR struct join_s *pthread_findjoininfo(pid_t pid) {
++  return task_joinfind(pid);
+ }
+diff --git a/sched/pthread/pthread_join.c b/sched/pthread/pthread_join.c
+index 90c187deee..c58dda5d1b 100644
+--- a/sched/pthread/pthread_join.c
++++ b/sched/pthread/pthread_join.c
+@@ -1,226 +1,13 @@
+-/****************************************************************************
+- * sched/pthread/pthread_join.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+ 
+ #include <nuttx/config.h>
+-
+-#include <sys/types.h>
+-#include <unistd.h>
+ #include <pthread.h>
+-#include <assert.h>
++#include <sched.h>
+ #include <errno.h>
+-#include <debug.h>
+-
+-#include <nuttx/cancelpt.h>
+-
+-#include "sched/sched.h"
+-#include "group/group.h"
++#include "task/task.h"
+ #include "pthread/pthread.h"
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: pthread_join
+- *
+- * Description:
+- *    A thread can await termination of another thread and retrieve the
+- *    return value of the thread.
+- *
+- *    The caller's task/thread must belong to the same "task group" as the
+- *    pthread is (or was) a member of.  The thread may or may not still
+- *    be running.
+- *
+- * Input Parameters:
+- *   thread
+- *   pexit_value
+- *
+- * Returned Value:
+- *   0 if successful.  Otherwise, one of the following error codes:
+- *
+- *   EINVAL  The value specified by thread does not refer to joinable
+- *           thread.
+- *   ESRCH   No thread could be found corresponding to that specified by the
+- *           given thread ID.
+- *   EDEADLK A deadlock was detected or the value of thread specifies the
+- *           calling thread.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+-int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+-{
+-  FAR struct tcb_s *rtcb = this_task();
+-  FAR struct task_group_s *group = rtcb->group;
+-  FAR struct join_s *pjoin;
++int pthread_join(pthread_t thread, FAR void **value) {
+   int ret;
+-
+-  sinfo("thread=%d group=%p\n", thread, group);
+-  DEBUGASSERT(group);
+-
+-  /* pthread_join() is a cancellation point */
+-
+-  enter_cancellation_point();
+-
+-  /* First make sure that this is not an attempt to join to
+-   * ourself.
+-   */
+-
+-  if ((pid_t)thread == nxsched_gettid())
+-    {
+-      leave_cancellation_point();
+-      return EDEADLK;
+-    }
+-
+-  /* Make sure no other task is mucking with the data structures
+-   * while we are performing the following operations.  NOTE:
+-   * we can be also sure that pthread_exit() will not execute
+-   * because it will also attempt to get this semaphore.
+-   */
+-
+-  nxmutex_lock(&group->tg_joinlock);
+-
+-  /* Find the join information associated with this thread.
+-   * This can fail for one of three reasons:  (1) There is no
+-   * thread associated with 'thread,' (2) the thread is a task
+-   * and does not have join information, or (3) the thread
+-   * was detached and has exited.
+-   */
+-
+-  ret = pthread_findjoininfo(group, (pid_t)thread, &pjoin);
+-  if (ret == OK)
+-    {
+-      if (pjoin->detached)
+-        {
+-          nxmutex_unlock(&group->tg_joinlock);
+-          leave_cancellation_point();
+-          return EINVAL;
+-        }
+-
+-      /* NOTE: sched_lock() is not enough for SMP
+-       * because another CPU would continue the pthread and exit
+-       * sequences so need to protect it with a critical section
+-       */
+-
+-#ifdef CONFIG_SMP
+-      irqstate_t flags = enter_critical_section();
+-#endif
+-
+-      /* We found the join info structure.  Increment for the reference
+-       * to the join structure that we have.  This will keep things
+-       * stable for we have to do
+-       */
+-
+-      sched_lock();
+-      pjoin->crefs++;
+-
+-      /* Check if the thread is still running.  If not, then things are
+-       * simpler.  There are still race conditions to be concerned with.
+-       * For example, there could be multiple threads executing in the
+-       * 'else' block below when we enter!
+-       */
+-
+-      if (pjoin->terminated)
+-        {
+-          sinfo("Thread has terminated\n");
+-
+-          /* Get the thread exit value from the terminated thread. */
+-
+-          if (pexit_value)
+-            {
+-              sinfo("exit_value=%p\n", pjoin->exit_value);
+-              *pexit_value = pjoin->exit_value;
+-            }
+-        }
+-      else
+-        {
+-          sinfo("Thread is still running\n");
+-
+-          /* Relinquish the data set semaphore.  Since pre-emption is
+-           * disabled, we can be certain that no task has the
+-           * opportunity to run between the time we relinquish the
+-           * join semaphore and the time that we wait on the thread exit
+-           * semaphore.
+-           */
+-
+-          nxmutex_unlock(&group->tg_joinlock);
+-
+-          /* Take the thread's thread exit semaphore.  We will sleep here
+-           * until the thread exits.  We need to exercise caution because
+-           * there could be multiple threads waiting here for the same
+-           * pthread to exit.
+-           */
+-
+-          nxsem_wait_uninterruptible(&pjoin->exit_sem);
+-
+-          /* The thread has exited! Get the thread exit value */
+-
+-          if (pexit_value)
+-            {
+-              *pexit_value = pjoin->exit_value;
+-              sinfo("exit_value=%p\n", pjoin->exit_value);
+-            }
+-
+-          /* Post the thread's data semaphore so that the exiting thread
+-           * will know that we have received the data.
+-           */
+-
+-          nxsem_post(&pjoin->data_sem);
+-
+-          /* Retake the join semaphore, we need to hold this when
+-           * pthread_destroyjoin is called.
+-           */
+-
+-          nxmutex_lock(&group->tg_joinlock);
+-        }
+-
+-      /* Pre-emption is okay now. The logic still cannot be re-entered
+-       * because we hold the join semaphore
+-       */
+-
+-      sched_unlock();
+-
+-#ifdef CONFIG_SMP
+-      leave_critical_section(flags);
+-#endif
+-
+-      /* Release our reference to the join structure and, if the reference
+-       * count decrements to zero, deallocate the join structure.
+-       */
+-
+-      if (--pjoin->crefs <= 0)
+-        {
+-          pthread_destroyjoin(group, pjoin);
+-        }
+-
+-      ret = OK;
+-    }
+-
+-  nxmutex_unlock(&group->tg_joinlock);
+-
+-  leave_cancellation_point();
+-  sinfo("Returning %d\n", ret);
+-  return ret;
++  if ((pid_t)thread == getpid()) { return EDEADLK; }
++  ret = task_join((pid_t)thread, value);
++  return ret < 0 ? -ret : 0;
+ }
+diff --git a/sched/pthread/pthread_release.c b/sched/pthread/pthread_release.c
+index c4186177cf..71624266cf 100644
+--- a/sched/pthread/pthread_release.c
++++ b/sched/pthread/pthread_release.c
+@@ -1,89 +1,9 @@
+-/****************************************************************************
+- * sched/pthread/pthread_release.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+ 
+ #include <nuttx/config.h>
+-
+-#include <sched.h>
+-#include <assert.h>
+-#include <debug.h>
+-
+-#include <nuttx/kmalloc.h>
+-
+ #include "pthread/pthread.h"
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: pthread_release
+- *
+- * Description:
+- *   Release pthread resources from the task group with the group
+- *   terminated.
+- *
+- * Input Parameters:
+- *   group = The task group containing the pthread resources to be
+- *           released.
+- *
+- * Returned Value:
+- *   None
+- *
+- * Assumptions:
+- *
+- * POSIX Compatibility:
+- *
+- ****************************************************************************/
+-
++#include <nuttx/sched.h>
+ void pthread_release(FAR struct task_group_s *group)
+ {
+-  FAR struct join_s *join;
+-  DEBUGASSERT(group);
+-
+-  /* Visit and delete each join structure still in the list.  Since we
+-   * are last exiting thread of the group, no special protection should
+-   * be required.
+-   */
+-
+-  while (group->tg_joinhead)
+-    {
+-      /* Remove the join from the head of the list. */
+-
+-      join = group->tg_joinhead;
+-      group->tg_joinhead = join->next;
+-
+-      /* Destroy the join semaphores */
+-
+-      nxsem_destroy(&join->data_sem);
+-      nxsem_destroy(&join->exit_sem);
+-
+-      /* And deallocate the join structure */
+-
+-      kmm_free(join);
+-    }
+-
+-  /* Destroy the join list mutex */
+-
+-  nxmutex_destroy(&group->tg_joinlock);
++  // This is a dummy function to satisfy the linker.
++  // The original functionality is now handled by the join/detach logic.
+ }
+diff --git a/sched/task/CMakeLists.txt b/sched/task/CMakeLists.txt
+index 9e0f98ac54..4d37061b15 100644
+--- a/sched/task/CMakeLists.txt
++++ b/sched/task/CMakeLists.txt
+@@ -30,6 +30,8 @@ set(SRCS
+     task_getgroup.c
+     task_getpid.c
+     task_prctl.c
++	task_join.c
++	task_join.c
+     task_recover.c
+     task_restart.c
+     task_spawnparms.c
+diff --git a/sched/task/Make.defs b/sched/task/Make.defs
+index 1db20a6a05..5a8ba7cc8d 100644
+--- a/sched/task/Make.defs
++++ b/sched/task/Make.defs
+@@ -1,52 +1,30 @@
+-############################################################################
+-# sched/task/Make.defs
+-#
+-# Licensed to the Apache Software Foundation (ASF) under one or more
+-# contributor license agreements.  See the NOTICE file distributed with
+-# this work for additional information regarding copyright ownership.  The
+-# ASF licenses this file to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance with the
+-# License.  You may obtain a copy of the License at
+-#
+-#   http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+-# License for the specific language governing permissions and limitations
+-# under the License.
+-#
+-############################################################################
+ 
+-CSRCS += task_create.c task_init.c task_setup.c task_activate.c
+-CSRCS += task_start.c task_delete.c task_exit.c task_exithook.c
+-CSRCS += task_getgroup.c task_getpid.c task_prctl.c task_recover.c
+-CSRCS += task_restart.c task_spawnparms.c task_cancelpt.c task_terminate.c
+-CSRCS += task_gettid.c exit.c
+-
+-ifeq ($(CONFIG_SCHED_HAVE_PARENT),y)
+-CSRCS += task_getppid.c task_reparent.c
+-endif
+-
+-ifeq ($(CONFIG_ARCH_HAVE_FORK),y)
++ifneq ($(CONFIG_DISABLE_PTHREAD),y)
++DEPPATH += --dep-path task
++VPATH += :task
++CSRCS += task_activate.c
++CSRCS += task_cancelpt.c
++CSRCS += task_create.c
++CSRCS += task_delete.c
++CSRCS += task_execve.c
++CSRCS += task_exit.c
++CSRCS += task_exithook.c
+ CSRCS += task_fork.c
+-endif
+-
+-ifneq ($(CONFIG_BUILD_KERNEL),y)
++CSRCS += task_getgroup.c
++CSRCS += task_getpid.c
++CSRCS += task_getppid.c
++CSRCS += task_gettid.c
++CSRCS += task_init.c
++CSRCS += task_join.c
++CSRCS += task_posixspawn.c
++CSRCS += task_prctl.c
++CSRCS += task_recover.c
++CSRCS += task_reparent.c
++CSRCS += task_restart.c
++CSRCS += task_setup.c
+ CSRCS += task_spawn.c
+-endif
+-
+-ifneq ($(CONFIG_BINFMT_DISABLE),y)
+-ifeq ($(CONFIG_LIBC_EXECFUNCS),y)
+-CSRCS += task_execve.c task_posixspawn.c
+-endif
+-endif
+-
+-ifeq ($(CONFIG_SCHED_STARTHOOK),y)
++CSRCS += task_spawnparms.c
++CSRCS += task_start.c
+ CSRCS += task_starthook.c
++CSRCS += task_terminate.c
+ endif
+-
+-# Include task build support
+-
+-DEPPATH += --dep-path task
+-VPATH += :task
+diff --git a/sched/task/task.h b/sched/task/task.h
+index ca63d2c756..edbe220142 100644
+--- a/sched/task/task.h
++++ b/sched/task/task.h
+@@ -1,61 +1,25 @@
+-/****************************************************************************
+- * sched/task/task.h
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+ #ifndef __SCHED_TASK_TASK_H
+ #define __SCHED_TASK_TASK_H
+ 
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+-
+ #include <nuttx/config.h>
+-#include <nuttx/compiler.h>
+-
+-#include <sys/types.h>
+-#include <stdbool.h>
+-
+ #include <nuttx/sched.h>
+-
+-/****************************************************************************
+- * Public Function Prototypes
+- ****************************************************************************/
+-
+-struct tcb_s; /* Forward reference */
+-
+-/* Task start-up */
+-
+-void nxtask_start(void);
+-int  nxtask_setup_scheduler(FAR struct task_tcb_s *tcb, int priority,
+-       start_t start, main_t main, uint8_t ttype);
+-int  nxtask_setup_arguments(FAR struct task_tcb_s *tcb,
+-       FAR const char *name, FAR char * const argv[]);
+-
+-/* Task exit */
+-
+-int  nxtask_exit(void);
+-int  nxtask_terminate(pid_t pid);
+-void nxtask_exithook(FAR struct tcb_s *tcb, int status);
+-void nxtask_recover(FAR struct tcb_s *tcb);
+-
+-/* Cancellation points */
+-
+-bool nxnotify_cancellation(FAR struct tcb_s *tcb);
++#include <nuttx/signal.h>
++
++int task_create(FAR const char *name, int priority, int stack_size, main_t entry, FAR char * const *argv);
++int task_init(FAR struct tcb_s *tcb, const char *name, int priority, FAR const uint32_t *stack, int stack_size, FAR void *entry, FAR char * const *argv, FAR sem_t *exitsem);
++int task_activate(FAR struct tcb_s *tcb);
++int task_delete(pid_t pid);
++int task_restart(pid_t pid);
++
++#if !defined(CONFIG_DISABLE_PTHREAD)
++struct tcb_s;
++struct join_s;
++FAR struct join_s *task_joinfind(pid_t pid);
++void task_joinalloc(FAR struct tcb_s *tcb);
++void task_joinfree(FAR struct tcb_s *tcb);
++int task_join(pid_t pid, FAR void **exit_value);
++int task_detach(pid_t pid);
++void task_completejoin(FAR struct tcb_s *tcb, FAR void *exit_value);
++#endif
+ 
+ #endif /* __SCHED_TASK_TASK_H */
