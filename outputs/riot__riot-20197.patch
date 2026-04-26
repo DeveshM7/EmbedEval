@@ -1,0 +1,87 @@
+diff --git a/sys/include/net/nanocoap.h b/sys/include/net/nanocoap.h
+index 509f94b664..5788933bd3 100644
+--- a/sys/include/net/nanocoap.h
++++ b/sys/include/net/nanocoap.h
+@@ -987,6 +987,32 @@ static inline ssize_t coap_get_uri_query_string(coap_pkt_t *pkt, char *target,
+ bool coap_find_uri_query(coap_pkt_t *pkt, const char *key,
+                          const char **value, size_t *len);
+ 
++
++/**
++ * @brief   Iterate over URI query options of the packet
++ *
++ * This function iterates over all URI-Query options in the packet,
++ * splitting each into a key and value pair. Options may have the format
++ * "key=value" or just "key".
++ *
++ * To start iteration, set @p pos to point to NULL. On each successful call,
++ * @p pos is updated to point to the next option.
++ *
++ * @param[in]     pkt       pkt to work on
++ * @param[in,out] pos       opaque position pointer, must point to NULL on first call
++ * @param[out]    key       buffer for the key string (null-terminated)
++ * @param[in]     key_len   size of @p key buffer
++ * @param[out]    value     buffer for the value string (null-terminated)
++ * @param[in]     value_len size of @p value buffer
++ *
++ * @return  2 if a key=value pair was found
++ * @return  1 if a key without value was found
++ * @return  0 if no more query options
++ * @return  -E2BIG if key or value buffer is too small
++ */
++ssize_t coap_iterate_uri_query(coap_pkt_t *pkt, void **pos,
++                               char *key, size_t key_len,
++                               char *value, size_t value_len);
+ /**
+  * @brief   Iterate over a packet's options
+  *
+diff --git a/sys/net/application_layer/nanocoap/nanocoap.c b/sys/net/application_layer/nanocoap/nanocoap.c
+index 6e3d7e6adf..a49136cab0 100644
+--- a/sys/net/application_layer/nanocoap/nanocoap.c
++++ b/sys/net/application_layer/nanocoap/nanocoap.c
+@@ -479,6 +479,45 @@ bool coap_find_uri_query(coap_pkt_t *pkt, const char *key, const char **value, s
+     return false;
+ }
+ 
++
++ssize_t coap_iterate_uri_query(coap_pkt_t *pkt, void **pos,
++                               char *key, size_t key_len,
++                               char *value, size_t value_len)
++{
++    uint8_t *opt_pos = (uint8_t *)*pos;
++    int len_query;
++    const uint8_t *query_data = coap_iterate_option(pkt, COAP_OPT_URI_QUERY,
++                                                    &opt_pos, &len_query);
++    *pos = (void *)opt_pos;
++
++    if (query_data == NULL) {
++        return 0;
++    }
++
++    const char *separator = memchr(query_data, '=', len_query);
++    if (separator) {
++        size_t klen = separator - (const char *)query_data;
++        size_t vlen = len_query - klen - 1;
++        if (klen + 1 > key_len || vlen + 1 > value_len) {
++            return -E2BIG;
++        }
++        memcpy(key, query_data, klen);
++        key[klen] = '\0';
++        memcpy(value, separator + 1, vlen);
++        value[vlen] = '\0';
++        return 2;
++    }
++    else {
++        if ((size_t)len_query + 1 > key_len) {
++            return -E2BIG;
++        }
++        memcpy(key, query_data, len_query);
++        key[len_query] = '\0';
++        value[0] = '\0';
++        return 1;
++    }
++}
++
+ bool coap_has_unprocessed_critical_options(const coap_pkt_t *pkt)
+ {
+     for (unsigned i = 0; i < sizeof(pkt->opt_crit); ++i){

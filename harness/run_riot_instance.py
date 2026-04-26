@@ -79,6 +79,7 @@ your_command_here
 
 CRITICAL RULES — responses that break these are rejected:
 - Every response MUST include exactly one ```mswea_bash_command``` block.
+- DO NOT provide text-only responses. If you are finished, you MUST run the submission command.
 - NEVER use heredoc syntax (<<'EOF' or <<'PY'). It breaks inside docker exec.
   Use python3 -c "..." with a one-liner instead.
 - After a successful build you MUST still run `run_tests` before submitting.
@@ -119,7 +120,7 @@ Mandatory workflow:
    - If run_tests shows all target tests PASSING: go to step 4
 4. Submit by running THIS EXACT COMMAND ALONE — nothing before or after it:
 
-```
+```mswea_bash_command
 echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
 ```
 
