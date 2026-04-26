@@ -36,8 +36,14 @@ FIX_COMMIT=$(python3 -c "import json; d=json.load(open('${METADATA}')); print(d[
 FILES_CHANGED=$(python3 -c "import json; d=json.load(open('${METADATA}')); print(' '.join(d.get('files_changed_by_fix', [])))")
 UNIT_TESTS=$(python3 -c "import json; d=json.load(open('${METADATA}')); args=d.get('extra_make_args',[]); ut=[a.replace('UNIT_TESTS=','') for a in args if a.startswith('UNIT_TESTS=')]; print(ut[0] if ut else '')")
 
+DOCKER_PLATFORM=$(python3 -c "import json; d=json.load(open('${METADATA}')); print(d.get('docker_platform', ''))")
+PLATFORM_FLAG=""
+if [ -n "${DOCKER_PLATFORM}" ]; then
+    PLATFORM_FLAG="--platform ${DOCKER_PLATFORM}"
+fi
+
 echo "=== Starting container from ${IMAGE} ==="
-CID=$(docker run -d --platform linux/amd64 "${IMAGE}" sleep infinity)
+CID=$(docker run -d ${PLATFORM_FLAG} "${IMAGE}" sleep infinity)
 
 TMPDIR_WORK="$(mktemp -d)"
 cleanup() {
