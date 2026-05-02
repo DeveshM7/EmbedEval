@@ -65,25 +65,18 @@ You are an expert embedded systems engineer. You can interact with a Linux shell
 to navigate codebases, edit source files, build firmware, and run tests.
 You are working inside a RIOT OS repository.
 
-Your response must contain exactly ONE bash code block with ONE command
-(or commands connected with && or ||).
-Include a THOUGHT section before your command explaining your reasoning.
-
-<format_example>
-THOUGHT: Your reasoning here.
-
-```mswea_bash_command
-your_command_here
-```
-</format_example>
+You MUST use the `bash` function/tool provided to you to execute commands.
+Include your reasoning in the content/thought of your response, and then call the `bash` tool.
 
 CRITICAL RULES — responses that break these are rejected:
-- Every response MUST include exactly one ```mswea_bash_command``` block.
-- DO NOT provide text-only responses. If you are finished, you MUST run the submission command.
+- Every action must be executed by calling the `bash` tool.
+- Do NOT output commands in markdown ````bash```` blocks; you must use the `bash` tool.
+- DO NOT provide text-only responses. If you are finished, you MUST call the `bash` tool with the submission command.
 - NEVER use heredoc syntax (<<'EOF' or <<'PY'). It breaks inside docker exec.
   Use python3 -c "..." with a one-liner instead.
 - After a successful build you MUST still run `run_tests` before submitting.
   A passing build does NOT mean tests pass.
+- If you receive an error about missing tool calls, just call the `bash` tool.
 """
 
 INSTANCE_TEMPLATE = """\
@@ -93,7 +86,7 @@ Please solve this issue:
 
 ## Important Rules
 
-1. Every response must contain exactly one action in triple backticks.
+1. Every action must be a `bash` tool call. Do not use markdown blocks.
 2. Do NOT modify any files under tests/.
 3. Environment variable changes and directory changes are NOT persistent between
    commands — every action runs in a new subshell. Use absolute paths or prefix
@@ -118,14 +111,11 @@ Mandatory workflow:
    - If build fails: fix the error and repeat
    - If run_tests shows tests FAILING: fix the bug and go back to step 3
    - If run_tests shows all target tests PASSING: go to step 4
-4. Submit by running THIS EXACT COMMAND ALONE — nothing before or after it:
+4. Submit by calling the `bash` tool with the following command:
 
-```mswea_bash_command
 echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
-```
 
-CRITICAL: The submit command must be the ONLY thing in your response's code block.
-Do NOT chain it with && or any other command. It must be alone.
+CRITICAL: Do NOT chain the submission command with any other command.
 
 Other useful commands:
 - Find code: `grep -rn "name" --include="*.c" --include="*.h" /testbed`
@@ -253,8 +243,17 @@ def main():
 
     # DefaultAgent takes system_template and instance_template as required kwargs.
     # step_limit and cost_limit are optional AgentConfig fields.
+    model = get_model(input_model_name=args.model)
+    
+    # Customize the format error message to aggressively guide the model back on track.
+    model.config.format_error_template = (
+        "ERROR: No tool call found in your response. "
+        "You MUST NOT apologize or explain yourself. You must execute actions using the `bash` tool. "
+        "If you are finished, you MUST call the `bash` tool with the command: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    )
+
     agent = AgentClass(
-        get_model(input_model_name=args.model),
+        model,
         env,
         system_template=SYSTEM_TEMPLATE,
         instance_template=INSTANCE_TEMPLATE,

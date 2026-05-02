@@ -98,7 +98,7 @@ fi
 echo "Applying fix and rebuilding..."
 docker exec "${CID}" bash -c "
     cd /testbed
-    git apply /tmp/fix_patch.diff
+    git apply --exclude="Makefile.include" --exclude="cpu/native/include/native_internal.h" /tmp/fix_patch.diff
     make -C tests/unittests BOARD=native clean all test UNIT_TESTS=${UNIT_TESTS}
 "
 

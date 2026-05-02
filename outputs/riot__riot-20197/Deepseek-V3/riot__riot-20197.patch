@@ -1,0 +1,82 @@
+diff --git a/sys/include/net/nanocoap.h b/sys/include/net/nanocoap.h
+index 509f94b664..8806d406db 100644
+--- a/sys/include/net/nanocoap.h
++++ b/sys/include/net/nanocoap.h
+@@ -2443,3 +2443,24 @@ static inline uint32_t coap_get_observe(coap_pkt_t *pkt)
+ }
+ #endif
+ /** @} */
++
++/**
++ * @brief   Iterate over URI query options
++ *
++ * This function iterates over all URI-Query options and returns each key-value
++ * pair. Options have the format "key=value", but options that only consist of
++ * a key may also exist.
++ *
++ * @param[in]   pkt     pkt to work on
++ * @param[in,out] pos   iteration position, set to NULL to start from beginning
++ * @param[out]  key     buffer to store key
++ * @param[in]   key_len size of key buffer
++ * @param[out]  value   buffer to store value
++ * @param[in]   value_len size of value buffer
++ *
++ * @returns     2 if key=value pair found
++ * @returns     1 if key found without value
++ * @returns     0 if no more options
++ * @returns     -E2BIG if buffer too small
++ */
++int coap_iterate_uri_query(coap_pkt_t *pkt, void **pos, char *key, size_t key_len, char *value, size_t value_len);
+diff --git a/sys/net/application_layer/nanocoap/nanocoap.c b/sys/net/application_layer/nanocoap/nanocoap.c
+index 6e3d7e6adf..e7eb4f1306 100644
+--- a/sys/net/application_layer/nanocoap/nanocoap.c
++++ b/sys/net/application_layer/nanocoap/nanocoap.c
+@@ -1526,3 +1526,48 @@ const sock_udp_ep_t *coap_request_ctx_get_local_udp(const coap_request_ctx_t *ct
+     return NULL;
+ #endif
+ }
++
++int coap_iterate_uri_query(coap_pkt_t *pkt, void **pos, char *key, size_t key_len, char *value, size_t value_len)
++{
++    uint8_t **opt_pos = (uint8_t **)pos;
++    int len_query;
++    
++    const void *key_data = coap_iterate_option(pkt, COAP_OPT_URI_QUERY,
++                                               opt_pos, &len_query);
++    if (key_data == NULL) {
++        return 0;
++    }
++    
++    const char *separator = memchr(key_data, '=', len_query);
++    size_t len_key = separator ? (separator - (char *)key_data) : len_query;
++    
++    /* Check if key buffer is large enough */
++    if (len_key >= key_len) {
++        return -E2BIG;
++    }
++    
++    /* Copy key */
++    memcpy(key, key_data, len_key);
++    key[len_key] = '\0';
++    
++    if (separator) {
++        /* key=value format */
++        size_t len_val = len_query - len_key - 1;
++        
++        /* Check if value buffer is large enough */
++        if (len_val >= value_len) {
++            return -E2BIG;
++        }
++        
++        /* Copy value */
++        memcpy(value, separator + 1, len_val);
++        value[len_val] = '\0';
++        return 2;
++    } else {
++        /* key only format */
++        if (value_len > 0) {
++            value[0] = '\0';
++        }
++        return 1;
++    }
++}

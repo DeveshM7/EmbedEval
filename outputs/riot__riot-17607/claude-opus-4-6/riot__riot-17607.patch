@@ -1,0 +1,228 @@
+diff --git a/sys/include/ztimer.h b/sys/include/ztimer.h
+index 79847799c8..d919799c1a 100644
+--- a/sys/include/ztimer.h
++++ b/sys/include/ztimer.h
+@@ -361,6 +361,18 @@ typedef struct {
+      * @param   clock       ztimer clock to cancel a pending alarm, if any
+      */
+     void (*cancel)(ztimer_clock_t *clock);
++
++    /**
++     * @brief   Start the clock
++     * @param   clock       ztimer clock to start
++     */
++    void (*start)(ztimer_clock_t *clock);
++
++    /**
++     * @brief   Stop the clock
++     * @param   clock       ztimer clock to stop
++     */
++    void (*stop)(ztimer_clock_t *clock);
+ } ztimer_ops_t;
+ 
+ /**
+@@ -382,6 +394,10 @@ struct ztimer_clock {
+ #if MODULE_PM_LAYERED || DOXYGEN
+     uint8_t block_pm_mode;          /**< min. pm mode to block for the clock to run */
+ #endif
++#if MODULE_ZTIMER_ONDEMAND || DOXYGEN
++    uint16_t users;                 /**< reference count for on-demand clocks */
++    uint16_t adjust_clock_start;    /**< will be subtracted on first set() after start */
++#endif
+ };
+ 
+ /**
+@@ -712,6 +728,26 @@ int ztimer_mutex_lock_timeout(ztimer_clock_t *clock, mutex_t *mutex,
+ int ztimer_rmutex_lock_timeout(ztimer_clock_t *clock, rmutex_t *rmutex,
+                                uint32_t timeout);
+ 
++/**
++ * @brief   Acquire a ztimer clock
++ *
++ * This increments the reference count. On first acquisition, the
++ * clock's start() op is called (if available).
++ *
++ * @param[in]   clock       ztimer clock to acquire
++ */
++void ztimer_acquire(ztimer_clock_t *clock);
++
++/**
++ * @brief   Release a ztimer clock
++ *
++ * This decrements the reference count. When the last user releases the
++ * clock, the clock's stop() op is called (if available).
++ *
++ * @param[in]   clock       ztimer clock to release
++ */
++void ztimer_release(ztimer_clock_t *clock);
++
+ /**
+  * @brief   Initialize the board-specific default ztimer configuration
+  */
+diff --git a/sys/include/ztimer/mock.h b/sys/include/ztimer/mock.h
+index a03bfbc487..5fd336e7dd 100644
+--- a/sys/include/ztimer/mock.h
++++ b/sys/include/ztimer/mock.h
+@@ -43,11 +43,14 @@ typedef struct {
+     uint32_t now;           /**< current counter value */
+     uint32_t target;        /**< ticks left until alarm is hit */
+     unsigned armed;         /**< flag for checking if a target has been set */
++    unsigned running;       /**< flag for checking if the clock is running */
+ 
+     struct {
+         unsigned now;       /**< Number of calls to ztimer_ops_t::now */
+         unsigned set;       /**< Number of calls to ztimer_ops_t::set */
+         unsigned cancel;    /**< Number of calls to ztimer_ops_t::cancel */
++        unsigned start;     /**< Number of calls to ztimer_ops_t::start */
++        unsigned stop;      /**< Number of calls to ztimer_ops_t::stop */
+     } calls;                /**< Struct holding number of calls to each
+                                  operation */
+ } ztimer_mock_t;
+diff --git a/sys/ztimer/core.c b/sys/ztimer/core.c
+index e415f49fce..21ac81a335 100644
+--- a/sys/ztimer/core.c
++++ b/sys/ztimer/core.c
+@@ -49,6 +49,51 @@ static inline uint32_t _min_u32(uint32_t a, uint32_t b)
+ }
+ #endif
+ 
++
++#if MODULE_ZTIMER_ONDEMAND
++static void _ztimer_clock_start(ztimer_clock_t *clock)
++{
++    if (clock->ops->start) {
++        clock->ops->start(clock);
++    }
++#ifdef MODULE_ZTIMER_EXTEND
++    if (clock->max_value < UINT32_MAX) {
++        clock->ops->set(clock, clock->max_value >> 1);
++    }
++#endif
++}
++
++static void _ztimer_clock_stop(ztimer_clock_t *clock)
++{
++    clock->ops->cancel(clock);
++    if (clock->ops->stop) {
++        clock->ops->stop(clock);
++    }
++}
++
++void ztimer_acquire(ztimer_clock_t *clock)
++{
++    unsigned state = irq_disable();
++    if (clock->users++ == 0) {
++        if (!clock->list.next) {
++            _ztimer_clock_start(clock);
++        }
++    }
++    irq_restore(state);
++}
++
++void ztimer_release(ztimer_clock_t *clock)
++{
++    unsigned state = irq_disable();
++    assert(clock->users > 0);
++    if (--clock->users == 0) {
++        if (!clock->list.next) {
++            _ztimer_clock_stop(clock);
++        }
++    }
++    irq_restore(state);
++}
++#endif /* MODULE_ZTIMER_ONDEMAND */
+ static unsigned _is_set(const ztimer_clock_t *clock, const ztimer_t *t)
+ {
+     if (!clock->list.next) {
+@@ -93,6 +138,10 @@ uint32_t ztimer_set(ztimer_clock_t *clock, ztimer_t *timer, uint32_t val)
+ 
+     uint32_t now = _ztimer_update_head_offset(clock);
+ 
++#if MODULE_ZTIMER_ONDEMAND
++    int was_empty = (clock->list.next == NULL);
++#endif
++
+     if (_is_set(clock, timer)) {
+         _del_entry_from_list(clock, &timer->base);
+     }
+@@ -105,6 +154,20 @@ uint32_t ztimer_set(ztimer_clock_t *clock, ztimer_t *timer, uint32_t val)
+         val = 0;
+     }
+ 
++#if MODULE_ZTIMER_ONDEMAND
++    /* auto-start clock when first timer is set without explicit acquire */
++    if (was_empty && !clock->users) {
++        _ztimer_clock_start(clock);
++        /* subtract clock start adjustment */
++        if (val > clock->adjust_clock_start) {
++            val -= clock->adjust_clock_start;
++        }
++        else {
++            val = 0;
++        }
++    }
++#endif
++
+     timer->base.offset = val;
+     _add_entry_to_list(clock, &timer->base);
+     if (clock->list.next == &timer->base) {
+@@ -305,6 +368,12 @@ static ztimer_t *_now_next(ztimer_clock_t *clock)
+ 
+ static void _ztimer_update(ztimer_clock_t *clock)
+ {
++#if MODULE_ZTIMER_ONDEMAND
++    if (!clock->list.next && !clock->users) {
++        _ztimer_clock_stop(clock);
++        return;
++    }
++#endif
+ #ifdef MODULE_ZTIMER_EXTEND
+     if (clock->max_value < UINT32_MAX) {
+         if (clock->list.next) {
+diff --git a/sys/ztimer/mock.c b/sys/ztimer/mock.c
+index 92150693d6..432c200fc3 100644
+--- a/sys/ztimer/mock.c
++++ b/sys/ztimer/mock.c
+@@ -23,6 +23,7 @@
+ 
+ #include <stdint.h>
+ #include <inttypes.h>
++#include "kernel_defines.h"
+ #include "ztimer/mock.h"
+ 
+ #define ENABLE_DEBUG 0
+@@ -114,10 +115,34 @@ static void ztimer_mock_op_cancel(ztimer_clock_t *clock)
+     self->armed = 0;
+ }
+ 
++static void ztimer_mock_op_start(ztimer_clock_t *clock)
++{
++    ztimer_mock_t *self = (ztimer_mock_t *)clock;
++
++    ++self->calls.start;
++    self->running = 1;
++    DEBUG("zmock_start:  %3u now=0x%08" PRIx32 "\n", self->calls.start, self->now);
++}
++
++static void ztimer_mock_op_stop(ztimer_clock_t *clock)
++{
++    ztimer_mock_t *self = (ztimer_mock_t *)clock;
++
++    ++self->calls.stop;
++    self->running = 0;
++    self->armed = 0;
++    DEBUG(
++        "zmock_stop:   %3u now=0x%08" PRIx32 "
++",
++        self->calls.stop, self->now);
++}
++
+ static const ztimer_ops_t ztimer_mock_ops = {
+     .set = ztimer_mock_op_set,
+     .now = ztimer_mock_op_now,
+     .cancel = ztimer_mock_op_cancel,
++    .start = ztimer_mock_op_start,
++    .stop = ztimer_mock_op_stop,
+ };
+ 
+ void ztimer_mock_init(ztimer_mock_t *self, unsigned width)

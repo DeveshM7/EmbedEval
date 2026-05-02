@@ -1,0 +1,84 @@
+diff --git a/sys/include/net/nanocoap.h b/sys/include/net/nanocoap.h
+index 509f94b664..78a57086ef 100644
+--- a/sys/include/net/nanocoap.h
++++ b/sys/include/net/nanocoap.h
+@@ -987,6 +987,32 @@ static inline ssize_t coap_get_uri_query_string(coap_pkt_t *pkt, char *target,
+ bool coap_find_uri_query(coap_pkt_t *pkt, const char *key,
+                          const char **value, size_t *len);
+ 
++/**
++ * @brief   Iterate over all URI_QUERY options and return key-value pairs
++ *
++ * This function iterates over URI_QUERY options one by one. Query options may
++ * be formatted as either "key=value" or bare "key". In the latter case,
++ * @p value is set to an empty string.
++ *
++ * To start iteration, set the iterator state referenced by @p pos to NULL.
++ * On success, @p key and @p value are always NUL-terminated.
++ *
++ * @param[in]      pkt        packet to work on
++ * @param[in,out]  pos        iterator state; initialize with NULL
++ * @param[out]     key        destination buffer for the query key
++ * @param[in]      key_len    size of @p key in bytes
++ * @param[out]     value      destination buffer for the query value
++ * @param[in]      value_len  size of @p value in bytes
++ *
++ * @return         2 on success with a key and a value
++ * @return         1 on success with a bare key and empty value
++ * @return         0 when no more URI_QUERY options are present
++ * @return         -E2BIG if key or value buffer is too small
++ */
++int coap_iterate_uri_query(coap_pkt_t *pkt, void **pos,
++                           char *key, size_t key_len,
++                           char *value, size_t value_len);
++
+ /**
+  * @brief   Iterate over a packet's options
+  *
+diff --git a/sys/net/application_layer/nanocoap/nanocoap.c b/sys/net/application_layer/nanocoap/nanocoap.c
+index 6e3d7e6adf..9f78b28f10 100644
+--- a/sys/net/application_layer/nanocoap/nanocoap.c
++++ b/sys/net/application_layer/nanocoap/nanocoap.c
+@@ -440,6 +440,42 @@ int coap_get_blockopt(coap_pkt_t *pkt, uint16_t option, uint32_t *blknum, uint8_
+     return (blkopt & 0x8) ? 1 : 0;
+ }
+ 
++int coap_iterate_uri_query(coap_pkt_t *pkt, void **pos,
++                           char *key, size_t key_len,
++                           char *value, size_t value_len)
++{
++    assert(pos);
++    assert(key);
++    assert(value);
++
++    uint8_t *opt_pos = *pos;
++    int len_query;
++    const uint8_t *query = coap_iterate_option(pkt, COAP_OPT_URI_QUERY, &opt_pos, &len_query);
++
++    if (query == NULL) {
++        return 0;
++    }
++
++    const uint8_t *separator = memchr(query, 61, len_query);
++    size_t len_key = separator ? (size_t)(separator - query) : (size_t)len_query;
++    size_t len_value = separator ? (size_t)(len_query - len_key - 1) : 0;
++
++    if ((len_key + 1 > key_len) || (len_value + 1 > value_len)) {
++        return -E2BIG;
++    }
++
++    memcpy(key, query, len_key);
++    key[len_key] = 0;
++
++    if (separator) {
++        memcpy(value, separator + 1, len_value);
++    }
++    value[len_value] = 0;
++
++    *pos = opt_pos;
++    return separator ? 2 : 1;
++}
++
+ bool coap_find_uri_query(coap_pkt_t *pkt, const char *key, const char **value, size_t *len)
+ {
+     uint8_t *opt_pos = NULL;
