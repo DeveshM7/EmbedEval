@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the shared Zephyr base image.
-# Run this once (or when the base Dockerfile changes).
+# Run this once (or when the Zephyr base Dockerfile changes).
 
 set -euo pipefail
 

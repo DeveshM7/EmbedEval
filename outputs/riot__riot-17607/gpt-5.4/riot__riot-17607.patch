@@ -1,0 +1,297 @@
+diff --git a/sys/include/ztimer.h b/sys/include/ztimer.h
+index 79847799c8..192a85b1ef 100644
+--- a/sys/include/ztimer.h
++++ b/sys/include/ztimer.h
+@@ -361,6 +361,9 @@ typedef struct {
+      * @param   clock       ztimer clock to cancel a pending alarm, if any
+      */
+     void (*cancel)(ztimer_clock_t *clock);
++
++    void (*start)(ztimer_clock_t *clock);
++    void (*stop)(ztimer_clock_t *clock);
+ } ztimer_ops_t;
+ 
+ /**
+@@ -373,6 +376,8 @@ struct ztimer_clock {
+     uint16_t adjust_set;            /**< will be subtracted on every set()  */
+     uint16_t adjust_sleep;          /**< will be subtracted on every sleep(),
+                                          in addition to adjust_set          */
++    uint16_t adjust_clock_start;    /**< will be subtracted when clock starts */
++    uint16_t users;                 /**< refcount for on-demand clock use */
+ #if MODULE_ZTIMER_EXTEND || MODULE_ZTIMER_NOW64 || DOXYGEN
+     /* values used for checkpointed intervals and 32bit extension */
+     uint32_t max_value;             /**< maximum relative timer value       */
+@@ -441,6 +446,9 @@ unsigned ztimer_is_set(const ztimer_clock_t *clock, const ztimer_t *timer);
+  */
+ bool ztimer_remove(ztimer_clock_t *clock, ztimer_t *timer);
+ 
++void ztimer_acquire(ztimer_clock_t *clock);
++void ztimer_release(ztimer_clock_t *clock);
++
+ /**
+  * @brief   Post a message after a delay
+  *
+diff --git a/sys/include/ztimer/convert.h b/sys/include/ztimer/convert.h
+index 098f092c43..9513cb0888 100644
+--- a/sys/include/ztimer/convert.h
++++ b/sys/include/ztimer/convert.h
+@@ -70,6 +70,8 @@ void ztimer_convert_init(ztimer_convert_t *ztimer_convert,
+  * @param[in]       clock   ztimer clock to operate on
+  */
+ void ztimer_convert_cancel(ztimer_clock_t *clock);
++void ztimer_convert_start(ztimer_clock_t *clock);
++void ztimer_convert_stop(ztimer_clock_t *clock);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/sys/include/ztimer/mock.h b/sys/include/ztimer/mock.h
+index a03bfbc487..eb18c5906d 100644
+--- a/sys/include/ztimer/mock.h
++++ b/sys/include/ztimer/mock.h
+@@ -43,11 +43,14 @@ typedef struct {
+     uint32_t now;           /**< current counter value */
+     uint32_t target;        /**< ticks left until alarm is hit */
+     unsigned armed;         /**< flag for checking if a target has been set */
++    unsigned running;       /**< flag indicating whether timer is running */
+ 
+     struct {
+         unsigned now;       /**< Number of calls to ztimer_ops_t::now */
+         unsigned set;       /**< Number of calls to ztimer_ops_t::set */
+         unsigned cancel;    /**< Number of calls to ztimer_ops_t::cancel */
++        unsigned start;     /**< Number of calls to ztimer_ops_t::start */
++        unsigned stop;      /**< Number of calls to ztimer_ops_t::stop */
+     } calls;                /**< Struct holding number of calls to each
+                                  operation */
+ } ztimer_mock_t;
+diff --git a/sys/ztimer/convert.c b/sys/ztimer/convert.c
+index 921a478155..cce6bd6d6b 100644
+--- a/sys/ztimer/convert.c
++++ b/sys/ztimer/convert.c
+@@ -56,3 +56,17 @@ void ztimer_convert_init(ztimer_convert_t *ztimer_convert,
+     DEBUG("ztimer_convert_init() max_value=%" PRIu32 "\n",
+           ztimer_convert->super.max_value);
+ }
++
++void ztimer_convert_start(ztimer_clock_t *clock)
++{
++    ztimer_convert_t *ztimer_convert = (ztimer_convert_t *)clock;
++
++    ztimer_acquire(ztimer_convert->lower);
++}
++
++void ztimer_convert_stop(ztimer_clock_t *clock)
++{
++    ztimer_convert_t *ztimer_convert = (ztimer_convert_t *)clock;
++
++    ztimer_release(ztimer_convert->lower);
++}
+diff --git a/sys/ztimer/convert_frac.c b/sys/ztimer/convert_frac.c
+index 0d3dc66ecd..355847dc23 100644
+--- a/sys/ztimer/convert_frac.c
++++ b/sys/ztimer/convert_frac.c
+@@ -74,6 +74,8 @@ static const ztimer_ops_t ztimer_convert_frac_ops = {
+     .set = ztimer_convert_frac_op_set,
+     .now = ztimer_convert_frac_op_now,
+     .cancel = ztimer_convert_cancel,
++    .start = ztimer_convert_start,
++    .stop = ztimer_convert_stop,
+ };
+ 
+ static void ztimer_convert_frac_compute_scale(ztimer_convert_frac_t *self,
+diff --git a/sys/ztimer/convert_muldiv64.c b/sys/ztimer/convert_muldiv64.c
+index f5e4d3d1d5..af6e1bcac2 100644
+--- a/sys/ztimer/convert_muldiv64.c
++++ b/sys/ztimer/convert_muldiv64.c
+@@ -98,6 +98,8 @@ static const ztimer_ops_t _ztimer_convert_muldiv64_ops = {
+     .set = _ztimer_convert_muldiv64_set,
+     .now = _ztimer_convert_muldiv64_now,
+     .cancel = ztimer_convert_cancel,
++    .start = ztimer_convert_start,
++    .stop = ztimer_convert_stop,
+ };
+ 
+ void ztimer_convert_muldiv64_init(
+diff --git a/sys/ztimer/convert_shift.c b/sys/ztimer/convert_shift.c
+index a099a103a9..9260ce8755 100644
+--- a/sys/ztimer/convert_shift.c
++++ b/sys/ztimer/convert_shift.c
+@@ -78,6 +78,8 @@ static const ztimer_ops_t _ztimer_convert_shift_ops_up = {
+     .set = _ztimer_convert_shift_up_set,
+     .now = _ztimer_convert_shift_up_now,
+     .cancel = ztimer_convert_cancel,
++    .start = ztimer_convert_start,
++    .stop = ztimer_convert_stop,
+ };
+ 
+ void ztimer_convert_shift_up_init(ztimer_convert_shift_t *clock,
+diff --git a/sys/ztimer/core.c b/sys/ztimer/core.c
+index e415f49fce..5ef4c43cf2 100644
+--- a/sys/ztimer/core.c
++++ b/sys/ztimer/core.c
+@@ -68,6 +68,43 @@ unsigned ztimer_is_set(const ztimer_clock_t *clock, const ztimer_t *timer)
+     return res;
+ }
+ 
++void ztimer_acquire(ztimer_clock_t *clock)
++{
++    unsigned state = irq_disable();
++
++    bool was_off = (clock->users == 0);
++    clock->users++;
++
++    if (was_off) {
++        if (clock->ops->start) {
++            clock->ops->start(clock);
++        }
++        if (clock->max_value < UINT32_MAX) {
++            clock->ops->set(clock, clock->max_value >> 1);
++        }
++        else if (!clock->ops->start) {
++            clock->ops->set(clock, 0);
++        }
++    }
++
++    irq_restore(state);
++}
++
++void ztimer_release(ztimer_clock_t *clock)
++{
++    unsigned state = irq_disable();
++
++    assert(clock->users);
++    if (--clock->users == 0) {
++        clock->ops->cancel(clock);
++        if (clock->ops->stop) {
++            clock->ops->stop(clock);
++        }
++    }
++
++    irq_restore(state);
++}
++
+ bool ztimer_remove(ztimer_clock_t *clock, ztimer_t *timer)
+ {
+     bool was_removed = false;
+@@ -91,6 +128,11 @@ uint32_t ztimer_set(ztimer_clock_t *clock, ztimer_t *timer, uint32_t val)
+ 
+     unsigned state = irq_disable();
+ 
++    bool acquired = false;
++    if (!clock->list.next) {
++        ztimer_acquire(clock);
++        acquired = true;
++    }
+     uint32_t now = _ztimer_update_head_offset(clock);
+ 
+     if (_is_set(clock, timer)) {
+@@ -114,6 +156,9 @@ uint32_t ztimer_set(ztimer_clock_t *clock, ztimer_t *timer, uint32_t val)
+         }
+         DEBUG("ztimer_set(): %p setting %" PRIu32 "\n", (void *)clock, val);
+ #endif
++        if (acquired && val > clock->adjust_clock_start) {
++            val -= clock->adjust_clock_start;
++        }
+         clock->ops->set(clock, val);
+     }
+ 
+@@ -296,6 +341,9 @@ static ztimer_t *_now_next(ztimer_clock_t *clock)
+             /* reset next pointer so ztimer_is_set() works */
+             entry->next = NULL;
+         }
++        if (!clock->list.next) {
++            ztimer_release(clock);
++        }
+         return (ztimer_t *)entry;
+     }
+     else {
+@@ -329,7 +377,8 @@ static void _ztimer_update(ztimer_clock_t *clock)
+                 clock->ops->set(clock, clock->max_value >> 1);
+             }
+             else {
+-                clock->ops->cancel(clock);
++                ztimer_release(clock);
++                return;
+             }
+         }
+     }
+diff --git a/sys/ztimer/mock.c b/sys/ztimer/mock.c
+index 92150693d6..78d7c9fd86 100644
+--- a/sys/ztimer/mock.c
++++ b/sys/ztimer/mock.c
+@@ -114,10 +114,29 @@ static void ztimer_mock_op_cancel(ztimer_clock_t *clock)
+     self->armed = 0;
+ }
+ 
++static void ztimer_mock_op_start(ztimer_clock_t *clock)
++{
++    ztimer_mock_t *self = (ztimer_mock_t *)clock;
++
++    ++self->calls.start;
++    self->running = 1;
++}
++
++static void ztimer_mock_op_stop(ztimer_clock_t *clock)
++{
++    ztimer_mock_t *self = (ztimer_mock_t *)clock;
++
++    ++self->calls.stop;
++    self->running = 0;
++    self->armed = 0;
++}
++
+ static const ztimer_ops_t ztimer_mock_ops = {
+     .set = ztimer_mock_op_set,
+     .now = ztimer_mock_op_now,
+     .cancel = ztimer_mock_op_cancel,
++    .start = ztimer_mock_op_start,
++    .stop = ztimer_mock_op_stop,
+ };
+ 
+ void ztimer_mock_init(ztimer_mock_t *self, unsigned width)
+@@ -130,7 +149,4 @@ void ztimer_mock_init(ztimer_mock_t *self, unsigned width)
+     };
+     DEBUG("zmock_init: %p width=%u mask=0x%08" PRIx32 "\n", (void *)self, width,
+           self->mask);
+-    if (max_value < UINT32_MAX) {
+-        self->super.ops->set(&self->super, self->super.max_value >> 1);
+-    }
+ }
+diff --git a/sys/ztimer/periph_rtc.c b/sys/ztimer/periph_rtc.c
+index 7144706d1a..d451a0b97c 100644
+--- a/sys/ztimer/periph_rtc.c
++++ b/sys/ztimer/periph_rtc.c
+@@ -142,6 +142,8 @@ static const ztimer_ops_t _ztimer_periph_rtc_ops = {
+     .set = _ztimer_periph_rtc_set,
+     .now = _ztimer_periph_rtc_now,
+     .cancel = _ztimer_periph_rtc_cancel,
++    .start = NULL,
++    .stop = NULL,
+ };
+ 
+ void ztimer_periph_rtc_init(ztimer_periph_rtc_t *clock)
+diff --git a/sys/ztimer/periph_rtt.c b/sys/ztimer/periph_rtt.c
+index 74bdc227ec..118f567956 100644
+--- a/sys/ztimer/periph_rtt.c
++++ b/sys/ztimer/periph_rtt.c
+@@ -78,6 +78,8 @@ static const ztimer_ops_t _ztimer_periph_rtt_ops = {
+     .set = _ztimer_periph_rtt_set,
+     .now = _ztimer_periph_rtt_now,
+     .cancel = _ztimer_periph_rtt_cancel,
++    .start = NULL,
++    .stop = NULL,
+ };
+ 
+ void ztimer_periph_rtt_init(ztimer_periph_rtt_t *clock)
+diff --git a/sys/ztimer/periph_timer.c b/sys/ztimer/periph_timer.c
+index 9cd565b611..3f2405445e 100644
+--- a/sys/ztimer/periph_timer.c
++++ b/sys/ztimer/periph_timer.c
+@@ -82,6 +82,8 @@ static const ztimer_ops_t _ztimer_periph_timer_ops = {
+     .set = _ztimer_periph_timer_set,
+     .now = _ztimer_periph_timer_now,
+     .cancel = _ztimer_periph_timer_cancel,
++    .start = NULL,
++    .stop = NULL,
+ };
+ 
+ void ztimer_periph_timer_init(ztimer_periph_timer_t *clock, tim_t dev,

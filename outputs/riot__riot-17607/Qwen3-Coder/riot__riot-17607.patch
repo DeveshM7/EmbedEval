@@ -1,0 +1,350 @@
+diff --git a/sys/include/ztimer.h b/sys/include/ztimer.h
+index 79847799c8..1ceec087e4 100644
+--- a/sys/include/ztimer.h
++++ b/sys/include/ztimer.h
+@@ -728,68 +728,3 @@ void ztimer_init(void);
+  *
+  * @internal
+  */
+-static inline void ztimer_init_extend(ztimer_clock_t *clock)
+-{
+-    if (clock->max_value < UINT32_MAX) {
+-        clock->ops->set(clock, clock->max_value >> 1);
+-    }
+-}
+-#endif /* MODULE_ZTIMER_EXTEND */
+-
+-/* default ztimer virtual devices */
+-/**
+- * @brief   Default ztimer microsecond clock
+- */
+-extern ztimer_clock_t *const ZTIMER_USEC;
+-
+-/**
+- * @brief   Default ztimer millisecond clock
+- */
+-extern ztimer_clock_t *const ZTIMER_MSEC;
+-
+-/**
+- * @brief   Default ztimer second clock
+- */
+-extern ztimer_clock_t *const ZTIMER_SEC;
+-
+-/**
+- * @brief   Base ztimer for the microsecond clock (ZTIMER_USEC)
+- *
+- * This ztimer will reference the counter device object at the end of the
+- * chain of ztimer_clock_t for ZTIMER_USEC.
+- *
+- * If the base counter device object's frequency (CONFIG_ZTIMER_USEC_BASE_FREQ)
+- * is not 1MHz then ZTIMER_USEC will be converted on top of this one. Otherwise
+- * they will reference the same ztimer_clock.
+- *
+- * To avoid chained conversions its better to base new ztimer_clock on top of
+- * ZTIMER_USEC_BASE running at CONFIG_ZTIMER_USEC_BASE_FREQ.
+- *
+- */
+-extern ztimer_clock_t *const ZTIMER_USEC_BASE;
+-
+-/**
+- * @brief   Base ztimer for the millisecond clock (ZTIMER_MSEC)
+- *
+- * This ztimer will reference the counter device object at the end of the
+- * chain of ztimer_clock_t for ZTIMER_MSEC.
+- *
+- * If ztimer_periph_rtt is not used then ZTIMER_MSEC_BASE will reference the
+- * same base as ZTIMER_USEC_BASE.
+- *
+- * If the base counter device object's frequency (CONFIG_ZTIMER_MSEC_BASE_FREQ)
+- * is not 1KHz then ZTIMER_MSEC will be converted on top of this one. Otherwise
+- * they will reference the same ztimer_clock.
+- *
+- * To avoid chained conversions its better to base new ztimer_clock on top of
+- * ZTIMER_MSEC_BASE running at CONFIG_ZTIMER_MSEC_BASE_FREQ.
+- *
+- */
+-extern ztimer_clock_t *const ZTIMER_MSEC_BASE;
+-
+-#ifdef __cplusplus
+-}
+-#endif
+-
+-#endif /* ZTIMER_H */
+-/** @} */
+diff --git a/sys/include/ztimer/mock.h b/sys/include/ztimer/mock.h
+index a03bfbc487..b7f2343bf4 100644
+--- a/sys/include/ztimer/mock.h
++++ b/sys/include/ztimer/mock.h
+@@ -43,11 +43,14 @@ typedef struct {
+     uint32_t now;           /**< current counter value */
+     uint32_t target;        /**< ticks left until alarm is hit */
+     unsigned armed;         /**< flag for checking if a target has been set */
++    unsigned running;         /**< flag for checking if timer is running */
+ 
+     struct {
+         unsigned now;       /**< Number of calls to ztimer_ops_t::now */
+         unsigned set;       /**< Number of calls to ztimer_ops_t::set */
+         unsigned cancel;    /**< Number of calls to ztimer_ops_t::cancel */
++        unsigned start;      /**< Number of calls to ztimer_ops_t::start */
++        unsigned stop;       /**< Number of calls to ztimer_ops_t::stop */
+     } calls;                /**< Struct holding number of calls to each
+                                  operation */
+ } ztimer_mock_t;
+diff --git a/sys/ztimer/core.c b/sys/ztimer/core.c
+index e415f49fce..14238a3a8b 100644
+--- a/sys/ztimer/core.c
++++ b/sys/ztimer/core.c
+@@ -419,3 +419,73 @@ static void _ztimer_print(const ztimer_clock_t *clock)
+     } while ((entry = entry->next));
+     puts("");
+ }
++
++#include "irq.h"
++#include "atomic_utils.h"
++
++/* Reference counter for each ztimer clock */
++static uint8_t _refcount[16] = {0}; /* Assuming max 16 ztimer clocks */
++
++void ztimer_acquire(ztimer_clock_t *clock)
++{
++    unsigned state = irq_disable();
++    
++    /* Find or assign an index for this clock */
++    static ztimer_clock_t *_clocks[16] = {0};
++    static uint8_t _clock_count = 0;
++    uint8_t index = 0;
++    
++    /* Check if we already have this clock registered */
++    for (index = 0; index < _clock_count; index++) {
++        if (_clocks[index] == clock) {
++            break;
++        }
++    }
++    
++    /* If not found and we have space, register it */
++    if (index == _clock_count && _clock_count < 16) {
++        _clocks[_clock_count] = clock;
++        index = _clock_count++;
++    }
++    
++    /* Increment reference counter */
++    if (index < 16) {
++        _refcount[index]++;
++        
++        /* If this is the first reference and start op exists, start the timer */
++        if (_refcount[index] == 1 && clock->ops->start) {
++            clock->ops->start(clock);
++        }
++    }
++    
++    irq_restore(state);
++}
++
++void ztimer_release(ztimer_clock_t *clock)
++{
++    unsigned state = irq_disable();
++    
++    /* Find the clock index */
++    static ztimer_clock_t *_clocks[16] = {0};
++    static uint8_t _clock_count = 0;
++    uint8_t index = 0;
++    
++    /* Check if we have this clock registered */
++    for (index = 0; index < _clock_count; index++) {
++        if (_clocks[index] == clock) {
++            break;
++        }
++    }
++    
++    /* If found, decrement reference counter */
++    if (index < _clock_count && index < 16 && _refcount[index] > 0) {
++        _refcount[index]--;
++        
++        /* If this was the last reference and stop op exists, stop the timer */
++        if (_refcount[index] == 0 && clock->ops->stop) {
++            clock->ops->stop(clock);
++        }
++    }
++    
++    irq_restore(state);
++}
+diff --git a/sys/ztimer/mock.c b/sys/ztimer/mock.c
+index 92150693d6..d04d07c4aa 100644
+--- a/sys/ztimer/mock.c
++++ b/sys/ztimer/mock.c
+@@ -104,6 +104,20 @@ static uint32_t ztimer_mock_op_now(ztimer_clock_t *clock)
+ }
+ 
+ static void ztimer_mock_op_cancel(ztimer_clock_t *clock)
++
++static void ztimer_mock_op_start(ztimer_clock_t *clock)
++{
++    ztimer_mock_t *self = (ztimer_mock_t *)clock;
++    self->calls.start++;
++    self->running = 1;
++}
++
++static void ztimer_mock_op_stop(ztimer_clock_t *clock)
++{
++    ztimer_mock_t *self = (ztimer_mock_t *)clock;
++    self->calls.stop++;
++    self->running = 0;
++}
+ {
+     ztimer_mock_t *self = (ztimer_mock_t *)clock;
+ 
+@@ -118,6 +132,22 @@ static const ztimer_ops_t ztimer_mock_ops = {
+     .set = ztimer_mock_op_set,
+     .now = ztimer_mock_op_now,
+     .cancel = ztimer_mock_op_cancel,
++    .start = ztimer_mock_op_start,
++    .stop = ztimer_mock_op_stop,
++
++static void ztimer_mock_op_start(ztimer_clock_t *clock)
++{
++    ztimer_mock_t *self = (ztimer_mock_t *)clock;
++    self->calls.start++;
++    self->running = 1;
++}
++
++static void ztimer_mock_op_stop(ztimer_clock_t *clock)
++{
++    ztimer_mock_t *self = (ztimer_mock_t *)clock;
++    self->calls.stop++;
++    self->running = 0;
++}
+ };
+ 
+ void ztimer_mock_init(ztimer_mock_t *self, unsigned width)
+diff --git a/sys/ztimer/periph_rtc.c b/sys/ztimer/periph_rtc.c
+index 7144706d1a..b0f2a16e47 100644
+--- a/sys/ztimer/periph_rtc.c
++++ b/sys/ztimer/periph_rtc.c
+@@ -133,6 +133,18 @@ static void _ztimer_periph_rtc_set(ztimer_clock_t *clock, uint32_t val)
+ }
+ 
+ static void _ztimer_periph_rtc_cancel(ztimer_clock_t *clock)
++
++static void _ztimer_periph_rtc_start(ztimer_clock_t *clock)
++{
++    (void)clock;
++    rtc_poweron();
++}
++
++static void _ztimer_periph_rtc_stop(ztimer_clock_t *clock)
++{
++    (void)clock;
++    rtc_poweroff();
++}
+ {
+     (void)clock;
+     rtc_clear_alarm();
+@@ -142,6 +154,20 @@ static const ztimer_ops_t _ztimer_periph_rtc_ops = {
+     .set = _ztimer_periph_rtc_set,
+     .now = _ztimer_periph_rtc_now,
+     .cancel = _ztimer_periph_rtc_cancel,
++    .start = _ztimer_periph_rtc_start,
++    .stop = _ztimer_periph_rtc_stop,
++
++static void _ztimer_periph_rtc_start(ztimer_clock_t *clock)
++{
++    (void)clock;
++    rtc_poweron();
++}
++
++static void _ztimer_periph_rtc_stop(ztimer_clock_t *clock)
++{
++    (void)clock;
++    rtc_poweroff();
++}
+ };
+ 
+ void ztimer_periph_rtc_init(ztimer_periph_rtc_t *clock)
+diff --git a/sys/ztimer/periph_rtt.c b/sys/ztimer/periph_rtt.c
+index 74bdc227ec..a4fa67f3d4 100644
+--- a/sys/ztimer/periph_rtt.c
++++ b/sys/ztimer/periph_rtt.c
+@@ -69,6 +69,18 @@ static uint32_t _ztimer_periph_rtt_now(ztimer_clock_t *clock)
+ }
+ 
+ static void _ztimer_periph_rtt_cancel(ztimer_clock_t *clock)
++
++static void _ztimer_periph_rtt_start(ztimer_clock_t *clock)
++{
++    (void)clock;
++    rtt_poweron();
++}
++
++static void _ztimer_periph_rtt_stop(ztimer_clock_t *clock)
++{
++    (void)clock;
++    rtt_poweroff();
++}
+ {
+     (void)clock;
+     rtt_clear_alarm();
+@@ -78,6 +90,20 @@ static const ztimer_ops_t _ztimer_periph_rtt_ops = {
+     .set = _ztimer_periph_rtt_set,
+     .now = _ztimer_periph_rtt_now,
+     .cancel = _ztimer_periph_rtt_cancel,
++    .start = _ztimer_periph_rtt_start,
++    .stop = _ztimer_periph_rtt_stop,
++
++static void _ztimer_periph_rtt_start(ztimer_clock_t *clock)
++{
++    (void)clock;
++    rtt_poweron();
++}
++
++static void _ztimer_periph_rtt_stop(ztimer_clock_t *clock)
++{
++    (void)clock;
++    rtt_poweroff();
++}
+ };
+ 
+ void ztimer_periph_rtt_init(ztimer_periph_rtt_t *clock)
+diff --git a/sys/ztimer/periph_timer.c b/sys/ztimer/periph_timer.c
+index 9cd565b611..2449146ccc 100644
+--- a/sys/ztimer/periph_timer.c
++++ b/sys/ztimer/periph_timer.c
+@@ -66,6 +66,18 @@ static uint32_t _ztimer_periph_timer_now(ztimer_clock_t *clock)
+ }
+ 
+ static void _ztimer_periph_timer_cancel(ztimer_clock_t *clock)
++
++static void _ztimer_periph_timer_start(ztimer_clock_t *clock)
++{
++    ztimer_periph_timer_t *ztimer_periph = (ztimer_periph_timer_t *)clock;
++    timer_start(ztimer_periph->dev);
++}
++
++static void _ztimer_periph_timer_stop(ztimer_clock_t *clock)
++{
++    ztimer_periph_timer_t *ztimer_periph = (ztimer_periph_timer_t *)clock;
++    timer_stop(ztimer_periph->dev);
++}
+ {
+     ztimer_periph_timer_t *ztimer_periph = (ztimer_periph_timer_t *)clock;
+ 
+@@ -82,6 +94,20 @@ static const ztimer_ops_t _ztimer_periph_timer_ops = {
+     .set = _ztimer_periph_timer_set,
+     .now = _ztimer_periph_timer_now,
+     .cancel = _ztimer_periph_timer_cancel,
++    .start = _ztimer_periph_timer_start,
++    .stop = _ztimer_periph_timer_stop,
++
++static void _ztimer_periph_timer_start(ztimer_clock_t *clock)
++{
++    ztimer_periph_timer_t *ztimer_periph = (ztimer_periph_timer_t *)clock;
++    timer_start(ztimer_periph->dev);
++}
++
++static void _ztimer_periph_timer_stop(ztimer_clock_t *clock)
++{
++    ztimer_periph_timer_t *ztimer_periph = (ztimer_periph_timer_t *)clock;
++    timer_stop(ztimer_periph->dev);
++}
+ };
+ 
+ void ztimer_periph_timer_init(ztimer_periph_timer_t *clock, tim_t dev,
