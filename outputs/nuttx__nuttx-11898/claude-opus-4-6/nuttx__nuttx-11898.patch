@@ -1,0 +1,58 @@
+diff --git a/sched/pthread/pthread_completejoin.c b/sched/pthread/pthread_completejoin.c
+index e87455ab1e..173c8ef846 100644
+--- a/sched/pthread/pthread_completejoin.c
++++ b/sched/pthread/pthread_completejoin.c
+@@ -229,10 +229,11 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+        * have sampled the exit value.
+        */
+ 
+-      if (!waiters && pjoin->detached)
+-        {
+-          pthread_destroyjoin(group, pjoin);
+-        }
++      /* Note: Even if there are no waiters and the thread is detached,
++       * we keep the join info so that a later pthread_join() on this
++       * (detached) thread can correctly return EINVAL per POSIX.
++       * The join info will be cleaned up when the group is released.
++       */
+ 
+       /* Giving the following semaphore will allow the waiters
+        * to call pthread_destroyjoin.
+diff --git a/sched/pthread/pthread_detach.c b/sched/pthread/pthread_detach.c
+index f1476515ff..f4f02e0ffb 100644
+--- a/sched/pthread/pthread_detach.c
++++ b/sched/pthread/pthread_detach.c
+@@ -78,27 +78,18 @@ int pthread_detach(pthread_t thread)
+     {
+       /* Has the thread already terminated? */
+ 
+-      if (pjoin->terminated)
++      if (pjoin->detached)
+         {
+-          /* YES.. just remove the thread entry. */
+-
+-          pthread_destroyjoin(group, pjoin);
++          ret = EINVAL;
+         }
+       else
+         {
+-          /* NO.. Just mark the thread as detached.  It
+-           * will be removed and deallocated when the
+-           * thread exits
++          /* Mark the thread as detached.  Keep the join info so that
++           * a later pthread_join() correctly returns EINVAL per POSIX.
++           * The join info will be cleaned up when the group is released.
+            */
+ 
+-          if (pjoin->detached)
+-            {
+-              ret = EINVAL;
+-            }
+-          else
+-            {
+-              pjoin->detached = true;
+-            }
++          pjoin->detached = true;
+         }
+     }
+ 

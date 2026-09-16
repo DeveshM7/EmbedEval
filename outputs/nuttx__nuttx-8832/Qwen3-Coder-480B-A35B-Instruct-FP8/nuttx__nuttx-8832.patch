@@ -1,0 +1,82 @@
+diff --git a/sched/wqueue/kwork_thread.c b/sched/wqueue/kwork_thread.c
+index 806024d4bd..1228c2617d 100644
+--- a/sched/wqueue/kwork_thread.c
++++ b/sched/wqueue/kwork_thread.c
+@@ -139,47 +139,50 @@ static int work_thread(int argc, FAR char *argv[])
+ 
+   for (; ; )
+     {
+-      /* Then process queued work.  work_process will not return until: (1)
+-       * there is no further work in the work queue, and (2) semaphore is
+-       * posted.
+-       */
++      /* Then process queued work. Wait for at least one work item. */
+ 
+       nxsem_wait_uninterruptible(&wqueue->sem);
+ 
+-      /* And check each entry in the work queue.  Since we have disabled
+-       * interrupts we know:  (1) we will not be suspended unless we do
+-       * so ourselves, and (2) there will be no changes to the work queue
+-       */
+-
+-      /* Remove the ready-to-execute work from the list */
+-
+-      work = (FAR struct work_s *)dq_remfirst(&wqueue->q);
+-      if (work && work->worker)
++      /* Process all pending work items in the queue */
++      do
+         {
+-          /* Extract the work description from the entry (in case the work
+-           * instance will be re-used after it has been de-queued).
++          /* And check each entry in the work queue.  Since we have disabled
++           * interrupts we know:  (1) we will not be suspended unless we do
++           * so ourselves, and (2) there will be no changes to the work queue
+            */
+ 
+-          worker = work->worker;
++          /* Remove the ready-to-execute work from the list */
+ 
+-          /* Extract the work argument (before re-enabling interrupts) */
++          work = (FAR struct work_s *)dq_remfirst(&wqueue->q);
++          if (work && work->worker)
++            {
++              /* Extract the work description from the entry (in case the work
++               * instance will be re-used after it has been de-queued).
++               */
+ 
+-          arg = work->arg;
++              worker = work->worker;
+ 
+-          /* Mark the work as no longer being queued */
++              /* Extract the work argument (before re-enabling interrupts) */
+ 
+-          work->worker = NULL;
++              arg = work->arg;
+ 
+-          /* Do the work.  Re-enable interrupts while the work is being
+-           * performed... we don't have any idea how long this will take!
+-           */
++              /* Mark the work as no longer being queued */
++
++              work->worker = NULL;
+ 
+-          leave_critical_section(flags);
+-          CALL_WORKER(worker, arg);
+-          flags = enter_critical_section();
++              /* Do the work.  Re-enable interrupts while the work is being
++               * performed... we don't have any idea how long this will take!
++               */
++
++              leave_critical_section(flags);
++              CALL_WORKER(worker, arg);
++              flags = enter_critical_section();
++            }
++
++          /* Continue processing while there are more work items */
+         }
++      while (dq_peek(&wqueue->q) != NULL);
+     }
+-
+   leave_critical_section(flags);
+ 
+   return OK; /* To keep some compilers happy */

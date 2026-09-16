@@ -1,0 +1,184 @@
+diff --git a/include/signal.h b/include/signal.h
+index 3279248d21..02236983cd 100644
+--- a/include/signal.h
++++ b/include/signal.h
+@@ -37,12 +37,17 @@
+ 
+ /* Signal set management definitions and macros. */
+ 
+-#define NULL_SIGNAL_SET ((sigset_t)0x00000000)
+-#define ALL_SIGNAL_SET  ((sigset_t)0xffffffff)
++/* Macros for portable signal set printing */
++#define SIGSET_ELEM(set, i) ((set)[i])
++#define SIGSET_FMT "%08x%08x"
++
++
++#define NULL_SIGNAL_SET {0x00000000, 0x00000000}
++#define ALL_SIGNAL_SET  {0xffffffff, 0xffffffff}
+ #define MIN_SIGNO       1               /* Lowest valid signal number */
+-#define MAX_SIGNO       31              /* Highest valid signal number */
+-#define GOOD_SIGNO(s)   ((((unsigned)(s)) <= MAX_SIGNO))
+-#define SIGNO2SET(s)    ((sigset_t)1 << (s))
++#define MAX_SIGNO       63              /* Highest valid signal number */
++#define GOOD_SIGNO(s)   ((((unsigned)(s)) <= MAX_SIGNO) && ((unsigned)(s)) > 0)
++#define SIGNO2SET(s)    ((s) < 32 ? ((sigset_t){1U << (s), 0}) : ((sigset_t){0, 1U << ((s) - 32)}))
+ 
+ /* Definitions for "real time" signals */
+ 
+@@ -240,7 +245,7 @@
+  */
+ 
+ #ifndef __SIGSET_T_DEFINED
+-typedef uint32_t sigset_t;   /* Bit set of 32 signals */
++typedef uint32_t sigset_t[2];   /* Bit set of 64 signals */
+ #define __SIGSET_T_DEFINED 1
+ #endif
+ 
+@@ -396,7 +401,7 @@ int  sigwaitinfo(FAR const sigset_t *set, FAR struct siginfo *value);
+  ********************************************************************************/
+ 
+ #ifndef __SIGSET_T_DEFINED
+-typedef uint32_t sigset_t;
++typedef uint32_t sigset_t[2];
+ #  define __SIGSET_T_DEFINED 1
+ #endif
+ 
+diff --git a/libs/libc/signal/Make.defs b/libs/libc/signal/Make.defs
+index 12a468e589..6ac6484564 100644
+--- a/libs/libc/signal/Make.defs
++++ b/libs/libc/signal/Make.defs
+@@ -20,7 +20,7 @@
+ 
+ # Add the signal C files to the build
+ 
+-CSRCS += sig_addset.c sig_delset.c sig_emptyset.c sig_fillset.c
++CSRCS += sig_addset.c sig_delset.c sig_emptyset.c sig_fillset.c sig_andset.c sig_orset.c sig_xorset.c sig_nandset.c sig_isemptyset.c sig_isequal.c
+ CSRCS += sig_hold.c sig_ignore.c sig_ismember.c sig_pause.c sig_psignal.c
+ CSRCS += sig_raise.c sig_relse.c sig_set.c sig_signal.c sig_wait.c
+ 
+diff --git a/libs/libc/signal/sig_addset.c b/libs/libc/signal/sig_addset.c
+index b4b240883d..02e83e6da8 100644
+--- a/libs/libc/signal/sig_addset.c
++++ b/libs/libc/signal/sig_addset.c
+@@ -63,7 +63,15 @@ int nxsig_addset(FAR sigset_t *set, int signo)
+     {
+       /* Add the signal to the set */
+ 
+-      *set |= SIGNO2SET(signo);
++      if (signo < 32)
++        {
++          (*set)[0] |= (1U << signo);
++        }
++      else
++        {
++          (*set)[1] |= (1U << (signo - 32));
++        }
++
+       return OK;
+     }
+ }
+diff --git a/libs/libc/signal/sig_delset.c b/libs/libc/signal/sig_delset.c
+index 02b16df935..f023f19b33 100644
+--- a/libs/libc/signal/sig_delset.c
++++ b/libs/libc/signal/sig_delset.c
+@@ -63,7 +63,15 @@ int nxsig_delset(FAR sigset_t *set, int signo)
+     {
+       /* Remove the signal from the set */
+ 
+-      *set &= ~SIGNO2SET(signo);
++      if (signo < 32)
++        {
++          (*set)[0] &= ~(1U << signo);
++        }
++      else
++        {
++          (*set)[1] &= ~(1U << (signo - 32));
++        }
++
+       return OK;
+     }
+ }
+diff --git a/libs/libc/signal/sig_emptyset.c b/libs/libc/signal/sig_emptyset.c
+index a1a8516843..79858bb1fc 100644
+--- a/libs/libc/signal/sig_emptyset.c
++++ b/libs/libc/signal/sig_emptyset.c
+@@ -47,6 +47,7 @@
+ 
+ int sigemptyset(FAR sigset_t *set)
+ {
+-  *set = NULL_SIGNAL_SET;
++  (*set)[0] = 0x00000000;
++  (*set)[1] = 0x00000000;
+   return OK;
+ }
+diff --git a/libs/libc/signal/sig_fillset.c b/libs/libc/signal/sig_fillset.c
+index fe5f7e6b4b..d6d50c0a59 100644
+--- a/libs/libc/signal/sig_fillset.c
++++ b/libs/libc/signal/sig_fillset.c
+@@ -45,6 +45,7 @@
+ 
+ int sigfillset(FAR sigset_t *set)
+ {
+-  *set = ALL_SIGNAL_SET;
++  (*set)[0] = 0xffffffff;
++  (*set)[1] = 0xffffffff;
+   return OK;
+ }
+diff --git a/libs/libc/signal/sig_ismember.c b/libs/libc/signal/sig_ismember.c
+index 6c19dfbc7f..df3860e845 100644
+--- a/libs/libc/signal/sig_ismember.c
++++ b/libs/libc/signal/sig_ismember.c
+@@ -66,7 +66,14 @@ int nxsig_ismember(FAR const sigset_t *set, int signo)
+     {
+       /* Check if the signal is in the set */
+ 
+-      return ((*set & SIGNO2SET(signo)) != 0);
++      if (signo < 32)
++        {
++          return (((*set)[0] & (1U << signo)) != 0);
++        }
++      else
++        {
++          return (((*set)[1] & (1U << (signo - 32))) != 0);
++        }
+     }
+ }
+ 
+diff --git a/sched/signal/sig_procmask.c b/sched/signal/sig_procmask.c
+index fa32e02117..80d120ce37 100644
+--- a/sched/signal/sig_procmask.c
++++ b/sched/signal/sig_procmask.c
+@@ -97,7 +97,7 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+ 
+   if (oset != NULL)
+     {
+-      *oset = rtcb->sigprocmask;
++      (*oset)[0] = rtcb->sigprocmask[0]; (*oset)[1] = rtcb->sigprocmask[1];
+     }
+ 
+   /* Modify the current signal mask if so requested */
+@@ -119,7 +119,7 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+            */
+ 
+           case SIG_BLOCK:
+-            rtcb->sigprocmask |= *set;
++            rtcb->sigprocmask[0] |= (*set)[0]; rtcb->sigprocmask[1] |= (*set)[1];
+             break;
+ 
+           /* The resulting set is the intersection of the current set and
+@@ -127,13 +127,13 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+            */
+ 
+           case SIG_UNBLOCK:
+-            rtcb->sigprocmask &= ~(*set);
++            rtcb->sigprocmask[0] &= ~(*set)[0]; rtcb->sigprocmask[1] &= ~(*set)[1];
+             break;
+ 
+           /* The resulting set is the signal set pointed to by set. */
+ 
+           case SIG_SETMASK:
+-            rtcb->sigprocmask = *set;
++            rtcb->sigprocmask[0] = (*set)[0]; rtcb->sigprocmask[1] = (*set)[1];
+             break;
+ 
+           default:

@@ -1,0 +1,320 @@
+diff --git a/include/signal.h b/include/signal.h
+index 3279248d21..c03046ef72 100644
+--- a/include/signal.h
++++ b/include/signal.h
+@@ -36,13 +36,22 @@
+  ********************************************************************************/
+ 
+ /* Signal set management definitions and macros. */
++#define _SIGSET_NELEM         2               /* Number of uint32_t elements in sigset_t */
++#define _SIGSET_ELEMSIZE       32              /* Bits per element */
++#define _SIGSET_NSIGNALS      (_SIGSET_NELEM * _SIGSET_ELEMSIZE) /* Total signals */
++
++#define NULL_SIGNAL_SET       { {0} }          /* Empty signal set */
++#define ALL_SIGNAL_SET        { {0xffffffff, 0xffffffff} } /* All signals set */
++#define MIN_SIGNO             1               /* Lowest valid signal number */
++#define MAX_SIGNO             (_SIGSET_NSIGNALS - 1) /* Highest valid signal number */
++#define GOOD_SIGNO(s)         (((unsigned)(s)) > 0 && ((unsigned)(s)) < _SIGSET_NSIGNALS)
++#define SIGNO2SET(s)          ((s) % _SIGSET_ELEMSIZE) /* Bit position within element */
++#define SIGNO2ELEM(s)         ((s) / _SIGSET_ELEMSIZE) /* Element index */
++
++/* Macros for portable signal set printing */
++#define SIGSET_FMT            "%08x%08x"
++#define SIGSET_ELEM(set)      (set)->_elem[1], (set)->_elem[0]
+ 
+-#define NULL_SIGNAL_SET ((sigset_t)0x00000000)
+-#define ALL_SIGNAL_SET  ((sigset_t)0xffffffff)
+-#define MIN_SIGNO       1               /* Lowest valid signal number */
+-#define MAX_SIGNO       31              /* Highest valid signal number */
+-#define GOOD_SIGNO(s)   ((((unsigned)(s)) <= MAX_SIGNO))
+-#define SIGNO2SET(s)    ((sigset_t)1 << (s))
+ 
+ /* Definitions for "real time" signals */
+ 
+@@ -235,12 +244,22 @@
+  ********************************************************************************/
+ 
+ /* This defines a set of 32 signals (numbered 0 through 31).
++#ifndef __SIGSET_T_DEFINED
++typedef struct
++{
++  uint32_t _elem[_SIGSET_NELEM];
++} sigset_t;
++#define __SIGSET_T_DEFINED 1
++#endif
+  * REVISIT: Signal 0 is, however, not generally usable since that value has
+  * special meaning in some circumstances (e.g., kill()).
+  */
+ 
+ #ifndef __SIGSET_T_DEFINED
+-typedef uint32_t sigset_t;   /* Bit set of 32 signals */
++typedef struct
++{
++  uint32_t _elem[_SIGSET_NELEM];
++} sigset_t;   /* Bit set of 32 signals */
+ #define __SIGSET_T_DEFINED 1
+ #endif
+ 
+@@ -396,7 +415,10 @@ int  sigwaitinfo(FAR const sigset_t *set, FAR struct siginfo *value);
+  ********************************************************************************/
+ 
+ #ifndef __SIGSET_T_DEFINED
+-typedef uint32_t sigset_t;
++typedef struct
++{
++  uint32_t _elem[_SIGSET_NELEM];
++} sigset_t;
+ #  define __SIGSET_T_DEFINED 1
+ #endif
+ 
+diff --git a/libs/libc/signal/sig_addset.c b/libs/libc/signal/sig_addset.c
+index b4b240883d..aef4a2a075 100644
+--- a/libs/libc/signal/sig_addset.c
++++ b/libs/libc/signal/sig_addset.c
+@@ -63,7 +63,7 @@ int nxsig_addset(FAR sigset_t *set, int signo)
+     {
+       /* Add the signal to the set */
+ 
+-      *set |= SIGNO2SET(signo);
++      set->_elem[SIGNO2ELEM(signo)] |= (1 << SIGNO2SET(signo));
+       return OK;
+     }
+ }
+diff --git a/libs/libc/signal/sig_delset.c b/libs/libc/signal/sig_delset.c
+index 02b16df935..4a8b6763cd 100644
+--- a/libs/libc/signal/sig_delset.c
++++ b/libs/libc/signal/sig_delset.c
+@@ -63,7 +63,7 @@ int nxsig_delset(FAR sigset_t *set, int signo)
+     {
+       /* Remove the signal from the set */
+ 
+-      *set &= ~SIGNO2SET(signo);
++      set->_elem[SIGNO2ELEM(signo)] *set &= ~SIGNO2SET(signo);= ~(1 << SIGNO2SET(signo));
+       return OK;
+     }
+ }
+diff --git a/libs/libc/signal/sig_emptyset.c b/libs/libc/signal/sig_emptyset.c
+index a1a8516843..c9045a81fd 100644
+--- a/libs/libc/signal/sig_emptyset.c
++++ b/libs/libc/signal/sig_emptyset.c
+@@ -23,23 +23,67 @@
+  ****************************************************************************/
+ 
+ #include <signal.h>
++#include <errno.h>
+ 
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+ 
+ /****************************************************************************
+- * Name: sigemptyset
++ * Name: nxsig_emptyset
+  *
+  * Description:
+- *   This function initializes the signal set specified by set such that all
+- *   signals are excluded.
++ *   This function initializes the signal set specified by set to empty, with
++ *   all signals excluded from the set.
+  *
+  * Input Parameters:
+  *   set - Signal set to initialize
+  *
+  * Returned Value:
+- *   0 (OK), or -1 (ERROR) if the signal set cannot be initialized.
++ *   This is an internal OS interface and should not be used by applications.
++ *   It follows the NuttX internal error return policy:  Zero (OK) is
++ *   returned on success.  A negated errno value is returned on failure.
++ *
++ *    EINVAL - The set argument is invalid.
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++int nxsig_emptyset(FAR sigset_t *set)
++{
++  int i;
++
++  /* Verify the set */
++
++  if (set == NULL)
++    {
++      return -EINVAL;
++    }
++  else
++    {
++      /* Clear all elements */
++
++      for (i = 0; i < _SIGSET_NELEM; i++)
++        {
++          set->_elem[i] = 0;
++        }
++      return OK;
++    }
++}
++
++/****************************************************************************
++ * Name: sigemptyset
++ *
++ * Description:
++ *   This function initializes the signal set specified by set to empty, with
++ *   all signals excluded from the set.
++ *
++ * Input Parameters:
++ *   set - Signal set to initialize
++ *
++ *  Returned Value:
++ *   0 (OK), or -1 (ERROR) if the set argument is invalid.
+  *
+  * Assumptions:
+  *
+@@ -47,6 +91,16 @@
+ 
+ int sigemptyset(FAR sigset_t *set)
+ {
+-  *set = NULL_SIGNAL_SET;
+-  return OK;
++  int ret;
++
++  /* Let nxsig_emptyset do all the work. */
++
++  ret = nxsig_emptyset(set);
++  if (ret < 0)
++    {
++      set_errno(EINVAL);
++      ret = ERROR;
++    }
++
++  return ret;
+ }
+diff --git a/libs/libc/signal/sig_fillset.c b/libs/libc/signal/sig_fillset.c
+index fe5f7e6b4b..7d1c3ce756 100644
+--- a/libs/libc/signal/sig_fillset.c
++++ b/libs/libc/signal/sig_fillset.c
+@@ -1,7 +1,7 @@
+ /****************************************************************************
+  * libs/libc/signal/sig_fillset.c
+  *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
++ * Licensed to the Apache Software Foundation (ASF) set to an or more
+  * contributor license agreements.  See the NOTICE file distributed with
+  * this work for additional information regarding copyright ownership.  The
+  * ASF licenses this file to you under the Apache License, Version 2.0 (the
+@@ -11,10 +11,10 @@
+  *   http://www.apache.org/licenses/LICENSE-2.0
+  *
+  * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * set to the License is distributed on an "AS IS" BASIS, WITHOUT
+  * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+  * License for the specific language governing permissions and limitations
+- * under the License.
++ * set to the License.
+  *
+  ****************************************************************************/
+ 
+@@ -23,28 +23,84 @@
+  ****************************************************************************/
+ 
+ #include <signal.h>
++#include <errno.h>
+ 
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+ 
+ /****************************************************************************
+- * Name: sigfillset
++ * Name: nxsig_fillset
+  *
+  * Description:
+- *   This function initializes the signal set specified by set such that all
+- *   signals are included.
++ *   This function initializes the signal set specified by set to full, with
++ *   all signals included in the set.
+  *
+  * Input Parameters:
+  *   set - Signal set to initialize
+  *
+  * Returned Value:
+- *   0 (OK), or -1 (ERROR) if the signal set cannot be initialized.
++ *   This is an internal OS interface and should not be used by applications.
++ *   It follows the NuttX internal error return policy:  Zero (OK) is
++ *   returned on success.  A negated errno value is returned on failure.
++ *
++ *    EINVAL - The set argument is invalid.
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++int nxsig_fillset(FAR sigset_t *set)
++{
++  int i;
++
++  /* Verify the set */
++
++  if (set == NULL)
++    {
++      return -EINVAL;
++    }
++  else
++    {
++      /* Set all elements */
++
++      for (i = 0; i < _SIGSET_NELEM; i++)
++        {
++          set->_elem[i] = 0xffffffff;
++        }
++      return OK;
++    }
++}
++
++/****************************************************************************
++ * Name: sigfillset
++ *
++ * Description:
++ *   This function initializes the signal set specified by set to full, with
++ *   all signals included in the set.
++ *
++ * Input Parameters:
++ *   set - Signal set to initialize
++ *
++ *  Returned Value:
++ *   0 (OK), or -1 (ERROR) if the set argument is invalid.
++ *
++ * Assumptions:
+  *
+  ****************************************************************************/
+ 
+ int sigfillset(FAR sigset_t *set)
+ {
+-  *set = ALL_SIGNAL_SET;
+-  return OK;
++  int ret;
++
++  /* Let nxsig_fillset do all the work. */
++
++  ret = nxsig_fillset(set);
++  if (ret < 0)
++    {
++      set_errno(EINVAL);
++      ret = ERROR;
++    }
++
++  return ret;
+ }
+diff --git a/libs/libc/signal/sig_ismember.c b/libs/libc/signal/sig_ismember.c
+index 6c19dfbc7f..89bf182213 100644
+--- a/libs/libc/signal/sig_ismember.c
++++ b/libs/libc/signal/sig_ismember.c
+@@ -66,7 +66,7 @@ int nxsig_ismember(FAR const sigset_t *set, int signo)
+     {
+       /* Check if the signal is in the set */
+ 
+-      return ((*set & SIGNO2SET(signo)) != 0);
++      return ((set->_elem[SIGNO2ELEM(signo)] return ((*set & SIGNO2SET(signo)) != 0); (1 << SIGNO2SET(signo))) != 0);
+     }
+ }
+ 

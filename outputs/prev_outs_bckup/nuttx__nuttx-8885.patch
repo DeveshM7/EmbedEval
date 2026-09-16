@@ -1,0 +1,714 @@
+diff --git a/fs/procfs/fs_procfsproc.c b/fs/procfs/fs_procfsproc.c
+index 0fb6db8c8e..ba0ac71a2c 100644
+--- a/fs/procfs/fs_procfsproc.c
++++ b/fs/procfs/fs_procfsproc.c
+@@ -637,8 +637,9 @@ static ssize_t proc_status(FAR struct proc_file_s *procfile,
+   /* Show the signal mask. Note: sigset_t is uint32_t on NuttX. */
+ 
+   linesize = procfs_snprintf(procfile->line, STATUS_LINELEN,
+-                             "%-12s%08" PRIx32 "\n",
+-                             "SigMask:", tcb->sigprocmask);
++                             "%-12s" SIGSET_FMT "\n",
++                             "SigMask:", SIGSET_ELEM2(&tcb->sigprocmask, 1),
++                             SIGSET_ELEM2(&tcb->sigprocmask, 0));
+   copysize = procfs_memcpy(procfile->line, linesize, buffer, remaining,
+                            &offset);
+ 
+diff --git a/include/nuttx/signal.h b/include/nuttx/signal.h
+index 76afe2e22d..098f37f512 100644
+--- a/include/nuttx/signal.h
++++ b/include/nuttx/signal.h
+@@ -191,6 +191,22 @@ int nxsig_addset(FAR sigset_t *set, int signo);
+ 
+ int nxsig_delset(FAR sigset_t *set, int signo);
+ 
++int sigisemptyset(FAR const sigset_t *set);
++int sigandset(FAR sigset_t *dest, FAR const sigset_t *left,
++              FAR const sigset_t *right);
++int signandset(FAR sigset_t *dest, FAR const sigset_t *left,
++               FAR const sigset_t *right);
++int sigorset(FAR sigset_t *dest, FAR const sigset_t *left,
++             FAR const sigset_t *right);
++int sigxorset(FAR sigset_t *dest, FAR const sigset_t *left,
++              FAR const sigset_t *right);
++
++int sigisemptyset(FAR const sigset_t *set);
++int sigorset(FAR sigset_t *dest, FAR const sigset_t *left, FAR const sigset_t *right);
++int sigandset(FAR sigset_t *dest, FAR const sigset_t *left, FAR const sigset_t *right);
++int signandset(FAR sigset_t *dest, FAR const sigset_t *left, FAR const sigset_t *right);
++int sigxorset(FAR sigset_t *dest, FAR const sigset_t *left, FAR const sigset_t *right);
++
+ /****************************************************************************
+  * Name: nxsig_pendingset
+  *
+diff --git a/include/signal.h b/include/signal.h
+index 3279248d21..0a017351c4 100644
+--- a/include/signal.h
++++ b/include/signal.h
+@@ -28,6 +28,7 @@
+ #include <nuttx/config.h>
+ #include <nuttx/compiler.h>
+ 
++#include <inttypes.h>
+ #include <stdint.h>
+ #include <time.h>
+ 
+@@ -37,16 +38,22 @@
+ 
+ /* Signal set management definitions and macros. */
+ 
+-#define NULL_SIGNAL_SET ((sigset_t)0x00000000)
+-#define ALL_SIGNAL_SET  ((sigset_t)0xffffffff)
+ #define MIN_SIGNO       1               /* Lowest valid signal number */
+-#define MAX_SIGNO       31              /* Highest valid signal number */
++#define MAX_SIGNO       63              /* Highest valid signal number */
+ #define GOOD_SIGNO(s)   ((((unsigned)(s)) <= MAX_SIGNO))
+-#define SIGNO2SET(s)    ((sigset_t)1 << (s))
++#define _SIGSET_NELEM   2
++#define _SIGSET_INDEX(s) ((unsigned)(s) >> 5)
++#define _SIGSET_BIT(s)  ((uint32_t)1 << ((unsigned)(s) & 31))
++#define NULL_SIGNAL_SET ((sigset_t){{0, 0}})
++#define ALL_SIGNAL_SET  ((sigset_t){{UINT32_MAX, UINT32_MAX}})
++#define SIGNO2SET(s)    ((sigset_t){{_SIGSET_INDEX(s) == 0 ? _SIGSET_BIT(s) : 0, _SIGSET_INDEX(s) == 1 ? _SIGSET_BIT(s) : 0}})
++#define SIGSET_ELEM(set) ((set)->_elem[0])
++#define SIGSET_ELEM2(set, n) ((set)->_elem[n])
++#define SIGSET_FMT      "%08" PRIx32 "%08" PRIx32
+ 
+ /* Definitions for "real time" signals */
+ 
+-#define SIGSTDMAX       29              /* Last standard signal number */
++#define SIGSTDMAX       31              /* Last standard signal number */
+ #define SIGRTMIN        (SIGSTDMAX + 1) /* First real time signal */
+ #define SIGRTMAX        MAX_SIGNO       /* Last real time signal */
+ #define _NSIG           (MAX_SIGNO + 1) /* Biggest signal number + 1 */
+@@ -226,10 +233,6 @@
+ 
+ #define tkill(tid, signo)            tgkill((pid_t)-1, tid, signo)
+ 
+-#define sigisemptyset(set)           (!*(set))
+-#define sigorset(dest, left, right)  (!(*(dest) = *(left) | *(right)))
+-#define sigandset(dest, left, right) (!(*(dest) = *(left) & *(right)))
+-
+ /********************************************************************************
+  * Public Types
+  ********************************************************************************/
+@@ -240,7 +243,10 @@
+  */
+ 
+ #ifndef __SIGSET_T_DEFINED
+-typedef uint32_t sigset_t;   /* Bit set of 32 signals */
++typedef struct sigset_s
++{
++  uint32_t _elem[_SIGSET_NELEM];
++} sigset_t;                 /* Bit set of 64 signals */
+ #define __SIGSET_T_DEFINED 1
+ #endif
+ 
+@@ -354,6 +360,15 @@ int  sigaddset(FAR sigset_t *set, int signo);
+ int  sigdelset(FAR sigset_t *set, int signo);
+ int  sigemptyset(FAR sigset_t *set);
+ int  sigfillset(FAR sigset_t *set);
++int  sigisemptyset(FAR const sigset_t *set);
++int  sigandset(FAR sigset_t *dest, FAR const sigset_t *left,
++               FAR const sigset_t *right);
++int  signandset(FAR sigset_t *dest, FAR const sigset_t *left,
++                FAR const sigset_t *right);
++int  sigorset(FAR sigset_t *dest, FAR const sigset_t *left,
++              FAR const sigset_t *right);
++int  sigxorset(FAR sigset_t *dest, FAR const sigset_t *left,
++               FAR const sigset_t *right);
+ int  sighold(int signo);
+ int  sigismember(FAR const sigset_t *set, int signo);
+ int  sigignore(int signo);
+@@ -396,7 +411,7 @@ int  sigwaitinfo(FAR const sigset_t *set, FAR struct siginfo *value);
+  ********************************************************************************/
+ 
+ #ifndef __SIGSET_T_DEFINED
+-typedef uint32_t sigset_t;
++typedef struct sigset_s sigset_t;
+ #  define __SIGSET_T_DEFINED 1
+ #endif
+ 
+diff --git a/libs/libc/signal/Make.defs b/libs/libc/signal/Make.defs
+index 12a468e589..3edc0e7b7e 100644
+--- a/libs/libc/signal/Make.defs
++++ b/libs/libc/signal/Make.defs
+@@ -28,3 +28,5 @@ CSRCS += sig_raise.c sig_relse.c sig_set.c sig_signal.c sig_wait.c
+ 
+ DEPPATH += --dep-path signal
+ VPATH += :signal
++
++CSRCS += sig_andset.c sig_isemptyset.c sig_nandset.c sig_orset.c sig_xorset.c
+diff --git a/libs/libc/signal/sig_addset.c b/libs/libc/signal/sig_addset.c
+index b4b240883d..78196bb4af 100644
+--- a/libs/libc/signal/sig_addset.c
++++ b/libs/libc/signal/sig_addset.c
+@@ -1,103 +1,14 @@
+-/****************************************************************************
+- * libs/libc/signal/sig_addset.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+-
+ #include <signal.h>
+ #include <errno.h>
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: nxsig_addset
+- *
+- * Description:
+- *   This function adds the signal specified by signo to the signal set
+- *   specified by set.
+- *
+- * Input Parameters:
+- *   set - Signal set to add signal to
+- *   signo - Signal to add
+- *
+- * Returned Value:
+- *   This is an internal OS interface and should not be used by applications.
+- *   It follows the NuttX internal error return policy:  Zero (OK) is
+- *   returned on success.  A negated errno value is returned on failure.
+- *
+- *    EINVAL - The signo argument is invalid.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+ int nxsig_addset(FAR sigset_t *set, int signo)
+ {
+-  /* Verify the signal */
+-
+-  if (!GOOD_SIGNO(signo))
+-    {
+-      return -EINVAL;
+-    }
+-  else
+-    {
+-      /* Add the signal to the set */
+-
+-      *set |= SIGNO2SET(signo);
+-      return OK;
+-    }
++  if (!GOOD_SIGNO(signo)) return -EINVAL;
++  set->_elem[_SIGSET_INDEX(signo)] |= _SIGSET_BIT(signo);
++  return OK;
+ }
+-
+-/****************************************************************************
+- * Name: sigaddset
+- *
+- * Description:
+- *   This function adds the signal specified by signo to the signal set
+- *   specified by set.
+- *
+- * Input Parameters:
+- *   set - Signal set to add signal to
+- *   signo - Signal to add
+- *
+- * Returned Value:
+- *   0 (OK), or -1 (ERROR) if the signal number is invalid.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+ int sigaddset(FAR sigset_t *set, int signo)
+ {
+-  int ret;
+-
+-  /* Let nxsig_addset do all the work. */
+-
+-  ret = nxsig_addset(set, signo);
+-  if (ret < 0)
+-    {
+-      set_errno(EINVAL);
+-      ret = ERROR;
+-    }
+-
++  int ret = nxsig_addset(set, signo);
++  if (ret < 0) { set_errno(EINVAL); ret = ERROR; }
+   return ret;
+ }
+diff --git a/libs/libc/signal/sig_delset.c b/libs/libc/signal/sig_delset.c
+index 02b16df935..865719c2ad 100644
+--- a/libs/libc/signal/sig_delset.c
++++ b/libs/libc/signal/sig_delset.c
+@@ -1,103 +1,14 @@
+-/****************************************************************************
+- * libs/libc/signal/sig_delset.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+-
+ #include <signal.h>
+ #include <errno.h>
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: nxsig_delset
+- *
+- * Description:
+- *   This function deletes the signal specified by signo from the signal
+- *   set specified by the 'set' argument.
+- *
+- * Input Parameters:
+- *   set - Signal set to delete the signal from
+- *   signo - Signal to delete
+- *
+- * Returned Value:
+- *   This is an internal OS interface and should not be used by applications.
+- *   It follows the NuttX internal error return policy:  Zero (OK) is
+- *   returned on success.  A negated errno value is returned on failure.
+- *
+- *    EINVAL - The signo argument is invalid.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+ int nxsig_delset(FAR sigset_t *set, int signo)
+ {
+-  /* Verify the signal */
+-
+-  if (!GOOD_SIGNO(signo))
+-    {
+-      return -EINVAL;
+-    }
+-  else
+-    {
+-      /* Remove the signal from the set */
+-
+-      *set &= ~SIGNO2SET(signo);
+-      return OK;
+-    }
++  if (!GOOD_SIGNO(signo)) return -EINVAL;
++  set->_elem[_SIGSET_INDEX(signo)] &= ~_SIGSET_BIT(signo);
++  return OK;
+ }
+-
+-/****************************************************************************
+- * Name: sigdelset
+- *
+- * Description:
+- *   This function deletes the signal specified by signo from the signal
+- *   set specified by the 'set' argument.
+- *
+- * Input Parameters:
+- *   set - Signal set to delete the signal from
+- *   signo - Signal to delete
+- *
+- * Returned Value:
+- *   0 (OK), or -1 (ERROR) if the signal number is invalid.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+ int sigdelset(FAR sigset_t *set, int signo)
+ {
+-  int ret;
+-
+-  /* Let nxseg_delset do all the work. */
+-
+-  ret = nxsig_delset(set, signo);
+-  if (ret < 0)
+-    {
+-      set_errno(EINVAL);
+-      ret = ERROR;
+-    }
+-
++  int ret = nxsig_delset(set, signo);
++  if (ret < 0) { set_errno(EINVAL); ret = ERROR; }
+   return ret;
+ }
+diff --git a/libs/libc/signal/sig_emptyset.c b/libs/libc/signal/sig_emptyset.c
+index a1a8516843..6ccc9288fd 100644
+--- a/libs/libc/signal/sig_emptyset.c
++++ b/libs/libc/signal/sig_emptyset.c
+@@ -1,52 +1,7 @@
+-/****************************************************************************
+- * libs/libc/signal/sig_emptyset.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+-
+ #include <signal.h>
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: sigemptyset
+- *
+- * Description:
+- *   This function initializes the signal set specified by set such that all
+- *   signals are excluded.
+- *
+- * Input Parameters:
+- *   set - Signal set to initialize
+- *
+- * Returned Value:
+- *   0 (OK), or -1 (ERROR) if the signal set cannot be initialized.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
++#include <string.h>
+ int sigemptyset(FAR sigset_t *set)
+ {
+-  *set = NULL_SIGNAL_SET;
++  memset(set, 0, sizeof(*set));
+   return OK;
+ }
+diff --git a/libs/libc/signal/sig_fillset.c b/libs/libc/signal/sig_fillset.c
+index fe5f7e6b4b..2d1014afc5 100644
+--- a/libs/libc/signal/sig_fillset.c
++++ b/libs/libc/signal/sig_fillset.c
+@@ -1,50 +1,7 @@
+-/****************************************************************************
+- * libs/libc/signal/sig_fillset.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+-
+ #include <signal.h>
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: sigfillset
+- *
+- * Description:
+- *   This function initializes the signal set specified by set such that all
+- *   signals are included.
+- *
+- * Input Parameters:
+- *   set - Signal set to initialize
+- *
+- * Returned Value:
+- *   0 (OK), or -1 (ERROR) if the signal set cannot be initialized.
+- *
+- ****************************************************************************/
+-
+ int sigfillset(FAR sigset_t *set)
+ {
+-  *set = ALL_SIGNAL_SET;
++  set->_elem[0] = UINT32_MAX;
++  set->_elem[1] = UINT32_MAX;
+   return OK;
+ }
+diff --git a/libs/libc/signal/sig_ismember.c b/libs/libc/signal/sig_ismember.c
+index 6c19dfbc7f..a00d88456b 100644
+--- a/libs/libc/signal/sig_ismember.c
++++ b/libs/libc/signal/sig_ismember.c
+@@ -1,107 +1,14 @@
+-/****************************************************************************
+- * libs/libc/signal/sig_ismember.c
+- *
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance with the
+- * License.  You may obtain a copy of the License at
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- *
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Included Files
+- ****************************************************************************/
+-
+ #include <signal.h>
+ #include <errno.h>
+-
+ #include <nuttx/signal.h>
+-
+-/****************************************************************************
+- * Public Functions
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Name: nxsig_ismember
+- *
+- * Description:
+- *   This function tests whether the signal specified by signo is a member
+- *   of the set specified by set.
+- *
+- * Input Parameters:
+- *   set - Signal set to test
+- *   signo - Signal to test for
+- *
+- * Returned Value:
+- *   This is an internal OS interface and should not be used by applications.
+- *   On success, it returns 0 if the signal is not a member, 1 if the signal
+- *   is a member of the set.
+- *   A negated errno value is returned on failure.
+- *
+- *    EINVAL - The signo argument is invalid.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+ int nxsig_ismember(FAR const sigset_t *set, int signo)
+ {
+-  /* Verify the signal */
+-
+-  if (!GOOD_SIGNO(signo))
+-    {
+-      return -EINVAL;
+-    }
+-  else
+-    {
+-      /* Check if the signal is in the set */
+-
+-      return ((*set & SIGNO2SET(signo)) != 0);
+-    }
++  if (!GOOD_SIGNO(signo)) return -EINVAL;
++  return ((set->_elem[_SIGSET_INDEX(signo)] & _SIGSET_BIT(signo)) != 0);
+ }
+-
+-/****************************************************************************
+- * Name: sigismember
+- *
+- * Description:
+- *   This function tests whether the signal specified by signo is a member
+- *   of the set specified by set.
+- *
+- * Input Parameters:
+- *   set - Signal set to test
+- *   signo - Signal to test for
+- *
+- * Returned Value:
+- *   1 (true), if the specified signal is a member of the set,
+- *   0 (OK or FALSE), if it is not, or
+- *  -1 (ERROR) if the signal number is invalid.
+- *
+- * Assumptions:
+- *
+- ****************************************************************************/
+-
+ int sigismember(FAR const sigset_t *set, int signo)
+ {
+-  int ret;
+-
+-  /* Let nxsig_ismember do all of the work */
+-
+-  ret = nxsig_ismember(set, signo);
+-  if (ret < 0)
+-    {
+-      set_errno(EINVAL);
+-      ret = ERROR;
+-    }
+-
++  int ret = nxsig_ismember(set, signo);
++  if (ret < 0) { set_errno(EINVAL); ret = ERROR; }
+   return ret;
+ }
+diff --git a/sched/misc/assert.c b/sched/misc/assert.c
+index e1afdd263f..0abbf56a33 100644
+--- a/sched/misc/assert.c
++++ b/sched/misc/assert.c
+@@ -124,9 +124,9 @@ static void stack_dump(uintptr_t sp, uintptr_t stack_top)
+   for (stack = sp & ~0x1f; stack < (stack_top & ~0x1f); stack += 32)
+     {
+       FAR uint32_t *ptr = (FAR uint32_t *)stack;
+-      _alert("%p: %08" PRIx32 " %08" PRIx32 " %08" PRIx32
+-             " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32
+-             " %08" PRIx32 "\n",
++      _alert("%p: %08" PRIx32 " " SIGSET_FMT " " SIGSET_FMT
++             " " SIGSET_FMT " " SIGSET_FMT " " SIGSET_FMT " " SIGSET_FMT
++             " " SIGSET_FMT "\n",
+              (FAR void *)stack, ptr[0], ptr[1], ptr[2], ptr[3],
+              ptr[4], ptr[5], ptr[6], ptr[7]);
+     }
+@@ -286,7 +286,7 @@ static void dump_task(FAR struct tcb_s *tcb, FAR void *arg)
+ #endif
+          " %3d %-8s %-7s %c%c%c"
+          " %-18s"
+-         " %08" PRIx32
++         " " SIGSET_FMT
+          " %p"
+          "   %7zu"
+ #ifdef CONFIG_STACK_COLORATION
+@@ -310,7 +310,8 @@ static void dump_task(FAR struct tcb_s *tcb, FAR void *arg)
+          , tcb->flags & TCB_FLAG_CANCEL_PENDING ? 'P' : '-'
+          , tcb->flags & TCB_FLAG_EXIT_PROCESSING ? 'P' : '-'
+          , state
+-         , tcb->sigprocmask
++         , SIGSET_ELEM2(&tcb->sigprocmask, 1),
++         SIGSET_ELEM2(&tcb->sigprocmask, 0)
+          , tcb->stack_base_ptr
+          , tcb->adj_stack_size
+ #ifdef CONFIG_STACK_COLORATION
+diff --git a/sched/signal/sig_deliver.c b/sched/signal/sig_deliver.c
+index 9a72ed64d6..016d9c67e5 100644
+--- a/sched/signal/sig_deliver.c
++++ b/sched/signal/sig_deliver.c
+@@ -114,7 +114,7 @@ void nxsig_deliver(FAR struct tcb_s *stcb)
+        */
+ 
+       savesigprocmask   = stcb->sigprocmask;
+-      newsigprocmask    = savesigprocmask | sigq->mask;
++      sigorset(&newsigprocmask, &savesigprocmask, &sigq->mask);
+       stcb->sigprocmask = newsigprocmask;
+ 
+ #ifndef CONFIG_BUILD_FLAT
+@@ -182,9 +182,11 @@ void nxsig_deliver(FAR struct tcb_s *stcb)
+        * in the current sigprocmask that were already set by newsigprocmask.
+        */
+ 
+-      altsigprocmask    = stcb->sigprocmask ^ newsigprocmask;
+-      stcb->sigprocmask = (stcb->sigprocmask & altsigprocmask) |
+-                          (savesigprocmask & ~altsigprocmask);
++      sigxorset(&altsigprocmask, &stcb->sigprocmask, &newsigprocmask);
++      sigset_t preserved;
++      sigandset(&preserved, &stcb->sigprocmask, &altsigprocmask);
++      signandset(&stcb->sigprocmask, &savesigprocmask, &altsigprocmask);
++      sigorset(&stcb->sigprocmask, &stcb->sigprocmask, &preserved);
+ 
+       /* Remove the signal structure from the sigpostedq */
+ 
+diff --git a/sched/signal/sig_dispatch.c b/sched/signal/sig_dispatch.c
+index 8407251336..617b70869b 100644
+--- a/sched/signal/sig_dispatch.c
++++ b/sched/signal/sig_dispatch.c
+@@ -97,7 +97,7 @@ static int nxsig_queue_action(FAR struct tcb_s *stcb, siginfo_t *info)
+           sigq->mask = sigact->act.sa_mask;
+           if ((sigact->act.sa_flags & SA_NODEFER) == 0)
+             {
+-              sigq->mask |= SIGNO2SET(info->si_signo);
++              nxsig_addset(&sigq->mask, info->si_signo);
+             }
+ 
+           memcpy(&sigq->info, info, sizeof(siginfo_t));
+diff --git a/sched/signal/sig_procmask.c b/sched/signal/sig_procmask.c
+index fa32e02117..a39ff794ae 100644
+--- a/sched/signal/sig_procmask.c
++++ b/sched/signal/sig_procmask.c
+@@ -119,7 +119,7 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+            */
+ 
+           case SIG_BLOCK:
+-            rtcb->sigprocmask |= *set;
++            sigorset(&rtcb->sigprocmask, &rtcb->sigprocmask, set);
+             break;
+ 
+           /* The resulting set is the intersection of the current set and
+@@ -127,7 +127,7 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+            */
+ 
+           case SIG_UNBLOCK:
+-            rtcb->sigprocmask &= ~(*set);
++            signandset(&rtcb->sigprocmask, &rtcb->sigprocmask, set);
+             break;
+ 
+           /* The resulting set is the signal set pointed to by set. */
+diff --git a/sched/signal/sig_timedwait.c b/sched/signal/sig_timedwait.c
+index 77ab7634b9..a201f84204 100644
+--- a/sched/signal/sig_timedwait.c
++++ b/sched/signal/sig_timedwait.c
+@@ -260,8 +260,9 @@ int nxsig_timedwait(FAR const sigset_t *set, FAR struct siginfo *info,
+    * signals in the pending signal set argument.
+    */
+ 
+-  intersection = *set & nxsig_pendingset(rtcb);
+-  if (intersection != NULL_SIGNAL_SET)
++  intersection = nxsig_pendingset(rtcb);
++  sigandset(&intersection, set, &intersection);
++  if (!sigisemptyset(&intersection))
+     {
+       /* One or more of the signals in intersections is sufficient to cause
+        * us to not wait.  Pick the lowest numbered signal and mark it not

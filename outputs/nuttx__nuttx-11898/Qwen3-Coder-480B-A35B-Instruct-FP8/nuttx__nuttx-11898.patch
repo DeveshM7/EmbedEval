@@ -1,0 +1,106 @@
+diff --git a/include/nuttx/sched.h b/include/nuttx/sched.h
+index 780481e04d..489a75dcbf 100644
+--- a/include/nuttx/sched.h
++++ b/include/nuttx/sched.h
+@@ -468,6 +468,11 @@ struct task_group_s
+ 
+                               /* Pthread join Info:                         */
+ 
++  /* Detached threads *********************************************************/
++
++  FAR struct detached_s *tg_detached; /* List of detached thread IDs          */
++
++  /* Pthreads ***************************************************************/
+   mutex_t tg_joinlock;            /* Mutually exclusive access to join data */
+   FAR struct join_s *tg_joinhead; /* Head of a list of join data            */
+   FAR struct join_s *tg_jointail; /* Tail of a list of join data            */
+diff --git a/sched/pthread/pthread.h b/sched/pthread/pthread.h
+index e53ad3e537..c27adab8be 100644
+--- a/sched/pthread/pthread.h
++++ b/sched/pthread/pthread.h
+@@ -43,6 +43,29 @@
+ /* The following defines an entry in the pthread logic's local data set.
+  * Note that this structure is used to implemented a singly linked list.
+  * This structure is used (instead of, say, a binary search tree) because
++/* This structure is used to track detached threads that have exited but may
++
++ * still be referenced by pthread_join().  According to POSIX, pthread_join()
++
++ * on a detached thread should return EINVAL even after the thread exits.
++
++ */
++
++
++
++struct detached_s
++
++{
++
++  FAR struct detached_s *next;   /* Implements link list */
++
++  pid_t                  pid;    /* Thread ID */
++
++};
++
++
++
++
+  * the data set will be searched using the pid as a key -- a process IDs will
+  * always be created in a montonically increasing fashion.
+  */
+@@ -82,6 +105,11 @@ int pthread_setup_scheduler(FAR struct pthread_tcb_s *tcb, int priority,
+                             start_t start, pthread_startroutine_t entry);
+ 
+ int pthread_completejoin(pid_t pid, FAR void *exit_value);
++int pthread_add_detached(FAR struct task_group_s *group, pid_t pid);
++
++int pthread_remove_detached(FAR struct task_group_s *group, pid_t pid);
++
++bool pthread_is_detached(FAR struct task_group_s *group, pid_t pid);
+ void pthread_destroyjoin(FAR struct task_group_s *group,
+                          FAR struct join_s *pjoin);
+ int pthread_findjoininfo(FAR struct task_group_s *group,
+diff --git a/sched/pthread/pthread_completejoin.c b/sched/pthread/pthread_completejoin.c
+index e87455ab1e..d1254f16e8 100644
+--- a/sched/pthread/pthread_completejoin.c
++++ b/sched/pthread/pthread_completejoin.c
+@@ -222,6 +222,7 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+       /* Notify waiters of the availability of the exit value */
+ 
+       waiters = pthread_notifywaiters(pjoin);
++      pthread_remove_detached(group, pid);
+ 
+       /* If there are no waiters and if the thread is marked as detached.
+        * then discard the join information now.  Otherwise, the pthread
+@@ -232,6 +233,7 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+       if (!waiters && pjoin->detached)
+         {
+           pthread_destroyjoin(group, pjoin);
++          pthread_remove_detached(group, pid);
+         }
+ 
+       /* Giving the following semaphore will allow the waiters
+diff --git a/sched/pthread/pthread_detach.c b/sched/pthread/pthread_detach.c
+index f1476515ff..4b9f7cd583 100644
+--- a/sched/pthread/pthread_detach.c
++++ b/sched/pthread/pthread_detach.c
+@@ -98,6 +98,7 @@ int pthread_detach(pthread_t thread)
+           else
+             {
+               pjoin->detached = true;
++              pthread_add_detached(group, (pid_t)thread);
+             }
+         }
+     }
+diff --git a/sched/task/task.h b/sched/task/task.h
+index ca63d2c756..6d8e93d463 100644
+--- a/sched/task/task.h
++++ b/sched/task/task.h
+@@ -52,6 +52,7 @@ int  nxtask_setup_arguments(FAR struct task_tcb_s *tcb,
+ int  nxtask_exit(void);
+ int  nxtask_terminate(pid_t pid);
+ void nxtask_exithook(FAR struct tcb_s *tcb, int status);
++int task_join(pid_t pid, FAR int *status);
+ void nxtask_recover(FAR struct tcb_s *tcb);
+ 
+ /* Cancellation points */

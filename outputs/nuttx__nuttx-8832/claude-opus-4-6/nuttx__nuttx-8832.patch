@@ -1,0 +1,69 @@
+diff --git a/sched/wqueue/kwork_thread.c b/sched/wqueue/kwork_thread.c
+index 806024d4bd..6ad248de7d 100644
+--- a/sched/wqueue/kwork_thread.c
++++ b/sched/wqueue/kwork_thread.c
+@@ -146,37 +146,44 @@ static int work_thread(int argc, FAR char *argv[])
+ 
+       nxsem_wait_uninterruptible(&wqueue->sem);
+ 
+-      /* And check each entry in the work queue.  Since we have disabled
+-       * interrupts we know:  (1) we will not be suspended unless we do
+-       * so ourselves, and (2) there will be no changes to the work queue
++      /* Drain all pending work items before sleeping again.  We loop
++       * as long as there are entries in the work queue.  Additional
++       * semaphore posts that arrived while we were executing a worker
++       * are consumed here so the count stays in sync with the queue.
+        */
+ 
+-      /* Remove the ready-to-execute work from the list */
+-
+-      work = (FAR struct work_s *)dq_remfirst(&wqueue->q);
+-      if (work && work->worker)
++      while ((work = (FAR struct work_s *)dq_remfirst(&wqueue->q)) != NULL)
+         {
+-          /* Extract the work description from the entry (in case the work
+-           * instance will be re-used after it has been de-queued).
+-           */
++          if (work->worker)
++            {
++              /* Extract the work description from the entry (in case the
++               * work instance will be re-used after it has been de-queued).
++               */
++
++              worker = work->worker;
++
++              /* Extract the work argument (before re-enabling interrupts) */
+ 
+-          worker = work->worker;
++              arg = work->arg;
+ 
+-          /* Extract the work argument (before re-enabling interrupts) */
++              /* Mark the work as no longer being queued */
+ 
+-          arg = work->arg;
++              work->worker = NULL;
+ 
+-          /* Mark the work as no longer being queued */
++              /* Do the work.  Re-enable interrupts while the work is being
++               * performed... we don't have any idea how long this will take!
++               */
+ 
+-          work->worker = NULL;
++              leave_critical_section(flags);
++              CALL_WORKER(worker, arg);
++              flags = enter_critical_section();
++            }
+ 
+-          /* Do the work.  Re-enable interrupts while the work is being
+-           * performed... we don't have any idea how long this will take!
++          /* Consume a semaphore count for each additional item beyond the
++           * first (the first was consumed by nxsem_wait above).
+            */
+ 
+-          leave_critical_section(flags);
+-          CALL_WORKER(worker, arg);
+-          flags = enter_critical_section();
++          nxsem_trywait(&wqueue->sem);
+         }
+     }
+ 
