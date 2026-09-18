@@ -86,16 +86,24 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
     cid = r.stdout.strip()
     workdir = Path(tempfile.mkdtemp())
 
-    def dexec(cmd: str, t: int):
+    def dexec(cmd: str, t: int, label: str | None = None):
         # With --verbose the container output streams live; otherwise it is
-        # captured and only shown when a step fails.
-        return sh(["docker", "exec", cid, "bash", "-c", cmd], timeout=t, quiet=not verbose)
+        # captured and only shown when a step fails. Either way each step
+        # announces itself and reports how long it took, so a step that is
+        # silently skipped or suspiciously fast is visible.
+        if label:
+            print(f"    {label} ...", end="", flush=True)
+        t0 = time.time()
+        r = sh(["docker", "exec", cid, "bash", "-c", cmd], timeout=t, quiet=not verbose)
+        if label:
+            print(f" {time.time() - t0:.1f}s (rc={r.returncode})")
+        return r
 
     try:
         # --- Step 1: tests must FAIL on the unfixed code -------------------
         print("\n  Step 1: expecting tests to FAIL at the base commit")
-        dexec(f"cd /testbed && {build_cmd}", 900)
-        r1 = dexec("cd /testbed && run_tests", timeout)
+        dexec(f"cd /testbed && {build_cmd}", 900, "build")
+        r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
         if r1.returncode == 0:
             print("  FAIL: tests PASSED before the fix -- the instance does not "
                   "isolate the bug (test patch may not apply, or the bug is absent)")
@@ -113,20 +121,23 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         pf.write_text(patch_text)
 
         sh(["docker", "cp", str(pf), f"{cid}:/tmp/fix.diff"], timeout=60)
-        ra = dexec("cd /testbed && git apply /tmp/fix.diff", 120)
+        ra = dexec("cd /testbed && git apply /tmp/fix.diff", 120, "git apply")
         if ra.returncode != 0:
             print(f"  FAIL: git apply failed: {ra.stderr.strip()[:300]}")
             return False
 
-        for p in cfg.get("clean_paths", []):
-            dexec(f"rm -rf {p}", 60)
-        rb = dexec(f"cd /testbed && {build_cmd}", 900)
+        cleaned = cfg["clean_paths"]
+        if cleaned:
+            dexec("rm -rf " + " ".join(cleaned), 60, f"clean {' '.join(cleaned)}")
+        else:
+            print(f"    clean: nothing to remove for {meta['project']}")
+        rb = dexec(f"cd /testbed && {build_cmd}", 900, "rebuild")
         if rb.returncode != 0:
             print(f"  FAIL: build failed after applying the fix (rc={rb.returncode})")
             print("  " + ((rb.stdout or "") + (rb.stderr or ""))[-400:].replace("\n", "\n  "))
             return False
 
-        r2 = dexec("cd /testbed && run_tests", timeout)
+        r2 = dexec("cd /testbed && run_tests", timeout, "run_tests")
         if r2.returncode != 0:
             print(f"  FAIL: tests still failing after the fix (rc={r2.returncode})")
             print("  " + ((r2.stdout or "") + (r2.stderr or ""))[-400:].replace("\n", "\n  "))
