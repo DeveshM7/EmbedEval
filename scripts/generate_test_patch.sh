@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+#
+# REFERENCE ONLY -- not wired into any pipeline, and hardcoded to one instance.
+# Its EXPECTED_BASE sanity check is also stale: it expects 46ecf540..., while
+# zephyr__zephyr-65697's metadata says base_commit 41b7c17a...
+#
+# Kept because it documents how a test-only patch is derived: take the diff
+# between the base commit and the test commit, restricted to tests/, so the
+# instance gets the new tests without the fix. Instance authoring will move
+# into the automated sourcing pipeline.
+#
 # Generates test_patch.diff for instance zephyr__zephyr-65697.
 #
 # This script clones the Zephyr repo (blobless, so fast) into a temp dir,
