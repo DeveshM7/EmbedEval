@@ -1,5 +1,5 @@
 """
-Run mini-swe-agent on a single EmbedBench-Pro RIOT instance.
+Run mini-swe-agent on a single EmbedEval RIOT instance.
 Usage:
     python harness/run_riot_instance.py
     python harness/run_riot_instance.py --instance riot__riot-5323 --model anthropic/claude-sonnet-4-6

@@ -26,8 +26,8 @@ KERNEL_BASE_COMMIT="151f6eab3c7f836ab1334d129ac482cf7b40a718"
 KERNEL_MERGE_COMMIT="2071aadc0e798780812d0b7898536dbef6476248"
 APPS_COMMIT="c222043ed1ede9ef8e9e93ffed14ee9c41c4a2b1"
 
-IMAGE="nuttx-embedbench:nuttx-4459"
-BASE_IMAGE="nuttx-embedbench-base:latest"
+IMAGE="embedeval:nuttx-4459"
+BASE_IMAGE="embedeval-nuttx-base:latest"
 
 WORK_DIR=""
 CID=""
@@ -64,7 +64,7 @@ cd "${REPO_ROOT}"
 echo ""
 echo "=== Step 2: Writing Dockerfile ==="
 cat > "${INSTANCE_DIR}/Dockerfile" <<'DOCKERFILE'
-FROM nuttx-embedbench-base:latest
+FROM embedeval-nuttx-base:latest
 
 ARG KERNEL_BASE_COMMIT
 ARG APPS_COMMIT

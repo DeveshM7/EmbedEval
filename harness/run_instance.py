@@ -1,5 +1,5 @@
 """
-Run mini-swe-agent on a single EmbedBench-Pro instance.
+Run mini-swe-agent on a single EmbedEval instance.
 Usage:
     python harness/run_instance.py
     python harness/run_instance.py --instance zephyr__zephyr-65697 --model anthropic/claude-sonnet-4-6

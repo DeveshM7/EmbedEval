@@ -1,4 +1,4 @@
-FROM embedbench-riot-legacy-base:latest
+FROM embedeval-riot-legacy-base:latest
 
 ARG BASE_COMMIT
 ARG BOARD

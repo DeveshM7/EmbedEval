@@ -1,4 +1,4 @@
-FROM nuttx-embedbench-base:latest
+FROM embedeval-nuttx-base:latest
 
 WORKDIR /testbed
 

@@ -1,5 +1,5 @@
 """
-Run mini-swe-agent on a single NuttX EmbedBench instance.
+Run mini-swe-agent on a single NuttX EmbedEval instance.
 Usage:
     python harness/run_nuttx_instance.py
     python harness/run_nuttx_instance.py --instance nuttx__nuttx-8885 --model anthropic/claude-sonnet-4-6

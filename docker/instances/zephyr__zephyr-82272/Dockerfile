@@ -1,4 +1,4 @@
-FROM embedbench-zephyr-base:latest
+FROM embedeval-zephyr-base:latest
 
 WORKDIR /testbed
 

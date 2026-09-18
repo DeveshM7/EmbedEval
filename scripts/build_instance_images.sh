@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds per-instance Docker images for Zephyr instances under docker/instances/.
-# Requires: embedbench-zephyr-base:latest already built.
+# Requires: embedeval-zephyr-base:latest already built.
 # Each instance directory must contain a Dockerfile, test_patch.diff, and metadata.json.
 
 set -euo pipefail

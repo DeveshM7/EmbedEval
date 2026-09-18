@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds per-instance Docker images for RIOT instances under docker/instances/.
-# Requires: embedbench-riot-base:latest already built.
+# Requires: embedeval-riot-base:latest already built.
 # Each instance directory must contain a Dockerfile, test_patch.diff, and metadata.json.
 
 set -euo pipefail

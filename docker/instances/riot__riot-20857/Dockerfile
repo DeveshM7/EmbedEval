@@ -1,4 +1,4 @@
-FROM embedbench-riot-base:latest
+FROM embedeval-riot-base:latest
 
 WORKDIR /testbed
 

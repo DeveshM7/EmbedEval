@@ -22,8 +22,8 @@ KERNEL_MERGE_COMMIT="717bb04cb7c6f1efb179d40a464e43e7cd13c7d8"
 APPS_BASE_COMMIT="75b4720a6e57dedebb4ce607035350bfc3190fb3"
 APPS_MERGE_COMMIT="a1bca5070c03f7208473f005b034ab12ee271838"
 
-IMAGE="nuttx-embedbench:nuttx-8885"
-BASE_IMAGE="nuttx-embedbench-base:latest"
+IMAGE="embedeval:nuttx-8885"
+BASE_IMAGE="embedeval-nuttx-base:latest"
 
 WORK_DIR=""
 CID=""
