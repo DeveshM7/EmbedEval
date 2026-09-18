@@ -2,7 +2,7 @@
 Run mini-swe-agent on a single EmbedEval RIOT instance.
 Usage:
     python harness/run_riot_instance.py
-    python harness/run_riot_instance.py --instance riot__riot-5323 --model anthropic/claude-sonnet-4-6
+    python harness/run_riot_instance.py --instance riot__riot-20857 --model anthropic/claude-sonnet-4-6
 """
 
 import argparse
@@ -171,7 +171,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--instance",
-        default="riot__riot-5323",
+        default="riot__riot-20857",
         help="Instance ID matching a dir under docker/instances/",
     )
     parser.add_argument(
