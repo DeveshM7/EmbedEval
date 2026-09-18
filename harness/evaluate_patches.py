@@ -174,8 +174,8 @@ def main() -> None:
     p.add_argument("--model", nargs="+", required=True)
     p.add_argument("--timeout", type=int, default=300,
                    help="seconds for the test run (default: 300)")
-    p.add_argument("--output", default="results.json",
-                   help="where to write the results file (default: results.json)")
+    p.add_argument("--output", default="outputs/results.json",
+                   help="where to write the results file (default: outputs/results.json)")
     p.add_argument("--dry-run", action="store_true",
                    help="list the patches that would be graded and exit")
     args = p.parse_args()
@@ -221,6 +221,7 @@ def main() -> None:
           + (f"   ({missing} not run)" if missing else ""))
 
     out = paths.REPO_ROOT / args.output
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "models": models,
