@@ -62,7 +62,8 @@ def gold_patch(meta: dict, workdir: Path) -> str:
     return r.stdout
 
 
-def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600) -> bool:
+def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
+             verbose: bool = False) -> bool:
     meta = instances.load_metadata(instance_id)
     cfg = build_config.config(meta["project"])
     image = meta["docker_image"]
@@ -85,8 +86,10 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
     cid = r.stdout.strip()
     workdir = Path(tempfile.mkdtemp())
 
-    def dexec(cmd: str, t: int, quiet: bool = True):
-        return sh(["docker", "exec", cid, "bash", "-c", cmd], timeout=t, quiet=quiet)
+    def dexec(cmd: str, t: int):
+        # With --verbose the container output streams live; otherwise it is
+        # captured and only shown when a step fails.
+        return sh(["docker", "exec", cid, "bash", "-c", cmd], timeout=t, quiet=not verbose)
 
     try:
         # --- Step 1: tests must FAIL on the unfixed code -------------------
@@ -120,13 +123,13 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         rb = dexec(f"cd /testbed && {build_cmd}", 900)
         if rb.returncode != 0:
             print(f"  FAIL: build failed after applying the fix (rc={rb.returncode})")
-            print("  " + (rb.stdout + rb.stderr)[-400:].replace("\n", "\n  "))
+            print("  " + ((rb.stdout or "") + (rb.stderr or ""))[-400:].replace("\n", "\n  "))
             return False
 
         r2 = dexec("cd /testbed && run_tests", timeout)
         if r2.returncode != 0:
             print(f"  FAIL: tests still failing after the fix (rc={r2.returncode})")
-            print("  " + (r2.stdout + r2.stderr)[-400:].replace("\n", "\n  "))
+            print("  " + ((r2.stdout or "") + (r2.stderr or ""))[-400:].replace("\n", "\n  "))
             return False
 
         print("\n  VALID: fails before the fix, passes after")
@@ -147,6 +150,8 @@ def main() -> None:
     p.add_argument("--all", action="store_true")
     p.add_argument("--patch", help="validate this patch instead of the upstream fix")
     p.add_argument("--timeout", type=int, default=600)
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="stream build and test output instead of capturing it")
     args = p.parse_args()
 
     if args.all:
@@ -162,7 +167,8 @@ def main() -> None:
         p.error("--patch applies to exactly one instance")
 
     start = time.time()
-    results = {t: validate(t, Path(args.patch) if args.patch else None, args.timeout)
+    results = {t: validate(t, Path(args.patch) if args.patch else None, args.timeout,
+                           args.verbose)
                for t in targets}
 
     print(f"\n{'=' * 70}\nSUMMARY  ({(time.time() - start) / 60:.1f} min)\n{'=' * 70}")

@@ -36,6 +36,7 @@ BUILD: dict[str, dict] = {
             "TEST_PATH": lambda m: m["test_path"],
         },
         "platform": None,
+        "clean_paths": ["/testbed/build"],
     },
     "nuttx": {
         "base_image": "embedeval-nuttx-base:latest",
@@ -46,6 +47,7 @@ BUILD: dict[str, dict] = {
             "APPS_BASE_COMMIT": lambda m: m["apps_base_commit"],
         },
         "platform": None,
+        "clean_paths": [],
     },
     "riot": {
         "base_image": "embedeval-riot-base:latest",
@@ -56,6 +58,9 @@ BUILD: dict[str, dict] = {
             "UNIT_TESTS": _riot_unit_tests,
         },
         "platform": "linux/amd64",
+        # riot builds under tests/unittests and its build_command already does
+        # `clean all`, so there is nothing to wipe first.
+        "clean_paths": [],
     },
 }
 
