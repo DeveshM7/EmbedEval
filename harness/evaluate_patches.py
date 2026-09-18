@@ -1,18 +1,20 @@
 """
-Evaluate agent-generated patches by applying them in fresh containers and running tests.
+Grade agent patches by applying them in fresh containers.
 
-For each instance, this script:
-  1. Starts a fresh container from the instance's Docker image
-  2. Copies the agent's .patch file into the container
-  3. Applies the patch with `git apply`
-  4. Rebuilds and runs `run_tests`
-  5. Records pass/fail based on the exit code
+    python harness/evaluate_patches.py --all --model gpt-5.4
+    python harness/evaluate_patches.py --repo riot --model gpt-5.4 gemini-2.5-pro
+    python harness/evaluate_patches.py --instance zephyr__zephyr-65697 --model gpt-5.4
 
-Usage:
-    python harness/evaluate_patches.py --model anthropic/claude-sonnet-4-6
-    python harness/evaluate_patches.py --model anthropic/claude-sonnet-4-6 --instances zephyr__zephyr-65697
-    python harness/evaluate_patches.py --patch-dir outputs/my_run/
+Reads outputs/<repo>/<model>/<PR>/patch.diff, written by run.py. Selection
+flags mirror run.py so the same invocation shape grades what you just ran.
+
+Evaluation is deliberately decoupled from the agent run: each patch is applied
+in a container started fresh from the instance image, so nothing the agent left
+behind -- stale build artefacts, a modified test file, a running process -- can
+influence the result. The patch text is the only thing that crosses over.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -21,27 +23,23 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).parent.parent
-INSTANCES_DIR = REPO_ROOT / "docker" / "instances"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import paths
+import projects
 
 
-def load_metadata(instance_id: str) -> dict:
-    path = INSTANCES_DIR / instance_id / "metadata.json"
-    with open(path) as f:
-        return json.load(f)
-
-
-def evaluate_patch(instance_id: str, patch_path: Path, timeout: int = 300) -> dict:
-    """
-    Spin up a fresh container, apply the patch, build, run tests, return result.
-    """
-    meta = load_metadata(instance_id)
+def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dict:
+    meta = paths.load_metadata(instance_id)
+    cfg = projects.config(meta["project"])
     image = meta["docker_image"]
-    build_command = meta["build_command"]
+    build_command = projects.setting(meta, "build_command")
+    patch_path = paths.patch_path(instance_id, model_name)
 
     result = {
         "instance_id": instance_id,
-        "patch_file": str(patch_path),
+        "model": paths.resolve_model(model_name),
+        "patch_file": str(patch_path.relative_to(paths.REPO_ROOT)),
         "patch_empty": False,
         "patch_applied": False,
         "build_ok": False,
@@ -51,218 +49,187 @@ def evaluate_patch(instance_id: str, patch_path: Path, timeout: int = 300) -> di
         "elapsed_seconds": 0,
     }
 
-    # Check if patch file exists and is non-empty
     if not patch_path.exists():
-        result["error"] = "patch file not found"
+        # Distinct from a failing patch: the run never happened, or wrote
+        # somewhere else. Not graded, so it cannot silently count as a failure.
+        result["grade"] = "missing"
+        result["error"] = "no patch file (run not found)"
         return result
 
-    patch_content = patch_path.read_text().strip()
-    if not patch_content:
+    if not patch_path.read_text().strip():
         result["patch_empty"] = True
         result["error"] = "empty patch — agent made no changes"
         return result
 
+    if build_command is None:
+        result["error"] = "no build_command in metadata or project config"
+        return result
+
+    run_args = ["docker", "run", "-d", "--rm"]
+    platform = projects.setting(meta, "docker_platform")
+    if platform:
+        run_args += ["--platform", platform]
+    run_args += [image, "sleep", "900"]
+
     container_id = None
     start = time.time()
-
     try:
-        # Start a fresh container from the instance image.
-        print(f"  Starting container from {image}...")
-        proc = subprocess.run(
-            ["docker", "run", "-d", "--rm",
-             image, "sleep", "600"],
-            capture_output=True, text=True, timeout=30,
-        )
+        print(f"  starting container from {image} ...")
+        proc = subprocess.run(run_args, capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
-            result["error"] = f"docker run failed: {proc.stderr.strip()}"
+            result["error"] = f"docker run failed: {proc.stderr.strip()[:200]}"
             return result
         container_id = proc.stdout.strip()
 
-        # Copy patch into container
-        print(f"  Applying patch...")
-        copy_proc = subprocess.run(
-            ["docker", "cp", str(patch_path), f"{container_id}:/tmp/agent.patch"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if copy_proc.returncode != 0:
-            result["error"] = f"docker cp failed: {copy_proc.stderr.strip()}"
-            return result
+        def dexec(cmd: str, t: int):
+            return subprocess.run(
+                ["docker", "exec", container_id, "bash", "-c", cmd],
+                capture_output=True, text=True, timeout=t,
+            )
 
-        # Apply the patch
-        apply_proc = subprocess.run(
-            ["docker", "exec", container_id, "bash", "-c",
-             "cd /testbed && git apply /tmp/agent.patch"],
+        print("  applying patch ...")
+        cp = subprocess.run(
+            ["docker", "cp", str(patch_path), f"{container_id}:/tmp/agent.patch"],
             capture_output=True, text=True, timeout=30,
         )
-        if apply_proc.returncode != 0:
-            result["error"] = f"git apply failed: {apply_proc.stderr.strip()}"
+        if cp.returncode != 0:
+            result["error"] = f"docker cp failed: {cp.stderr.strip()[:200]}"
+            return result
+
+        ap = dexec("cd /testbed && git apply /tmp/agent.patch", 60)
+        if ap.returncode != 0:
+            result["error"] = f"git apply failed: {ap.stderr.strip()[:300]}"
             return result
         result["patch_applied"] = True
 
-        # Clean the build directory so CMake re-configures from scratch.
-        # This is necessary when the agent adds new Kconfig options or
-        # CMakeLists changes that a stale cache wouldn't pick up.
-        subprocess.run(
-            ["docker", "exec", container_id, "bash", "-c",
-             "rm -rf /testbed/build"],
-            capture_output=True, text=True, timeout=10,
-        )
+        # Clean before rebuilding so a stale cache cannot mask a Kconfig or
+        # CMakeLists change. Paths are per project: zephyr builds out-of-tree
+        # into /testbed/build, while nuttx builds in-tree and riot under
+        # tests/unittests -- for those the previous hardcoded
+        # `rm -rf /testbed/build` was a silent no-op.
+        for p in cfg["clean_paths"]:
+            dexec(f"rm -rf {p}", 30)
 
-        # Build using the instance's specific build command
-        print(f"  Building ({build_command})...")
-        build_proc = subprocess.run(
-            ["docker", "exec", container_id, "bash", "-c",
-             f"cd /testbed && {build_command}"],
-            capture_output=True, text=True, timeout=180,
-        )
-        if build_proc.returncode != 0:
-            result["error"] = f"build failed (rc={build_proc.returncode})"
-            # Still show output for debugging
-            output = build_proc.stdout + build_proc.stderr
-            if output:
-                result["build_output_tail"] = output[-500:]
+        print(f"  building ({build_command}) ...")
+        bp = dexec(f"cd /testbed && {build_command}", 600)
+        if bp.returncode != 0:
+            result["error"] = f"build failed (rc={bp.returncode})"
+            out = (bp.stdout or "") + (bp.stderr or "")
+            if out:
+                result["build_output_tail"] = out[-600:]
             return result
         result["build_ok"] = True
 
-        # Run tests
-        print(f"  Running tests...")
-        test_proc = subprocess.run(
-            ["docker", "exec", container_id, "bash", "-c",
-             "cd /testbed && run_tests"],
-            capture_output=True, text=True, timeout=timeout,
-        )
+        print("  running tests ...")
+        tp = dexec("cd /testbed && run_tests", timeout)
+        out = (tp.stdout or "") + (tp.stderr or "")
+        result["test_output_tail"] = out[-1200:]
 
-        output = test_proc.stdout + test_proc.stderr
-        result["test_output_tail"] = output[-1000:]
-
-        if test_proc.returncode == 0:
+        if tp.returncode == 0:
             result["tests_passed"] = True
             result["grade"] = "pass"
-            print(f"  PASS")
-        elif test_proc.returncode == 1:
+            print("  PASS")
+        elif tp.returncode == 1:
             result["error"] = "tests failed"
-            print(f"  FAIL — tests did not pass")
-        elif test_proc.returncode == 2:
+            print("  FAIL — tests did not pass")
+        elif tp.returncode == 2:
             result["error"] = "tests timed out (possible infinite loop)"
-            print(f"  FAIL — timeout")
+            print("  FAIL — timeout")
         else:
-            result["error"] = f"run_tests exited with rc={test_proc.returncode}"
-            print(f"  FAIL — unexpected exit code {test_proc.returncode}")
+            result["error"] = f"run_tests exited with rc={tp.returncode}"
+            print(f"  FAIL — unexpected exit code {tp.returncode}")
 
     except subprocess.TimeoutExpired:
         result["error"] = "evaluation timed out"
-        print(f"  FAIL — overall timeout")
+        print("  FAIL — overall timeout")
     except Exception as e:
-        result["error"] = str(e)
-        print(f"  FAIL — exception: {e}")
+        result["error"] = f"{type(e).__name__}: {e}"
+        print(f"  FAIL — {result['error']}")
     finally:
         result["elapsed_seconds"] = round(time.time() - start, 1)
-        # Clean up container
         if container_id:
-            subprocess.run(
-                ["docker", "rm", "-f", container_id],
-                capture_output=True, timeout=15,
-            )
-
+            subprocess.run(["docker", "rm", "-f", container_id],
+                           capture_output=True, timeout=30)
     return result
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate agent patches by applying them in fresh containers."
-    )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--model",
-        help="Model slug — looks for patches in outputs/<model_slug>/",
-    )
-    group.add_argument(
-        "--patch-dir",
-        help="Direct path to directory containing .patch files",
-    )
-    parser.add_argument(
-        "--instances",
-        nargs="+",
-        default=None,
-        help="Specific instance IDs to evaluate (default: all patches found)",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=300,
-        help="Timeout in seconds for test execution (default: 300)",
-    )
-    args = parser.parse_args()
+def select_instances(args) -> list[str]:
+    if args.instance:
+        known = set(paths.discover_instances())
+        for i in args.instance:
+            if i not in known:
+                sys.exit(f"ERROR: unknown instance {i!r}")
+        return list(args.instance)
+    if args.repo:
+        return paths.discover_instances(args.repo)
+    return paths.discover_instances()
 
-    # Locate patch directory
-    if args.model:
-        slug = args.model.replace("/", "_").replace(":", "_")
-        patch_dir = REPO_ROOT / "outputs" / slug
-    else:
-        patch_dir = Path(args.patch_dir)
 
-    if not patch_dir.exists():
-        sys.exit(f"ERROR: Patch directory not found: {patch_dir}")
+def main() -> None:
+    p = argparse.ArgumentParser(description="Grade agent patches in fresh containers.")
+    sel = p.add_mutually_exclusive_group(required=True)
+    sel.add_argument("--instance", nargs="+")
+    sel.add_argument("--repo", choices=paths.PROJECTS)
+    sel.add_argument("--all", action="store_true")
+    p.add_argument("--model", nargs="+", required=True)
+    p.add_argument("--timeout", type=int, default=300,
+                   help="seconds for the test run (default: 300)")
+    p.add_argument("--output", default="results.json",
+                   help="where to write the results file (default: results.json)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="list the patches that would be graded and exit")
+    args = p.parse_args()
 
-    # Find all .patch files
-    patch_files = sorted(patch_dir.glob("*.patch"))
-    if not patch_files:
-        sys.exit(f"ERROR: No .patch files found in {patch_dir}")
+    try:
+        models = [paths.resolve_model(m) for m in args.model]
+    except paths.UnknownModelError as e:
+        sys.exit(f"ERROR: {e}")
+    instances = select_instances(args)
 
-    # Map instance_id -> patch_path
-    patches = {}
-    for pf in patch_files:
-        instance_id = pf.stem  # e.g. zephyr__zephyr-65697.patch -> zephyr__zephyr-65697
-        patches[instance_id] = pf
+    pairs = [(i, m) for m in models for i in instances]
+    present = [(i, m) for i, m in pairs if paths.patch_path(i, m).exists()]
+    print(f"Instances : {len(instances)}")
+    print(f"Models    : {', '.join(models)}")
+    print(f"Pairs     : {len(pairs)} ({len(present)} with a patch on disk)\n")
 
-    # Filter to requested instances
-    if args.instances:
-        for inst in args.instances:
-            if inst not in patches:
-                sys.exit(f"ERROR: No patch found for '{inst}'. Available: {list(patches.keys())}")
-        patches = {k: v for k, v in patches.items() if k in args.instances}
+    if args.dry_run:
+        for i, m in pairs:
+            pp = paths.patch_path(i, m)
+            mark = "ok     " if pp.exists() else "MISSING"
+            print(f"  [{mark}] {pp.relative_to(paths.REPO_ROOT)}")
+        return
 
-    print(f"Patch dir  : {patch_dir}")
-    print(f"Patches    : {len(patches)} — {', '.join(patches.keys())}")
-    print(f"Timeout    : {args.timeout}s per instance")
-    print()
-
-    # Evaluate each patch
     results = []
-    for i, (instance_id, patch_path) in enumerate(patches.items(), 1):
-        print(f"[{i}/{len(patches)}] Evaluating {instance_id}")
-        result = evaluate_patch(instance_id, patch_path, timeout=args.timeout)
-        results.append(result)
-        print(f"  Grade: {result['grade']}  ({result['elapsed_seconds']}s)")
-        if result["error"]:
-            print(f"  Error: {result['error']}")
+    for n, (instance_id, model_name) in enumerate(pairs, 1):
+        print(f"[{n}/{len(pairs)}] {instance_id}  x  {model_name}")
+        results.append(evaluate_patch(instance_id, model_name, timeout=args.timeout))
         print()
 
-    # Summary
-    print("=" * 60)
-    print("EVALUATION RESULTS")
-    print("=" * 60)
-
+    print("=" * 74)
+    print("RESULTS")
+    print("=" * 74)
     for r in results:
-        icon = "PASS" if r["grade"] == "pass" else "FAIL"
+        icon = {"pass": "PASS", "missing": "----"}.get(r["grade"], "FAIL")
         err = f"  ({r['error']})" if r["error"] else ""
-        print(f"  [{icon}] {r['instance_id']:40s} {r['elapsed_seconds']:>6.1f}s{err}")
+        print(f"  [{icon}] {r['model']:34s} {r['instance_id']:24s} "
+              f"{r['elapsed_seconds']:>6.1f}s{err}")
 
-    passed = sum(1 for r in results if r["grade"] == "pass")
-    total = len(results)
-    print(f"\n  {passed}/{total} patches produce passing tests")
+    graded = [r for r in results if r["grade"] != "missing"]
+    passed = sum(1 for r in graded if r["grade"] == "pass")
+    missing = len(results) - len(graded)
+    print(f"\n  {passed}/{len(graded)} graded patches pass"
+          + (f"   ({missing} not run)" if missing else ""))
 
-    # Save evaluation results
-    eval_path = patch_dir / "evaluation.json"
-    eval_data = {
+    out = paths.REPO_ROOT / args.output
+    out.write_text(json.dumps({
         "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "total": total,
+        "models": models,
+        "total": len(results),
+        "graded": len(graded),
         "passed": passed,
         "results": results,
-    }
-    with open(eval_path, "w") as f:
-        json.dump(eval_data, f, indent=2)
-    print(f"  Results saved to: {eval_path}")
+    }, indent=2))
+    print(f"  written to {out.relative_to(paths.REPO_ROOT)}")
 
 
 if __name__ == "__main__":
