@@ -13,15 +13,25 @@ RUN git clone --filter=blob:none https://github.com/apache/nuttx-apps.git apps \
     && cd apps && git checkout ${APPS_BASE_COMMIT}
 
 # ── Configure sim:nsh and enable work queues explicitly
+#
+# CONFIG_NDEBUG must be forced off. ostest reports test failures only through
+# ASSERT(), and assert() in include/assert.h is gated on NDEBUG, not on
+# CONFIG_DEBUG_ASSERTIONS (which governs only DEBUGASSERT/PANIC). Kconfig
+# declares `config NDEBUG` with `default !DEBUG_ASSERTIONS`, but a default
+# applies only to a symbol absent from .config, and sim:nsh's defconfig pins
+# CONFIG_NDEBUG=y -- so olddefconfig preserves it, every ASSERT() compiles to
+# nothing, and ostest exits 0 however broken the code under test is.
 RUN ./tools/configure.sh -a ./apps sim:nsh \
-    && grep -v "CONFIG_TESTING_OSTEST\|CONFIG_NSH_CONSOLE_LOGIN\|CONFIG_SCHED_WORKQUEUE\|CONFIG_SCHED_LPWORK\|CONFIG_SCHED_HPWORK" \
+    && grep -v "CONFIG_NDEBUG\|CONFIG_TESTING_OSTEST\|CONFIG_NSH_CONSOLE_LOGIN\|CONFIG_SCHED_WORKQUEUE\|CONFIG_SCHED_LPWORK\|CONFIG_SCHED_HPWORK" \
        .config > .config.tmp \
     && mv .config.tmp .config \
     && echo "CONFIG_TESTING_OSTEST=y" >> .config \
     && echo "CONFIG_NSH_CONSOLE_LOGIN=n" >> .config \
     && echo "CONFIG_SCHED_WORKQUEUE=y" >> .config \
     && echo "CONFIG_SCHED_LPWORK=y" >> .config \
-    && make olddefconfig
+    && echo "CONFIG_NDEBUG=n" >> .config \
+    && make olddefconfig \
+    && grep -q "^# CONFIG_NDEBUG is not set" .config
 
 # ── Apply test patch (nuttx-apps PR #1665)
 # Adds wqueue.c and wires it into ostest — build succeeds, bug is runtime assertion
