@@ -64,9 +64,9 @@ BUILD: dict[str, dict] = {
     },
 }
 
-# docker/bases/riot_legacy.Dockerfile is not listed above: its only consumer
-# was riot__riot-5323, which was removed. Build it by hand if a pre-2017 RIOT
-# instance ever needs it.
+# There was a riot_legacy base pinning the pre-2017 riotbuild image, for
+# riot__riot-5323. Both the instance and the Dockerfile are gone; recover it
+# from git history if a RIOT instance that old is ever added back.
 
 
 def config(project: str) -> dict:

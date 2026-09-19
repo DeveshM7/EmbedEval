@@ -8,7 +8,7 @@ Build per-instance Docker images.
 
 Replaces build_instance_images.sh and build_riot_instance_images.sh, and adds
 NuttX, which previously had no general build path -- only 16 hand-written
-per-PR scripts under nuttx-validation/scripts/.
+per-PR scripts, now under archive/nuttx-validation/.
 
 Requires the project's base image; see scripts/build_bases.py.
 """
