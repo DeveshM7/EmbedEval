@@ -24,15 +24,6 @@ Either half alone is useless. A change with no detecting test gives the agent
 nothing to aim at. A test change with no behavioural change gives it nothing to
 solve.
 
-### This is not restricted to bug fixes
-
-A **new feature or a new driver is a perfectly good task** — the agent simply
-has to implement it until the tests pass, rather than repair something. What
-matters is only that the tests fail before the change and pass after it.
-
-So do not reject a PR for being an addition rather than a correction. Judge it
-on whether its tests reliably verify what it does.
-
 ---
 
 ## What you are given
@@ -51,31 +42,27 @@ GitHub page:
 
 Read all of it. You are being used here precisely because you can read the
 whole thing and judge causality; nothing has been summarised or trimmed for
-you. Review comments deserve particular attention — a reviewer saying a fix
-misses the root cause is the highest-signal content in a PR, and it appears
-nowhere else.
+you.
 
 ---
 
 ## Accept when all of these hold
 
-1. **The source change alters behaviour.** Either a correction — an off-by-one,
-   a bad bounds check, a wrong error code, an ordering or locking mistake — or
-   an addition, such as a new API, subsystem, or driver.
-2. **The test change exercises that specific behaviour.** You should be able to
-   point at the assertion that would fail if the source change were removed.
-3. **The test lives under `tests/` and looks runnable in an emulator** — that
+1. **You can name an assertion in the test diff that would fail without the
+   source change.** This is the core requirement, and it is deliberately
+   concrete: you are not asked to judge whether the change is significant or
+   meaningful, only to point at the test that detects it.
+2. **The test lives under `tests/` and looks runnable in an emulator** — that
    is, it does not depend on a physical board, a sensor, a radio, or an
    external network service.
-4. **The failure is deterministic.** It fails every run, not one in twenty.
+3. **The failure is deterministic.** It fails every run, not one in twenty.
 
 ---
 
 ## Reject when any of these hold
 
-- **Requires real hardware** to run or verify. This is the most common reason a
-  new driver or peripheral PR has to be rejected — and note that the reason is
-  the hardware, never the fact that it adds something new.
+- **Requires real hardware** to run or verify — a physical board, a sensor, a
+  radio, an external network service.
 - **Pure refactor.** Behaviour is unchanged by design, so no test can tell
   before from after.
 - **Documentation, formatting, typo, or comment-only change.**
@@ -83,29 +70,6 @@ nowhere else.
 - **Test-only change** with no behavioural source change.
 - **Flaky-test fix** — raising a timeout, adding a retry, loosening a
   tolerance. The test changed because it was wrong, not because the code was.
-- **The source change and the test are unrelated** — both present but not
-  causally connected. Common in large PRs that bundle several changes.
-
----
-
-## These are NOT criteria
-
-Each of the following looks like a sensible rule and was measured against the
-eight Zephyr PRs already hand-validated as good instances. Each one would have
-thrown good instances away. Do not use them.
-
-| Tempting rule | Rejects |
-|---|---|
-| "must add a new test file" | 5 of 8 — most fixes add cases to an existing file |
-| "must have the `bug` label" | 4 of 8 |
-| "must be a small diff" | PR 74435 is a good instance with 21 files |
-| "must have a linked issue" | PR 43405 has none |
-
-A linked issue (`Fixes #NNNN`) is a genuine *positive* signal — 7 of the 8 have
-one — but its absence is not disqualifying.
-
-Likewise, size is not a criterion in either direction. A one-file fix and a
-sixteen-file change are both acceptable if the test detects the change.
 
 ---
 
@@ -151,27 +115,19 @@ wrong reject is never revisited and the PR is lost silently.
 ## Worked examples
 
 **PR 65697 — accept.** One source file, one test file. `pthread_key_delete()`
-frees the wrong key; the test asserts the correct key was deleted. Small,
-causally tight, deterministic, runs on `qemu_x86`.
+frees the wrong key; `test_correct_key_is_deleted` asserts the deleted key
+equals the requested one. Deterministic, runs on `qemu_x86`.
 
-**PR 74435 — accept.** Twenty-one files, sixteen of them source. Large, but the
-RTIO test changes assert exactly the behaviour the source changes correct. Size
-is not a reason to reject.
+**PR 74435 — accept.** Twenty-one files, sixteen of them source. The RTIO test
+changes assert exactly the behaviour the source changes alter.
 
-**A PR adding a new subsystem with tests that run on `native_sim` — accept.**
-`change_type` is `feature`. The agent has to implement the subsystem until
-those tests pass. That is a legitimate task, and often a harder one than a
-fix. Being an addition is not a reason to reject.
+**PR 33690 — accept.** Modifies existing sensor tests rather than adding a new
+test file; the assertions still detect the change.
 
-**A PR adding a driver for a physical sensor over I2C — reject.** Not because
-it is a feature, but because the tests need the actual part on a real board.
-If its tests run against an emulated bus or a mock and genuinely verify the
-driver's behaviour, accept it.
+**A new subsystem with tests that run on `native_sim` — accept.**
+`change_type` is `feature`. The agent implements the subsystem until the tests
+pass.
 
-**PR 33690 — accept, and note what it is not.** Thirteen files and *no new test
-file* — it modifies existing sensor tests. It carries no `bug` label. Both of
-those are fine.
-
-**A PR that adds a new driver plus tests for it — reject.** The tests are new
-capability coverage, not bug detection. There is no prior wrong behaviour for
-an agent to correct.
+**A driver for a physical sensor over I2C — reject.** The tests need the actual
+part on a real board. If instead they run against an emulated bus or a mock and
+genuinely verify the driver's behaviour, accept it.
