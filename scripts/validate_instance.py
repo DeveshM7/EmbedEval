@@ -37,6 +37,7 @@ def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
 def verify_structured_results(meta: dict, report: dict, phase: str) -> tuple[bool, str]:
     expected_fail = set(meta["fail_to_pass"]) if phase == "before" else set()
     expected_pass = set(meta["pass_to_pass"])
+    expected_exit_code = 1 if phase == "before" else 0
     if phase == "after":
         expected_pass |= set(meta["fail_to_pass"])
     actual_pass = set(report.get("passed", []))
@@ -48,12 +49,14 @@ def verify_structured_results(meta: dict, report: dict, phase: str) -> tuple[boo
         and not report.get("missing")
         and not report.get("unexpected")
         and not report.get("error")
+        and report.get("exit_code") == expected_exit_code
     )
     detail = (
         f"expected pass={sorted(expected_pass)}, fail={sorted(expected_fail)}; "
         f"got pass={sorted(actual_pass)}, fail={sorted(actual_fail)}, "
         f"missing={report.get('missing', [])}, unexpected={report.get('unexpected', [])}, "
-        f"error={report.get('error')}"
+        f"error={report.get('error')}, exit_code={report.get('exit_code')} "
+        f"(expected {expected_exit_code})"
     )
     return valid, detail
 
@@ -151,9 +154,9 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
         if not structured_results_match("before"):
             return False
-        if r1.returncode == 0:
-            print("  FAIL: tests PASSED before the fix -- the instance does not "
-                  "isolate the bug (test patch may not apply, or the bug is absent)")
+        if r1.returncode != 1:
+            print(f"  FAIL: expected run_tests exit 1 before the fix, got "
+                  f"{r1.returncode} -- the regression did not fail cleanly")
             return False
         print(f"  ok: run_tests exited {r1.returncode} as expected")
 
