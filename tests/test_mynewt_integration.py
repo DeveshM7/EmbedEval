@@ -18,6 +18,7 @@ scripts_instances = load_module("scripts_instances", "scripts/instances.py")
 build_config = load_module("mynewt_build_config", "scripts/build_config.py")
 harness_paths = load_module("harness_paths", "harness/paths.py")
 projects = load_module("mynewt_projects", "harness/projects.py")
+validate_instance = load_module("mynewt_validate_instance", "scripts/validate_instance.py")
 
 
 class MynewtProjectConfigurationTests(unittest.TestCase):
@@ -57,6 +58,10 @@ class MynewtInstanceDefinitionTests(unittest.TestCase):
                 self.assertTrue(meta["pass_to_pass"])
                 self.assertTrue(meta["files_changed_by_fix"])
                 self.assertEqual(meta["build_command"], "true")
+                self.assertEqual(
+                    meta["structured_test_results"],
+                    "/tmp/mynewt-result.json",
+                )
 
     def test_2809_preserves_compiler_compatibility_flag(self):
         path = (
@@ -74,6 +79,81 @@ class MynewtInstanceDefinitionTests(unittest.TestCase):
         statement = json.loads(path.read_text())["problem_statement"]
         self.assertIn("JSON_ATTR_MAX", statement)
         self.assertIn("JSON_ERR_STRLONG", statement)
+
+
+class StructuredResultValidationTests(unittest.TestCase):
+    meta = {
+        "fail_to_pass": ["suite/regression"],
+        "pass_to_pass": ["suite/existing"],
+    }
+
+    @staticmethod
+    def report(**overrides):
+        report = {
+            "build_ok": True,
+            "passed": ["suite/existing"],
+            "failed": ["suite/regression"],
+            "missing": [],
+            "unexpected": [],
+            "error": None,
+        }
+        report.update(overrides)
+        return report
+
+    def test_before_accepts_only_the_expected_regression_failure(self):
+        valid, _ = validate_instance.verify_structured_results(
+            self.meta, self.report(), "before"
+        )
+        self.assertTrue(valid)
+
+    def test_before_rejects_a_failed_build(self):
+        valid, _ = validate_instance.verify_structured_results(
+            self.meta, self.report(build_ok=False), "before"
+        )
+        self.assertFalse(valid)
+
+    def test_before_rejects_the_wrong_failed_test(self):
+        valid, _ = validate_instance.verify_structured_results(
+            self.meta,
+            self.report(failed=["suite/other"], missing=["suite/regression"]),
+            "before",
+        )
+        self.assertFalse(valid)
+
+    def test_before_rejects_a_missing_test(self):
+        valid, _ = validate_instance.verify_structured_results(
+            self.meta, self.report(failed=[], missing=["suite/regression"]), "before"
+        )
+        self.assertFalse(valid)
+
+    def test_after_accepts_all_expected_tests_passing(self):
+        valid, _ = validate_instance.verify_structured_results(
+            self.meta,
+            self.report(
+                passed=["suite/existing", "suite/regression"],
+                failed=[],
+            ),
+            "after",
+        )
+        self.assertTrue(valid)
+
+    def test_after_rejects_a_remaining_regression_failure(self):
+        valid, _ = validate_instance.verify_structured_results(
+            self.meta, self.report(), "after"
+        )
+        self.assertFalse(valid)
+
+    def test_after_rejects_an_unexpected_test(self):
+        valid, _ = validate_instance.verify_structured_results(
+            self.meta,
+            self.report(
+                passed=["suite/existing", "suite/regression", "suite/unexpected"],
+                failed=[],
+                unexpected=["suite/unexpected"],
+            ),
+            "after",
+        )
+        self.assertFalse(valid)
 
 
 if __name__ == "__main__":

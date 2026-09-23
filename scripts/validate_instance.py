@@ -16,6 +16,7 @@ previously it had only 16 hand-written per-PR scripts.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,30 @@ import instances
 
 def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
     return subprocess.run(cmd, capture_output=quiet, text=True, timeout=timeout)
+
+
+def verify_structured_results(meta: dict, report: dict, phase: str) -> tuple[bool, str]:
+    expected_fail = set(meta["fail_to_pass"]) if phase == "before" else set()
+    expected_pass = set(meta["pass_to_pass"])
+    if phase == "after":
+        expected_pass |= set(meta["fail_to_pass"])
+    actual_pass = set(report.get("passed", []))
+    actual_fail = set(report.get("failed", []))
+    valid = (
+        report.get("build_ok") is True
+        and actual_pass == expected_pass
+        and actual_fail == expected_fail
+        and not report.get("missing")
+        and not report.get("unexpected")
+        and not report.get("error")
+    )
+    detail = (
+        f"expected pass={sorted(expected_pass)}, fail={sorted(expected_fail)}; "
+        f"got pass={sorted(actual_pass)}, fail={sorted(actual_fail)}, "
+        f"missing={report.get('missing', [])}, unexpected={report.get('unexpected', [])}, "
+        f"error={report.get('error')}"
+    )
+    return valid, detail
 
 
 def gold_patch(meta: dict, workdir: Path) -> str:
@@ -99,11 +124,33 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             print(f" {time.time() - t0:.1f}s (rc={r.returncode})")
         return r
 
+    def structured_results_match(phase: str) -> bool:
+        result_path = meta.get("structured_test_results")
+        if not result_path:
+            return True
+        result = sh(["docker", "exec", cid, "cat", result_path], timeout=30)
+        if result.returncode != 0:
+            print(f"  FAIL: could not read structured test results at {result_path}")
+            return False
+        try:
+            report = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            print(f"  FAIL: invalid structured test results at {result_path}: {e}")
+            return False
+        valid, detail = verify_structured_results(meta, report, phase)
+        if not valid:
+            print(f"  FAIL: {phase} structured test results do not match: {detail}")
+            return False
+        print(f"  ok: {phase} structured test results match the expected cases")
+        return True
+
     try:
         # --- Step 1: tests must FAIL on the unfixed code -------------------
         print("\n  Step 1: expecting tests to FAIL at the base commit")
         dexec(f"cd /testbed && {build_cmd}", 900, "build")
         r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
+        if not structured_results_match("before"):
+            return False
         if r1.returncode == 0:
             print("  FAIL: tests PASSED before the fix -- the instance does not "
                   "isolate the bug (test patch may not apply, or the bug is absent)")
@@ -138,6 +185,8 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             return False
 
         r2 = dexec("cd /testbed && run_tests", timeout, "run_tests")
+        if not structured_results_match("after"):
+            return False
         if r2.returncode != 0:
             print(f"  FAIL: tests still failing after the fix (rc={r2.returncode})")
             print("  " + ((r2.stdout or "") + (r2.stderr or ""))[-400:].replace("\n", "\n  "))
