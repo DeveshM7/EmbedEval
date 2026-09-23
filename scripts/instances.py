@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTANCES_DIR = REPO_ROOT / "docker" / "instances"
 BASES_DIR = REPO_ROOT / "docker" / "bases"
 
-PROJECTS = ("zephyr", "nuttx", "riot")
+PROJECTS = ("zephyr", "nuttx", "riot", "mynewt")
 
 _INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
 
