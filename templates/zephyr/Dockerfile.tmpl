@@ -1,0 +1,69 @@
+FROM embedeval-zephyr-base:latest
+
+WORKDIR /testbed
+
+# Blobless clone: all history metadata, file contents fetched on demand. Lets
+# us check out any commit without a depth limit, at roughly a fifth the size
+# of a full clone.
+ARG BASE_COMMIT=@@BASE_COMMIT@@
+RUN git clone --filter=blob:none @@REPO@@.git . \
+    && git checkout ${BASE_COMMIT}
+
+# -l . tells west this directory is already the Zephyr repo. --narrow and
+# --depth=1 keep the external modules small.
+RUN west init -l . \
+    && west update --narrow -o=--depth=1 \
+    && west zephyr-export
+
+# Python dependencies first: `west sdk` needs patoolib, which lives in them.
+RUN west packages pip --install 2>/dev/null \
+    || pip install -r scripts/requirements.txt
+
+# SDK install, handling both eras with one step.
+#
+# `west sdk install` is a west extension defined inside the Zephyr tree and
+# only exists from Zephyr 3.6 (late 2023). It also understands the split
+# distribution SDK 0.17.0 introduced. For older base commits neither is true,
+# so fall back to downloading and running setup.sh directly.
+#
+# $(uname -m) resolves to x86_64 or aarch64, so this works on Intel and ARM
+# hosts alike.
+ARG ZEPHYR_SDK_VERSION=@@SDK_VERSION@@
+ENV ZEPHYR_BASE=/testbed
+RUN west sdk install -T 2>/dev/null \
+    || ( ARCH=$(uname -m) \
+         && SDK_ARCHIVE="zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-${ARCH}.tar.xz" \
+         && wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${ZEPHYR_SDK_VERSION}/${SDK_ARCHIVE}" \
+         && tar -xf "${SDK_ARCHIVE}" -C /opt \
+         && rm "${SDK_ARCHIVE}" \
+         && /opt/zephyr-sdk-${ZEPHYR_SDK_VERSION}/setup.sh -t x86_64-zephyr-elf -h -c )
+
+# run_tests on PATH so the agent can call it as a plain command.
+COPY run_tests.sh /usr/local/bin/run_tests
+RUN chmod +x /usr/local/bin/run_tests
+
+# Zephyr reference guide for the agent.
+COPY ZEPHYR_GUIDE.md /testbed/ZEPHYR_GUIDE.md
+
+# The test-only patch: brings the PR's new tests without its fix, leaving the
+# repo in the broken-with-failing-tests state the agent has to resolve.
+COPY test_patch.diff /tmp/
+RUN git apply /tmp/test_patch.diff
+
+# Pre-build to populate the CMake cache, so an incremental rebuild after one
+# edit takes seconds. `|| true` is deliberate: the build may legitimately fail
+# here, since the fix is absent.
+#
+# Any `-- -DCONFIG_...` arguments come from the scenario the test belongs to.
+# `west build` reads prj.conf alone and ignores the `extra_configs` a
+# tests.yaml scenario declares, so a test that only detects its bug under a
+# particular Kconfig will pass on broken code without them. That is not
+# hypothetical: 85079 needs CONFIG_RTIO_SUBMIT_SEM=n and 62109 needs
+# CONFIG_LOG_THREAD_ID_PREFIX=y, and without them both instances validate as
+# though the bug were absent.
+ARG PLATFORM=@@PLATFORM@@
+ARG TEST_PATH=@@TEST_PATH@@
+RUN west build -b ${PLATFORM} ${TEST_PATH}@@EXTRA_BUILD_ARGS@@ || true
+
+# ctags index for code navigation.
+RUN ctags -R --languages=C,C++ --exclude=build -f /testbed/tags .

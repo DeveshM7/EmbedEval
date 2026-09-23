@@ -11,12 +11,20 @@ comes from.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-INSTANCES_DIR = REPO_ROOT / "docker" / "instances"
 BASES_DIR = REPO_ROOT / "docker" / "bases"
+
+# Where instance directories are read from. EMBEDEVAL_INSTANCES_DIR redirects
+# it so a freshly generated instance can be built and validated without being
+# copied in beside the hand-written ones -- and, more importantly, without any
+# chance of overwriting them.
+INSTANCES_DIR = Path(
+    os.environ.get("EMBEDEVAL_INSTANCES_DIR", REPO_ROOT / "docker" / "instances")
+)
 
 PROJECTS = ("zephyr", "nuttx", "riot")
 

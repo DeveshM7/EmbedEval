@@ -13,7 +13,8 @@ Three stages, deliberately separate:
                              hard filters need and nothing more.
     filter   free, instant -- cuts the pool to PRs that could become instances.
     enrich   costly, narrow-- full GitHub context for the survivors only:
-                             diffs, review threads, linked issues, commits.
+                             diffs, review threads, linked issues, commits,
+                             and the complete test suite each PR touches.
 
 Enrich runs last because only ~15% of PRs survive filtering. Pulling the
 expensive context for the whole pool would be about six times the API calls
@@ -43,6 +44,7 @@ Requires the `gh` CLI, authenticated. Read-only.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
 import subprocess
@@ -224,6 +226,61 @@ def gh_paged(path: str, cap: int = 1000) -> list:
     return out
 
 
+# Zephyr marks a test suite by putting one of these in the directory. Taken
+# from twister itself -- twisterlib/testplan.py walks every directory and
+# treats any that contains one of these as a suite:
+#
+#     TEST_DEFINITION_FILENAME = ['testcase.yaml', 'tests.yaml', 'sample.yaml']
+#
+# `west build` uses a different marker (CMakeLists.txt), but the two land on
+# the same directory because a suite has both.
+SUITE_MARKERS = ("testcase.yaml", "tests.yaml", "sample.yaml")
+
+
+def find_suite_root(file_path: str, sha: str, cache: dict) -> tuple[str | None, str | None]:
+    """Walk up from a changed test file to the directory that owns it.
+
+    tests/posix/common/src/key.c -> tests/posix/common
+
+    The depth varies -- tests live in src/ under some suites and at the root
+    of others -- so this cannot be a fixed number of path segments.
+    """
+    parts = file_path.split("/")
+    for depth in range(len(parts) - 1, 1, -1):     # deepest first, stop above tests/
+        d = "/".join(parts[:depth])
+        if d not in cache:
+            listing = gh(f"repos/{REPO}/contents/{d}?ref={sha}")
+            names = {f["name"] for f in listing} if isinstance(listing, list) else set()
+            cache[d] = next((m for m in SUITE_MARKERS if m in names), None)
+        if cache[d]:
+            return d, cache[d]
+    return None, None
+
+
+def fetch_suite(root: str, sha: str) -> dict:
+    """Every file in a test suite directory, with contents.
+
+    No size cap. Most Zephyr suites are four files; the occasional large
+    shared suite is a problem for later, not now.
+    """
+    tree = gh(f"repos/{REPO}/git/trees/{sha}:{root}?recursive=1")
+    if not tree:
+        return {}
+    out = {}
+    for b in tree.get("tree", []):
+        if b.get("type") != "blob":
+            continue
+        blob = gh(f"repos/{REPO}/git/blobs/{b['sha']}")
+        content = None
+        if blob and blob.get("encoding") == "base64":
+            try:
+                content = base64.b64decode(blob["content"]).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                content = None          # binary; recorded by name and size only
+        out[b["path"]] = {"size": b.get("size"), "content": content}
+    return out
+
+
 def fetch_full(number: int) -> dict | None:
     """Everything a triage model could want about one PR.
 
@@ -264,6 +321,14 @@ def fetch_full(number: int) -> dict | None:
             ],
         })
 
+    raw_commits = gh_paged(f"repos/{REPO}/pulls/{number}/commits")
+    commits = [{"sha": c["sha"], "message": (c.get("commit") or {}).get("message", "")}
+               for c in raw_commits]
+    base_commit = None
+    if raw_commits:
+        parents = raw_commits[0].get("parents") or []
+        base_commit = parents[0]["sha"] if parents else None
+
     record = {
         "number": pr["number"],
         "title": pr["title"],
@@ -289,10 +354,23 @@ def fetch_full(number: int) -> dict | None:
         ],
         "files_truncated": len(files) >= 3000,
 
-        "commits": [
-            {"sha": c["sha"], "message": (c.get("commit") or {}).get("message", "")}
-            for c in gh_paged(f"repos/{REPO}/pulls/{number}/commits")
-        ],
+        "commits": commits,
+
+        # The state of the repo immediately before this PR: the first parent of
+        # its first commit.
+        #
+        # NOT merge_commit_sha~1, which is a different thing entirely -- on a
+        # repo as busy as Zephyr that is whatever unrelated PR happened to land
+        # just before the merge. PR 65697 shows the gap plainly: its commits are
+        # 330c820b (fix) and ba723889 (tests), 330c820b's parent is 41b7c17a and
+        # that is the base, while merge_commit_sha is 0e11bcf5 and belongs to
+        # neither.
+        #
+        # head_commit is the PR's last commit, so base_commit..head_commit spans
+        # exactly this PR and nothing else, which is the range validation uses
+        # to reconstruct the upstream fix.
+        "base_commit": base_commit,
+        "head_commit": commits[-1]["sha"] if commits else None,
 
         # Top-level conversation.
         "comments": [
@@ -319,6 +397,24 @@ def fetch_full(number: int) -> dict | None:
 
         "linked_issues": linked,
     }
+
+    # The complete test suite behind every test file the PR touched.
+    #
+    # The diff alone is not enough to judge runnability: a PR that adds cases
+    # to an existing suite never touches its yaml, so platform_allow and
+    # harness would be invisible. Read at the merge commit, which covers both
+    # shapes -- for an existing suite the yaml is present at base and merge,
+    # for a new suite it exists only at merge.
+    ref = pr.get("merge_commit_sha") or pr["head"]["sha"]
+    cache, suites = {}, {}
+    for f in record["files"]:
+        name = f["filename"]
+        if not name.startswith("tests/"):
+            continue
+        root, marker = find_suite_root(name, ref, cache)
+        if root and root not in suites:
+            suites[root] = {"config": marker, "files": fetch_suite(root, ref)}
+    record["test_suites"] = suites
 
     ENRICHED.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, indent=2))
@@ -412,11 +508,14 @@ def cmd_enrich(args) -> None:
             continue
         ok += 1
         patched = sum(1 for f in rec["files"] if f.get("patch"))
+        suites = rec.get("test_suites", {})
+        nfiles = sum(len(s["files"]) for s in suites.values())
         print(f"  [{i}/{len(numbers)}] {n}  "
               f"{patched}/{len(rec['files'])} files with diff, "
               f"{len(rec['commits'])} commits, "
               f"{len(rec['comments']) + len(rec['review_comments'])} comments, "
-              f"{len(rec['linked_issues'])} linked issues")
+              f"{len(rec['linked_issues'])} linked issues, "
+              f"{len(suites)} suite(s)/{nfiles} files")
 
     print(f"\n  {ok}/{len(numbers)} enriched  ->  "
           f"{ENRICHED.relative_to(REPO_ROOT)}")
