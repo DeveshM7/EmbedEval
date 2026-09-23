@@ -201,16 +201,21 @@ The implementation is complete when:
 6. Existing project discovery and dry-run commands continue to work unchanged.
 7. `harness/run.py` accepts each Mynewt instance through `--dry-run` without an
    API call.
-8. No generated model outputs, patches, trajectories, or validation logs are
+8. If a working provider API key is available, one model is run against
+   `mynewt__mynewt-3680` and its patch is graded through the unified
+   fresh-container evaluator.
+9. No generated model outputs, patches, trajectories, or validation logs are
    added to Git.
 
-An actual model call is deferred until a provider and API key are selected.
+The model and provider are selected at run time based on the credentials that
+are available. A missing API key does not invalidate the Docker, task, or
+unified harness integration; it only prevents the optional live demonstration
+run. Generated model artifacts remain local and uncommitted.
 
 ## Excluded work
 
-- Selecting or configuring a model provider
-- Running a paid model
 - Committing generated outputs or validation logs
+- Committing API keys or other credentials
 - Adding new benchmark candidates
 - Changing PR filtering
 - Adding validation phases to existing RTOS projects
