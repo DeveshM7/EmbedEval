@@ -1,7 +1,12 @@
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +85,14 @@ class MynewtInstanceDefinitionTests(unittest.TestCase):
         self.assertIn("JSON_ATTR_MAX", statement)
         self.assertIn("JSON_ERR_STRLONG", statement)
 
+    def test_3299_requests_three_way_gold_patch_application(self):
+        path = (
+            REPO_ROOT
+            / "docker/instances/mynewt__mynewt-3299/metadata.json"
+        )
+        meta = json.loads(path.read_text())
+        self.assertTrue(meta["gold_patch_three_way"])
+
 
 class StructuredResultValidationTests(unittest.TestCase):
     meta = {
@@ -111,6 +124,7 @@ class StructuredResultValidationTests(unittest.TestCase):
             self.meta, self.report(build_ok=False), "before"
         )
         self.assertFalse(valid)
+
 
     def test_before_rejects_the_wrong_failed_test(self):
         valid, _ = validate_instance.verify_structured_results(
@@ -154,6 +168,100 @@ class StructuredResultValidationTests(unittest.TestCase):
             "after",
         )
         self.assertFalse(valid)
+
+
+class ValidatorPatchApplicationTests(unittest.TestCase):
+    @staticmethod
+    def metadata(**overrides):
+        meta = {
+            "project": "mynewt",
+            "docker_image": "embedeval-mynewt-test:latest",
+            "build_command": "true",
+        }
+        meta.update(overrides)
+        return meta
+
+    @staticmethod
+    def result(cmd, returncode=0, stdout="", stderr=""):
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    def test_three_way_gold_patch_uses_three_way_git_apply(self):
+        commands = []
+        run_count = 0
+
+        def fake_sh(cmd, timeout=120, quiet=True):
+            nonlocal run_count
+            commands.append(cmd)
+            if cmd[:2] == ["docker", "run"]:
+                return self.result(cmd, stdout="container-id\n")
+            if cmd[:2] == ["docker", "exec"] and cmd[-1].endswith("run_tests"):
+                run_count += 1
+                return self.result(cmd, returncode=1 if run_count == 1 else 0)
+            return self.result(cmd)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patch_path = Path(tmp) / "fix.diff"
+            patch_path.write_text("test patch\n")
+            with (
+                mock.patch.object(
+                    validate_instance.instances,
+                    "load_metadata",
+                    return_value=self.metadata(gold_patch_three_way=True),
+                ),
+                mock.patch.object(
+                    validate_instance.build_config,
+                    "config",
+                    return_value={"platform": "linux/amd64", "clean_paths": []},
+                ),
+                mock.patch.object(validate_instance, "sh", side_effect=fake_sh),
+                redirect_stdout(io.StringIO()),
+            ):
+                valid = validate_instance.validate("mynewt__mynewt-test", patch_path)
+
+        self.assertTrue(valid)
+        docker_exec_commands = [
+            cmd[-1] for cmd in commands if cmd[:2] == ["docker", "exec"]
+        ]
+        self.assertIn(
+            "cd /testbed && git apply --3way /tmp/fix.diff",
+            docker_exec_commands,
+        )
+
+    def test_verbose_apply_failure_reports_the_failure_without_crashing(self):
+        def fake_sh(cmd, timeout=120, quiet=True):
+            if cmd[:2] == ["docker", "run"]:
+                return self.result(cmd, stdout="container-id\n")
+            if cmd[:2] == ["docker", "exec"] and cmd[-1].endswith("run_tests"):
+                return self.result(cmd, returncode=1)
+            if cmd[:2] == ["docker", "exec"] and "git apply" in cmd[-1]:
+                return self.result(cmd, returncode=1, stdout=None, stderr=None)
+            return self.result(cmd)
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            patch_path = Path(tmp) / "fix.diff"
+            patch_path.write_text("test patch\n")
+            with (
+                mock.patch.object(
+                    validate_instance.instances,
+                    "load_metadata",
+                    return_value=self.metadata(),
+                ),
+                mock.patch.object(
+                    validate_instance.build_config,
+                    "config",
+                    return_value={"platform": "linux/amd64", "clean_paths": []},
+                ),
+                mock.patch.object(validate_instance, "sh", side_effect=fake_sh),
+                redirect_stdout(output),
+            ):
+                valid = validate_instance.validate(
+                    "mynewt__mynewt-test", patch_path, verbose=True
+                )
+
+        self.assertFalse(valid)
+        self.assertIn("FAIL: git apply failed:", output.getvalue())
+        self.assertNotIn("AttributeError", output.getvalue())
 
 
 if __name__ == "__main__":

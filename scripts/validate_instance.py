@@ -168,9 +168,10 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         pf.write_text(patch_text)
 
         sh(["docker", "cp", str(pf), f"{cid}:/tmp/fix.diff"], timeout=60)
-        ra = dexec("cd /testbed && git apply /tmp/fix.diff", 120, "git apply")
+        three_way = " --3way" if meta.get("gold_patch_three_way") else ""
+        ra = dexec(f"cd /testbed && git apply{three_way} /tmp/fix.diff", 120, "git apply")
         if ra.returncode != 0:
-            print(f"  FAIL: git apply failed: {ra.stderr.strip()[:300]}")
+            print(f"  FAIL: git apply failed: {(ra.stderr or '').strip()[:300]}")
             return False
 
         cleaned = cfg["clean_paths"]
