@@ -46,6 +46,12 @@ _ORIENTATION = {
         "compile to a native host binary -- there is no emulator. `run_tests` already "
         "selects and builds the right suite; do not construct make invocations by hand."
     ),
+    "mynewt": (
+        "The Apache Mynewt source tree is at /testbed. Tests use Newt with the "
+        "native BSP and simulator compiler through an external project at /project. "
+        "Use `run_tests` to perform a clean native build and execute the complete "
+        "pinned selftest suite; do not construct a separate newt target."
+    ),
 }
 
 # Zephyr only: `west build -t run` starts QEMU, which never exits, so the command
@@ -109,6 +115,22 @@ PROJECTS: dict[str, dict] = {
         # would mean hand-constructing a make invocation, which is RIOT's single
         # largest observed failure mode.
         "rebuild_command": "",
+    },
+    "mynewt": {
+        "label": "Apache Mynewt",
+        "orientation": _ORIENTATION["mynewt"],
+        "extra_warnings": "",
+        "protected_paths": [
+            "fs/fcb2/selftest/",
+            "kernel/os/selftest/",
+            "encoding/json/selftest/",
+        ],
+        "needs_qemu_cleanup": False,
+        "clean_paths": [],
+        "docker_platform": "linux/amd64",
+        "build_command": "true",
+        "rebuild_command": "",
+        "run_command": "run_tests",
     },
 }
 
