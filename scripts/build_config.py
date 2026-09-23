@@ -65,7 +65,6 @@ BUILD: dict[str, dict] = {
     "mynewt": {
         "base_image": "embedeval-mynewt-base:latest",
         "base_dockerfile": "docker/bases/mynewt.Dockerfile",
-        "base_context": ".",
         "build_args": {"BASE_COMMIT": lambda m: m["base_commit"]},
         "platform": "linux/amd64",
         "clean_paths": [],

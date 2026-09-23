@@ -33,8 +33,7 @@ def build_base(project: str, dry_run: bool = False) -> bool:
     cmd = ["docker", "build", "-f", str(dockerfile), "-t", cfg["base_image"]]
     if cfg["platform"]:
         cmd += ["--platform", cfg["platform"]]
-    context = instances.REPO_ROOT / cfg.get("base_context", "docker/bases")
-    cmd.append(str(context))
+    cmd.append(str(instances.BASES_DIR))
 
     print(f"\n=== {project}: {cfg['base_image']} ===")
     print("  " + " ".join(cmd))
