@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -40,6 +41,39 @@ class MynewtProjectConfigurationTests(unittest.TestCase):
         self.assertEqual(build_config.config("mynewt")["platform"], "linux/amd64")
         self.assertEqual(projects.config("mynewt")["docker_platform"], "linux/amd64")
         self.assertFalse(projects.config("mynewt")["needs_qemu_cleanup"])
+
+
+class MynewtInstanceDefinitionTests(unittest.TestCase):
+    def test_all_three_instances_have_current_metadata(self):
+        for pr in (2809, 3299, 3680):
+            instance_id = f"mynewt__mynewt-{pr}"
+            path = REPO_ROOT / "docker" / "instances" / instance_id / "metadata.json"
+            with self.subTest(instance_id=instance_id):
+                meta = json.loads(path.read_text())
+                self.assertEqual(meta["project"], "mynewt")
+                self.assertEqual(meta["instance_id"], instance_id)
+                self.assertEqual(meta["docker_platform"], "linux/amd64")
+                self.assertTrue(meta["fail_to_pass"])
+                self.assertTrue(meta["pass_to_pass"])
+                self.assertTrue(meta["files_changed_by_fix"])
+                self.assertEqual(meta["build_command"], "true")
+
+    def test_2809_preserves_compiler_compatibility_flag(self):
+        path = (
+            REPO_ROOT
+            / "docker/instances/mynewt__mynewt-2809/metadata.json"
+        )
+        meta = json.loads(path.read_text())
+        self.assertIn("-Wno-error=stringop-overflow", meta["compatibility_cflags"])
+
+    def test_3680_describes_both_required_boundaries(self):
+        path = (
+            REPO_ROOT
+            / "docker/instances/mynewt__mynewt-3680/metadata.json"
+        )
+        statement = json.loads(path.read_text())["problem_statement"]
+        self.assertIn("JSON_ATTR_MAX", statement)
+        self.assertIn("JSON_ERR_STRLONG", statement)
 
 
 if __name__ == "__main__":
