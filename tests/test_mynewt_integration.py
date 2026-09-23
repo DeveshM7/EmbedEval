@@ -58,6 +58,7 @@ class MynewtInstanceDefinitionTests(unittest.TestCase):
                 meta = json.loads(path.read_text())
                 self.assertEqual(meta["project"], "mynewt")
                 self.assertEqual(meta["instance_id"], instance_id)
+                self.assertEqual(meta["docker_image"], f"embedeval:mynewt-{pr}")
                 self.assertEqual(meta["docker_platform"], "linux/amd64")
                 self.assertTrue(meta["fail_to_pass"])
                 self.assertTrue(meta["pass_to_pass"])

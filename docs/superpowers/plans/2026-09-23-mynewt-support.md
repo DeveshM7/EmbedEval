@@ -248,7 +248,7 @@ git commit -m "Register Apache Mynewt with unified commands"
 
 **Interfaces:**
 - Consumes: `embedeval-mynewt-base:latest`, `BASE_COMMIT`, `/opt/benchmark/setup.py`, and `/usr/local/bin/mynewt_run_tests`.
-- Produces: images `embedeval-mynewt-2809:latest`, `embedeval-mynewt-3299:latest`, and `embedeval-mynewt-3680:latest`, each containing base code plus the exact PR test patch.
+- Produces: images `embedeval:mynewt-2809`, `embedeval:mynewt-3299`, and `embedeval:mynewt-3680`, each containing base code plus the exact PR test patch.
 
 - [ ] **Step 1: Copy all three test patches unchanged**
 
@@ -304,7 +304,7 @@ Copy each old `metadata.json`, then change only these integration fields:
 
 ```text
 instance_id: apache__mynewt-core-<PR> -> mynewt__mynewt-<PR>
-docker_image: embedbench:mynewt-<PR> -> embedeval-mynewt-<PR>:latest
+docker_image: embedbench:mynewt-<PR> -> embedeval:mynewt-<PR>
 build_command: run_tests -> true
 ```
 
