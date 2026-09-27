@@ -88,9 +88,6 @@ somewhere we never see, and cannot be evaluated at all.
      variant) or `qemu_x86`. If it lists only other targets, reject.
    - `platform_exclude` → reject only if it excludes both of ours.
    - `harness:` present and not `ztest` or `console` → reject.
-   - `depends_on` → judge against what those two platforms provide. Note that
-     `native_sim` does have working networking, so `depends_on: netif` is
-     fine; a real sensor, radio, or USB device is not.
    - No config file, or nothing conclusive → judge from the test sources,
      which you also have. When still unsure, accept with low confidence rather
      than reject.
@@ -157,8 +154,7 @@ more than their prose.
   unfixed code and the instance is discarded as useless.
 - `fail_to_pass` — the ztest test **identifiers** that fail before the change
   and pass after, as a list, e.g. `["test_correct_key_is_deleted"]`. Names as
-  they appear in `ZTEST(...)` in the source, not descriptions. If you cannot
-  name at least one, the verdict is `reject`.
+  they appear in `ZTEST(...)` in the source, not descriptions.
 - `pass_to_pass` — identifiers of other tests in the same suite that pass
   before and must still pass after. These catch a fix that breaks something
   else. Name a few real ones from the suite; an empty list is acceptable if
@@ -177,24 +173,3 @@ When uncertain, prefer `accept` with `"confidence": "low"`. A wrong accept is
 caught downstream when the instance fails to validate and costs one build. A
 wrong reject is never revisited and the PR is lost silently.
 
----
-
-## Worked examples
-
-**PR 65697 — accept.** One source file, one test file. `pthread_key_delete()`
-frees the wrong key; `test_correct_key_is_deleted` checks that the deleted key
-equals the requested one. Deterministic, runs on `qemu_x86`.
-
-**PR 74435 — accept.** Twenty-one files, sixteen of them source. The RTIO test
-changes exercise exactly the behaviour the source changes alter.
-
-**PR 33690 — accept.** Modifies existing sensor tests rather than adding a new
-test file; the existing tests still detect the change.
-
-**A new subsystem with tests that run on `native_sim` — accept.**
-`change_type` is `feature`. The agent implements the subsystem until the tests
-pass.
-
-**A driver for a physical sensor over I2C — reject.** The tests need the actual
-part on a real board. If instead they run against an emulated bus or a mock and
-genuinely verify the driver's behaviour, accept it.
