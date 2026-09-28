@@ -26,7 +26,7 @@ INSTANCES_DIR = Path(
     os.environ.get("EMBEDEVAL_INSTANCES_DIR", REPO_ROOT / "docker" / "instances")
 )
 
-PROJECTS = ("zephyr", "nuttx", "riot")
+PROJECTS = ("zephyr", "nuttx", "riot", "mynewt")
 
 _INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
 

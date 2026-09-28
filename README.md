@@ -2,13 +2,13 @@
 
 A benchmark for evaluating LLM coding agents on **embedded RTOS bug fixes**.
 
-Each task is a real merged pull request from Zephyr, NuttX, or RIOT. The agent
-gets the repository at the commit *before* the fix, plus the tests the PR added.
-It has to make those tests pass. Everything runs inside Docker with a real
-cross-compiler toolchain, so a patch only counts if the firmware actually builds
-and the tests actually run.
+Each task is a real merged pull request from Zephyr, NuttX, RIOT, or Apache
+Mynewt. The agent gets the repository at the commit *before* the fix, plus the
+tests the PR added. It has to make those tests pass. Everything runs inside
+Docker with a real compiler toolchain, so a patch only counts if the software
+actually builds and the tests actually run.
 
-**17 instances:** 8 Zephyr, 6 NuttX, 3 RIOT.
+**20 instances:** 8 Zephyr, 6 NuttX, 3 RIOT, 3 Apache Mynewt.
 
 ---
 
@@ -92,7 +92,7 @@ Every command takes the same three selection flags:
 ```bash
 --instance zephyr__zephyr-65697    # one or more, space separated
 --repo nuttx                       # every instance in one project
---all                              # all 17
+--all                              # all 20
 ```
 
 Instance ids are `<project>__<project>-<PR>`, matching the directory names under
@@ -163,6 +163,27 @@ broken — it means the test cannot detect the bug, and every agent will score a
 free pass on it. This is not theoretical; see the `CONFIG_NDEBUG` note in
 `docker/instances/nuttx__nuttx-11889/Dockerfile` for a case where it happened.
 
+### Apache Mynewt
+
+Build and validate all three Mynewt instances through the same commands:
+
+```bash
+python scripts/build_bases.py --repo mynewt
+python scripts/build_instances.py --repo mynewt
+python scripts/validate_instance.py --repo mynewt --verbose
+```
+
+Run and grade an individual task through the unified harness:
+
+```bash
+python harness/run.py --instance mynewt__mynewt-3680 --model <configured-model> -v
+python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <configured-model>
+```
+
+Mynewt tests compile to host-native executables using `hw/bsp/native` and
+`compiler/sim`. They run on Docker's `linux/amd64` platform and do not use
+QEMU.
+
 ---
 
 ## Layout
@@ -183,4 +204,4 @@ look when something behaves differently across RTOSes:
   cleanup behaviour. Instance `metadata.json` overrides these per instance.
 - **`scripts/build_config.py`** — base images, build arguments, platform.
 
-Adding a fourth RTOS means adding an entry to each, not writing a new runner.
+Adding another RTOS means adding an entry to each, not writing a new harness.
