@@ -14,7 +14,9 @@ Three stages, deliberately separate:
     filter   free, instant -- cuts the pool to PRs that could become instances.
     enrich   costly, narrow-- full GitHub context for the survivors only:
                              diffs, review threads, linked issues, commits,
-                             and the complete test suite each PR touches.
+                             the complete test suite each PR touches, the
+                             pre-change source it modifies, and the board
+                             files of our platforms at its base commit.
 
 Enrich runs last because only ~15% of PRs survive filtering. Pulling the
 expensive context for the whole pool would be about six times the API calls
@@ -281,7 +283,99 @@ def fetch_suite(root: str, sha: str) -> dict:
     return out
 
 
-def fetch_full(number: int) -> dict | None:
+def fetch_file(path: str, sha: str) -> dict:
+    """One file at one commit: {size, content}. content is None for binary
+    files and for files over the contents API's 1 MB limit."""
+    meta = gh(f"repos/{REPO}/contents/{path}?ref={sha}")
+    if not isinstance(meta, dict) or meta.get("type") != "file":
+        return {"size": None, "content": None, "omitted": "not found at this commit"}
+    content = None
+    if meta.get("encoding") == "base64" and meta.get("content"):
+        try:
+            content = base64.b64decode(meta["content"]).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            content = None
+    return {"size": meta.get("size"), "content": content}
+
+
+# Budget for the pre-change source files, in characters: roughly 30K tokens.
+# Records are otherwise at most ~41K tokens, so this keeps the largest prompt
+# well inside the model's context while covering all but the largest fixes.
+BASE_SOURCE_BUDGET = 120_000
+
+
+def fetch_base_sources(files: list[dict], base: str) -> dict:
+    """The version before the PR of every non-test file it modifies, removes
+    or renames -- the code the fix is applied to.
+
+    The diff alone shows changed lines with three lines of context. Judging
+    whether a test detects the change often needs the function around it,
+    and without this the triage model goes and reads it piecemeal through
+    tools, one expensive round trip per chunk. Added files are skipped: they
+    have no before-state, and the diff already shows them whole.
+
+    Most-changed files first, until BASE_SOURCE_BUDGET is spent; any file
+    that does not fit is still listed, with the reason it was left out.
+    """
+    wanted = [f for f in files
+              if not f["filename"].startswith(NON_SOURCE_PREFIXES)
+              and f["status"] != "added"]
+    wanted.sort(key=lambda f: -(f["additions"] + f["deletions"]))
+    out, spent = {}, 0
+    for f in wanted:
+        path = f.get("previous_filename") or f["filename"]
+        got = fetch_file(path, base)
+        if got["content"] is None:
+            got.setdefault("omitted", "binary, or over the 1 MB API limit")
+        elif spent + len(got["content"]) > BASE_SOURCE_BUDGET:
+            got = {"size": got["size"], "content": None,
+                   "omitted": f"over the {BASE_SOURCE_BUDGET:,}-character budget "
+                              f"for pre-change sources; read it with a tool if needed"}
+        else:
+            spent += len(got["content"])
+        out[path] = got
+    return out
+
+
+# The boards we can run, as pr_triage.md names them, and the board file each
+# is defined by. Board folders moved over the years (boards/x86/qemu_x86/ ->
+# boards/qemu/x86/), so the file is found by name anywhere under boards/.
+OUR_PLATFORMS = {
+    "native_sim": "native_sim.yaml",
+    "native_sim/native/64": "native_sim_native_64.yaml",
+    "native_sim_64": "native_sim_64.yaml",
+    "qemu_x86": "qemu_x86.yaml",
+}
+
+
+def fetch_platforms(base: str) -> dict:
+    """Which of our platforms exist at the PR's base commit, and what each
+    declares it supports.
+
+    A suite that `depends_on` a capability the board does not declare never
+    runs there, and a board that does not exist yet cannot be built at all --
+    native_sim arrived in 2023, so a 2022 PR cannot use it. Neither fact is in
+    the PR itself. The board yaml is kept raw rather than parsed; it is short,
+    and the model reads it as written.
+    """
+    tree = gh(f"repos/{REPO}/git/trees/{base}:boards?recursive=1")
+    paths = [b["path"] for b in (tree or {}).get("tree", []) if b.get("type") == "blob"]
+    out = {}
+    for name, filename in OUR_PLATFORMS.items():
+        hits = [p for p in paths if p.rsplit("/", 1)[-1] == filename]
+        found = None
+        for p in hits:
+            f = fetch_file(f"boards/{p}", base)
+            if f["content"] and re.search(rf"(?m)^identifier:\s*{re.escape(name)}\s*$", f["content"]):
+                found = {"exists": True, "path": f"boards/{p}", "content": f["content"]}
+                break
+        out[name] = found or {"exists": False}
+    if tree and tree.get("truncated"):
+        out["_note"] = "boards/ listing was truncated by GitHub; absence may be unreliable"
+    return out
+
+
+def fetch_full(number: int, refresh: bool = False) -> dict | None:
     """Everything a triage model could want about one PR.
 
     This is what the model reads instead of the GitHub web page, so it has to
@@ -290,7 +384,7 @@ def fetch_full(number: int) -> dict | None:
     to judge whether a test detects a bug.
     """
     out = ENRICHED / f"{number}.json"
-    if out.exists():
+    if out.exists() and not refresh:
         return json.loads(out.read_text())
 
     pr = gh(f"repos/{REPO}/pulls/{number}")
@@ -349,7 +443,9 @@ def fetch_full(number: int) -> dict | None:
         "files": [
             {"filename": f["filename"], "status": f["status"],
              "additions": f["additions"], "deletions": f["deletions"],
-             "patch": f.get("patch")}
+             "patch": f.get("patch"),
+             **({"previous_filename": f["previous_filename"]}
+                if f.get("previous_filename") else {})}
             for f in files
         ],
         "files_truncated": len(files) >= 3000,
@@ -415,6 +511,12 @@ def fetch_full(number: int) -> dict | None:
         if root and root not in suites:
             suites[root] = {"config": marker, "files": fetch_suite(root, ref)}
     record["test_suites"] = suites
+
+    # Read at the base commit, not the merge: these describe the tree the
+    # agent is given, before the change.
+    if base_commit:
+        record["base_sources"] = fetch_base_sources(record["files"], base_commit)
+        record["platforms"] = fetch_platforms(base_commit)
 
     ENRICHED.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, indent=2))
@@ -489,6 +591,18 @@ def cmd_filter(_args) -> None:
 
 
 
+def describe_context(rec: dict) -> str:
+    """The two sections read at the base commit, for the progress line."""
+    if "base_sources" not in rec:
+        return "no base-commit context (enriched before it existed; use --refresh)"
+    src = rec["base_sources"]
+    kept = sum(1 for f in src.values() if f.get("content") is not None)
+    plats = [k for k, v in rec.get("platforms", {}).items()
+             if not k.startswith("_") and v.get("exists")]
+    return (f"{kept}/{len(src)} pre-change sources, "
+            f"platforms at base: {', '.join(plats) or 'none'}")
+
+
 def cmd_enrich(args) -> None:
     if args.pr:
         numbers = args.pr
@@ -502,7 +616,7 @@ def cmd_enrich(args) -> None:
     print(f"Enriching {len(numbers)} candidates with full GitHub context.\n")
     ok = 0
     for i, n in enumerate(numbers, 1):
-        rec = fetch_full(n)
+        rec = fetch_full(n, refresh=args.refresh)
         if not rec:
             print(f"  [{i}/{len(numbers)}] {n}  FAILED")
             continue
@@ -515,7 +629,8 @@ def cmd_enrich(args) -> None:
               f"{len(rec['commits'])} commits, "
               f"{len(rec['comments']) + len(rec['review_comments'])} comments, "
               f"{len(rec['linked_issues'])} linked issues, "
-              f"{len(suites)} suite(s)/{nfiles} files")
+              f"{len(suites)} suite(s)/{nfiles} files, "
+              f"{describe_context(rec)}")
 
     print(f"\n  {ok}/{len(numbers)} enriched  ->  "
           f"{ENRICHED.relative_to(REPO_ROOT)}")
@@ -539,6 +654,8 @@ def main() -> None:
                        help="full GitHub context for PRs that passed filtering")
     e.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
     e.add_argument("--limit", type=int, help="only the first N candidates")
+    e.add_argument("--refresh", action="store_true",
+                   help="re-fetch records that already exist instead of reusing them")
 
     args = p.parse_args()
     {"selftest": cmd_selftest, "fetch": cmd_fetch,

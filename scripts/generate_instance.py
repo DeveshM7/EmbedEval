@@ -67,17 +67,20 @@ def run(cmd: list[str], timeout: int = 300, check: bool = True):
 
 
 def ensure_clone() -> Path:
-    """A blobless mirror of Zephyr, reused across instances.
+    """A full bare mirror of Zephyr, reused across instances and by
+    triage_prs.py.
 
-    Blobless means all history metadata without file contents until asked for,
-    so any commit can be reached without a depth limit at a fraction of a full
-    clone. The same trick validate_instance.py uses.
+    Full rather than blobless. Blobless (all history, file contents fetched on
+    first use) is enough for building a test patch, but triage searches the
+    tree with git grep, and in a blobless clone that downloads every file under
+    the searched path one at a time -- so searches had to be capped at a few
+    hundred files, and the model spent its tool rounds guessing narrower
+    directories. A full clone is a few GB, once, and makes any search instant.
     """
     if not CLONE_CACHE.exists():
         CLONE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        print(f"  cloning {REPO_URL} (blobless, one-time) ...")
-        run(["git", "clone", "--filter=blob:none", "--no-checkout", "--bare",
-             f"{REPO_URL}.git", str(CLONE_CACHE)], timeout=1800)
+        print(f"  cloning {REPO_URL} (full, one-time; a few GB) ...")
+        run(["git", "clone", "--bare", f"{REPO_URL}.git", str(CLONE_CACHE)], timeout=3600)
     return CLONE_CACHE
 
 
