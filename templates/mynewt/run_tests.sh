@@ -54,6 +54,10 @@ def compile_diagnostic(output, source, api):
         # GCC reports later assignments from an undeclared function as int-to-
         # pointer conversions. Attribute only direct calls at this error's location.
         excerpt = re.match(rf"\s*{row}\s*\| (.*)$", lines[index + 1]) if index + 1 < len(lines) else None
+        assignment = re.fullmatch(
+            rf"\s*[A-Za-z_]\w*\s*(?P<operator>=)\s*{re.escape(api)}\s*\([^();]*\);\s*",
+            excerpt[1],
+        ) if excerpt else None
         if not (
             missing_function
             and re.fullmatch(
@@ -61,10 +65,9 @@ def compile_diagnostic(output, source, api):
                 r"makes pointer from integer without a cast \[-Werror=int-conversion\]",
                 message,
             )
-            and excerpt
-            and re.fullmatch(rf"\s*[A-Za-z_]\w*\s*=\s*{re.escape(api)}\s*\([^();]*\);\s*", excerpt[1])
+            and assignment
             and column
-            and excerpt[1][int(column) - 1:int(column)] == "="
+            and int(column) == assignment.start("operator") + 1
         ):
             return None
     return diagnostic

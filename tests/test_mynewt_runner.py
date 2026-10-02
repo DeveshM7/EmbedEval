@@ -112,6 +112,9 @@ class CompileDiagnosticTests(unittest.TestCase):
             CASCADE.splitlines()[0],
             CASCADE.replace(f"m1 = {API}(m1, m2);", f"m1 = 42; {API}(m1, m2);"),
             CASCADE.replace(f"{API}(m1, m2)", f"{API}(m1, m2) + other()"),
+            CASCADE.replace(":248:8:", ":248:33:").replace(
+                f"{API}(m1, m2)", f"{API}(m1 = 42, m2)"
+            ),
         ):
             with self.subTest(cascade=cascade):
                 code, result = run_runner(ERROR + "\n" + cascade, 1)
