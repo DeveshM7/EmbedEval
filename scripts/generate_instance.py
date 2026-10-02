@@ -280,8 +280,10 @@ def generate(
                 "git", "-C", str(clone), "diff", "--name-only",
                 f"{base_commit}..{test_commit}", "--", *test_files,
             ]).stdout.splitlines()
-            if not is_test_path(compile_test_source, project) or compile_test_source not in changed:
-                sys.exit("ERROR: compile_test_source must be a changed test-side path in the test patch")
+            if (Path(compile_test_source).suffix not in (".c", ".cc", ".cpp", ".cxx", ".C")
+                    or not is_test_path(compile_test_source, project)
+                    or compile_test_source not in changed):
+                sys.exit("ERROR: compile_test_source must be a changed test-side C/C++ source in the test patch")
             source = run([
                 "git", "-C", str(clone), "show", f"{test_commit}:{compile_test_source}",
             ]).stdout

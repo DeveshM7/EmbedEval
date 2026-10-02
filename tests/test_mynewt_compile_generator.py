@@ -19,6 +19,7 @@ import generate_instance
 
 TEST_SOURCE = "kernel/os/selftest/src/testcases/os_msys_test_cases.c"
 UNCHANGED_SOURCE = "kernel/os/selftest/src/testcases/other.c"
+NON_SOURCE = "kernel/os/selftest/pkg.yml"
 
 
 class MynewtCompileGeneratorTests(unittest.TestCase):
@@ -35,10 +36,13 @@ class MynewtCompileGeneratorTests(unittest.TestCase):
         test_file.parent.mkdir(parents=True)
         test_file.write_text("int old_test;\n")
         (source / UNCHANGED_SOURCE).write_text("int unchanged;\n")
+        config_file = source / NON_SOURCE
+        config_file.write_text("pkg.name: kernel/os/selftest\n")
         subprocess.run(["git", "-C", str(source), "add", "."], check=True)
         subprocess.run(["git", "-C", str(source), "commit", "-qm", "base"], check=True)
         base = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
         test_file.write_text("void test(void) { os_msys_get_free(); }\n")
+        config_file.write_text("pkg.name: kernel/os/selftest\n# os_msys_get_free\n")
         subprocess.run(["git", "-C", str(source), "commit", "-qam", "compile test"], check=True)
         test_commit = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
         clone = self.root / "mynewt.git"
@@ -54,7 +58,7 @@ class MynewtCompileGeneratorTests(unittest.TestCase):
             "base_commit": base,
             "head_commit": test_commit,
             "linked_issues": [{"number": 3234}],
-            "files": [{"filename": TEST_SOURCE}],
+            "files": [{"filename": TEST_SOURCE}, {"filename": NON_SOURCE}],
             "test_suites": {"kernel/os/selftest": {}},
         }
         (self.enriched / "3299.json").write_text(json.dumps(record))
@@ -118,6 +122,10 @@ class MynewtCompileGeneratorTests(unittest.TestCase):
     def test_rejects_source_outside_test_patch(self) -> None:
         with self.assertRaises(SystemExit):
             self.generate(compile_test_source=UNCHANGED_SOURCE)
+
+    def test_rejects_changed_non_source_with_missing_api_token(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.generate(compile_test_source=NON_SOURCE)
 
     def test_rejects_token_absent_from_test_source(self) -> None:
         with self.assertRaises(SystemExit):
