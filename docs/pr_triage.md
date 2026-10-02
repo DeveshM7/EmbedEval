@@ -216,7 +216,7 @@ more than their prose.
   `platform_allow`. If both are absent and either would work, choose
   `native_sim`, which is faster, where it exists.
 - `extra_configs` — Kconfig settings the test needs in order to detect the
-  change, as a list like `["CONFIG_RTIO_SUBMIT_SEM=n"]`. Usually empty.
+  change, as a list of `"CONFIG_<NAME>=<value>"` strings. Usually empty.
   Fill it when the suite's config file defines scenarios with `extra_configs`
   and the test you nominated only works under one of them — take that
   scenario's settings. This matters because the build reads `prj.conf` alone
