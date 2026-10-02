@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -35,14 +36,20 @@ def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
 
 
 def verify_structured_results(meta: dict, report: dict, phase: str) -> tuple[bool, str]:
-    expected_fail = set(meta["fail_to_pass"]) if phase == "before" else set()
-    expected_pass = set(meta["pass_to_pass"])
-    expected_exit_code = 1 if phase == "before" else 0
-    if phase == "after":
-        expected_pass |= set(meta["fail_to_pass"])
+    mode = meta.get("failure_mode", "runtime") if meta["project"] == "mynewt" else "runtime"
+    if phase == "baseline":
+        expected_fail = set()
+        expected_pass = set(meta["baseline_tests"])
+        expected_exit_code = 0
+    else:
+        expected_fail = set(meta["fail_to_pass"]) if phase == "before" else set()
+        expected_pass = set(meta["pass_to_pass"])
+        expected_exit_code = 1 if phase == "before" else 0
+        if phase == "after":
+            expected_pass |= set(meta["fail_to_pass"])
     actual_pass = set(report.get("passed", []))
     actual_fail = set(report.get("failed", []))
-    valid = (
+    inventory_valid = (
         report.get("build_ok") is True
         and actual_pass == expected_pass
         and actual_fail == expected_fail
@@ -51,6 +58,39 @@ def verify_structured_results(meta: dict, report: dict, phase: str) -> tuple[boo
         and not report.get("error")
         and report.get("exit_code") == expected_exit_code
     )
+    if phase == "baseline":
+        valid = (inventory_valid and report.get("failure_mode", "runtime") == "runtime"
+                 and report.get("compile_failure", False) is False
+                 and not report.get("diagnostic"))
+    elif mode == "compile" and phase == "before":
+        source = meta["compile_test_source"]
+        api = meta["missing_api"]
+        diagnostic = report.get("diagnostic")
+        match = (re.fullmatch(r"(.+?):\d+(?::\d+)?:\s*(?:fatal )?error:\s*(.*)", diagnostic)
+                 if isinstance(diagnostic, str) else None)
+        matched_diagnostic = bool(
+            match
+            and (match.group(1) == source or match.group(1).endswith("/" + source))
+            and re.search(rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", match.group(2))
+        )
+        valid = (
+            report.get("failure_mode") == "compile"
+            and report.get("build_ok") is False
+            and report.get("compile_failure") is True
+            and report.get("compile_test_source") == source
+            and report.get("missing_api") == api
+            and matched_diagnostic
+            and not actual_pass and not actual_fail
+            and not report.get("missing") and not report.get("unexpected")
+            and not report.get("error")
+            and report.get("exit_code") == 1
+        )
+    elif mode == "compile":
+        valid = (inventory_valid and report.get("failure_mode") == "compile"
+                 and report.get("compile_failure") is False
+                 and not report.get("diagnostic"))
+    else:
+        valid = inventory_valid
     detail = (
         f"expected pass={sorted(expected_pass)}, fail={sorted(expected_fail)}; "
         f"got pass={sorted(actual_pass)}, fail={sorted(actual_fail)}, "
@@ -130,11 +170,11 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             print(f" {time.time() - t0:.1f}s (rc={r.returncode})")
         return r
 
-    def structured_results_match(phase: str) -> bool:
+    def structured_results_match(phase: str, container_id: str = cid) -> bool:
         result_path = meta.get("structured_test_results")
         if not result_path:
             return True
-        result = sh(["docker", "exec", cid, "cat", result_path], timeout=30)
+        result = sh(["docker", "exec", container_id, "cat", result_path], timeout=30)
         if result.returncode != 0:
             print(f"  FAIL: could not read structured test results at {result_path}")
             return False
@@ -151,6 +191,32 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         return True
 
     try:
+        if meta["project"] == "mynewt":
+            print("\n  Baseline: expecting existing tests to PASS before test patch")
+            baseline_run = sh(run_args, timeout=120)
+            if baseline_run.returncode != 0:
+                print(f"  FAIL: baseline docker run failed: {baseline_run.stderr.strip()[:200]}")
+                return False
+            baseline_cid = baseline_run.stdout.strip()
+            try:
+                checkout = sh(["docker", "exec", baseline_cid, "bash", "-c",
+                               "cd /testbed && git checkout --detach HEAD^"], timeout=120,
+                              quiet=not verbose)
+                if checkout.returncode != 0:
+                    print(f"  FAIL: baseline checkout failed (rc={checkout.returncode})")
+                    return False
+                baseline = sh(["docker", "exec", baseline_cid, "bash", "-c",
+                               "cd /testbed && run_tests --baseline"], timeout=timeout,
+                              quiet=not verbose)
+                if not structured_results_match("baseline", baseline_cid):
+                    return False
+                if baseline.returncode != 0:
+                    print(f"  FAIL: expected baseline run_tests exit 0, got {baseline.returncode}")
+                    return False
+                print("  ok: baseline tests passed")
+            finally:
+                sh(["docker", "rm", "-f", baseline_cid], timeout=60)
+
         # --- Step 1: tests must FAIL on the unfixed code -------------------
         print("\n  Step 1: expecting tests to FAIL at the base commit")
         dexec(f"cd /testbed && {build_cmd}", 900, "build")
