@@ -12,10 +12,17 @@ from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "templates/mynewt/run_tests.sh"
-SOURCE = "kernel/os/selftest/src/testcases/os_msys_test_cases.c"
-API = "os_msys_get_free"
+SOURCE = "kernel/os/selftest/src/testcases/os_mbuf_test_pack_chains.c"
+API = "os_mbuf_pack_chains"
 ERROR = (
-    f"{SOURCE}:41:3: error: implicit declaration of function '{API}'"
+    f"{SOURCE}:204:5: error: implicit declaration of function ‘{API}’; "
+    "did you mean ‘os_mbuf_test_pack_chains’? [-Werror=implicit-function-declaration]"
+)
+CASCADE = (
+    f"{SOURCE}:248:8: error: assignment to ‘struct os_mbuf *’ from ‘int’ "
+    "makes pointer from integer without a cast [-Werror=int-conversion]\n"
+    f"  248 |     m1 = {API}(m1, m2);\n"
+    "      |        ^\n"
 )
 
 
@@ -31,7 +38,7 @@ def runner_python():
     return SCRIPT.read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
 
-def run_runner(build_output, build_code, *, baseline=False, timeout=False, runtime_output="[pass] case_a\n"):
+def run_runner(build_output, build_code, *, baseline=False, timeout=False, runtime_output="[pass] case_a\n", failure_mode="compile"):
     python = runner_python()
     metadata = {
         "failure_mode": "compile",
@@ -42,6 +49,10 @@ def run_runner(build_output, build_code, *, baseline=False, timeout=False, runti
         "fail_to_pass": ["case_a"],
         "pass_to_pass": [],
     }
+    if failure_mode is None:
+        metadata.pop("failure_mode")
+    else:
+        metadata["failure_mode"] = failure_mode
     saved = {}
 
     def run(command, **kwargs):
@@ -79,6 +90,45 @@ class CompileDiagnosticTests(unittest.TestCase):
 
     def test_matches_expected_source_and_api_error(self):
         self.assertEqual(self.diagnostic(f"compiling\n{ERROR}\n"), ERROR)
+
+    def test_accepts_observed_missing_function_conversion_cascades(self):
+        output = ERROR + "\n" + "".join(
+            CASCADE.replace(":248:", f":{line}:").replace("248 |", f"{line} |")
+            for line in (248, 281, 319, 354)
+        )
+        self.assertEqual(self.diagnostic(output), ERROR)
+        code, result = run_runner(output, 1)
+        self.assertEqual(code, 1)
+        self.assertTrue(result["compile_failure"])
+        self.assertEqual(result["diagnostic"], ERROR)
+
+    def test_rejects_unattributed_same_source_conversion(self):
+        for cascade in (
+            CASCADE.replace(f"{API}(m1, m2)", "42"),
+            CASCADE.replace(API, API + "_other"),
+            CASCADE.replace("248 |", "249 |"),
+            CASCADE.replace(":248:8:", ":248:9:"),
+            CASCADE.replace(":248:8:", ":248:"),
+            CASCADE.splitlines()[0],
+            CASCADE.replace(f"m1 = {API}(m1, m2);", f"m1 = 42; {API}(m1, m2);"),
+            CASCADE.replace(f"{API}(m1, m2)", f"{API}(m1, m2) + other()"),
+        ):
+            with self.subTest(cascade=cascade):
+                code, result = run_runner(ERROR + "\n" + cascade, 1)
+                self.assertEqual(code, 3)
+                self.assertFalse(result["compile_failure"])
+
+    def test_rejects_same_source_nonconversion_error_even_with_api_excerpt(self):
+        output = ERROR + "\n" + CASCADE.replace(
+            "assignment to ‘struct os_mbuf *’ from ‘int’ "
+            "makes pointer from integer without a cast [-Werror=int-conversion]",
+            "expected ';' before '}' token",
+        )
+        self.assertIsNone(self.diagnostic(output))
+
+    def test_conversion_requires_missing_function_primary_diagnostic(self):
+        self.assertIsNone(self.diagnostic(CASCADE))
+        self.assertIsNone(self.diagnostic(f"{SOURCE}:204:5: error: #error {API}\n" + CASCADE))
 
     def test_rejects_warning_for_expected_source_and_api(self):
         warning = ERROR.replace("error:", "warning:")
@@ -148,6 +198,28 @@ class CompileDiagnosticTests(unittest.TestCase):
         self.assertEqual(result["failure_mode"], "runtime")
         self.assertFalse(result["compile_failure"])
         self.assertIsNone(result["diagnostic"])
+
+    def test_omitted_mode_defaults_to_runtime_for_pass_and_named_failure(self):
+        for output, expected_code, passed, failed in (
+            ("[pass] case_a\n", 0, ["case_a"], []),
+            ("[FAIL] case_a\n", 1, [], ["case_a"]),
+        ):
+            with self.subTest(output=output):
+                code, result = run_runner(
+                    "Executing test: selftest", 0,
+                    runtime_output=output, failure_mode=None,
+                )
+                self.assertEqual(code, expected_code)
+                self.assertEqual(result["failure_mode"], "runtime")
+                self.assertTrue(result["build_ok"])
+                self.assertEqual(result["passed"], passed)
+                self.assertEqual(result["failed"], failed)
+
+    def test_omitted_mode_rejects_compile_failure(self):
+        code, result = run_runner(ERROR, 1, failure_mode=None)
+        self.assertEqual(code, 3)
+        self.assertEqual(result["failure_mode"], "runtime")
+        self.assertFalse(result["compile_failure"])
 
     def test_unrelated_build_failure_returns_three_without_evidence(self):
         code, result = run_runner(ERROR.replace(SOURCE, "other.c"), 1)

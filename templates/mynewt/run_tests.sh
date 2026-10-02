@@ -34,19 +34,39 @@ def compile_diagnostic(output, source, api):
     if re.search(r"internal compiler error", output, re.IGNORECASE):
         return None
     diagnostic = None
-    for line in output.splitlines():
+    missing_function = False
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
         if not re.search(r"(?:fatal )?error:", line):
             continue
-        match = re.match(r"(.+?):\d+(?::\d+)?:\s*(?:fatal )?error:\s*(.*)", line)
+        match = re.match(r"(.+?):(\d+)(?::(\d+))?:\s*(?:fatal )?error:\s*(.*)", line)
         if not match:
             return None
-        path, message = match.groups()
-        if not (path == source or path.endswith("/" + source)) or not re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", message
+        path, row, column, message = match.groups()
+        if not (path == source or path.endswith("/" + source)):
+            return None
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", message):
+            if diagnostic is None:
+                diagnostic = line
+            if re.search(rf"implicit declaration of function ['‘]{re.escape(api)}['’]", message):
+                missing_function = True
+            continue
+        # GCC reports later assignments from an undeclared function as int-to-
+        # pointer conversions. Attribute only direct calls at this error's location.
+        excerpt = re.match(rf"\s*{row}\s*\| (.*)$", lines[index + 1]) if index + 1 < len(lines) else None
+        if not (
+            missing_function
+            and re.fullmatch(
+                r"assignment to ['‘][^'’]+\*['’] from ['‘]int['’] "
+                r"makes pointer from integer without a cast \[-Werror=int-conversion\]",
+                message,
+            )
+            and excerpt
+            and re.fullmatch(rf"\s*[A-Za-z_]\w*\s*=\s*{re.escape(api)}\s*\([^();]*\);\s*", excerpt[1])
+            and column
+            and excerpt[1][int(column) - 1:int(column)] == "="
         ):
             return None
-        if diagnostic is None:
-            diagnostic = line
     return diagnostic
 
 

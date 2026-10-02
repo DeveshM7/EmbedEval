@@ -194,9 +194,11 @@ The default `failure_mode: "runtime"` requires a successful build and the
 exact named `fail_to_pass` failures before the fix. For
 `failure_mode: "compile"`, declare `compile_test_source` (a changed selftest
 C/C++ source in the test patch) and `missing_api` (the API token used there).
-Every pre-fix compiler error must name that source and API; an unrelated error,
-compiler crash, or timeout is not regression evidence. This strict rule also
-rejects cascading errors that omit the API token. After the fix, compile
+Every pre-fix compiler error must name that source and API, except GCC
+int-to-pointer assignment cascades following an implicit-function declaration:
+each cascade must include a matching source line and column showing a direct
+assignment from the missing API call. An unrelated error, compiler crash, or
+timeout is not regression evidence. After the fix, compile
 mode still requires every `fail_to_pass` and `pass_to_pass` testcase to execute
 and pass, with no missing or unexpected cases. Build/runtime timeouts return
 `2`; other unqualified build or inventory failures return `3`.
