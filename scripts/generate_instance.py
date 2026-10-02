@@ -264,6 +264,29 @@ def generate(
     patch = build_test_patch(base_commit, test_commit, project, test_files)
     if not patch.strip():
         sys.exit(f"ERROR: no test-file diff for {pr}; instance would have no tests")
+    if project == "mynewt":
+        failure_mode = triage.get("failure_mode", "runtime")
+        if failure_mode not in ("runtime", "compile"):
+            sys.exit("ERROR: Mynewt failure_mode must be 'runtime' or 'compile'")
+        compile_test_source = triage.get("compile_test_source")
+        missing_api = triage.get("missing_api")
+        if failure_mode == "compile":
+            if not isinstance(compile_test_source, str) or not compile_test_source.strip():
+                sys.exit("ERROR: compile mode requires compile_test_source")
+            if not isinstance(missing_api, str) or not missing_api.strip():
+                sys.exit("ERROR: compile mode requires missing_api")
+            clone = ensure_clone(project)
+            changed = run([
+                "git", "-C", str(clone), "diff", "--name-only",
+                f"{base_commit}..{test_commit}", "--", *test_files,
+            ]).stdout.splitlines()
+            if not is_test_path(compile_test_source, project) or compile_test_source not in changed:
+                sys.exit("ERROR: compile_test_source must be a changed test-side path in the test patch")
+            source = run([
+                "git", "-C", str(clone), "show", f"{test_commit}:{compile_test_source}",
+            ]).stdout
+            if missing_api not in source:
+                sys.exit("ERROR: missing_api is absent from compile_test_source")
     (inst / "test_patch.diff").write_text(patch)
     check_applies(patch, base_commit, inst, project)
 
@@ -325,6 +348,9 @@ def generate(
     else:
         meta.update({
             "issue_url": f"https://github.com/apache/mynewt-core/issues/{linked[0]['number']}",
+            "failure_mode": failure_mode,
+            "compile_test_source": compile_test_source,
+            "missing_api": missing_api,
             "docker_platform": "linux/amd64",
             "structured_test_results": "/tmp/mynewt-result.json",
             "baseline_tests": triage["baseline_tests"],

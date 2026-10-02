@@ -64,25 +64,30 @@ test requires a physical board, MCU-specific peripheral, radio, sensor,
 external device, or another simulator. A package being named `selftest` is not
 enough if its actual dependencies require hardware.
 
-The generated runner executes exactly one package using:
+The generated runner builds exactly one package using:
 
 ```bash
 newt test @apache-mynewt-core/<test_path>
 ```
 
-It then executes the produced ELF directly and reads the Mynewt testutil
-`[pass] suite/test` and `[FAIL] suite/test` lines. Missing, unexpected, or
-crashed testcases invalidate the instance.
+For `failure_mode: "runtime"`, it executes the produced ELF directly and reads
+the Mynewt testutil `[pass] suite/test` and `[FAIL] suite/test` lines. Missing,
+unexpected, or crashed testcases invalidate the instance. For
+`failure_mode: "compile"`, the unfixed base must fail to compile because a
+changed selftest source refers to a missing production API. The fixed revision
+must build, execute, and produce the complete expected testcase inventory.
 
 ---
 
 ## Accept when all of these hold
 
-1. **A changed testcase detects the production change.** Name the assertion,
-   represented by a named `[FAIL] suite/test` result without the fix and a
-   named `[pass] suite/test` result with it. Build-only failures, crashes, and
-   missing testcase results are invalid because the runner classifies them as
-   infrastructure errors rather than regression failures.
+1. **A changed testcase detects the production change.** For runtime mode,
+   name the assertion represented by a named `[FAIL] suite/test` result without
+   the fix and a named `[pass] suite/test` result with it. For compile mode,
+   identify a changed selftest source and the literal missing API token or
+   header it references. The unfixed base must fail compilation for that
+   signature; the fixed revision must build and pass the named tests. Other
+   build failures, crashes, and missing testcase results are invalid.
 2. **The PR has an originating issue.** `linked_issues` must contain the issue
    that reports or requests the behavior. A PR, review comment, or unrelated
    issue is not a substitute.
@@ -118,8 +123,10 @@ the change does not have to be labeled a bug fix.
 - The test merely changes because the old test was flaky, overly strict, or
   wrong.
 - The only plausible execution path is QEMU or another unsupported simulator.
-- The only detecting oracle is a build failure, crash, missing testcase, or
-  incomplete result inventory rather than a clean named testcase failure.
+- A build failure lacks a changed test-side source containing the missing API
+  token or header, or the fixed revision cannot run the complete test inventory.
+- A runtime-mode test crashes, omits testcase results, or has an incomplete
+  result inventory rather than a clean named testcase failure.
 - Test and production changes overlap in a way that cannot produce a clean
   test-only patch.
 
@@ -136,6 +143,7 @@ Return exactly one JSON object, with no prose outside it:
   "confidence": "high",
   "change_type": "fix",
   "platform": "native",
+  "failure_mode": "runtime",
   "problem_statement": "JSON string values that do not fit in the destination including the terminating NUL must return JSON_ERR_STRLONG. Attribute names exactly JSON_ATTR_MAX characters long must be accepted for lookup and return JSON_ERR_BADATTR when unknown; longer names must return JSON_ERR_ATTRLEN.",
   "fail_to_pass": [
     "test_json_suite/test_json_decode_errors"
@@ -154,6 +162,22 @@ Return exactly one JSON object, with no prose outside it:
 }
 ```
 
+A compile-mode verdict uses the same fields, with these values in addition to
+its own issue, test inventory, and problem statement:
+
+```json
+{
+  "failure_mode": "compile",
+  "compile_test_source": "kernel/os/selftest/src/testcases/os_msys_test_cases.c",
+  "missing_api": "os_msys_get_free",
+  "fail_to_pass": ["os_msys_test_suite/os_msys_get_free"]
+}
+```
+
+Here `fail_to_pass` names tests expected to pass after the missing API is
+implemented. The unfixed revision does not produce named test results because
+compilation stops first.
+
 Field rules:
 
 - `verdict`: `accept` or `reject`. A rejection may omit every later field
@@ -161,11 +185,19 @@ Field rules:
 - `confidence`: `high`, `medium`, or `low`.
 - `change_type`: `fix` or `feature`.
 - `platform`: exactly `native`. Never output a QEMU board.
+- `failure_mode`: `runtime` or `compile`; omitted means `runtime` for Mynewt.
+  Choose `compile` only when a changed selftest source refers to a missing
+  production API and the unfixed build fails for that signature.
+- `compile_test_source`: required for compile mode. Path of the changed
+  test-side source in the generated test-only patch.
+- `missing_api`: required for compile mode. Literal missing API token or header
+  appearing in `compile_test_source` at `test_commit`.
 - `problem_statement`: describe the observed problem and expected behavior.
   Do not reveal the upstream patch, implementation, function to edit, or exact
   source location.
 - `fail_to_pass`: full `suite/testcase` identifiers for changed tests that fail
-  before the fix and pass after it.
+  before the fix and pass after it in runtime mode. In compile mode, these are
+  the changed tests expected to pass after the API is implemented.
 - `pass_to_pass`: every other testcase expected when the patched selftest
   package runs. This must include unchanged passing cases and any newly added
   passing cases.
