@@ -66,15 +66,18 @@ def gold_patch(meta: dict, workdir: Path) -> str:
     Fetch the upstream fix as a diff, restricted to the files the fix should
     touch so test changes never leak in.
 
-    Zephyr and RIOT are single-repo (base_commit..fix_commit). NuttX is two
-    repos and the fix lives in the kernel one, between kernel_base_commit and
-    kernel_merge_commit.
+    Zephyr, RIOT, and Mynewt are single-repo. Their fix range starts at
+    gold_base_commit when test-only support landed before the production fix,
+    otherwise at base_commit. NuttX is two repos and the fix lives in the
+    kernel one, between kernel_base_commit and kernel_merge_commit.
     """
     project = meta["project"]
     if project == "nuttx":
         repo, base, fix = meta["kernel_repo"], meta["kernel_base_commit"], meta["kernel_merge_commit"]
     else:
-        repo, base, fix = meta["repo"], meta["base_commit"], meta["fix_commit"]
+        repo = meta["repo"]
+        base = meta.get("gold_base_commit", meta["base_commit"])
+        fix = meta["fix_commit"]
 
     clone = workdir / "repo"
     print(f"  cloning {repo} (blobless) ...")

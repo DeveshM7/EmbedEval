@@ -184,6 +184,44 @@ Mynewt tests compile to host-native executables using `hw/bsp/native` and
 `compiler/sim`. They run on Docker's `linux/amd64` platform and do not use
 QEMU.
 
+### Finding and generating PR instances
+
+The candidate workflow currently supports Zephyr and Apache Mynewt. Zephyr is
+the default; pass `--repo mynewt` for the native-only Mynewt path:
+
+```bash
+# Confirm the hard filters retain every hand-validated instance.
+python scripts/filter_candidates.py selftest --repo mynewt
+
+# Fetch a date range, apply free hard filters, then collect full context only
+# for the surviving PRs.
+python scripts/filter_candidates.py fetch --repo mynewt --since 2024-01-01 --until 2024-12-31
+python scripts/filter_candidates.py filter --repo mynewt
+python scripts/filter_candidates.py enrich --repo mynewt
+```
+
+Give each JSON record under `candidates/mynewt/enriched/` to the triage model
+with [`docs/mynewt_pr_triage.md`](docs/mynewt_pr_triage.md). Save an accepted
+verdict as JSON, then generate the four instance files:
+
+```bash
+python scripts/generate_instance.py \
+    --repo mynewt \
+    --pr 3299 \
+    --triage triage/mynewt-3299.json \
+    --tag-suffix=-gen
+```
+
+Generated instances go under `generated/`, never directly into
+`docker/instances/`. Build and validate one in isolation before promoting it:
+
+```bash
+EMBEDEVAL_INSTANCES_DIR="$PWD/generated" \
+    python scripts/build_instances.py --instance mynewt__mynewt-3299
+EMBEDEVAL_INSTANCES_DIR="$PWD/generated" \
+    python scripts/validate_instance.py mynewt__mynewt-3299 --verbose
+```
+
 ---
 
 ## Layout

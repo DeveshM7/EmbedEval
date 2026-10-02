@@ -135,7 +135,9 @@ def check_api_key(model_name: str) -> None:
 
 def build_prompts(meta: dict) -> tuple[str, str]:
     cfg = projects.config(meta["project"])
-    protected = " or ".join(f"`{p}`" for p in cfg["protected_paths"])
+    protected = " or ".join(
+        f"`{p}`" for p in projects.setting(meta, "protected_paths")
+    )
     warn = cfg["extra_warnings"]
     system = SYSTEM_TEMPLATE.format(
         label=cfg["label"], orientation=cfg["orientation"]
@@ -299,7 +301,7 @@ def capture_patch(env, meta: dict) -> tuple[str, list[str]]:
     Protected paths are excluded from the patch but reported, so test tampering
     is visible rather than quietly dropped.
     """
-    protected = projects.config(meta["project"])["protected_paths"]
+    protected = projects.setting(meta, "protected_paths")
     excludes = " ".join(f"':(exclude){p}'" for p in protected)
     patch = env.execute({"command": f"cd /testbed && git diff -- . {excludes}"}).get("output", "")
     touched = env.execute(
