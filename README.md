@@ -184,6 +184,34 @@ Mynewt tests compile to host-native executables using `hw/bsp/native` and
 `compiler/sim`. They run on Docker's `linux/amd64` platform and do not use
 QEMU.
 
+Mynewt validation first runs the unpatched baseline in a separate container
+at the parent of the benchmark test snapshot. Its exact `baseline_tests`
+inventory must pass with exit `0`. The test-patched snapshot must then fail
+with exit `1`, and the production fix must make the complete expected test
+inventory pass with exit `0`.
+
+The default `failure_mode: "runtime"` requires a successful build and the
+exact named `fail_to_pass` failures before the fix. For
+`failure_mode: "compile"`, declare `compile_test_source` (a changed selftest
+C/C++ source in the test patch) and `missing_api` (the API token used there).
+Every pre-fix compiler error must name that source and API; an unrelated error,
+compiler crash, or timeout is not regression evidence. This strict rule also
+rejects cascading errors that omit the API token. After the fix, compile
+mode still requires every `fail_to_pass` and `pass_to_pass` testcase to execute
+and pass, with no missing or unexpected cases. Build/runtime timeouts return
+`2`; other unqualified build or inventory failures return `3`.
+
+Both modes retain the same eligibility requirements: an originating issue,
+a merged PR that changes an executable native selftest, and an exact test-only
+patch. If test support lives outside `selftest`, inspect both
+`base_commit..test_commit` and `test_commit..head_commit`, declare
+`test_support_paths`, and verify that the support does not contain the
+production fix. Reject candidates whose separation cannot be established.
+
+No additional compile-mode benchmark candidate has been verified. The three
+listed Mynewt instances remain runtime tasks; compile-mode support alone does
+not establish a new eligible benchmark instance.
+
 ### Finding and generating PR instances
 
 The candidate workflow currently supports Zephyr and Apache Mynewt. Zephyr is
