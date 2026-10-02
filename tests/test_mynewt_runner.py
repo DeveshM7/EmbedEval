@@ -95,6 +95,18 @@ class CompileDiagnosticTests(unittest.TestCase):
     def test_rejects_error_for_another_api(self):
         self.assertIsNone(self.diagnostic(ERROR.replace(API, "os_msys_get_used")))
 
+    def test_rejects_matching_error_when_another_file_has_independent_error(self):
+        output = ERROR + "\nother.c:7:2: error: unknown type name 'thing'\n"
+        self.assertIsNone(self.diagnostic(output))
+        code, result = run_runner(output, 1)
+        self.assertEqual(code, 3)
+        self.assertFalse(result["compile_failure"])
+
+    def test_rejects_api_only_in_source_filename(self):
+        source = f"kernel/os/selftest/src/testcases/{API}.c"
+        line = source + ":41:3: error: expected ';' before '}' token"
+        self.assertIsNone(self.classifiers["compile_diagnostic"](line, source, API))
+
     def test_rejects_longer_api_token(self):
         self.assertIsNone(self.diagnostic(ERROR.replace(API, API + "_v2")))
 

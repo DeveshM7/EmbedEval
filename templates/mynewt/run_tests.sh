@@ -33,16 +33,21 @@ def compile_diagnostic(output, source, api):
         return None
     if re.search(r"internal compiler error", output, re.IGNORECASE):
         return None
+    diagnostic = None
     for line in output.splitlines():
-        match = re.match(r"(.+?):\d+(?::\d+)?:\s*(?:fatal )?error:", line)
-        if not match:
+        if not re.search(r"(?:fatal )?error:", line):
             continue
-        path = match.group(1)
-        if (path == source or path.endswith("/" + source)) and re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", line
+        match = re.match(r"(.+?):\d+(?::\d+)?:\s*(?:fatal )?error:\s*(.*)", line)
+        if not match:
+            return None
+        path, message = match.groups()
+        if not (path == source or path.endswith("/" + source)) or not re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", message
         ):
-            return line
-    return None
+            return None
+        if diagnostic is None:
+            diagnostic = line
+    return diagnostic
 
 
 parser = argparse.ArgumentParser()
