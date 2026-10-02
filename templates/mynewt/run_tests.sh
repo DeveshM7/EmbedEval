@@ -28,16 +28,46 @@ def classify(output, returncode, expected):
     return (0 if returncode == 0 else 3), result
 
 
+def compile_diagnostic(output, source, api):
+    if not source or not api:
+        return None
+    if re.search(r"internal compiler error", output, re.IGNORECASE):
+        return None
+    for line in output.splitlines():
+        match = re.match(r"(.+?):\d+(?::\d+)?:\s*(?:fatal )?error:", line)
+        if not match:
+            continue
+        path = match.group(1)
+        if (path == source or path.endswith("/" + source)) and re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", line
+        ):
+            return line
+    return None
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--baseline", action="store_true")
 args = parser.parse_args()
 meta = json.loads(Path("/opt/benchmark/metadata.json").read_text())
+mode = "runtime" if args.baseline else meta.get("failure_mode", "runtime")
 expected = (
     meta["baseline_tests"]
     if args.baseline
     else meta["fail_to_pass"] + meta["pass_to_pass"]
 )
-result = {"build_ok": False, "passed": [], "failed": [], "error": None}
+result = {
+    "failure_mode": mode,
+    "build_ok": False,
+    "compile_failure": False,
+    "compile_test_source": meta.get("compile_test_source"),
+    "missing_api": meta.get("missing_api"),
+    "diagnostic": None,
+    "passed": [],
+    "failed": [],
+    "missing": [],
+    "unexpected": [],
+    "error": None,
+}
 code = 3
 try:
     # Fresh build and runtime directories prevent stale binaries or simulated flash.
@@ -52,7 +82,17 @@ try:
     output = build.stdout + build.stderr
     print(output, flush=True)
     binaries = list(Path("/project/bin").rglob("*.elf"))
-    if (
+    if mode == "compile" and build.returncode > 0 and "Executing test: " not in output:
+        diagnostic = compile_diagnostic(
+            output, meta.get("compile_test_source"), meta.get("missing_api")
+        )
+        if diagnostic is not None:
+            result["compile_failure"] = True
+            result["diagnostic"] = diagnostic
+            code = 1
+        else:
+            result["error"] = "build failed without expected compile diagnostic"
+    elif (
         "Executing test: " not in output
         or len(binaries) != 1
         or build.returncode not in (0, 1)
