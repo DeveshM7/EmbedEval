@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""Run NuttX PR-pair triage against a served open-weight model and score it.
+
+    python scripts/triage_nuttx_prs.py run --profile qwen38-nvfp4 --gold
+    python scripts/triage_nuttx_prs.py run --profile qwen38-nvfp4 --case apps-2327
+    python scripts/triage_nuttx_prs.py run --profile qwen38-nvfp4 --apps-pr 2327 --kernel-pr 11889
+    python scripts/triage_nuttx_prs.py run --profile qwen38-nvfp4 --pairs-file candidates/nuttx/pairs.jsonl
+    python scripts/triage_nuttx_prs.py eval triage/nuttx_runs/<run>
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as futures
+import hashlib
+import json
+import re
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
+
+from nuttx_candidates import KERNEL, APPS, ENRICHED, enrich, full_pr, source_at
+
+ROOT = Path(__file__).resolve().parent.parent
+PROMPT = ROOT / "docs" / "nuttx_pr_triage.md"
+GOLD = ROOT / "triage" / "nuttx_gold.json"
+MODELS = ROOT / "triage" / "models.json"
+RUNS = ROOT / "triage" / "nuttx_runs"
+TOOLS = [{"type": "function", "function": {
+    "name": "read_file",
+    "description": "Read a repository file at this PR's pinned base or head commit.",
+    "parameters": {"type": "object", "properties": {
+        "repo": {"type": "string", "enum": ["apps", "kernel"]},
+        "kernel_pr": {"type": "integer", "description": "Required if several kernel PRs are candidates"},
+        "path": {"type": "string", "description": "Repository-relative file path"},
+        "ref": {"type": "string", "enum": ["base", "head"]}},
+        "required": ["repo", "path", "ref"]}}}]
+MAX_TOOL_ROUNDS = 6
+MAX_REPAIRS = 2
+
+
+def load_gold() -> dict[str, str]:
+    data = json.loads(GOLD.read_text())
+    return {**{case: "accept" for case in data["accept"]},
+            **{case: "reject" for case in data["reject"]}}
+
+
+def pair_cases(path: Path) -> list[str]:
+    cases = []
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            apps, kernel = row["apps_pr"], row["kernel_pr"]
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError(f"{path}: line {number}: invalid pair row") from exc
+        if any(type(value) is not int or value <= 0 for value in (apps, kernel)):
+            raise ValueError(f"{path}: line {number}: PR numbers must be positive integers")
+        case = f"apps-{apps}-kernel-{kernel}"
+        if row.get("case", case) != case:
+            raise ValueError(f"{path}: line {number}: case does not match PR numbers")
+        cases.append(case)
+    if not cases:
+        raise ValueError(f"{path}: no PR pairs")
+    return list(dict.fromkeys(cases))
+
+
+def load_record(case: str) -> dict:
+    pair = re.fullmatch(r"apps-(\d+)-kernel-(\d+)", case)
+    if pair:
+        return enrich(int(pair[1]), kernel_number=int(pair[2]))
+    path = ENRICHED / f"{case}.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    kind, _, number = case.partition("-")
+    if not number.isdecimal() or kind not in ("apps", "kernel"):
+        raise ValueError(f"invalid case ID: {case}")
+    if kind == "apps":
+        old_path = ENRICHED / f"{number}.json"
+        if not old_path.exists():
+            raise FileNotFoundError(f"{old_path}: run nuttx_candidates.py enrich --pr {number}")
+        return json.loads(old_path.read_text())
+    # Kernel-only negatives do not enter the apps-first discovery stream.
+    record = {"project": "nuttx", "apps": None,
+              "kernel_candidates": [full_pr(KERNEL, int(number))],
+              "test_contents": {}, "pairing_source": "kernel_only"}
+    ENRICHED.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2) + "\n")
+    return record
+
+
+def render_record(case: str, record: dict, field_limit: int = 8000) -> str:
+    """Bound individual blobs while preserving both PRs and every changed path."""
+    def bounded(value):
+        if isinstance(value, str):
+            return (value[:field_limit] + f"\n[truncated {len(value) - field_limit} characters]"
+                    if len(value) > field_limit else value)
+        if isinstance(value, list):
+            return [bounded(item) for item in value]
+        if isinstance(value, dict):
+            return {key: bounded(item) for key, item in value.items()}
+        return value
+
+    # These API fields are redundant with changed paths and comments, and can
+    # contain long user profile payloads unrelated to the PR.
+    def pr_view(pr):
+        if pr is None:
+            return None
+        keys = ("repo", "number", "url", "title", "body", "merged_at", "labels",
+                "base_commit", "head_commit", "merge_commit_sha", "commits",
+                "files", "files_truncated", "linked_issues", "base_sources",
+                "sim_nsh_defconfig")
+        view = {key: pr[key] for key in keys if key in pr}
+        for key in ("comments", "reviews", "review_comments"):
+            view[key] = [{field: item.get(field) for field in
+                          ("body", "state", "path", "diff_hunk") if item.get(field)}
+                         for item in pr.get(key, [])[:30]]
+        return bounded(view)
+
+    data = {"case": case, "pairing_source": record.get("pairing_source"),
+            "apps": pr_view(record.get("apps")),
+            "kernel_candidates": [pr_view(pr) for pr in record.get("kernel_candidates", [])],
+            "changed_test_contents": bounded(record.get("test_contents") or {})}
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_verdict(content: str | None) -> dict | None:
+    if not content:
+        return None
+    start, end = content.find("{"), content.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        value = json.loads(content[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
+    if verdict is None:
+        return ["reply must contain one JSON object"]
+    issues = []
+    if verdict.get("case") != case:
+        issues.append(f"case must be {case}")
+    if verdict.get("verdict") not in ("accept", "reject"):
+        issues.append("verdict must be accept or reject")
+    if not str(verdict.get("reason") or "").strip():
+        issues.append("reason is required")
+    if verdict.get("verdict") != "accept":
+        return issues
+    apps = record.get("apps")
+    kernels = {pr["number"]: pr for pr in record.get("kernel_candidates", [])}
+    selected = verdict.get("kernel_pr")
+    kernel = kernels.get(selected) if isinstance(selected, int) else None
+    if apps is None:
+        issues.append("accept requires an apps test PR")
+    if kernel is None:
+        issues.append("kernel_pr must select a supplied kernel candidate")
+    for name, pr in (("apps", apps), ("kernel", kernel)):
+        if pr and not pr.get("merged_at"):
+            issues.append(f"{name} PR must be merged")
+        if pr and (not pr.get("base_commit") or not pr.get("head_commit")):
+            issues.append(f"{name} PR requires base and head commits")
+    for field, pr in (("test_paths", apps), ("fix_paths", kernel)):
+        paths = verdict.get(field)
+        if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
+            issues.append(f"{field} must be a non-empty list of paths")
+            continue
+        changed = {f["filename"] for f in (pr or {}).get("files", [])}
+        missing = [p for p in paths if p not in changed]
+        if missing:
+            issues.append(f"{field} must name changed paths in the correct PR: {missing}")
+    if not isinstance(verdict.get("platform"), str) or not re.fullmatch(
+            r"(?:sim:nsh|qemu-[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+)", verdict.get("platform") or ""):
+        issues.append("platform must be sim:nsh or a concrete qemu-<board>:<config>")
+    if verdict.get("evidence_status") not in ("observed", "needs_validation"):
+        issues.append("evidence_status must be observed or needs_validation")
+    elif verdict["evidence_status"] == "observed" and not record.get("validation"):
+        issues.append("no validation trace was supplied; use needs_validation")
+    if "issue_url" not in verdict:
+        issues.append("issue_url is required (null if unknown)")
+    if verdict.get("confidence") not in ("high", "medium", "low"):
+        issues.append("confidence must be high, medium, or low")
+    if verdict.get("change_type") not in ("fix", "feature"):
+        issues.append("change_type must be fix or feature")
+    for field in ("problem_statement", "detecting_test"):
+        if not isinstance(verdict.get(field), str) or not verdict[field].strip():
+            issues.append(f"{field} is required")
+    names = verdict.get("fail_to_pass")
+    if not isinstance(names, list) or not names or not all(
+            isinstance(name, str) and name.strip() for name in names):
+        issues.append("fail_to_pass must name at least one detecting test function")
+    else:
+        contents = record.get("test_contents") or {}
+        paths = verdict.get("test_paths")
+        paths = paths if isinstance(paths, list) else []
+        sources = "\n".join(contents[path] for path in paths
+                            if isinstance(path, str) and isinstance(contents.get(path), str))
+        if sources:
+            missing = [name for name in names
+                       if not re.fullmatch(r"[A-Za-z_]\w*", name)
+                       or not re.search(rf"\b{re.escape(name)}\b", sources)]
+            if missing:
+                issues.append(f"fail_to_pass names not found in selected test sources: {missing}")
+    if verdict.get("fail_type") not in ("runtime_assert", "compile_error", "runtime_other"):
+        issues.append("fail_type must be runtime_assert, compile_error, or runtime_other")
+    if verdict.get("fail_type") == "compile_error":
+        source = verdict.get("compile_test_source")
+        token = verdict.get("missing_api")
+        content = ((record.get("test_contents") or {}).get(source)
+                   if isinstance(source, str) else None)
+        if not isinstance(source, str) or not isinstance(verdict.get("test_paths"), list) or \
+                source not in verdict["test_paths"]:
+            issues.append("compile_test_source must be a selected changed test path")
+        if not isinstance(token, str) or not token.strip() or \
+                (isinstance(content, str) and token not in content):
+            issues.append("missing_api must name an interface used by compile_test_source")
+    overrides = verdict.get("config_overrides")
+    if not isinstance(overrides, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in overrides.items()):
+        issues.append("config_overrides must be a mapping of config names to values")
+    supported = (verdict.get("platform") == "sim:nsh"
+                 and isinstance(verdict.get("test_paths"), list)
+                 and all(path.startswith("testing/ostest/")
+                         for path in verdict["test_paths"] if isinstance(path, str))
+                 and verdict.get("fail_type") in ("runtime_assert", "compile_error"))
+    readiness = verdict.get("readiness")
+    if not supported:
+        if readiness != "needs_fixture":
+            issues.append("readiness must be needs_fixture for this test and platform")
+    elif readiness not in ("needs_reviewed_recipe", "ready_to_generate"):
+        issues.append("readiness must be needs_reviewed_recipe or ready_to_generate")
+    if readiness == "ready_to_generate":
+        paths = verdict.get("test_paths") or []
+        contents = record.get("test_contents") or {}
+        sources = "\n".join(re.sub(r'"\s*"', '', contents.get(path) or "") for path in paths
+                            if isinstance(path, str))
+        names = verdict.get("fail_to_pass") or []
+        for field in ("test_success_marker", "test_failure_marker"):
+            marker = verdict.get(field)
+            if not isinstance(marker, str) or not marker.strip() or "\n" in marker or \
+                    "\r" in marker or marker not in sources or not any(
+                        isinstance(name, str) and name in marker for name in names):
+                issues.append(f"{field} must be a test-specific literal from a selected test source")
+        if verdict.get("test_success_marker") == verdict.get("test_failure_marker"):
+            issues.append("test success and failure markers must differ")
+        if verdict.get("test_failure_match", "literal") != "literal":
+            issues.append("ready_to_generate requires literal failure matching")
+    return issues
+
+
+def read_file(args: dict, record: dict) -> str:
+    if args.get("repo") == "apps":
+        pr = record.get("apps")
+        repo = APPS
+    elif args.get("repo") == "kernel":
+        candidates = record.get("kernel_candidates", [])
+        pr = next((p for p in candidates if p["number"] == args.get("kernel_pr")), None)
+        if pr is None and len(candidates) == 1:
+            pr = candidates[0]
+        repo = KERNEL
+    else:
+        return "error: repo must be apps or kernel"
+    if not pr:
+        return "error: repository PR is unavailable or ambiguous"
+    path = args.get("path", "")
+    if not isinstance(path, str) or not path or path.startswith("/") or ".." in Path(path).parts:
+        return "error: invalid repository-relative path"
+    ref = {"base": pr.get("base_commit"), "head": pr.get("head_commit")}.get(args.get("ref"))
+    if not ref:
+        return "error: this PR has no requested commit"
+    content = source_at(repo, path, ref)
+    return content[:60000] if content is not None else "error: file unavailable or over 100 KB"
+
+
+def score(gold: dict[str, str], verdicts: dict[str, dict]) -> dict:
+    rows = []
+    for case, expected in gold.items():
+        verdict = verdicts.get(case, {})
+        got = verdict.get("verdict", "missing")
+        rows.append({"case": case, "expected": expected, "got": got,
+                     "correct": got == expected,
+                     "kernel_pr": verdict.get("kernel_pr"),
+                     "reason": verdict.get("reason", ""),
+                     "platform": verdict.get("platform", "")})
+    return {"correct": sum(row["correct"] for row in rows),
+            "scored": len(rows), "rows": rows}
+
+
+def eval_run(run_dir: Path) -> dict:
+    gold = load_gold()
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.exists():
+        cases = set(json.loads(manifest_path.read_text()).get("cases", []))
+        gold = {case: expected for case, expected in gold.items() if case in cases}
+    if not gold:
+        raise ValueError("no gold cases in this run")
+    expected_kernels = json.loads(GOLD.read_text())["accept"]
+    verdicts = {case: json.loads((run_dir / f"{case}.json").read_text())
+                for case in gold if (run_dir / f"{case}.json").exists()}
+    result = score(gold, verdicts)
+    for row in result["rows"]:
+        if row["case"] in expected_kernels:
+            kernel_number = expected_kernels[row["case"]]["kernel_pr"]
+            row["expected_kernel_pr"] = kernel_number
+            row["kernel_match"] = (row["kernel_pr"] == row["expected_kernel_pr"]
+                                   if row["got"] == "accept" else None)
+    lines = [f"# NuttX triage: {run_dir.name}", "",
+             f"Verdicts: {result['correct']}/{result['scored']} correct", "",
+             "Kernel PR is reported for accepted gold cases but does not affect "
+             "the verdict score.",
+             "", "| Case | Expected | Got | Correct | Kernel PR (expected) |",
+             "|---|---|---|---|---|"]
+    for row in result["rows"]:
+        lines.append(f"| {row['case']} | {row['expected']} | {row['got']} | "
+                     f"{'yes' if row['correct'] else 'no'} | {row['kernel_pr'] or ''}"
+                     f"{' (' + str(row['expected_kernel_pr']) + ')' if 'expected_kernel_pr' in row else ''} |")
+    result["run"] = run_dir.name
+    (run_dir / "scorecard.json").write_text(json.dumps(result, indent=2) + "\n")
+    (run_dir / "scorecard.md").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    return result
+
+
+def triage_one(case: str, record: dict, profile: str, settings: dict,
+               api_base: str, run_dir: Path) -> dict:
+    import litellm
+
+    sampling = dict(settings.get("sampling", {}))
+    extra = {key: sampling.pop(key) for key in ("top_k", "min_p") if key in sampling}
+    options = {"model": f"openai/{profile}", "api_base": api_base, "api_key": "local",
+               "timeout": 3600, "num_retries": 0,
+               "max_tokens": settings.get("max_tokens", 32768), **sampling}
+    if extra:
+        options["extra_body"] = extra
+    messages = [{"role": "system", "content": PROMPT.read_text()},
+                {"role": "user", "content": "Enriched PR record:\n" + render_record(case, record)}]
+    trace = {"case": case, "turns": [], "repairs": [], "error": None}
+    verdict, issues, tool_rounds, repairs = None, ["no reply"], 0, 0
+    start = time.time()
+    try:
+        for _ in range(MAX_TOOL_ROUNDS + MAX_REPAIRS + 2):
+            t = time.time()
+            response = litellm.completion(messages=messages, **options,
+                                          **({"tools": TOOLS} if tool_rounds < MAX_TOOL_ROUNDS else {}))
+            choice = response.choices[0]
+            msg = choice.message
+            calls = msg.tool_calls or []
+            turn = {"seconds": round(time.time() - t, 1), "content": msg.content,
+                    "reasoning": getattr(msg, "reasoning_content", None),
+                    "finish_reason": choice.finish_reason,
+                    "usage": {"prompt": response.usage.prompt_tokens,
+                              "completion": response.usage.completion_tokens},
+                    "tool_calls": [{"name": call.function.name,
+                                    "arguments": call.function.arguments} for call in calls]}
+            trace["turns"].append(turn)
+            assistant = {"role": "assistant", "content": msg.content or ""}
+            if calls:
+                assistant["tool_calls"] = [call.model_dump() for call in calls]
+            messages.append(assistant)
+            if calls:
+                turn["tool_results"] = []
+                for call in calls:
+                    try:
+                        result = read_file(json.loads(call.function.arguments or "{}"), record)
+                    except (ValueError, RuntimeError) as exc:
+                        result = f"error: {exc}"
+                    turn["tool_results"].append(result)
+                    messages.append({"role": "tool", "tool_call_id": call.id,
+                                     "content": result})
+                tool_rounds += 1
+                if tool_rounds == MAX_TOOL_ROUNDS:
+                    messages.append({"role": "user", "content": "Tool budget reached. Return the JSON verdict now."})
+                continue
+            verdict = parse_verdict(msg.content)
+            issues = check_verdict(verdict, case, record)
+            if not issues or repairs >= MAX_REPAIRS:
+                break
+            repairs += 1
+            trace["repairs"].append(issues)
+            messages.append({"role": "user", "content": "Correct the JSON verdict:\n- "
+                             + "\n- ".join(issues)})
+    except Exception as exc:
+        trace["error"] = f"{type(exc).__name__}: {exc}"
+    trace.update({"seconds": round(time.time() - start, 1), "issues": issues,
+                  "messages": messages})
+    (run_dir / f"{case}.trace.json").write_text(json.dumps(trace, indent=2, default=str))
+    output = verdict if isinstance(verdict, dict) and not issues else {
+        "case": case, "verdict": "error", "reason": trace["error"] or "; ".join(issues)}
+    (run_dir / f"{case}.json").write_text(json.dumps(output, indent=2) + "\n")
+    return {"case": case, "verdict": output.get("verdict"), "seconds": trace["seconds"],
+            "error": trace["error"], "issues": issues}
+
+
+def run(args) -> None:
+    import litellm  # noqa: F401 - fail before starting a run if the client is absent
+
+    profiles = json.loads(MODELS.read_text())
+    if args.profile not in profiles or args.profile.startswith("_"):
+        raise SystemExit(f"unknown profile: {args.profile}")
+    if (args.apps_pr is None) != (args.kernel_pr is None):
+        raise SystemExit("--apps-pr and --kernel-pr must be supplied together")
+    pair_case = ([f"apps-{args.apps_pr}-kernel-{args.kernel_pr}"]
+                 if args.apps_pr is not None else [])
+    try:
+        pool_cases = pair_cases(args.pairs_file) if args.pairs_file else []
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    cases = list(dict.fromkeys((args.case or []) + pair_case + pool_cases
+                              + (list(load_gold()) if args.gold else [])))
+    if not cases:
+        raise SystemExit("give --case, --apps-pr with --kernel-pr, --pairs-file, and/or --gold")
+    try:
+        with urlopen(args.api_base.rstrip("/") + "/models", timeout=8) as response:
+            served = {model["id"] for model in json.load(response).get("data", [])}
+    except (OSError, URLError, ValueError) as exc:
+        raise SystemExit(f"model server unavailable at {args.api_base}: {exc}") from exc
+    if args.profile not in served:
+        raise SystemExit(f"model server does not serve {args.profile}; available: {sorted(served)}")
+    records = {case: load_record(case) for case in cases}
+    run_dir = RUNS / f"{datetime.now():%Y-%m-%d_%H%M%S}_{args.profile}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    prompt = PROMPT.read_text()
+    (run_dir / "nuttx_pr_triage.md").write_text(prompt)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                            capture_output=True, text=True).stdout.strip()
+    manifest = {"profile": args.profile, "api_base": args.api_base,
+                "sampling": profiles[args.profile].get("sampling"),
+                "max_tokens": profiles[args.profile].get("max_tokens"),
+                "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                "git_commit": commit, "cases": cases,
+                "pairs_file": str(args.pairs_file) if args.pairs_file else None,
+                "started": datetime.now().isoformat(timespec="seconds")}
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    with futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
+        jobs = [pool.submit(triage_one, case, records[case], args.profile,
+                            profiles[args.profile], args.api_base, run_dir) for case in cases]
+        for job in futures.as_completed(jobs):
+            result = job.result()
+            print(f"{result['case']}: {result['verdict']} ({result['seconds']} s) "
+                  f"{result['error'] or '; '.join(result['issues'])}", flush=True)
+    manifest["finished"] = datetime.now().isoformat(timespec="seconds")
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    if args.gold:
+        eval_run(run_dir)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    run_parser = commands.add_parser("run")
+    run_parser.add_argument("--profile", required=True)
+    run_parser.add_argument("--case", nargs="+")
+    run_parser.add_argument("--apps-pr", type=int)
+    run_parser.add_argument("--kernel-pr", type=int)
+    run_parser.add_argument("--pairs-file", type=Path)
+    run_parser.add_argument("--gold", action="store_true")
+    run_parser.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
+    run_parser.add_argument("--parallel", type=int, default=4)
+    eval_parser = commands.add_parser("eval")
+    eval_parser.add_argument("run_dir", nargs="?")
+    args = parser.parse_args()
+    if args.command == "run":
+        run(args)
+    else:
+        path = Path(args.run_dir) if args.run_dir else max(RUNS.iterdir())
+        eval_run(path)
+
+
+if __name__ == "__main__":
+    main()

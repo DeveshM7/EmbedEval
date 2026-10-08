@@ -62,6 +62,9 @@ These are deliberately separate and share no code:
 You only need `scripts/` when adding or repairing instances. Day to day, you use
 `harness/`.
 
+For NuttX PR discovery and instance generation, see
+[`docs/nuttx_pr_workflow.md`](docs/nuttx_pr_workflow.md).
+
 ---
 
 ## Quick start

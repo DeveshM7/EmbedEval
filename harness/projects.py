@@ -37,8 +37,8 @@ _ORIENTATION = {
     "nuttx": (
         "Two repos: the kernel at /testbed and the applications at /testbed/apps. "
         "Builds use GNU Make and are already configured for sim:nsh, which produces "
-        "a native binary at /testbed/nuttx. Run `make -j$(nproc)` to rebuild "
-        "incrementally. Never run distclean or configure.sh -- reconfiguring "
+        "a native binary at /testbed/nuttx. Run `make -j$(nproc)` to build; "
+        "later builds are incremental. Never run distclean or configure.sh -- reconfiguring "
         "discards the container's setup and breaks the test runner."
     ),
     "riot": (
@@ -91,6 +91,10 @@ PROJECTS: dict[str, dict] = {
         "protected_paths": ["apps/testing/", "apps/examples/"],
         "needs_qemu_cleanup": False,
         "clean_paths": [],
+        "docker_platform": "linux/amd64",
+        # Generated images are configured but not prebuilt; a cold native
+        # compile plus ostest took up to five minutes in local validation.
+        "command_timeout": 600,
         "build_command": "make -j$(nproc)",
         "rebuild_command": "make -j$(nproc)",
         "run_command": "printf 'ostest\\npoweroff\\n' | timeout 300 ./nuttx",

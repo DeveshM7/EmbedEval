@@ -16,6 +16,7 @@ previously it had only 16 hand-written per-PR scripts.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -86,7 +87,7 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
     cid = r.stdout.strip()
     workdir = Path(tempfile.mkdtemp())
 
-    def dexec(cmd: str, t: int, label: str | None = None):
+    def dexec(cmd: str, t: int, label: str | None = None, capture: bool = False):
         # With --verbose the container output streams live; otherwise it is
         # captured and only shown when a step fails. Either way each step
         # announces itself and reports how long it took, so a step that is
@@ -94,7 +95,14 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         if label:
             print(f"    {label} ...", end="", flush=True)
         t0 = time.time()
-        r = sh(["docker", "exec", cid, "bash", "-c", cmd], timeout=t, quiet=not verbose)
+        r = sh(["docker", "exec", cid, "bash", "-c", cmd], timeout=t,
+               quiet=capture or not verbose)
+        if capture and verbose:
+            print()
+            if r.stdout:
+                print(r.stdout, end="")
+            if r.stderr:
+                print(r.stderr, end="", file=sys.stderr)
         if label:
             print(f" {time.time() - t0:.1f}s (rc={r.returncode})")
         return r
@@ -102,13 +110,36 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
     try:
         # --- Step 1: tests must FAIL on the unfixed code -------------------
         print("\n  Step 1: expecting tests to FAIL at the base commit")
-        dexec(f"cd /testbed && {build_cmd}", 900, "build")
-        r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
-        if r1.returncode == 0:
-            print("  FAIL: tests PASSED before the fix -- the instance does not "
-                  "isolate the bug (test patch may not apply, or the bug is absent)")
-            return False
-        print(f"  ok: run_tests exited {r1.returncode} as expected")
+        compile_before = meta["project"] == "nuttx" and meta.get("fail_type") == "compile_error"
+        before_build = dexec(f"cd /testbed && {build_cmd}", 900, "build",
+                             capture=compile_before)
+        if compile_before:
+            source = meta.get("compile_test_source")
+            missing_api = meta.get("missing_api")
+            output = (before_build.stdout or "") + (before_build.stderr or "")
+            diagnostic = re.search(
+                rf"(?:^|[\s/]){re.escape(Path(source).name)}:\d+(?::\d+)?:\s*"
+                rf"(?:fatal )?error:[^\n]*{re.escape(missing_api)}",
+                output,
+            ) if source and missing_api else None
+            if before_build.returncode == 0 or not diagnostic:
+                print("  FAIL: expected a compile error in the changed test source "
+                      "naming the missing API")
+                return False
+            print(f"  ok: expected test-side compile error: {diagnostic.group(0).strip()}")
+        else:
+            if meta["project"] == "nuttx" and before_build.returncode != 0:
+                print(f"  FAIL: runtime test did not build (rc={before_build.returncode})")
+                return False
+            r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
+            if r1.returncode == 0:
+                print("  FAIL: tests PASSED before the fix -- the instance does not "
+                      "isolate the bug (test patch may not apply, or the bug is absent)")
+                return False
+            if meta["project"] == "nuttx" and r1.returncode != 1:
+                print(f"  FAIL: expected a test failure (rc=1), got rc={r1.returncode}")
+                return False
+            print(f"  ok: run_tests exited {r1.returncode} as expected")
 
         # --- Step 2: tests must PASS with the fix applied ------------------
         print("\n  Step 2: applying the fix, expecting tests to PASS")
@@ -126,6 +157,11 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             print(f"  FAIL: git apply failed: {ra.stderr.strip()[:300]}")
             return False
 
+        if meta["project"] == "nuttx" and meta.get("clean_after_patch"):
+            clean = dexec("cd /testbed && make clean", 300, "make clean")
+            if clean.returncode != 0:
+                print(f"  FAIL: make clean failed (rc={clean.returncode})")
+                return False
         cleaned = cfg["clean_paths"]
         if cleaned:
             dexec("rm -rf " + " ".join(cleaned), 60, f"clean {' '.join(cleaned)}")

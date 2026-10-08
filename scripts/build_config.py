@@ -46,7 +46,8 @@ BUILD: dict[str, dict] = {
             "KERNEL_BASE_COMMIT": lambda m: m["kernel_base_commit"],
             "APPS_BASE_COMMIT": lambda m: m["apps_base_commit"],
         },
-        "platform": None,
+        # The shared base installs gcc-multilib and an x64 xPack toolchain.
+        "platform": "linux/amd64",
         "clean_paths": [],
     },
     "riot": {

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Exit 0 only after the named test evidence and ostest's successful completion.
+# Exit 1 for the named failure, 2 for timeout,
+# and 3 when the simulator exits or ostest completes without the named test.
+set -u
+
+TIMEOUT="${1:-300}"
+SUCCESS_MARKER=@@SUCCESS_MARKER@@
+FAILURE_MARKER=@@FAILURE_MARKER@@
+FAILURE_MATCH=@@FAILURE_MATCH@@
+FAILURE_CONTEXT_MARKER=@@FAILURE_CONTEXT_MARKER@@
+OUTFILE="$(mktemp /tmp/nuttx_test_output.XXXXXX)"
+
+cd /testbed || exit 3
+printf 'ostest\npoweroff\n' | setsid ./nuttx >"$OUTFILE" 2>&1 &
+SIM_PID=$!
+
+cleanup() {
+    kill -- "-$SIM_PID" 2>/dev/null || true
+    kill "$SIM_PID" 2>/dev/null || true
+    wait "$SIM_PID" 2>/dev/null || true
+    rm -f "$OUTFILE"
+}
+trap cleanup EXIT
+
+END=$((SECONDS + TIMEOUT))
+failure_seen() {
+    if [[ "$FAILURE_MATCH" == regex ]]; then
+        grep -Eq -- "$FAILURE_MARKER" "$OUTFILE"
+    else
+        grep -Fq -- "$FAILURE_MARKER" "$OUTFILE"
+    fi
+}
+
+classify_output() {
+    if failure_seen &&
+        { [[ -z "$FAILURE_CONTEXT_MARKER" ]] ||
+          grep -Fq -- "$FAILURE_CONTEXT_MARKER" "$OUTFILE"; }; then
+        RESULT=1
+        return 0
+    fi
+    if grep -Eq 'ostest_main: Exiting with status [1-9][0-9]*' "$OUTFILE"; then
+        RESULT=3
+        return 0
+    fi
+    if grep -Fq 'ostest_main: Exiting with status 0' "$OUTFILE"; then
+        if grep -Fq -- "$SUCCESS_MARKER" "$OUTFILE"; then
+            RESULT=0
+        else
+            RESULT=3
+        fi
+        return 0
+    fi
+    return 1
+}
+
+while true; do
+    if classify_output; then
+        break
+    fi
+    if ! kill -0 "$SIM_PID" 2>/dev/null; then
+        # The process may have exited between the marker check and kill -0.
+        # Recheck the completed output before classifying an early exit.
+        if ! classify_output; then
+            RESULT=3
+        fi
+        break
+    fi
+    if (( SECONDS >= END )); then
+        RESULT=2
+        break
+    fi
+    sleep 0.1
+done
+
+cat "$OUTFILE"
+echo "run_tests: result=$RESULT"
+exit "$RESULT"

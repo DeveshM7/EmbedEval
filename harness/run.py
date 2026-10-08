@@ -73,9 +73,7 @@ Please solve this issue:
 
 ## Running Tests
 
-Use the `run_tests` command to build and run the tests. It handles all setup and
-teardown, waits for results, and exits as soon as pass/fail is known.
-Exit codes: 0 = all tests passed, 1 = tests failed, 2 = timed out.
+{test_help}
 
 If `run_tests` times out (exit code 2) with no test results, your change has
 introduced a hang or an infinite loop. Do NOT submit -- investigate further.
@@ -144,6 +142,16 @@ def build_prompts(meta: dict) -> tuple[str, str]:
         protected=protected,
         extra_warnings=f"\n{warn}\n" if warn else "",
         build_and_test=_build_and_test(meta),
+        test_help=(
+            "Use `run_tests` after building. It runs the configured ostest and "
+            "waits for results. Exit codes: 0 = target test and ostest passed, "
+            "1 = target test failed, 2 = timed out, 3 = missing target-test evidence."
+            if meta["project"] == "nuttx" else
+            "Use the `run_tests` command to build and run the tests. It handles "
+            "all setup and teardown, waits for results, and exits as soon as "
+            "pass/fail is known. Exit codes: 0 = all tests passed, "
+            "1 = tests failed, 2 = timed out."
+        ),
     )
     return system, instance
 
@@ -242,7 +250,8 @@ class QemuCleanupEnvironment:
 
 def make_environment(meta: dict):
     cfg = projects.config(meta["project"])
-    kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
+    kwargs = dict(image=meta["docker_image"], cwd="/testbed",
+                  timeout=projects.setting(meta, "command_timeout", 180))
     platform = projects.setting(meta, "docker_platform")
     if platform:
         kwargs["run_args"] = ["--rm", "--platform", platform]
