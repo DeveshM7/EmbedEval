@@ -184,6 +184,17 @@ class SuppliedPairTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "banner"):
                 render.ostest_banners(ostest, ["testing/ostest/ostest.h"])
 
+    def test_banner_before_a_config_skip_does_not_prove_the_test_ran(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ostest = Path(tmp)
+            (ostest / "ostest_main.c").write_text(
+                '  printf("\\nuser_main: condition variable test\\n");\n'
+                '#ifdef CONFIG_PRIORITY_INHERITANCE\n  printf("Skipping\\n");\n'
+                '#else\n  cond_test();\n#endif\n')
+            (ostest / "cond.c").write_text("void cond_test(void)\n{\n}\n")
+            with self.assertRaisesRegex(ValueError, "cond_test"):
+                render.ostest_banners(ostest, ["testing/ostest/cond.c"])
+
     def test_runner_lists_each_banner_as_one_shell_word(self):
         runner = render.render_runner(["user_main: cancel test", "user_main: POSIX timer test"])
         self.assertIn("BANNERS=('user_main: cancel test' 'user_main: POSIX timer test')", runner)

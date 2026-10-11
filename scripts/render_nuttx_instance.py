@@ -22,10 +22,11 @@ DEFAULT_OUT = REPO_ROOT / "generated"
 
 # printf("\nuser_main: cancel test\n"); in ostest_main.c prints this banner
 # just before calling the test's entry function.
-BANNER_PRINTF = re.compile(r'printf\("\\nuser_main: ([^"\\%]+)\\n"\);')
-BANNER_TEXT = re.compile(r"user_main: [^\n'\\%]+")
+BANNER_PRINTF = re.compile(r'printf\s*\(\s*"\\nuser_main: ([^"\\%]+)\\n"\s*\);')
+BANNER_TEXT = re.compile(r"user_main: [^\n\\%]+")
 # Non-static `void name(void)` definitions at the start of a line.
-ENTRY_DEF = re.compile(r"^(?!static\b)[a-z][\w ]*?\b(\w+)\s*\(void\)\s*$", re.MULTILINE)
+ENTRY_DEF = re.compile(r"^(?!static\b)[a-z][\w ]*?\b(\w+)\s*\(void\)\s*\{?\s*$",
+                       re.MULTILINE)
 
 
 def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
@@ -33,7 +34,10 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
 
     ostest_dir is testing/ostest with the test patch applied. Each changed
     source's entry functions are looked up where ostest_main.c calls them,
-    and the banner printed within a few lines before that call is kept.
+    and the banner printed within a few lines before that call is kept. A
+    preprocessor line between them (e.g. a skip under #ifdef) means the
+    banner does not prove the call ran, so that call is an error, as is any
+    call with no banner.
     """
     main_lines = (ostest_dir / "ostest_main.c").read_text().splitlines()
     banners: list[str] = []
@@ -47,13 +51,18 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
             for i, line in enumerate(main_lines):
                 if not call.search(line):
                     continue
+                banner = None
                 for prev in reversed(main_lines[max(0, i - 8):i]):
+                    if prev.lstrip().startswith("#"):
+                        break
                     match = BANNER_PRINTF.search(prev)
                     if match:
                         banner = f"user_main: {match[1]}"
-                        if banner not in banners:
-                            banners.append(banner)
                         break
+                if banner is None:
+                    raise ValueError(f"no ostest banner directly precedes the call to {func}")
+                if banner not in banners:
+                    banners.append(banner)
     if not banners:
         raise ValueError("no ostest banner precedes a test defined in the changed sources")
     return banners
