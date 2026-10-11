@@ -117,16 +117,20 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             source = meta.get("compile_test_source")
             missing_api = meta.get("missing_api")
             output = (before_build.stdout or "") + (before_build.stderr or "")
+            # Covers both a compiler diagnostic (missing symbol in the test
+            # source) and a linker diagnostic (missing symbol at link time,
+            # e.g. a test calling a kernel API the unfixed kernel doesn't
+            # implement yet) -- same bucket: the unfixed tree can't build.
             diagnostic = re.search(
                 rf"(?:^|[\s/]){re.escape(Path(source).name)}:\d+(?::\d+)?:\s*"
-                rf"(?:fatal )?error:[^\n]*{re.escape(missing_api)}",
+                rf"(?:(?:fatal )?error:|undefined reference to)[^\n]*{re.escape(missing_api)}",
                 output,
             ) if source and missing_api else None
             if before_build.returncode == 0 or not diagnostic:
-                print("  FAIL: expected a compile error in the changed test source "
-                      "naming the missing API")
+                print("  FAIL: expected a compile or link error in the changed test "
+                      "source naming the missing API")
                 return False
-            print(f"  ok: expected test-side compile error: {diagnostic.group(0).strip()}")
+            print(f"  ok: expected test-side build error: {diagnostic.group(0).strip()}")
         else:
             if meta["project"] == "nuttx" and before_build.returncode != 0:
                 print(f"  FAIL: runtime test did not build (rc={before_build.returncode})")
