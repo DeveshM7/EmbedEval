@@ -15,9 +15,8 @@ Three stages, deliberately separate:
     filter   free, instant -- cuts the pool to PRs that could become instances.
     enrich   costly, narrow-- full GitHub context for the survivors only:
                              diffs, review threads, linked issues, commits,
-                             the complete test suite each PR touches, the
-                             pre-change source it modifies, and the board
-                             files of our platforms at its base commit.
+                             the complete test suite each PR touches, and
+                             the pre-change source it modifies.
 
 enrich also adds a `twister` block (scripts/zephyr_env.py): the facts the
 twister pipeline needs, read from the PR's own commits in the local clone --
@@ -348,44 +347,6 @@ def fetch_base_sources(files: list[dict], base: str) -> dict:
     return out
 
 
-# The boards we can run, as pr_triage.md names them, and the board file each
-# is defined by. Board folders moved over the years (boards/x86/qemu_x86/ ->
-# boards/qemu/x86/), so the file is found by name anywhere under boards/.
-OUR_PLATFORMS = {
-    "native_sim": "native_sim.yaml",
-    "native_sim/native/64": "native_sim_native_64.yaml",
-    "native_sim_64": "native_sim_64.yaml",
-    "qemu_x86": "qemu_x86.yaml",
-}
-
-
-def fetch_platforms(base: str) -> dict:
-    """Which of our platforms exist at the PR's base commit, and what each
-    declares it supports.
-
-    A suite that `depends_on` a capability the board does not declare never
-    runs there, and a board that does not exist yet cannot be built at all --
-    native_sim arrived in 2023, so a 2022 PR cannot use it. Neither fact is in
-    the PR itself. The board yaml is kept raw rather than parsed; it is short,
-    and the model reads it as written.
-    """
-    tree = gh(f"repos/{REPO}/git/trees/{base}:boards?recursive=1")
-    paths = [b["path"] for b in (tree or {}).get("tree", []) if b.get("type") == "blob"]
-    out = {}
-    for name, filename in OUR_PLATFORMS.items():
-        hits = [p for p in paths if p.rsplit("/", 1)[-1] == filename]
-        found = None
-        for p in hits:
-            f = fetch_file(f"boards/{p}", base)
-            if f["content"] and re.search(rf"(?m)^identifier:\s*{re.escape(name)}\s*$", f["content"]):
-                found = {"exists": True, "path": f"boards/{p}", "content": f["content"]}
-                break
-        out[name] = found or {"exists": False}
-    if tree and tree.get("truncated"):
-        out["_note"] = "boards/ listing was truncated by GitHub; absence may be unreliable"
-    return out
-
-
 def add_twister_facts(record: dict) -> dict:
     """Attach the twister pipeline's facts (zephyr_env.twister_facts).
 
@@ -541,7 +502,8 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
     # agent is given, before the change.
     if base_commit:
         record["base_sources"] = fetch_base_sources(record["files"], base_commit)
-        record["platforms"] = fetch_platforms(base_commit)
+        # Which boards exist and which scenarios can run on them now come from
+        # the local clone (the twister block) and from scripts/dry_run.py.
         add_twister_facts(record)
 
     ENRICHED.mkdir(parents=True, exist_ok=True)
@@ -618,15 +580,14 @@ def cmd_filter(_args) -> None:
 
 
 def describe_context(rec: dict) -> str:
-    """The two sections read at the base commit, for the progress line."""
+    """The base-commit context, for the progress line."""
     if "base_sources" not in rec:
         return "no base-commit context (enriched before it existed; use --refresh)"
     src = rec["base_sources"]
     kept = sum(1 for f in src.values() if f.get("content") is not None)
-    plats = [k for k, v in rec.get("platforms", {}).items()
-             if not k.startswith("_") and v.get("exists")]
+    boards = [b for b in (rec.get("twister") or {}).get("boards", {}).values() if b]
     return (f"{kept}/{len(src)} pre-change sources, "
-            f"platforms at base: {', '.join(plats) or 'none'}")
+            f"boards at base: {', '.join(boards) or 'none'}")
 
 
 def cmd_enrich(args) -> None:

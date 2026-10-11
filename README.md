@@ -4,11 +4,17 @@ A benchmark for evaluating LLM coding agents on **embedded RTOS bug fixes**.
 
 Each task is a real merged pull request from Zephyr, NuttX, or RIOT. The agent
 gets the repository at the commit *before* the fix, plus the tests the PR added.
-It has to make those tests pass. Everything runs inside Docker with a real
+It has to make those tests pass. Everything runs inside a container with a real
 cross-compiler toolchain, so a patch only counts if the firmware actually builds
 and the tests actually run.
 
-**17 instances:** 8 Zephyr, 6 NuttX, 3 RIOT.
+- **Zephyr** instances are built, validated and run with Zephyr's own test
+  runner, **twister**, in **Apptainer** images (no Docker needed), and are
+  generated from PRs by a pipeline — see [Zephyr: the twister pipeline](#zephyr-the-twister-pipeline).
+- **NuttX and RIOT** instances are hand-built **Docker** images in
+  `docker/instances/`.
+
+**Instances:** 8 Zephyr (generated, in `generated/`), 6 NuttX, 3 RIOT.
 
 ---
 
@@ -17,7 +23,8 @@ and the tests actually run.
 | | |
 |---|---|
 | Python | 3.11 (tested) |
-| Docker | running, ~40 GB free for images |
+| Docker | NuttX and RIOT: running, ~40 GB free for images |
+| Apptainer | Zephyr: 1.2+ with rootless `--fakeroot` builds; ~5 GB of shared images plus 1.3–2.2 GB per instance, under `$EMBEDEVAL_WORK` (default `$SCRATCH/embedeval-twister`) |
 | git | for cloning upstream repos during validation |
 | API key | for whichever model you run |
 
@@ -45,8 +52,9 @@ Activate the venv before running anything. The commands below assume it is
 active; a system Python will not have `minisweagent` and will fail only once a
 run actually starts, not at `--dry-run`.
 
-Images are large — a NuttX instance is ~8.7 GB — and each project needs its base
-image built once before any of its instances.
+Images are large — a NuttX instance is ~8.7 GB — and each Docker project needs
+its base image built once before any of its instances. Zephyr's shared images
+are built automatically the first time an instance of their era needs them.
 
 ---
 
@@ -54,8 +62,8 @@ image built once before any of its instances.
 
 These are deliberately separate and share no code:
 
-- **`scripts/`** — *building* instances. Turns a PR into a Docker image and
-  proves the image behaves correctly.
+- **`scripts/`** — *building* instances. Turns a PR into an image (Apptainer for
+  Zephyr, Docker for NuttX and RIOT) and proves the image behaves correctly.
 - **`harness/`** — *running* agents. Points a model at an image and grades what
   it produces.
 
@@ -66,17 +74,27 @@ You only need `scripts/` when adding or repairing instances. Day to day, you use
 
 ## Quick start
 
-Run one agent on one instance and grade the result:
+Run one agent on one instance and grade the result. NuttX (Docker):
 
 ```bash
 # 1. build the images (once per project, slow)
-python scripts/build_bases.py --repo zephyr
-python scripts/build_instances.py --instance zephyr__zephyr-65697
+python scripts/build_bases.py --repo nuttx
+python scripts/build_instances.py --instance nuttx__nuttx-11889
 
 # 2. run the agent
-python harness/run.py --instance zephyr__zephyr-65697 --model claude-opus-4-6 -v
+python harness/run.py --instance nuttx__nuttx-11889 --model claude-opus-4-6 -v
 
 # 3. grade the patch it produced
+python harness/evaluate_patches.py --instance nuttx__nuttx-11889 --model claude-opus-4-6
+```
+
+Zephyr (Apptainer): the same three steps, with the instances read from
+`generated/`:
+
+```bash
+export EMBEDEVAL_INSTANCES_DIR=generated
+python scripts/build_instances.py --instance zephyr__zephyr-65697
+python harness/run.py --instance zephyr__zephyr-65697 --model claude-opus-4-6 -v
 python harness/evaluate_patches.py --instance zephyr__zephyr-65697 --model claude-opus-4-6
 ```
 
@@ -96,7 +114,7 @@ Every command takes the same three selection flags:
 ```
 
 Instance ids are `<project>__<project>-<PR>`, matching the directory names under
-`docker/instances/`. Use lowercase.
+`docker/instances/` (or `generated/` for Zephyr). Use lowercase.
 
 ## Selecting models
 
@@ -109,6 +127,7 @@ Use the short name or the full LiteLLM name:
 | `gemini-2.5-pro` | `gemini/gemini-2.5-pro` |
 | `Qwen-3-coder` | `together_ai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8` |
 | `DeepSeek-V3` | `together_ai/deepseek-ai/DeepSeek-V3` |
+| `qwen38-nvfp4` | `openai/qwen38-nvfp4` — local, served by `scripts/serve_triage_model.sh`; run the harness on the server's node |
 
 Add `--dry-run` to `run.py`, `evaluate_patches.py`, `build_instances.py`, or
 `build_bases.py` to see what each *would* do without starting containers or
@@ -129,7 +148,7 @@ outputs/results.json    grades from the last evaluate run
 
 ## How an instance works
 
-Each directory under `docker/instances/` holds four things:
+A NuttX or RIOT directory under `docker/instances/` holds four things:
 
 | file | purpose |
 |---|---|
@@ -138,11 +157,17 @@ Each directory under `docker/instances/` holds four things:
 | `run_tests.sh` | installed as `run_tests`; exits 0 pass, 1 fail, 2 timeout |
 | `metadata.json` | commits, problem statement, expected failing tests |
 
+A Zephyr instance under `generated/` holds an Apptainer recipe instead:
+`instance.def`, `instance.json` (board, scenario, twister options),
+`run_tests.py` (runs twister for that one scenario and reports every test),
+`test_patch.diff`, `metadata.json`, and `validation.json` once validated.
+
 The agent is given the problem statement and a shell. It never sees the real
 fix. Test files are protected — the runner diffs against `protected_paths` and
 warns if the agent edited them, so it cannot pass by rewriting the test.
 
-Grading happens in a **fresh container**, not the one the agent worked in. Only
+Grading happens in a **fresh container** (for Zephyr, a fresh overlay on the
+image), not the one the agent worked in. Only
 `patch.diff` crosses over, so nothing the agent left behind — a stale build
 artifact, a running process, a modified test — can influence the result.
 
@@ -156,6 +181,7 @@ commit, expects failure, applies the real upstream fix, and expects a pass.
 
 ```bash
 python scripts/validate_instance.py nuttx__nuttx-11889 --verbose
+EMBEDEVAL_INSTANCES_DIR=generated python scripts/validate_instance.py zephyr__zephyr-65697
 ```
 
 Run this on any instance you build or change. An instance that passes step 1 is
@@ -165,15 +191,52 @@ free pass on it. This is not theoretical; see the `CONFIG_NDEBUG` note in
 
 ---
 
+## Zephyr: the twister pipeline
+
+Zephyr instances are generated from merged PRs, never written by hand:
+
+```bash
+python scripts/filter_candidates.py fetch --since 2024-01-01 --until 2024-06-30
+python scripts/filter_candidates.py filter          # hard filters
+python scripts/filter_candidates.py enrich          # GitHub context + twister facts
+python scripts/dry_run.py <pr>...                   # which scenario/board pairs can run
+python scripts/triage_prs.py run --profile qwen38-nvfp4 --pr <pr>...   # model verdicts
+python scripts/twister_pipeline.py --pr <pr>... --verdicts <dir>       # generate, build,
+                                                    #   validate, clean up
+```
+
+- **enrich** adds a `twister` block read from the PR's own commits: the
+  suites and scenarios it changes, the board names valid at its base, and the
+  Python, SDK and twister options of its era (`scripts/zephyr_env.py`).
+- **dry run** asks twister's own filters which pairs can run, in seconds,
+  with no SDK or modules. A PR with no runnable pair is rejected before triage.
+- **triage** (`docs/pr_triage.md`) picks one selected pair, writes the problem
+  statement and the test lists.
+- **generate → build → validate** turns a verdict into an Apptainer image
+  layered on shared Python and SDK images for its era, then checks that
+  `run_tests` fails as built and passes with the upstream fix.
+
+Builds and runs need a node where Apptainer can build; on Scholar, inside a
+`spark-batch` job (see `docs/spark_triage_setup.md`).
+
+---
+
 ## Layout
 
 ```
-harness/        run.py, evaluate_patches.py, paths.py, projects.py
-scripts/        build_bases.py, build_instances.py, validate_instance.py, ...
-docker/bases/   one base image per project (toolchain + SDK)
-docker/instances/   one directory per benchmark task
-outputs/        agent runs and grades
-archive/        superseded work, kept for provenance
+harness/            run.py, evaluate_patches.py, paths.py, projects.py,
+                    apptainer_env.py (Zephyr agent environment)
+scripts/            Zephyr pipeline: filter_candidates.py, zephyr_env.py,
+                    dry_run.py, triage_prs.py, generate_instance.py,
+                    build_instances.py, validate_instance.py, twister_pipeline.py, ...
+                    Docker side: build_bases.py, build_config.py
+templates/zephyr/   Apptainer recipes, run_tests, lookup tables
+docker/bases/       Docker base images (NuttX, RIOT)
+docker/instances/   NuttX and RIOT instances; the hand-built Zephyr ones are
+                    kept as reference metadata only and are not built
+generated/          generated Zephyr instances (not in git)
+outputs/            agent runs and grades
+archive/            superseded work, kept for provenance
 ```
 
 Two files carry the per-project differences, and they are the first place to
@@ -181,6 +244,8 @@ look when something behaves differently across RTOSes:
 
 - **`harness/projects.py`** — prompts, build and test commands, protected paths,
   cleanup behaviour. Instance `metadata.json` overrides these per instance.
-- **`scripts/build_config.py`** — base images, build arguments, platform.
+- **`scripts/build_config.py`** — Docker base images, build arguments,
+  platform (NuttX and RIOT).
+- **`templates/zephyr/apptainer/`** — the Zephyr image recipes and `run_tests`.
 
 Adding a fourth RTOS means adding an entry to each, not writing a new runner.

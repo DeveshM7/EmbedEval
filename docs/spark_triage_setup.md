@@ -267,9 +267,10 @@ Profile flags that matter:
 
 | Piece | Zephyr version | For another project |
 |---|---|---|
-| Hard filters + enrichment (`filter_candidates.py`) | Zephyr PRs; test suites found by `testcase.yaml`; board files of our platforms | Your repo; how *your* tests are found and declared; your runnable targets' facts |
+| Hard filters + enrichment (`filter_candidates.py`, `zephyr_env.py`) | Zephyr PRs; test suites found by `testcase.yaml`; twister facts of the PR's era | Your repo; how *your* tests are found and declared; your runnable targets' facts |
+| Dry run (`dry_run.py`) | twister's filters: which scenario/board pairs can run | Your test runner's own selection, if it has one |
 | Record rendering (`render_record`) | Zephyr sections | Your record's sections |
-| Verdict checks (`check_verdict`) | `ZTEST(...)` names; our 4 Zephyr boards | Your test-name syntax; your runnable targets |
+| Verdict checks (`check_verdict`) | `ZTEST(...)` names; a board/scenario pair the dry run selected | Your test-name syntax; your runnable targets |
 | Instructions (`docs/pr_triage.md`) | Zephyr | Written for your project |
 | Gold set (`triage/gold.json`) | 8 hand-built instances + 6 rejects | Your validated instances + known rejects |
 
@@ -295,10 +296,11 @@ machinery in `triage_prs.py`.
   Zephyr, the per-scenario keys (`platform_allow`, `arch_exclude`, `filter`,
   `integration_platforms`, …) and the board history mattered more than
   expected. Verify the rules against the project's own test runner, and
-  against what your Docker images can actually build.
+  against what your images can actually build. Zephyr now asks twister
+  itself, through the dry run, instead of encoding the rules.
 - **Gold data can be wrong too.** Two hand-built instances listed `pass_to_pass`
-  tests that do not exist, and `metadata.json` omits the `extra_configs` the
-  Dockerfiles use.
+  tests that do not exist, and one test patch left out the PR's `testcase.yaml`
+  change that its Dockerfile then hard-coded as a `-D` flag.
 
 ---
 

@@ -60,5 +60,9 @@ def discover_instances(project: str | None = None) -> list[str]:
             continue
         if project and split_instance(d.name)[0] != project:
             continue
+        # Zephyr instances come from the twister pipeline (an instance.def).
+        # The hand-built Zephyr Docker folders are reference metadata only.
+        if split_instance(d.name)[0] == "zephyr" and not (d / "instance.def").exists():
+            continue
         found.append(d.name)
     return found

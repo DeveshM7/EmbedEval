@@ -220,6 +220,11 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
     meta = instances.load_metadata(instance_id)
     if meta.get("pipeline") == "twister":
         return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
+    if meta["project"] == "zephyr":
+        print(f"  SKIP: {instance_id} is a Docker Zephyr instance, kept as reference "
+              f"metadata only; Zephyr instances are validated from the twister pipeline "
+              f"(EMBEDEVAL_INSTANCES_DIR=generated).")
+        return False
     cfg = build_config.config(meta["project"])
     image = meta["docker_image"]
     build_cmd = meta.get("build_command")

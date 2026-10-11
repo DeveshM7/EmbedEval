@@ -20,7 +20,9 @@ from __future__ import annotations
 #
 #   zephyr  37/131 failures were agents re-specifying -b/<test path> (and
 #           inventing board names like `native_sim_64`), plus 19 attempts to
-#           set Kconfig from the command line with -D.
+#           set Kconfig from the command line with -D. Zephyr instances now
+#           come from the twister pipeline, where `run_tests` fixes the board
+#           and scenario, so the guidance is to use it and nothing else.
 #   nuttx   51/158 were build-system errors, dominated by distclean +
 #           configure.sh, which discards the container's own configuration.
 #   riot    46/99 were hand-built make invocations, e.g. `make -C
@@ -28,11 +30,13 @@ from __future__ import annotations
 
 _ORIENTATION = {
     "zephyr": (
-        "Builds use west + CMake + Ninja, and the build directory is already "
-        "configured for this test. Run `west build` with no arguments to rebuild "
-        "incrementally -- do not pass -b or a test path, and do not set Kconfig "
-        "options with -D. Kconfig for a test lives in its prj.conf; the resolved "
-        "values are in build/zephyr/.config."
+        "This instance builds and tests with Zephyr's twister for one board "
+        "and one test scenario, both fixed. `run_tests` rebuilds incrementally "
+        "(only what you changed is recompiled), runs the tests, and prints a "
+        "status for every test case. Do not run `west build`, `west build -t "
+        "run` or `scripts/twister` yourself, and do not pass a board, test "
+        "path or Kconfig options anywhere -- the scenario's configuration is "
+        "already applied. Build output is under /testbed/twister-out."
     ),
     "nuttx": (
         "Two repos: the kernel at /testbed and the applications at /testbed/apps. "
@@ -48,12 +52,13 @@ _ORIENTATION = {
     ),
 }
 
-# Zephyr only: `west build -t run` starts QEMU, which never exits, so the command
-# hangs until the per-command timeout. NuttX and RIOT have no equivalent.
+# Zephyr only: twister's run_tests has its own exit codes.
 _EXTRA_WARNINGS = {
     "zephyr": (
-        "Do NOT use `west build -t run` directly -- QEMU never exits cleanly, so that "
-        "command hangs until the timeout and you will never see whether your fix worked."
+        "`run_tests` exit codes on this instance: 0 = all tests passed, "
+        "1 = a test, the build or the configuration failed, 2 = the test "
+        "runner did not start, 3 = nothing ran. A run takes one to a few "
+        "minutes; tests under QEMU include the emulator's boot."
     ),
 }
 
@@ -66,30 +71,22 @@ PROJECTS: dict[str, dict] = {
         # exclude them from the captured patch while still recording that they
         # were touched.
         "protected_paths": ["tests/"],
-        # Zephyr runs tests under QEMU, which holds an exclusive lock on
-        # build/zephyr/qemu.pid. A docker exec timeout kills the client but not
-        # the container-side QEMU, so every later run_tests fails with "Cannot
-        # lock pid file" until the orphan is killed.
-        "needs_qemu_cleanup": True,
-        # What to remove before a clean rebuild during evaluation. Zephyr builds
-        # out-of-tree into /testbed/build; nuttx builds in-tree and riot builds
-        # under tests/unittests, so for those the previous hardcoded
-        # `rm -rf /testbed/build` was a silent no-op.
-        "clean_paths": ["/testbed/build"],
-        "run_command": "west build -t run",
-        # What the AGENT runs to rebuild after an edit. Distinct from
-        # metadata's build_command, which is the cold build the evaluator uses
-        # after wiping build/. Passing -b/<test path> here would contradict the
-        # orientation and is how agents invented board names like
-        # `native_sim_64`.
-        "rebuild_command": "west build",
+        # Zephyr instances are Apptainer images from the twister pipeline
+        # (harness/apptainer_env.py). NuttX and RIOT still run in Docker.
+        "runtime": "apptainer",
+        # run_tests rebuilds as well as running, so there is no separate
+        # rebuild step to show the agent.
+        "rebuild_command": "",
+        # Long enough for a full rebuild plus a QEMU test run. A command that
+        # times out ends its container and every process in it, so QEMU cannot
+        # be left running (it was under docker exec).
+        "command_timeout": 900,
     },
     "nuttx": {
         "label": "NuttX RTOS",
         "orientation": _ORIENTATION["nuttx"],
         "extra_warnings": "",
         "protected_paths": ["apps/testing/", "apps/examples/"],
-        "needs_qemu_cleanup": False,
         "clean_paths": [],
         "build_command": "make -j$(nproc)",
         "rebuild_command": "make -j$(nproc)",
@@ -100,7 +97,6 @@ PROJECTS: dict[str, dict] = {
         "orientation": _ORIENTATION["riot"],
         "extra_warnings": "",
         "protected_paths": ["tests/"],
-        "needs_qemu_cleanup": False,
         "clean_paths": [],
         # RIOT images are built for amd64; without this they fail to start on
         # arm64 hosts.
@@ -113,45 +109,15 @@ PROJECTS: dict[str, dict] = {
 }
 
 
-# Zephyr instances from the twister pipeline (metadata "pipeline": "twister";
-# scripts/generate_instance.py) run in an Apptainer image whose `run_tests`
-# builds and runs the one board/scenario with twister. Only what differs from
-# the Docker/west-build Zephyr entry is overridden.
-TWISTER_OVERRIDES: dict[str, dict] = {
-    "zephyr": {
-        "orientation": (
-            "This instance builds and tests with Zephyr's twister for one board "
-            "and one test scenario, both fixed. `run_tests` rebuilds incrementally "
-            "(only what you changed is recompiled), runs the tests, and prints a "
-            "status for every test case. Do not run `west build`, `west build -t "
-            "run` or `scripts/twister` yourself, and do not pass a board, test "
-            "path or Kconfig options anywhere -- the scenario's configuration is "
-            "already applied. Build output is under /testbed/twister-out."
-        ),
-        "extra_warnings": (
-            "`run_tests` exit codes on this instance: 0 = all tests passed, "
-            "1 = a test, the build or the configuration failed, 2 = the test "
-            "runner did not start, 3 = nothing ran. A run takes one to a few "
-            "minutes; tests under QEMU include the emulator's boot."
-        ),
-        # A command's timeout ends its container and every process in it, so
-        # QEMU cannot be orphaned; no cleanup hook is needed.
-        "needs_qemu_cleanup": False,
-        "rebuild_command": "",
-        "clean_paths": [],
-        # Long enough for a full rebuild plus a QEMU test run.
-        "command_timeout": 900,
-    },
-}
-
-
 def config_for(meta: dict) -> dict:
-    """The project configuration for one instance: the twister variant for
-    twister-pipeline instances, the plain project entry otherwise."""
-    cfg = dict(config(meta["project"]))
-    if meta.get("pipeline") == "twister":
-        cfg.update(TWISTER_OVERRIDES.get(meta["project"], {}))
-    return cfg
+    """The project configuration for one instance. A Zephyr instance must come
+    from the twister pipeline; the Docker ones in docker/instances/ are kept as
+    reference metadata only and cannot be run."""
+    if meta["project"] == "zephyr" and meta.get("pipeline") != "twister":
+        raise ValueError(f"{meta.get('instance_id')}: not a twister-pipeline instance. "
+                         "Zephyr instances are run from generated/ "
+                         "(EMBEDEVAL_INSTANCES_DIR=generated).")
+    return config(meta["project"])
 
 
 def config(project: str) -> dict:

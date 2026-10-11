@@ -25,8 +25,9 @@ hardware. After MAX_TOOL_ROUNDS the model is told to answer and the request is
 sent without tools, so a PR always ends with a verdict rather than an error.
 
 The verdict is checked by code before it is accepted: the fields pr_triage.md
-requires, a platform we can run, and fail_to_pass names that actually appear
-in the suite's sources. A failed check goes back to the model with the reason,
+requires, a board/scenario pair the twister dry run selected
+(scripts/dry_run.py), and fail_to_pass names that actually appear in the
+suite's sources. A failed check goes back to the model with the reason,
 up to MAX_REPAIRS times; whatever is left is recorded, not hidden.
 
 Each run writes to its own directory and never overwrites another:
@@ -66,8 +67,14 @@ INSTANCES = REPO_ROOT / "docker" / "instances"
 
 # Board names pr_triage.md allows. native_sim_64 is the pre-2024 spelling of
 # native_sim/native/64; the hand-built instances use both.
-PLATFORMS = {"native_sim", "native_sim_64", "native_sim/native/64", "qemu_x86"}
-SAME_BOARD = {"native_sim_64": "native_sim/native/64"}
+DRYRUN = REPO_ROOT / "candidates" / "dryrun"
+# Spellings of one board across Zephyr's history, for comparing with gold.
+SAME_BOARD = {"native_sim_64": "native_sim/native/64", "native_posix_64": "native_sim/native/64"}
+
+
+def load_dry_run(pr: int) -> dict | None:
+    p = DRYRUN / f"{pr}.json"
+    return json.loads(p.read_text()) if p.exists() else None
 
 MAX_TOOL_ROUNDS = 8     # model replies that call tools; then it must answer.
                         # 43405 took 24 rounds and 41 minutes reading log_core.c
@@ -137,14 +144,24 @@ def render_record(rec: dict) -> str:
             else:
                 out += [f"#### {root}/{name}", "```", f["content"], "```", ""]
 
-    out += ["## Our platforms at the base commit", ""]
-    for name, p in (rec.get("platforms") or {}).items():
-        if name.startswith("_"):
-            out += [f"Note: {p}", ""]
-        elif p.get("exists"):
-            out += [f"### {name}: exists ({p['path']})", "```yaml", p["content"], "```", ""]
-        else:
-            out += [f"### {name}: does not exist at this commit", ""]
+    out += ["## Twister dry run at the base commit", ""]
+    dr = load_dry_run(rec["number"])
+    if not dr:
+        out += ["(no dry run for this PR; run scripts/dry_run.py first)", ""]
+    else:
+        out += ["Twister's own filters, run on the base tree with this PR's tests "
+                "applied, for every scenario of every suite the PR changes, on each "
+                "board we can run. `selected`: twister would build and run that pair. "
+                "`filtered`: twister's reason. Kconfig/devicetree `filter:` "
+                "expressions are not evaluated here, so a selected pair can still "
+                "be filtered when it is built.", "",
+                "| suite | scenario | board | status | reason |", "|---|---|---|---|---|"]
+        out += [f"| {p['suite']} | {p['scenario']} | {p['board']} | {p['status']} | "
+                f"{p['reason']} |" for p in dr["pairs"]]
+        out += ["", "### Test cases per scenario (twister's names)", ""]
+        for scen, names in dr["tests"].items():
+            out += [f"- {scen}: {', '.join(names) or '(none found)'}"]
+        out += [""]
 
     sources = rec.get("base_sources") or {}
     out += ["## Source files before this PR, in full, at the base commit", ""]
@@ -259,6 +276,30 @@ def parse_verdict(content: str | None) -> dict | None:
         return None
 
 
+def check_pair(v: dict, rec: dict) -> list[str]:
+    """platform, test_path and scenario must name one pair the dry run selected
+    (or, without a dry run, a board and scenario that exist at the base)."""
+    plat, tp, scen = v.get("platform"), v.get("test_path"), v.get("scenario")
+    if not all(isinstance(x, str) and x for x in (plat, tp, scen)):
+        return ["`platform`, `test_path` and `scenario` are all required"]
+    dr = load_dry_run(rec["number"])
+    if dr:
+        selected = [p for p in dr["pairs"] if p["status"] == "selected"]
+        if any(p["suite"] == tp and p["scenario"] == scen and p["board"] == plat
+               for p in selected):
+            return []
+        options = "; ".join(f"{p['board']} + {p['suite']} / {p['scenario']}" for p in selected)
+        return [f"{plat} + {tp} / {scen} is not a pair the dry run selected. "
+                f"Selected pairs: {options or 'none'}"]
+    facts = rec.get("twister") or {}
+    issues = []
+    if plat not in [b for b in (facts.get("boards") or {}).values() if b]:
+        issues.append(f"`platform` must be one of {facts.get('boards')}")
+    if scen not in ((facts.get("suites") or {}).get(tp) or {}).get("scenarios", {}):
+        issues.append(f"`scenario` {scen!r} is not a scenario of suite {tp!r}")
+    return issues
+
+
 def check_verdict(v: dict | None, rec: dict) -> list[str]:
     """What pr_triage.md requires, checked mechanically. Judgement is not
     second-guessed here -- only form, and names that must exist."""
@@ -278,12 +319,9 @@ def check_verdict(v: dict | None, rec: dict) -> list[str]:
         issues.append("`confidence` must be high, medium or low")
     if v.get("change_type") not in ("fix", "feature"):
         issues.append("`change_type` must be fix or feature")
-    if v.get("platform") not in PLATFORMS:
-        issues.append(f"`platform` must be exactly one of {sorted(PLATFORMS)}")
+    issues += check_pair(v, rec)
     if not str(v.get("problem_statement") or "").strip():
         issues.append("`problem_statement` is required")
-    if not isinstance(v.get("extra_configs", []), list):
-        issues.append("`extra_configs` must be a list")
     sources = test_sources(rec)
     for field, required in (("fail_to_pass", True), ("pass_to_pass", False)):
         names = v.get(field, [])
@@ -407,11 +445,11 @@ def secondary(pr: int, v: dict) -> str:
     norm = lambda p: SAME_BOARD.get(p, p)
     plat = "✓" if norm(v.get("platform")) == norm(meta.get("platform")) else \
         f"✗ {v.get('platform')} (gold {meta.get('platform')})"
+    gold_scen = meta.get("scenario") or meta.get("test_scenario")
+    scen = "✓" if v.get("scenario") == gold_scen else f"✗ {v.get('scenario')} (gold {gold_scen})"
     want, got = set(meta.get("fail_to_pass") or []), set(v.get("fail_to_pass") or [])
     f2p = f"{len(want & got)}/{len(want)} gold" + (f", +{len(got - want)} extra" if got - want else "")
-    ec = "✓" if sorted(v.get("extra_configs") or []) == sorted(meta.get("extra_configs") or []) else \
-        f"✗ {v.get('extra_configs')} (gold {meta.get('extra_configs') or []})"
-    return f"{plat} / {f2p} / {ec}"
+    return f"{plat} / {scen} / {f2p}"
 
 
 def previous_verdicts(run_dir: Path) -> dict[int, str]:
@@ -456,7 +494,7 @@ def cmd_eval(args) -> None:
           f"max {max((r['seconds'] for r in rows), default=0) / 60:.1f} min. "
           f"Tool calls: {sum(r['tool_calls'] for r in rows)} in total; "
           f"budget hit on {sum(r['budget_hit'] for r in rows)} PR(s).", "",
-          "| PR | expected | got | ok | conf | platform / fail_to_pass / extra_configs | time | tools | unresolved issues |",
+          "| PR | expected | got | ok | conf | board / scenario / fail_to_pass | time | tools | unresolved issues |",
           "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         md.append(f"| {r['pr']} | {r['expected']} | {r['got']} | {r['ok']} | {r['confidence']} | "
@@ -493,6 +531,10 @@ def cmd_run(args) -> None:
     missing = [p for p in prs if not (ENRICHED / f"{p}.json").exists()]
     if missing:
         sys.exit(f"not enriched: {missing}. Run filter_candidates.py enrich --pr ...")
+    no_dry = [p for p in prs if load_dry_run(p) is None]
+    if no_dry:
+        print(f"  WARNING: no dry run for {no_dry}; the model sees no board/scenario table "
+              f"for them. Run scripts/dry_run.py {' '.join(map(str, no_dry))}")
 
     # Make every commit the tools may read reachable before any thread needs it.
     commits = set()

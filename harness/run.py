@@ -22,7 +22,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -223,61 +222,10 @@ def build_task(meta: dict) -> str:
 # --------------------------------------------------------------------------
 
 
-class QemuCleanupEnvironment:
-    """
-    DockerEnvironment plus orphaned-QEMU cleanup, for projects that run tests
-    under QEMU (Zephyr).
-
-    A per-command timeout kills the `docker exec` client on the host, but the
-    container-side QEMU keeps running and holds an exclusive lock on qemu.pid.
-    Every later `run_tests` then fails with "Cannot lock pid file". This kills
-    the orphan by PID file -- not by process name, which would match the calling
-    shell and kill the session.
-    """
-
-    _CLEANUP = (
-        "if [ -f /testbed/build/qemu.pid ]; then "
-        "  kill -9 $(cat /testbed/build/qemu.pid) 2>/dev/null || true; "
-        "fi; "
-        "rm -f /testbed/build/qemu.pid /testbed/build/zephyr/qemu.pid"
-    )
-
-    def __init__(self, **kwargs):
-        from minisweagent.environments.docker import DockerEnvironment
-
-        self._env = DockerEnvironment(**kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._env, name)
-
-    def execute(self, action: dict, **kwargs) -> dict:
-        result = self._env.execute(action, **kwargs)
-        if (
-            result.get("returncode") == -1
-            and "timed out" in (result.get("exception_info") or "").lower()
-        ):
-            try:
-                subprocess.run(
-                    [
-                        self._env.config.executable,
-                        "exec",
-                        self._env.container_id,
-                        "bash",
-                        "-c",
-                        self._CLEANUP,
-                    ],
-                    timeout=10,
-                    capture_output=True,
-                )
-            except Exception:
-                pass  # best effort; the agent will see the lock error otherwise
-        return result
-
-
 def make_environment(meta: dict):
     cfg = projects.config_for(meta)
-    if meta.get("pipeline") == "twister":
-        # Built by scripts/build_instances.py as an Apptainer image.
+    if cfg.get("runtime") == "apptainer":
+        # Zephyr: an Apptainer image built by scripts/build_instances.py.
         sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
         import apptainer_util
         from apptainer_env import ApptainerEnvironment
@@ -294,12 +242,12 @@ def make_environment(meta: dict):
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
                                     setup_commands=[commit_tests])
+
+    # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
     platform = projects.setting(meta, "docker_platform")
     if platform:
         kwargs["run_args"] = ["--rm", "--platform", platform]
-    if cfg["needs_qemu_cleanup"]:
-        return QemuCleanupEnvironment(**kwargs)
     from minisweagent.environments.docker import DockerEnvironment
 
     return DockerEnvironment(**kwargs)

@@ -75,6 +75,11 @@ def build_instance(instance_id: str, dry_run: bool = False, no_cache: bool = Fal
     d = instances.instance_dir(instance_id)
     if (d / "instance.def").exists():
         return build_apptainer(instance_id, dry_run)
+    if instances.split_instance(instance_id)[0] == "zephyr":
+        print(f"  SKIP: {instance_id} has no instance.def. Zephyr instances are built with "
+              f"Apptainer from the twister pipeline (generated/); the Docker ones in "
+              f"docker/instances/ are kept as reference metadata only.")
+        return False
     missing = [f for f in REQUIRED_FILES if not (d / f).exists()]
     if missing:
         print(f"  ERROR: {instance_id} missing {', '.join(missing)}")

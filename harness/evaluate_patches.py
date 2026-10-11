@@ -109,6 +109,11 @@ def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dic
     meta = paths.load_metadata(instance_id)
     if meta.get("pipeline") == "twister":
         return evaluate_apptainer(instance_id, model_name, meta, timeout)
+    if meta["project"] == "zephyr":
+        return {"instance_id": instance_id, "model": paths.resolve_model(model_name),
+                "grade": "missing", "error": "Docker Zephyr instance (reference metadata only); "
+                "grade Zephyr from generated/ (EMBEDEVAL_INSTANCES_DIR=generated)",
+                "elapsed_seconds": 0}
     cfg = projects.config(meta["project"])
     image = meta["docker_image"]
     build_command = projects.setting(meta, "build_command")
