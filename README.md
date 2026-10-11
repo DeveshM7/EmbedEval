@@ -8,7 +8,7 @@ It has to make those tests pass. Everything runs inside Docker with a real
 cross-compiler toolchain, so a patch only counts if the firmware actually builds
 and the tests actually run.
 
-**17 instances:** 8 Zephyr, 6 NuttX, 3 RIOT.
+**18 instances:** 8 Zephyr, 7 NuttX, 3 RIOT.
 
 ---
 
