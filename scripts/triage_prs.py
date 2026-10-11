@@ -63,7 +63,6 @@ ENRICHED = REPO_ROOT / "candidates" / "enriched"
 INSTRUCTIONS = REPO_ROOT / "docs" / "pr_triage.md"
 TRIAGE = REPO_ROOT / "triage"
 RUNS = TRIAGE / "runs"
-INSTANCES = REPO_ROOT / "docker" / "instances"
 
 # Board names pr_triage.md allows. native_sim_64 is the pre-2024 spelling of
 # native_sim/native/64; the hand-built instances use both.
@@ -428,28 +427,45 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
 # ---------------------------------------------------------------- scoring
 
 
+def gold_file() -> dict:
+    return json.loads((TRIAGE / "gold.json").read_text())
+
+
 def load_gold() -> dict[int, str]:
-    g = json.loads((TRIAGE / "gold.json").read_text())
+    g = gold_file()
     return {**{int(p): "accept" for p in g["accept"]},
             **{int(p): "reject" for p in g["reject"]},
             **{int(p): "info" for p in g.get("info_only", {})}}
 
 
+def gold_stage(pr: int) -> str:
+    """Where the pipeline itself rejects a gold reject: hard_filter, dry_run
+    or triage. Every gold PR is sent to the model regardless."""
+    return (gold_file()["reject"].get(str(pr)) or {}).get("stage", "")
+
+
 def secondary(pr: int, v: dict) -> str:
-    """Accepted gold PRs only: how the instance fields compare to the ones
-    built by hand. Reported, never scored."""
-    meta_path = INSTANCES / f"zephyr__zephyr-{pr}" / "metadata.json"
-    if not meta_path.exists() or v.get("verdict") != "accept":
+    """Accepted gold PRs only: the verdict's pair and tests against what the
+    validated instance proved (gold.json `expected`). Reported, never scored:
+    another selected pair may validate too, so a different pair is shown as
+    such, not as wrong."""
+    exp = ((gold_file()["accept"].get(str(pr)) or {}).get("expected"))
+    if not exp or v.get("verdict") != "accept":
         return ""
-    meta = json.loads(meta_path.read_text())
-    norm = lambda p: SAME_BOARD.get(p, p)
-    plat = "✓" if norm(v.get("platform")) == norm(meta.get("platform")) else \
-        f"✗ {v.get('platform')} (gold {meta.get('platform')})"
-    gold_scen = meta.get("scenario") or meta.get("test_scenario")
-    scen = "✓" if v.get("scenario") == gold_scen else f"✗ {v.get('scenario')} (gold {gold_scen})"
-    want, got = set(meta.get("fail_to_pass") or []), set(v.get("fail_to_pass") or [])
-    f2p = f"{len(want & got)}/{len(want)} gold" + (f", +{len(got - want)} extra" if got - want else "")
-    return f"{plat} / {scen} / {f2p}"
+    norm = lambda b: SAME_BOARD.get(b, b)
+    mine = (norm(v.get("platform")), v.get("test_path"), v.get("scenario"))
+    if mine == (norm(exp["platform"]), exp["test_path"], exp["scenario"]):
+        pair = "✓ pair"
+    else:
+        dr = load_dry_run(pr) or {"pairs": []}
+        sel = any(p["status"] == "selected" and (norm(p["board"]), p["suite"], p["scenario"]) == mine
+                  for p in dr["pairs"])
+        pair = (f"{'≠ selected' if sel else '✗ not selected'}: {v.get('platform')} "
+                f"{v.get('scenario')} (validated: {exp['platform']} {exp['scenario']})")
+    want, got = set(exp.get("fail_to_pass") or []), set(v.get("fail_to_pass") or [])
+    f2p = (f"f2p {len(want & got)}/{len(want)} measured"
+           + (f", +{len(got - want)} not measured" if got - want else ""))
+    return f"{pair} / {f2p}"
 
 
 def previous_verdicts(run_dir: Path) -> dict[int, str]:
@@ -471,13 +487,15 @@ def cmd_eval(args) -> None:
         pr, v = int(f.stem), json.loads(f.read_text())
         trace = json.loads((run_dir / f"{pr}.trace.json").read_text())
         want, got = gold.get(pr, "—"), v.get("verdict")
+        stage = gold_stage(pr)
         ok = "" if want in ("info", "—") else ("✓" if got == want else "✗")
         if ok:
             scored += 1
             correct += ok == "✓"
         if pr in prev and prev[pr] != got:
             changed.append(f"{pr}: {prev[pr]} → {got}")
-        rows.append({"pr": pr, "expected": want, "got": got, "ok": ok,
+        rows.append({"pr": pr, "expected": want + (f" ({stage})" if stage else ""),
+                     "stage": stage, "got": got, "ok": ok,
                      "confidence": v.get("confidence", ""), "secondary": secondary(pr, v),
                      "seconds": trace.get("seconds"), "turns": len(trace.get("turns", [])),
                      "tool_calls": sum(len(t.get("tool_calls") or []) for t in trace.get("turns", [])),
@@ -485,16 +503,18 @@ def cmd_eval(args) -> None:
                      "issues": trace.get("issues") or []})
 
     acc = [r for r in rows if r["expected"] == "accept"]
-    rej = [r for r in rows if r["expected"] == "reject"]
+    rej = [r for r in rows if r["expected"].startswith("reject")]
+    rej_t = [r for r in rej if r["stage"] == "triage"]
     md = [f"# Scorecard: {run_dir.name}", "",
           f"**Verdicts: {correct}/{scored} correct** "
           f"(accepts {sum(r['ok'] == '✓' for r in acc)}/{len(acc)}, "
-          f"rejects {sum(r['ok'] == '✓' for r in rej)}/{len(rej)})", "",
+          f"rejects {sum(r['ok'] == '✓' for r in rej)}/{len(rej)}, of which judged only at "
+          f"triage {sum(r['ok'] == '✓' for r in rej_t)}/{len(rej_t)})", "",
           f"Time per PR: mean {sum(r['seconds'] for r in rows) / max(len(rows), 1) / 60:.1f} min, "
           f"max {max((r['seconds'] for r in rows), default=0) / 60:.1f} min. "
           f"Tool calls: {sum(r['tool_calls'] for r in rows)} in total; "
           f"budget hit on {sum(r['budget_hit'] for r in rows)} PR(s).", "",
-          "| PR | expected | got | ok | conf | board / scenario / fail_to_pass | time | tools | unresolved issues |",
+          "| PR | expected | got | ok | conf | pair / fail_to_pass vs validated | time | tools | unresolved issues |",
           "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         md.append(f"| {r['pr']} | {r['expected']} | {r['got']} | {r['ok']} | {r['confidence']} | "
