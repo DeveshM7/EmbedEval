@@ -152,13 +152,13 @@ Read `candidates/nuttx/enriched/<apps-pr>.json` and decide which kernel PR,
 test paths, and fix paths actually form a separable task.
 
 The pair-triage prompt is in `docs/nuttx_pr_triage.md`. Run and score
-the 12-case gold set with the same served model profiles used by Zephyr. First
-prepare the eleven apps records in the checkout where the model client runs;
+the 14-case gold set with the same served model profiles used by Zephyr. First
+prepare the thirteen apps records in the checkout where the model client runs;
 the generated `candidates/` cache is ignored by Git:
 
 ```sh
 python scripts/filter_candidates.py enrich --repo nuttx --pr \
-  1665 1682 1792 2327 2329 2458 2725 3401 3676 3767 3785
+  1665 1682 1792 1857 2137 2327 2329 2458 2725 3401 3676 3767 3785
 ```
 
 For one already identified pair, supply both PR numbers directly. This fetches
@@ -192,8 +192,9 @@ srun --jobid=<id> --overlap -c 4 .venv/bin/python \
 
 The run stores a prompt snapshot, manifest, and one verdict and full trace per
 case in `triage/nuttx_runs/`. A run with `--gold` also writes a scorecard. The
-gold file is `triage/nuttx_gold.json`: six pairs with native validation traces and six
-provisional rejections based on PR evidence. Only the accept/reject choice is
+gold file is `triage/nuttx_gold.json`: seven pairs with native validation traces and
+seven rejections, six based on PR evidence and one (apps #2137) on a validator
+run whose fixed kernel does not link on `sim:nsh`. Only the accept/reject choice is
 scored. The selected kernel PR is reported as a secondary check. The AI
 verdict includes a detecting test, expected failure, and `readiness` status.
 `ready_to_generate` includes two proposed test-specific literal markers found
@@ -268,7 +269,7 @@ and runner before it can be generated.
 | Stage | NuttX status |
 |---|---|
 | PR fetch and linked ostest pairing | Scripted pool from ostest diffs and links in either direction; recall beyond linked ostest pairs is not measured |
-| AI triage instructions and model scoring | Pair classifier and 12-case scoring implemented; live model accuracy is not yet measured |
+| AI triage instructions and model scoring | Pair classifier and 14-case scoring implemented; live model accuracy is not yet measured |
 | Reviewed verdict to instance files | Implemented for `sim:nsh`/`ostest`, with explicit test/fix paths and branch commits |
 | Native Docker image and named-test runner | Implemented; optional config settings, regex failure evidence, and clean rebuild are recorded in metadata |
 | Old-fail/fixed-pass validation | Implemented through the shared validator; each new generated instance still needs a recorded local run |

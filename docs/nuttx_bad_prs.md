@@ -1,12 +1,14 @@
-# Apache NuttX: six benchmark rejection examples
+# Apache NuttX: seven benchmark rejection examples
 
 These are legitimate upstream changes. “Bad” means they should not be accepted
 as **kernel-fix EmbedEval instances** on the evidence currently available. The
 list spans both repositories and is meant to test later triage instructions.
-None of these six has been packaged and run through
-`scripts/validate_instance.py`; the findings below come from merged PR
-descriptions and changed-file diffs. A candidate with a new, reproducible
-old-code failure and fixed-code pass can be reconsidered.
+The first six findings come from merged PR descriptions and changed-file
+diffs. Two of them (#1792, #3401) were later packaged and run through
+`scripts/validate_instance.py`; both ended ambiguous because the changed test
+never ran under `sim:nsh`, as noted in their entries. The seventh (#2137) comes
+from a validator run. A candidate with a new, reproducible old-code failure and
+fixed-code pass can be reconsidered.
 
 ## [nuttx #20091 — serialize `clearenv()`](https://github.com/apache/nuttx/pull/20091)
 
@@ -43,7 +45,13 @@ every paired apps change as a regression test would mistake test enablement
 for a detecting testcase.
 
 **Expected rejection point:** Triage of the paired PRs. **Confidence:** High
-for the changed hunks; runtime behavior has not been tested here.
+for the changed hunks.
+
+**Validator run (2026-10-11):** packaged against kernel #9527 for `sim:nsh`.
+On the old kernel `CONFIG_PTHREAD_CLEANUP_STACKSIZE` does not exist, so the new
+guards compile the cleanup test out; ostest finishes without printing
+`user_main: pthread_cleanup test` and `run_tests` exits 3 (ambiguous). There is
+no old-code failure to compare against.
 
 ## [nuttx-apps #3676 — gate the perf test in non-flat builds](https://github.com/apache/nuttx-apps/pull/3676)
 
@@ -93,6 +101,33 @@ kernel PR is not enough to make the kernel PR the benchmark fix.
 **Expected rejection point:** Triage of fix direction and patch separation.
 **Confidence:** High.
 
+**Validator run (2026-10-11):** packaged with only the two `testing/ostest/`
+files against kernel #17011 for `sim:nsh`. `CONFIG_SCHED_SPORADIC` is not set
+there, so neither sporadic test is compiled or run; ostest exits 0 and
+`run_tests` exits 3 (ambiguous). This says nothing about the fix either way.
+
+## [nuttx-apps #2137 — SMP function call test](https://github.com/apache/nuttx-apps/pull/2137)
+
+**Evidence:** The apps PR adds `testing/ostest/smp_call.c`, gated by the new
+`CONFIG_SMP_CALL`, calling `nxsched_smp_call_single()` and `nxsched_smp_call()`.
+[Kernel PR #10934](https://github.com/apache/nuttx/pull/10934) adds those APIs
+in `sched/sched/sched_smp.c`, which relies on the per-architecture hook
+`up_send_smp_call()`. The PR implements that hook only for arm64
+(`arch/arm64/src/common/arm64_gicv3.c`).
+
+**Validator run (2026-10-11):** packaged for `sim:nsh` with `CONFIG_SMP`, its
+dependent options, and `CONFIG_SMP_CALL` forced on. On the old kernel the link
+fails with `undefined reference to 'nxsched_smp_call_single'`, the expected
+failure. After applying the kernel fix, the link still fails with
+`undefined reference to 'up_send_smp_call'` because the simulator has no
+implementation. The fixed kernel cannot pass on `sim:nsh`.
+
+**Reject point:** No passing fixed state on the native simulator. It also adds
+a feature rather than fixing a bug, which is a separate policy question.
+
+**Expected rejection point:** Triage of the runnable target, or validation.
+**Confidence:** High for `sim:nsh`; an arm64 QEMU target could revisit it.
+
 ## [nuttx-apps #3785 — sensor watchdog coverage](https://github.com/apache/nuttx-apps/pull/3785)
 
 **Evidence:** The merged apps PR adds `testing/drivers/drivertest` sensor
@@ -115,7 +150,7 @@ target or fixture may make the regression observable.
 
 ## What these examples test
 
-The current hard filter keeps all five apps PRs above; it leaves #3676 and
+The current hard filter keeps all six apps PRs above; it leaves #3676 and
 #3767 unresolved rather than guessing a kernel match. Enrichment resolves
 #3785's scoped #20145 as an issue and retains #20146 as the kernel PR. The
 kernel-only #20091 has no changed apps testcase to enter this apps-first
