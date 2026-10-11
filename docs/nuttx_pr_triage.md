@@ -105,18 +105,17 @@ For an accepted pair, also include:
 - `config_overrides` maps required NuttX config names to their values; use
   `{}` when the record shows none. `platform` is `sim:nsh` or a concrete
   QEMU configuration such as `qemu-armv7a:nsh`.
+- The runner judges the whole `ostest` run: it passes only when the suite
+  completes with status 0, prints no `ERROR` line, and prints the
+  `user_main: ... test` banner of every changed test. So every changed test
+  must actually run on the selected configuration, and every other `ostest`
+  test must still pass there.
 - For a `sim:nsh` `ostest` assertion or compile failure, use
-  `ready_to_generate` only when the selected changed test sources contain two
-  distinct, test-specific **literal output substrings**: one for success and
-  one for failure. Each substring must include a `fail_to_pass` test function
-  name. Adjacent C string literals can form one marker; use only the stable
-  portion before any formatted value such as `%d`. Add the substrings as
-  `test_success_marker` and `test_failure_marker`; use literal matching, not
-  a regex. These are proposed markers, not observed results. Do not use
-  generic `PASS`, `ERROR`, or the suite exit status.
-  If the source does not provide both markers, use `needs_reviewed_recipe`
-  and omit the marker fields. A reviewer must establish a reliable recipe
-  before generation. Use `needs_fixture` for QEMU, another apps test program,
-  or another failure mode. None of these statuses claims validation passed.
+  `ready_to_generate` when `ostest_main.c` calls each changed test and
+  `config_overrides` holds every setting those calls need on `sim:nsh`
+  (check the `#ifdef` guards around the calls). Use `needs_reviewed_recipe`
+  when you cannot tell whether a changed test runs there. Use
+  `needs_fixture` for QEMU, another apps test program, or another failure
+  mode. None of these statuses claims validation passed.
 - `issue_url` may be null. Do not invent links, paths, target support,
-  config settings, output markers, or test results.
+  config settings, or test results.

@@ -4,6 +4,10 @@
     python scripts/generate_nuttx_instance.py \
         --triage triage/nuttx_runs/<run>/apps-2329-kernel-11898.json
 
+    # rewrite an existing instance's run_tests.sh from the current template
+    python scripts/generate_nuttx_instance.py \
+        --rerender-runner docker/instances/nuttx__nuttx-8832
+
 The apps test patch is diffed from the apps PR branch, and the validator's
 kernel fix range is the kernel PR branch. Neither range ends at a merge commit.
 """
@@ -15,9 +19,10 @@ import json
 import re
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
-from render_nuttx_instance import DEFAULT_OUT, render
+from render_nuttx_instance import DEFAULT_OUT, ostest_banners, render, render_runner
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,8 +54,7 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
         raise ValueError("test_paths must be changed ostest files in the apps PR")
     if not fix_paths or not set(fix_paths) <= kernel_changed:
         raise ValueError("fix_paths must be changed files in the kernel PR")
-    for name in ("problem_statement", "test_success_marker", "test_failure_marker",
-                 "fail_to_pass"):
+    for name in ("problem_statement", "fail_to_pass"):
         if not verdict.get(name):
             raise ValueError(f"triage verdict lacks {name}")
     fail_type = verdict.get("fail_type")
@@ -87,10 +91,6 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
         "test_app": "ostest",
         "fail_type": fail_type,
         "problem_statement": verdict["problem_statement"],
-        "test_success_marker": verdict["test_success_marker"],
-        "test_failure_marker": verdict["test_failure_marker"],
-        "test_failure_match": verdict.get("test_failure_match", "literal"),
-        "test_failure_context_marker": verdict.get("test_failure_context_marker", ""),
         "fail_to_pass": verdict["fail_to_pass"],
         "pass_to_pass": verdict.get("pass_to_pass", []),
         "config_overrides": verdict.get("config_overrides", {}),
@@ -120,7 +120,8 @@ def apps_clone() -> Path:
     return APPS_CLONE
 
 
-def build_test_patch(base: str, head: str, paths: list[str]) -> str:
+def build_test_patch(base: str, head: str, paths: list[str]) -> tuple[str, list[str]]:
+    """The apps test patch, and the ostest banners of the tests it changes."""
     clone = apps_clone()
     run("git", "-C", str(clone), "fetch", "-q", "origin", base, head)
     changed = run("git", "-C", str(clone), "diff", "--name-only",
@@ -130,16 +131,36 @@ def build_test_patch(base: str, head: str, paths: list[str]) -> str:
     patch = run("git", "-C", str(clone), "diff", f"{base}..{head}", "--", *paths)
     if not patch.strip():
         raise ValueError("empty apps test patch")
+    with patched_apps(base, patch) as work:
+        return patch, ostest_banners(work / "testing" / "ostest", paths)
+
+
+@contextmanager
+def patched_apps(base: str, patch: str):
+    """A temporary apps worktree at base with patch applied."""
+    clone = apps_clone()
+    run("git", "-C", str(clone), "fetch", "-q", "origin", base)
     with tempfile.TemporaryDirectory(prefix="embedeval-nuttx-apply-") as tmp:
         work = Path(tmp) / "apps"
         patch_file = Path(tmp) / "test.diff"
         patch_file.write_text(patch)
         run("git", "-C", str(clone), "worktree", "add", "--detach", str(work), base)
         try:
-            run("git", "-C", str(work), "apply", "--check", str(patch_file))
+            run("git", "-C", str(work), "apply", str(patch_file))
+            yield work
         finally:
             run("git", "-C", str(clone), "worktree", "remove", "--force", str(work))
-    return patch
+
+
+def rerender_runner(inst: Path) -> Path:
+    """Rewrite inst/run_tests.sh from the template, keeping its other files."""
+    meta = json.loads((inst / "metadata.json").read_text())
+    patch = (inst / "test_patch.diff").read_text()
+    changed = re.findall(r"^diff --git a/(\S+) b/\1$", patch, re.MULTILINE)
+    with patched_apps(meta["apps_base_commit"], patch) as work:
+        banners = ostest_banners(work / "testing" / "ostest", changed)
+    (inst / "run_tests.sh").write_text(render_runner(banners))
+    return inst / "run_tests.sh"
 
 
 def generate(apps_number: int, kernel_number: int, verdict: dict,
@@ -148,8 +169,9 @@ def generate(apps_number: int, kernel_number: int, verdict: dict,
     record_path = pair_path if pair_path.exists() else ENRICHED / f"{apps_number}.json"
     record = json.loads(record_path.read_text())
     meta = metadata(record, kernel_number, verdict)
-    patch = build_test_patch(meta["apps_base_commit"], meta["apps_merge_commit"],
-                             meta["files_changed_by_test_patch"])
+    patch, meta["test_banners"] = build_test_patch(
+        meta["apps_base_commit"], meta["apps_merge_commit"],
+        meta["files_changed_by_test_patch"])
     with tempfile.TemporaryDirectory(prefix="embedeval-nuttx-testpatch-") as tmp:
         patch_file = Path(tmp) / "test.diff"
         patch_file.write_text(patch)
@@ -160,10 +182,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apps-pr", type=int)
     parser.add_argument("--kernel-pr", type=int)
-    parser.add_argument("--triage", required=True, type=Path)
+    parser.add_argument("--triage", type=Path)
+    parser.add_argument("--rerender-runner", type=Path, metavar="INSTANCE_DIR",
+                        help="only rewrite this instance's run_tests.sh")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--tag-suffix", default="-gen")
     args = parser.parse_args()
+    if args.rerender_runner:
+        print(rerender_runner(args.rerender_runner))
+        return
+    if not args.triage:
+        parser.error("supply --triage or --rerender-runner")
     verdict = json.loads(args.triage.read_text())
     pair = re.fullmatch(r"apps-(\d+)-kernel-(\d+)", verdict.get("case") or "")
     apps_number = args.apps_pr if args.apps_pr is not None else int(pair[1]) if pair else None

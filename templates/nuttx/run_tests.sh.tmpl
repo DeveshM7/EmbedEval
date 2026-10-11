@@ -1,82 +1,41 @@
 #!/usr/bin/env bash
-# Exit 0 only after the named test evidence and ostest's successful completion.
-# Exit 1 for the named failure, 2 for timeout,
-# and 3 when the simulator exits or ostest completes without the named test.
+# Run the whole ostest suite to completion, then classify its log once.
+# Exit 0 when ostest finished cleanly and ran every changed test, 1 for any
+# other completed run, and 2 for timeout.
+#
+# The simulator's own exit code is ignored: nsh's poweroff ends it with 0
+# even after ostest fails (status 256), so only the log decides.
 set -u
 
 TIMEOUT="${1:-300}"
-SUCCESS_MARKER=@@SUCCESS_MARKER@@
-FAILURE_MARKER=@@FAILURE_MARKER@@
-FAILURE_MATCH=@@FAILURE_MATCH@@
-FAILURE_CONTEXT_MARKER=@@FAILURE_CONTEXT_MARKER@@
+# The "user_main: ... test" lines ostest prints before each changed test.
+BANNERS=(@@BANNERS@@)
 OUTFILE="$(mktemp /tmp/nuttx_test_output.XXXXXX)"
-SNAPSHOT="$(mktemp /tmp/nuttx_test_snapshot.XXXXXX)"
+trap 'rm -f "$OUTFILE"' EXIT
 
-cd /testbed || exit 3
-printf 'ostest\npoweroff\n' | setsid ./nuttx >"$OUTFILE" 2>&1 &
-SIM_PID=$!
+cd /testbed || exit 1
+printf 'ostest\npoweroff\n' | timeout -k 10 "$TIMEOUT" ./nuttx >"$OUTFILE" 2>&1
+SIM_RC=$?
+cat "$OUTFILE"
 
-cleanup() {
-    kill -- "-$SIM_PID" 2>/dev/null || true
-    kill "$SIM_PID" 2>/dev/null || true
-    wait "$SIM_PID" 2>/dev/null || true
-    rm -f "$OUTFILE" "$SNAPSHOT"
-}
-trap cleanup EXIT
+if (( SIM_RC == 124 || SIM_RC == 137 )); then
+    echo "run_tests: result=2 (timed out after ${TIMEOUT}s)"
+    exit 2
+fi
 
-END=$((SECONDS + TIMEOUT))
-failure_seen() {
-    if [[ "$FAILURE_MATCH" == regex ]]; then
-        grep -Eq -- "$FAILURE_MARKER" "$SNAPSHOT"
-    else
-        grep -Fq -- "$FAILURE_MARKER" "$SNAPSHOT"
-    fi
-}
-
-classify_output() {
-    # OUTFILE is still growing, so separate greps of it can see different
-    # contents. Classify one copy so every check sees the same output.
-    cp "$OUTFILE" "$SNAPSHOT"
-    if failure_seen &&
-        { [[ -z "$FAILURE_CONTEXT_MARKER" ]] ||
-          grep -Fq -- "$FAILURE_CONTEXT_MARKER" "$SNAPSHOT"; }; then
-        RESULT=1
-        return 0
-    fi
-    if grep -Eq 'ostest_main: Exiting with status [1-9][0-9]*' "$SNAPSHOT"; then
-        RESULT=3
-        return 0
-    fi
-    if grep -Fq 'ostest_main: Exiting with status 0' "$SNAPSHOT"; then
-        if grep -Fq -- "$SUCCESS_MARKER" "$SNAPSHOT"; then
-            RESULT=0
-        else
-            RESULT=3
-        fi
-        return 0
-    fi
-    return 1
-}
-
-while true; do
-    if classify_output; then
-        break
-    fi
-    if ! kill -0 "$SIM_PID" 2>/dev/null; then
-        # The process may have exited between the marker check and kill -0.
-        # Recheck the completed output before classifying an early exit.
-        if ! classify_output; then
-            RESULT=3
-        fi
-        break
-    fi
-    if (( SECONDS >= END )); then
-        RESULT=2
-        break
-    fi
-    sleep 0.1
+REASONS=()
+grep -Fq 'user_main: Exiting' "$OUTFILE" || REASONS+=("no 'user_main: Exiting'")
+grep -Fq 'ostest_main: Exiting with status 0' "$OUTFILE" ||
+    REASONS+=("no 'ostest_main: Exiting with status 0'")
+grep -Fq 'ERROR' "$OUTFILE" && REASONS+=("ERROR in output")
+for banner in "${BANNERS[@]}"; do
+    grep -Fq -- "$banner" "$OUTFILE" || REASONS+=("changed test did not run: '$banner'")
 done
 
-cat "$OUTFILE"
-echo "run_tests: result=$RESULT"
-exit "$RESULT"
+if (( ${#REASONS[@]} == 0 )); then
+    echo "run_tests: result=0"
+    exit 0
+fi
+printf 'run_tests: %s\n' "${REASONS[@]}"
+echo "run_tests: result=1"
+exit 1

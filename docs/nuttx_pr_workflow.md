@@ -197,15 +197,16 @@ seven rejections, six based on PR evidence and one (apps #2137) on a validator
 run whose fixed kernel does not link on `sim:nsh`. Only the accept/reject choice is
 scored. The selected kernel PR is reported as a secondary check. The AI
 verdict includes a detecting test, expected failure, and `readiness` status.
-`ready_to_generate` includes two proposed test-specific literal markers found
-in the selected test source and can feed the generator directly.
-`needs_reviewed_recipe` still needs exact result markers before generation;
+`ready_to_generate` means each changed test is called from `ostest_main.c`
+and its required config is listed, so the verdict can feed the generator
+directly. `needs_reviewed_recipe` still needs a reviewer to confirm the
+changed test runs on `sim:nsh` before generation;
 `needs_fixture` needs runner or target work. None is validation.
 The kernel-only rejection #20091 is fetched directly at run time because it
 does not enter the apps-first discovery cache.
 
 The generator-ready verdict used by the current `sim:nsh` generator has this
-shape (abbreviated; the marker strings are illustrative):
+shape (abbreviated):
 
 ```json
 {
@@ -218,8 +219,6 @@ shape (abbreviated; the marker strings are illustrative):
   "problem_statement": "Describe the missing kernel behavior",
   "test_paths": ["testing/ostest/cancel.c"],
   "fix_paths": ["sched/pthread/pthread_join.c"],
-  "test_success_marker": "cancel_test: PASS pthread_join failed with status=EINVAL",
-  "test_failure_marker": "cancel_test: ERROR pthread_join failed but with wrong status=",
   "fail_to_pass": ["cancel_test"],
   "pass_to_pass": [],
   "config_overrides": {}
@@ -260,7 +259,13 @@ names from the checked-in instances; `--tag-suffix` permits another image tag.
 Validation must show old kernel plus the new apps test fails for the intended
 reason and fixed kernel plus the *same* apps test passes. A timeout, unrelated
 compile error, missing test output, or runner crash is inconclusive. The
-current Docker template runs native `sim:nsh` and `ostest`. Keep a QEMU lead
+current Docker template runs native `sim:nsh` and the whole `ostest` suite to
+completion, then reads its log once: pass needs `user_main: Exiting`,
+`ostest_main: Exiting with status 0`, no `ERROR` line, and the
+`user_main: ... test` banner of each changed test (derived by the generator
+from the patched `ostest_main.c`); anything else that completes fails, and a
+timeout returns 2. An unrelated `ostest` failure at the base commit therefore
+fails the fixed run too, which validation reports. Keep a QEMU lead
 when its bug requires that target; it needs its own target-specific template
 and runner before it can be generated.
 
@@ -271,7 +276,7 @@ and runner before it can be generated.
 | PR fetch and linked ostest pairing | Scripted pool from ostest diffs and links in either direction; recall beyond linked ostest pairs is not measured |
 | AI triage instructions and model scoring | Pair classifier and 14-case scoring implemented; live model accuracy is not yet measured |
 | Reviewed verdict to instance files | Implemented for `sim:nsh`/`ostest`, with explicit test/fix paths and branch commits |
-| Native Docker image and named-test runner | Implemented; optional config settings, regex failure evidence, and clean rebuild are recorded in metadata |
+| Native Docker image and whole-suite runner | Implemented; optional config settings and clean rebuild are recorded in metadata, changed-test banners are derived |
 | Old-fail/fixed-pass validation | Implemented through the shared validator; each new generated instance still needs a recorded local run |
 | QEMU-specific image and runner | Awaiting a concrete candidate that needs QEMU; discovery does not exclude it |
 | Unlinked-pair discovery (merge-window + symbol overlap) | Not implemented; a possible future option if linked-pool recall proves insufficient, see above |

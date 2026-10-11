@@ -236,22 +236,6 @@ def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
             issues.append("readiness must be needs_fixture for this test and platform")
     elif readiness not in ("needs_reviewed_recipe", "ready_to_generate"):
         issues.append("readiness must be needs_reviewed_recipe or ready_to_generate")
-    if readiness == "ready_to_generate":
-        paths = verdict.get("test_paths") or []
-        contents = record.get("test_contents") or {}
-        sources = "\n".join(re.sub(r'"\s*"', '', contents.get(path) or "") for path in paths
-                            if isinstance(path, str))
-        names = verdict.get("fail_to_pass") or []
-        for field in ("test_success_marker", "test_failure_marker"):
-            marker = verdict.get(field)
-            if not isinstance(marker, str) or not marker.strip() or "\n" in marker or \
-                    "\r" in marker or marker not in sources or not any(
-                        isinstance(name, str) and name in marker for name in names):
-                issues.append(f"{field} must be a test-specific literal from a selected test source")
-        if verdict.get("test_success_marker") == verdict.get("test_failure_marker"):
-            issues.append("test success and failure markers must differ")
-        if verdict.get("test_failure_match", "literal") != "literal":
-            issues.append("ready_to_generate requires literal failure matching")
     return issues
 
 

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import nuttx_candidates as candidates
 import triage_nuttx_prs as triage
 import generate_nuttx_instance as generator
+import render_nuttx_instance as render
 
 
 def pair_record():
@@ -132,20 +133,17 @@ class SuppliedPairTests(unittest.TestCase):
         verdict = {"verdict": "accept", "platform": "sim:nsh",
                    "test_paths": ["testing/ostest/example.c"],
                    "fix_paths": ["sched/example.c"], "fail_type": "runtime_assert",
-                   "problem_statement": "Wrong result", "test_success_marker": "PASS",
-                   "test_failure_marker": "FAIL", "fail_to_pass": ["example_test"]}
+                   "problem_statement": "Wrong result", "fail_to_pass": ["example_test"]}
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(generator, "ENRICHED", Path(tmp)), \
-             patch.object(generator, "build_test_patch", return_value="diff"), \
+             patch.object(generator, "build_test_patch",
+                          return_value=("diff", ["user_main: example test"])), \
              patch.object(generator, "render", return_value=Path(tmp) / "instance"):
             (Path(tmp) / "apps-7-kernel-11.json").write_text(json.dumps(record))
             self.assertEqual(generator.generate(7, 11, verdict), Path(tmp) / "instance")
 
-    def test_grounded_ai_recipe_can_feed_generator_directly(self):
+    def test_ready_recipe_can_feed_generator_directly(self):
         record = pair_record()
-        record["test_contents"]["testing/ostest/example.c"] = (
-            'void example_test(void) { printf("example_test: PASS result"); '
-            'printf("example_test: ERROR result"); }')
         record["apps"]["url"] = "https://example.test/apps"
         record["kernel_candidates"][0]["url"] = "https://example.test/kernel"
         verdict = {
@@ -158,54 +156,38 @@ class SuppliedPairTests(unittest.TestCase):
             "detecting_test": "example_test checks the changed result",
             "fail_to_pass": ["example_test"], "fail_type": "runtime_assert",
             "config_overrides": {}, "readiness": "ready_to_generate",
-            "test_success_marker": "example_test: PASS result",
-            "test_failure_marker": "example_test: ERROR result",
         }
         self.assertEqual(triage.check_verdict(verdict, verdict["case"], record), [])
-        self.assertEqual(generator.metadata(record, 11, verdict)["test_success_marker"],
-                         "example_test: PASS result")
+        self.assertEqual(generator.metadata(record, 11, verdict)["fail_to_pass"],
+                         ["example_test"])
 
         verdict["readiness"] = "needs_reviewed_recipe"
         with self.assertRaisesRegex(ValueError, "readiness"):
             generator.metadata(record, 11, verdict)
 
-    def test_ready_recipe_rejects_ungrounded_markers(self):
-        record = pair_record()
-        verdict = {
-            "case": "apps-7-kernel-11", "verdict": "accept", "reason": "new test checks result",
-            "kernel_pr": 11, "test_paths": ["testing/ostest/example.c"],
-            "fix_paths": ["sched/example.c"], "platform": "sim:nsh",
-            "evidence_status": "needs_validation", "issue_url": None,
-            "confidence": "medium", "change_type": "fix", "problem_statement": "Wrong result",
-            "detecting_test": "example_test checks the changed result",
-            "fail_to_pass": ["example_test"], "fail_type": "runtime_assert",
-            "config_overrides": {}, "readiness": "ready_to_generate",
-            "test_success_marker": "ostest_main: Exiting with status 0",
-            "test_failure_marker": "FAIL",
-        }
-        issues = triage.check_verdict(verdict, verdict["case"], record)
-        self.assertTrue(any("test_success_marker" in issue for issue in issues))
-        self.assertTrue(any("test_failure_marker" in issue for issue in issues))
+    def test_banners_come_from_ostest_main_calls_of_changed_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ostest = Path(tmp)
+            (ostest / "ostest_main.c").write_text(
+                'static void stdio_test(void)\n{\n}\n'
+                '  printf("\\nuser_main: cancel test\\n");\n  cancel_test();\n'
+                '  printf("\\nuser_main: condition variable test\\n");\n'
+                '  pthread_attr_init(&attr);\n  cond_test();\n')
+            (ostest / "cancel.c").write_text(
+                "static void helper(void)\n{\n}\n\nvoid cancel_test(void)\n{\n}\n")
+            (ostest / "cond.c").write_text("void cond_test(void)\n{\n}\n")
+            (ostest / "ostest.h").write_text("void cancel_test(void);\n")
+            changed = ["testing/ostest/cancel.c", "testing/ostest/cond.c",
+                       "testing/ostest/ostest.h", "testing/ostest/ostest_main.c"]
+            self.assertEqual(render.ostest_banners(ostest, changed),
+                             ["user_main: cancel test", "user_main: condition variable test"])
+            with self.assertRaisesRegex(ValueError, "banner"):
+                render.ostest_banners(ostest, ["testing/ostest/ostest.h"])
 
-    def test_marker_can_span_adjacent_c_string_literals(self):
-        record = pair_record()
-        record["test_contents"]["testing/ostest/example.c"] = (
-            'void example_test(void) { '
-            'printf("example_test: PASS result"); '
-            'printf("example_test:" " ERROR result=%d", result); }')
-        verdict = {
-            "case": "apps-7-kernel-11", "verdict": "accept", "reason": "test checks result",
-            "kernel_pr": 11, "test_paths": ["testing/ostest/example.c"],
-            "fix_paths": ["sched/example.c"], "platform": "sim:nsh",
-            "evidence_status": "needs_validation", "issue_url": None,
-            "confidence": "medium", "change_type": "fix", "problem_statement": "Wrong result",
-            "detecting_test": "example_test checks the changed result",
-            "fail_to_pass": ["example_test"], "fail_type": "runtime_assert",
-            "config_overrides": {}, "readiness": "ready_to_generate",
-            "test_success_marker": "example_test: PASS result",
-            "test_failure_marker": "example_test: ERROR result=",
-        }
-        self.assertEqual(triage.check_verdict(verdict, verdict["case"], record), [])
+    def test_runner_lists_each_banner_as_one_shell_word(self):
+        runner = render.render_runner(["user_main: cancel test", "user_main: POSIX timer test"])
+        self.assertIn("BANNERS=('user_main: cancel test' 'user_main: POSIX timer test')", runner)
+        self.assertNotIn("@@", runner)
 
     def test_generator_cli_uses_pair_in_triage_json(self):
         with tempfile.TemporaryDirectory() as tmp:

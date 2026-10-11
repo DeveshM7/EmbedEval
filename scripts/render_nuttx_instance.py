@@ -20,6 +20,50 @@ TEMPLATES = REPO_ROOT / "templates" / "nuttx"
 DEFAULT_OUT = REPO_ROOT / "generated"
 
 
+# printf("\nuser_main: cancel test\n"); in ostest_main.c prints this banner
+# just before calling the test's entry function.
+BANNER_PRINTF = re.compile(r'printf\("\\nuser_main: ([^"\\%]+)\\n"\);')
+BANNER_TEXT = re.compile(r"user_main: [^\n'\\%]+")
+# Non-static `void name(void)` definitions at the start of a line.
+ENTRY_DEF = re.compile(r"^(?!static\b)[a-z][\w ]*?\b(\w+)\s*\(void\)\s*$", re.MULTILINE)
+
+
+def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
+    """Banners ostest prints before the tests defined in the changed sources.
+
+    ostest_dir is testing/ostest with the test patch applied. Each changed
+    source's entry functions are looked up where ostest_main.c calls them,
+    and the banner printed within a few lines before that call is kept.
+    """
+    main_lines = (ostest_dir / "ostest_main.c").read_text().splitlines()
+    banners: list[str] = []
+    for path in changed:
+        name = Path(path).name
+        if not path.startswith("testing/ostest/") or not name.endswith(".c") or \
+                name == "ostest_main.c":
+            continue
+        for func in ENTRY_DEF.findall((ostest_dir / name).read_text()):
+            call = re.compile(rf"\b{re.escape(func)}\s*\(\s*\)\s*;")
+            for i, line in enumerate(main_lines):
+                if not call.search(line):
+                    continue
+                for prev in reversed(main_lines[max(0, i - 8):i]):
+                    match = BANNER_PRINTF.search(prev)
+                    if match:
+                        banner = f"user_main: {match[1]}"
+                        if banner not in banners:
+                            banners.append(banner)
+                        break
+    if not banners:
+        raise ValueError("no ostest banner precedes a test defined in the changed sources")
+    return banners
+
+
+def render_runner(banners: list[str]) -> str:
+    runner = (TEMPLATES / "run_tests.sh.tmpl").read_text()
+    return runner.replace("@@BANNERS@@", " ".join(shlex.quote(b) for b in banners))
+
+
 def render(meta: dict, patch_file: Path, out_root: Path,
            tag_suffix: str = "-gen") -> Path:
     instance_id = meta["instance_id"]
@@ -42,13 +86,9 @@ def render(meta: dict, patch_file: Path, out_root: Path,
     if meta["fail_type"] == "compile_error" and \
             (not meta.get("compile_test_source") or not meta.get("missing_api")):
         raise ValueError("compile cases need compile_test_source and missing_api")
-    for name in ("test_success_marker", "test_failure_marker"):
-        if not meta.get(name) or "\n" in meta[name]:
-            raise ValueError(f"{name} must be one nonempty line")
-    if "\n" in meta.get("test_failure_context_marker", ""):
-        raise ValueError("test_failure_context_marker must be one line")
-    if meta.get("test_failure_match", "literal") not in ("literal", "regex"):
-        raise ValueError("test_failure_match must be literal or regex")
+    banners = meta.get("test_banners")
+    if not banners or any(not BANNER_TEXT.fullmatch(b) for b in banners):
+        raise ValueError("test_banners must list ostest 'user_main: ...' lines")
     if not isinstance(meta.get("clean_after_patch", False), bool):
         raise ValueError("clean_after_patch must be a boolean")
     overrides = meta.get("config_overrides") or {}
@@ -92,13 +132,7 @@ def render(meta: dict, patch_file: Path, out_root: Path,
             steps.append(f"grep -q '^{re.escape(expected)}$' .config")
         extra_config_run = "RUN " + " \\\n    && ".join(steps)
     dockerfile = dockerfile.replace("@@EXTRA_CONFIG_RUN@@", extra_config_run)
-    runner = (TEMPLATES / "run_tests.sh.tmpl").read_text()
-    runner = runner.replace("@@SUCCESS_MARKER@@", shlex.quote(meta["test_success_marker"]))
-    runner = runner.replace("@@FAILURE_MARKER@@", shlex.quote(meta["test_failure_marker"]))
-    runner = runner.replace("@@FAILURE_MATCH@@",
-                            shlex.quote(meta.get("test_failure_match", "literal")))
-    runner = runner.replace("@@FAILURE_CONTEXT_MARKER@@",
-                            shlex.quote(meta.get("test_failure_context_marker", "")))
+    runner = render_runner(banners)
 
     generated_meta = dict(meta)
     generated_meta.update({
