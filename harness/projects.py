@@ -113,6 +113,47 @@ PROJECTS: dict[str, dict] = {
 }
 
 
+# Zephyr instances from the twister pipeline (metadata "pipeline": "twister";
+# scripts/generate_instance.py) run in an Apptainer image whose `run_tests`
+# builds and runs the one board/scenario with twister. Only what differs from
+# the Docker/west-build Zephyr entry is overridden.
+TWISTER_OVERRIDES: dict[str, dict] = {
+    "zephyr": {
+        "orientation": (
+            "This instance builds and tests with Zephyr's twister for one board "
+            "and one test scenario, both fixed. `run_tests` rebuilds incrementally "
+            "(only what you changed is recompiled), runs the tests, and prints a "
+            "status for every test case. Do not run `west build`, `west build -t "
+            "run` or `scripts/twister` yourself, and do not pass a board, test "
+            "path or Kconfig options anywhere -- the scenario's configuration is "
+            "already applied. Build output is under /testbed/twister-out."
+        ),
+        "extra_warnings": (
+            "`run_tests` exit codes on this instance: 0 = all tests passed, "
+            "1 = a test, the build or the configuration failed, 2 = the test "
+            "runner did not start, 3 = nothing ran. A run takes one to a few "
+            "minutes; tests under QEMU include the emulator's boot."
+        ),
+        # A command's timeout ends its container and every process in it, so
+        # QEMU cannot be orphaned; no cleanup hook is needed.
+        "needs_qemu_cleanup": False,
+        "rebuild_command": "",
+        "clean_paths": [],
+        # Long enough for a full rebuild plus a QEMU test run.
+        "command_timeout": 900,
+    },
+}
+
+
+def config_for(meta: dict) -> dict:
+    """The project configuration for one instance: the twister variant for
+    twister-pipeline instances, the plain project entry otherwise."""
+    cfg = dict(config(meta["project"]))
+    if meta.get("pipeline") == "twister":
+        cfg.update(TWISTER_OVERRIDES.get(meta["project"], {}))
+    return cfg
+
+
 def config(project: str) -> dict:
     if project not in PROJECTS:
         raise KeyError(f"unknown project {project!r}; known: {sorted(PROJECTS)}")

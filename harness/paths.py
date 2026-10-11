@@ -11,11 +11,17 @@ evaluator reports `grade: fail` for a patch it simply could not find.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-INSTANCES_DIR = REPO_ROOT / "docker" / "instances"
+# EMBEDEVAL_INSTANCES_DIR points the harness at other instances -- e.g.
+# generated/, where the twister pipeline writes them -- as it does for
+# scripts/instances.py on the build side.
+INSTANCES_DIR = Path(os.environ.get("EMBEDEVAL_INSTANCES_DIR") or REPO_ROOT / "docker" / "instances")
+if not INSTANCES_DIR.is_absolute():
+    INSTANCES_DIR = REPO_ROOT / INSTANCES_DIR
 OUTPUTS_DIR = REPO_ROOT / "outputs"
 
 PATCH_NAME = "patch.diff"
@@ -31,6 +37,9 @@ MODEL_DIRS: dict[str, str] = {
     "openai/gpt-5.4": "gpt-5.4",
     "together_ai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": "Qwen-3-coder",
     "together_ai/deepseek-ai/DeepSeek-V3": "DeepSeek-V3",
+    # Local open-weights model served by scripts/serve_triage_model.sh (vLLM,
+    # OpenAI-compatible); see LOCAL_MODELS in harness/run.py.
+    "openai/qwen38-nvfp4": "qwen38-nvfp4",
 }
 
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.

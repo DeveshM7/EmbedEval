@@ -5,6 +5,12 @@ Run an agent on EmbedEval instances.
     python harness/run.py --repo nuttx --model gpt-5.4
     python harness/run.py --all --model gpt-5.4 gemini-2.5-pro
 
+Twister-pipeline Zephyr instances (generated/, built as Apptainer images) run in
+an Apptainer environment instead of Docker, e.g. with the local Qwen server:
+
+    EMBEDEVAL_INSTANCES_DIR=generated python harness/run.py \
+        --instance zephyr__zephyr-65697 --model qwen38-nvfp4
+
 Replaces run_instance.py, run_nuttx_instance.py, run_riot_instance.py and
 run_all.py, which were ~50% duplicated and disagreed on prompt format, .env
 handling and the API-key check.
@@ -118,7 +124,35 @@ PROVIDER_KEYS = {
 }
 
 
+# Models served locally by scripts/serve_triage_model.sh: vLLM's
+# OpenAI-compatible API, so LiteLLM's openai/ route with an api_base. The
+# sampling settings come from the same profile triage uses (triage/models.json).
+# EMBEDEVAL_LOCAL_API_BASE overrides the address; the server listens on
+# 127.0.0.1, so the harness must run on the server's node.
+LOCAL_MODELS = {"openai/qwen38-nvfp4": "qwen38-nvfp4"}
+REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
+
+
+def model_config(full_model: str) -> dict:
+    """mini-swe-agent model config for a local model; {} for hosted ones."""
+    profile = LOCAL_MODELS.get(full_model)
+    if not profile:
+        return {}
+    prof = json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile]
+    sampling = dict(prof.get("sampling", {}))
+    extra = {k: sampling.pop(k) for k in ("top_k", "min_p") if k in sampling}
+    kwargs = dict(api_base=os.environ.get("EMBEDEVAL_LOCAL_API_BASE", "http://127.0.0.1:8000/v1"),
+                  api_key="local", timeout=REQUEST_TIMEOUT, num_retries=0,
+                  max_tokens=prof.get("max_tokens", 32768), **sampling)
+    if extra:
+        kwargs["extra_body"] = extra
+    # A local model has no price; without this LiteLLM's cost lookup fails.
+    return {"model_kwargs": kwargs, "cost_tracking": "ignore_errors"}
+
+
 def check_api_key(model_name: str) -> None:
+    if paths.resolve_model(model_name) in LOCAL_MODELS:
+        return
     provider = paths.resolve_model(model_name).split("/")[0]
     names = PROVIDER_KEYS.get(provider)
     if not names:
@@ -134,7 +168,7 @@ def check_api_key(model_name: str) -> None:
 
 
 def build_prompts(meta: dict) -> tuple[str, str]:
-    cfg = projects.config(meta["project"])
+    cfg = projects.config_for(meta)
     protected = " or ".join(f"`{p}`" for p in cfg["protected_paths"])
     warn = cfg["extra_warnings"]
     system = SYSTEM_TEMPLATE.format(
@@ -156,7 +190,7 @@ def _build_and_test(meta: dict) -> str:
     the evaluator after wiping the build directory. Re-specifying -b and a test
     path is what produced invented board names in the existing trajectories.
     """
-    rebuild = projects.config(meta["project"])["rebuild_command"]
+    rebuild = projects.config_for(meta)["rebuild_command"]
     return f"cd /testbed && {rebuild} && run_tests" if rebuild else "cd /testbed && run_tests"
 
 
@@ -241,7 +275,25 @@ class QemuCleanupEnvironment:
 
 
 def make_environment(meta: dict):
-    cfg = projects.config(meta["project"])
+    cfg = projects.config_for(meta)
+    if meta.get("pipeline") == "twister":
+        # Built by scripts/build_instances.py as an Apptainer image.
+        sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
+        import apptainer_util
+        from apptainer_env import ApptainerEnvironment
+
+        # The image carries the PR's test changes as uncommitted edits.
+        # Committing them in this run's overlay before the agent starts makes
+        # `git diff` show the agent's changes alone, so capture_patch's check
+        # for edits to protected paths means what it says. Graded patches still
+        # apply to the image as built: the same files, the same content.
+        commit_tests = ("cd /testbed && git add -A -- tests/ && git -c user.name=EmbedEval "
+                        "-c user.email=embedeval@localhost commit -q -m "
+                        "'The PR test changes, without its fix'")
+        return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
+                                    name=meta["instance_id"], cwd="/testbed",
+                                    timeout=cfg.get("command_timeout", 900),
+                                    setup_commands=[commit_tests])
     kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
     platform = projects.setting(meta, "docker_platform")
     if platform:
@@ -299,7 +351,7 @@ def capture_patch(env, meta: dict) -> tuple[str, list[str]]:
     Protected paths are excluded from the patch but reported, so test tampering
     is visible rather than quietly dropped.
     """
-    protected = projects.config(meta["project"])["protected_paths"]
+    protected = projects.config_for(meta)["protected_paths"]
     excludes = " ".join(f"':(exclude){p}'" for p in protected)
     patch = env.execute({"command": f"cd /testbed && git diff -- . {excludes}"}).get("output", "")
     touched = env.execute(
@@ -322,7 +374,7 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
 
     print(f"  instance : {instance_id}")
     print(f"  model    : {full_model}")
-    print(f"  image    : {meta['docker_image']}")
+    print(f"  image    : {meta.get('docker_image') or meta.get('apptainer_image')}")
     print(f"  output   : {out_dir.relative_to(paths.REPO_ROOT)}")
 
     result = {
@@ -341,7 +393,7 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
     env = None
     try:
         env = make_environment(meta)
-        model = get_model(input_model_name=full_model)
+        model = get_model(input_model_name=full_model, config=model_config(full_model))
         model.config.format_error_template = FORMAT_ERROR_TEMPLATE
 
         agent_class = make_verbose_agent_class(DefaultAgent) if args.verbose else DefaultAgent
