@@ -6,6 +6,7 @@ Hard filters for Zephyr PR candidates.
     python scripts/filter_candidates.py fetch --since 2024-01-01 --until 2024-06-30
     python scripts/filter_candidates.py filter
     python scripts/filter_candidates.py enrich
+    python scripts/filter_candidates.py enrich-twister
 
 Three stages, deliberately separate:
 
@@ -17,6 +18,13 @@ Three stages, deliberately separate:
                              the complete test suite each PR touches, the
                              pre-change source it modifies, and the board
                              files of our platforms at its base commit.
+
+enrich also adds a `twister` block (scripts/zephyr_env.py): the facts the
+twister pipeline needs, read from the PR's own commits in the local clone --
+the suites and scenarios it changes, the board names valid at its base, the
+Python and SDK of its era, and which twister options that era has.
+`enrich-twister` adds just that block to records enriched before it existed,
+with no GitHub calls.
 
 Enrich runs last because only ~15% of PRs survive filtering. Pulling the
 expensive context for the whole pool would be about six times the API calls
@@ -53,6 +61,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import zephyr_env  # noqa: E402
 
 REPO = "zephyrproject-rtos/zephyr"
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -375,6 +386,20 @@ def fetch_platforms(base: str) -> dict:
     return out
 
 
+def add_twister_facts(record: dict) -> dict:
+    """Attach the twister pipeline's facts (zephyr_env.twister_facts).
+
+    Local git only, so a failure here -- a head commit that cannot be fetched,
+    say -- is recorded on the record instead of aborting the enrichment.
+    """
+    try:
+        record["twister"] = zephyr_env.twister_facts(record["base_commit"],
+                                                     record["head_commit"])
+    except Exception as e:  # recorded, not raised: the rest of the record is still good
+        record["twister"] = {"error": f"{type(e).__name__}: {e}"}
+    return record
+
+
 def fetch_full(number: int, refresh: bool = False) -> dict | None:
     """Everything a triage model could want about one PR.
 
@@ -517,6 +542,7 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
     if base_commit:
         record["base_sources"] = fetch_base_sources(record["files"], base_commit)
         record["platforms"] = fetch_platforms(base_commit)
+        add_twister_facts(record)
 
     ENRICHED.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, indent=2))
@@ -636,6 +662,31 @@ def cmd_enrich(args) -> None:
           f"{ENRICHED.relative_to(REPO_ROOT)}")
 
 
+def cmd_enrich_twister(args) -> None:
+    """Add the twister block to records that were enriched without it."""
+    numbers = args.pr or sorted(int(p.stem) for p in ENRICHED.glob("*.json"))
+    print(f"Adding twister facts to {len(numbers)} enriched records.\n")
+    for i, n in enumerate(numbers, 1):
+        path = ENRICHED / f"{n}.json"
+        if not path.exists():
+            print(f"  [{i}/{len(numbers)}] {n}  no enriched record; run `enrich` first")
+            continue
+        rec = json.loads(path.read_text())
+        if "twister" in rec and "error" not in rec["twister"] and not args.refresh:
+            print(f"  [{i}/{len(numbers)}] {n}  already has twister facts")
+            continue
+        add_twister_facts(rec)
+        path.write_text(json.dumps(rec, indent=2))
+        t = rec["twister"]
+        if "error" in t:
+            print(f"  [{i}/{len(numbers)}] {n}  ERROR {t['error']}")
+            continue
+        print(f"  [{i}/{len(numbers)}] {n}  {t['base_date']}  python {t['python']}, "
+              f"SDK {t['sdk']}, boards {t['boards']}, "
+              f"{sum(len(s.get('scenarios', {})) for s in t['suites'].values())} scenario(s) "
+              f"in {len(t['suites'])} suite(s)")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -657,9 +708,14 @@ def main() -> None:
     e.add_argument("--refresh", action="store_true",
                    help="re-fetch records that already exist instead of reusing them")
 
+    t = sub.add_parser("enrich-twister",
+                       help="add twister facts to enriched records (local git only)")
+    t.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
+    t.add_argument("--refresh", action="store_true", help="recompute existing blocks")
+
     args = p.parse_args()
-    {"selftest": cmd_selftest, "fetch": cmd_fetch,
-     "filter": cmd_filter, "enrich": cmd_enrich}[args.cmd](args)
+    {"selftest": cmd_selftest, "fetch": cmd_fetch, "filter": cmd_filter,
+     "enrich": cmd_enrich, "enrich-twister": cmd_enrich_twister}[args.cmd](args)
 
 
 if __name__ == "__main__":
