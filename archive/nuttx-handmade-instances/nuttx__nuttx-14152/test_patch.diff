@@ -1,0 +1,80 @@
+diff --git a/testing/drivertest/drivertest_rtc.c b/testing/drivertest/drivertest_rtc.c
+index 27d9985b..0dbf9ceb 100644
+--- a/testing/drivertest/drivertest_rtc.c
++++ b/testing/drivertest/drivertest_rtc.c
+@@ -229,7 +229,7 @@ static void add_timeout(struct rtc_time * rtc_tm, const int delay)
+   timesp = timegm((struct tm *)rtc_tm);
+   timesp += delay;
+ 
+-  tm = localtime(&timesp);
++  tm = gmtime(&timesp);
+   rtc_tm->tm_sec = tm->tm_sec;
+   rtc_tm->tm_min = tm->tm_min;
+   rtc_tm->tm_hour = tm->tm_hour;
+diff --git a/testing/ostest/setjmp.c b/testing/ostest/setjmp.c
+index 40675696..4d5461d3 100644
+--- a/testing/ostest/setjmp.c
++++ b/testing/ostest/setjmp.c
+@@ -32,17 +32,23 @@
+  * Public Functions
+  ****************************************************************************/
+ 
+-void setjmp_test(void)
++void jump_with_retval(jmp_buf buf, int ret)
+ {
++  volatile bool did_jump = false;
+   int value;
+-  jmp_buf buf;
+-
+-  printf("setjmp_test: Initializing jmp_buf\n");
+ 
+   if ((value = setjmp(buf)) == 0)
+     {
+       printf("setjmp_test: Try jump\n");
+-      longjmp(buf, 123);
++
++      if (did_jump)
++        {
++          ASSERT(!"setjmp retutns zero after calling longjmp");
++        }
++
++      did_jump = true;
++      printf("setjmp_test: About to jump, longjmp with ret val: %d\n", ret);
++      longjmp(buf, ret);
+ 
+       /* Unreachable */
+ 
+@@ -50,7 +56,32 @@ void setjmp_test(void)
+     }
+   else
+     {
+-      ASSERT(value == 123);
++      /* If we provide 0 as the return value to longjmp()
++       * we expect it substitute to 1 for us.
++       */
++
++      if (ret == 0)
++        {
++          ret = 1;
++        }
++
++      ASSERT(value == ret);
+       printf("setjmp_test: Jump succeed\n");
+     }
+ }
++
++void setjmp_test(void)
++{
++  jmp_buf buf;
++
++  printf("setjmp_test: Initializing jmp_buf\n");
++
++  jump_with_retval(buf, 123);
++
++  /* Pls ref to:
++   * the longjmp should never make setjmp returns 0
++   * https://pubs.opengroup.org/onlinepubs/009604599/functions/longjmp.html
++   */
++
++  jump_with_retval(buf, 0);
++}

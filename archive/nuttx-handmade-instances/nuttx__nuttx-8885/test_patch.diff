@@ -1,0 +1,182 @@
+diff --git a/testing/ostest/Makefile b/testing/ostest/Makefile
+index 2761e8ec..98a15ca4 100644
+--- a/testing/ostest/Makefile
++++ b/testing/ostest/Makefile
+@@ -30,6 +30,7 @@ MODULE = $(CONFIG_TESTING_OSTEST)
+ # NuttX OS Test
+ 
+ CSRCS   = getopt.c dev_null.c restart.c sigprocmask.c sighand.c signest.c
++CSRCS  += sighelper.c
+ MAINSRC = ostest_main.c
+ 
+ ifeq ($(CONFIG_SIG_SIGSTOP_ACTION),y)
+diff --git a/testing/ostest/ostest.h b/testing/ostest/ostest.h
+index 3b089c08..22989fa5 100644
+--- a/testing/ostest/ostest.h
++++ b/testing/ostest/ostest.h
+@@ -26,6 +26,9 @@
+  ****************************************************************************/
+ 
+ #include <nuttx/config.h>
++#include <stdbool.h>
++#include <inttypes.h>
++#include <signal.h>
+ 
+ /****************************************************************************
+  * Pre-processor Definitions
+@@ -80,14 +83,6 @@
+ #  define FFLUSH()
+ #endif
+ 
+-/****************************************************************************
+- * Public Types
+- ****************************************************************************/
+-
+-/****************************************************************************
+- * Public Data
+- ****************************************************************************/
+-
+ /****************************************************************************
+  * Public Function Prototypes
+  ****************************************************************************/
+@@ -190,6 +185,10 @@ void timedwait_test(void);
+ 
+ void sigprocmask_test(void);
+ 
++/* sighelper.c **************************************************************/
++
++bool sigset_isequal(FAR const sigset_t *left, FAR const sigset_t *right);
++
+ /* sighand.c ****************************************************************/
+ 
+ void sighand_test(void);
+diff --git a/testing/ostest/posixtimer.c b/testing/ostest/posixtimer.c
+index 1572abee..6c296f02 100644
+--- a/testing/ostest/posixtimer.c
++++ b/testing/ostest/posixtimer.c
+@@ -30,6 +30,8 @@
+ #include <stdio.h>
+ #include <unistd.h>
+ 
++#include <nuttx/signal.h>
++
+ #include "ostest.h"
+ 
+ /****************************************************************************
+@@ -115,10 +117,11 @@ static void timer_expiration(int signo, siginfo_t *info, void *ucontext)
+       ASSERT(false);
+     }
+ 
+-  if (oldset != allsigs)
++  if (!sigset_isequal(&oldset, &allsigs))
+     {
+-      printf("timer_expiration: ERROR sigprocmask=%jx expected=%jx\n",
+-              (uintmax_t)oldset, (uintmax_t)allsigs);
++      printf("timer_expiration: ERROR sigprocmask=" SIGSET_FMT
++             " expected=" SIGSET_FMT "\n",
++             SIGSET_ELEM(&oldset), SIGSET_ELEM(&allsigs));
+       ASSERT(false);
+     }
+ }
+@@ -170,8 +173,9 @@ void timer_test(void)
+     }
+ 
+ #ifndef SDCC
+-  printf("timer_test: oact.sigaction=%p oact.sa_flags=%x oact.sa_mask=%jx\n",
+-          oact.sa_sigaction, oact.sa_flags, (uintmax_t)oact.sa_mask);
++  printf("timer_test: oact.sigaction=%p oact.sa_flags=%x "
++         "oact.sa_mask=" SIGSET_FMT "\n",
++         oact.sa_sigaction, oact.sa_flags, SIGSET_ELEM(&oact.sa_mask));
+ #endif
+ 
+   /* Create the POSIX timer */
+diff --git a/testing/ostest/sighand.c b/testing/ostest/sighand.c
+index bbd525ce..128b9dfb 100644
+--- a/testing/ostest/sighand.c
++++ b/testing/ostest/sighand.c
+@@ -35,6 +35,8 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
++#include <nuttx/signal.h>
++
+ #include "ostest.h"
+ 
+ /****************************************************************************
+@@ -120,7 +122,7 @@ static void wakeup_action(int signo, siginfo_t *info, void *ucontext)
+       ASSERT(false);
+     }
+ 
+-  if (oldset != allsigs)
++  if (!sigset_isequal(&oldset, &allsigs))
+     {
+       ASSERT(false);
+     }
+@@ -162,8 +164,8 @@ static int waiter_main(int argc, char *argv[])
+ 
+ #ifndef SDCC
+   printf("waiter_main: oact.sigaction=%p oact.sa_flags=%x "
+-         "oact.sa_mask=%jx\n",
+-          oact.sa_sigaction, oact.sa_flags, (uintmax_t)oact.sa_mask);
++         "oact.sa_mask=" SIGSET_FMT "\n",
++          oact.sa_sigaction, oact.sa_flags, SIGSET_ELEM(&oact.sa_mask));
+ #endif
+ 
+   /* Take the semaphore */
+diff --git a/testing/ostest/sighelper.c b/testing/ostest/sighelper.c
+new file mode 100644
+index 00000000..539a4d72
+--- /dev/null
++++ b/testing/ostest/sighelper.c
+@@ -0,0 +1,51 @@
++/****************************************************************************
++ * apps/testing/ostest/sighelper.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <stdbool.h>
++#include <signal.h>
++
++#include "ostest.h"
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++bool sigset_isequal(FAR const sigset_t *left, FAR const sigset_t *right)
++{
++  int ndx;
++
++  /* Check if all elements of the set are the same */
++
++  for (ndx = 0; ndx < _SIGSET_NELEM; ndx++)
++    {
++      if (right->_elem[ndx] != left->_elem[ndx])
++        {
++          return false;
++        }
++    }
++
++  return true;
++}

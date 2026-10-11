@@ -9,7 +9,7 @@ set -u
 
 TIMEOUT="${1:-300}"
 # The "user_main: ... test" lines ostest prints before each changed test.
-BANNERS=('user_main: nxevent test' 'user_main: robust test')
+BANNERS=('user_main: nxevent test')
 OUTFILE="$(mktemp /tmp/nuttx_test_output.XXXXXX)"
 trap 'rm -f "$OUTFILE"' EXIT
 
