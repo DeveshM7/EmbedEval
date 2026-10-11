@@ -136,6 +136,19 @@ def exec_args(image: Path, binds: dict[Path, str] | None = None,
     return cmd + [str(image)]
 
 
+# The files an instance image is built from. Their fingerprint is recorded in
+# validation.json, so a recipe changed after validation is never promoted.
+RECIPE_FILES = ("instance.def", "instance.json", "run_tests.py", "test_patch.diff")
+
+
+def recipe_fingerprint(instance_dir: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    for name in RECIPE_FILES:
+        h.update(name.encode() + b"\0" + (Path(instance_dir) / name).read_bytes() + b"\0")
+    return h.hexdigest()
+
+
 def remove(target: Path) -> bool:
     """Delete a file or directory, but only inside the work root.
 

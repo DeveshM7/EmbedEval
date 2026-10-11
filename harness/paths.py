@@ -16,12 +16,17 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# EMBEDEVAL_INSTANCES_DIR points the harness at other instances -- e.g.
-# generated/, where the twister pipeline writes them -- as it does for
-# scripts/instances.py on the build side.
-INSTANCES_DIR = Path(os.environ.get("EMBEDEVAL_INSTANCES_DIR") or REPO_ROOT / "docker" / "instances")
-if not INSTANCES_DIR.is_absolute():
-    INSTANCES_DIR = REPO_ROOT / INSTANCES_DIR
+# Where instance directories are read from: the validated twister-pipeline
+# Zephyr instances in apptainer/instances/ (written there only by
+# scripts/promote_instance.py), then the Docker instances in docker/instances/.
+# EMBEDEVAL_INSTANCES_DIR replaces both -- e.g. generated/, so a freshly
+# generated instance can be built and validated before it is promoted, and
+# without any chance of overwriting a committed one.
+# The same rule as scripts/instances.py on the build side.
+_override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
+INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
+                  if _override else [REPO_ROOT / "apptainer" / "instances",
+                                     REPO_ROOT / "docker" / "instances"])
 OUTPUTS_DIR = REPO_ROOT / "outputs"
 
 PATCH_NAME = "patch.diff"
@@ -94,7 +99,10 @@ def trajectory_path(instance_id: str, model_name: str) -> Path:
 
 
 def instance_dir(instance_id: str) -> Path:
-    return INSTANCES_DIR / instance_id
+    for root in INSTANCE_ROOTS:
+        if (root / instance_id / "metadata.json").exists():
+            return root / instance_id
+    return INSTANCE_ROOTS[0] / instance_id
 
 
 def load_metadata(instance_id: str) -> dict:
@@ -108,14 +116,15 @@ def load_metadata(instance_id: str) -> dict:
 def discover_instances(project: str | None = None) -> list[str]:
     """All instance ids that have a metadata.json, optionally filtered by project."""
     found = []
-    for d in sorted(INSTANCES_DIR.iterdir()):
-        if not (d.is_dir() and (d / "metadata.json").exists()):
-            continue
-        if project and split_instance(d.name)[0] != project:
-            continue
-        # Zephyr instances come from the twister pipeline (an instance.def);
-        # the hand-built Zephyr Docker folders are reference metadata only.
-        if split_instance(d.name)[0] == "zephyr" and not (d / "instance.def").exists():
-            continue
-        found.append(d.name)
-    return found
+    for root in INSTANCE_ROOTS:
+        for d in sorted(root.iterdir()) if root.is_dir() else []:
+            if d.name in found or not (d.is_dir() and (d / "metadata.json").exists()):
+                continue
+            if project and split_instance(d.name)[0] != project:
+                continue
+            # Zephyr instances come from the twister pipeline (an instance.def).
+            # The hand-built Zephyr Docker folders are reference metadata only.
+            if split_instance(d.name)[0] == "zephyr" and not (d / "instance.def").exists():
+                continue
+            found.append(d.name)
+    return sorted(found)

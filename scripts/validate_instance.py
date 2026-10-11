@@ -125,7 +125,11 @@ def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: i
     print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
     print(f"  {meta['test_path']}/{meta['scenario']} on {meta['platform']}")
     report = {"instance_id": instance_id, "image": str(image), "platform": meta["platform"],
-              "scenario": f"{meta['test_path']}/{meta['scenario']}", "valid": False}
+              "scenario": f"{meta['test_path']}/{meta['scenario']}", "valid": False,
+              # what was validated: promote_instance.py refuses a recipe that
+              # changed after this point
+              "recipe_sha256": au.recipe_fingerprint(instances.instance_dir(instance_id)),
+              "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     if not image.exists():
         print(f"  ERROR: image not built: {image}")
         report["reason"] = "image not built"

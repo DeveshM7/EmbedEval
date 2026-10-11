@@ -14,7 +14,7 @@ and the tests actually run.
 - **NuttX and RIOT** instances are hand-built **Docker** images in
   `docker/instances/`.
 
-**Instances:** 8 Zephyr (generated, in `generated/`), 6 NuttX, 3 RIOT.
+**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT.
 
 ---
 
@@ -88,11 +88,10 @@ python harness/run.py --instance nuttx__nuttx-11889 --model claude-opus-4-6 -v
 python harness/evaluate_patches.py --instance nuttx__nuttx-11889 --model claude-opus-4-6
 ```
 
-Zephyr (Apptainer): the same three steps, with the instances read from
-`generated/`:
+Zephyr (Apptainer): the same three steps. The instances are read from
+`apptainer/instances/`, and the image is built from the recipe there:
 
 ```bash
-export EMBEDEVAL_INSTANCES_DIR=generated
 python scripts/build_instances.py --instance zephyr__zephyr-65697
 python harness/run.py --instance zephyr__zephyr-65697 --model claude-opus-4-6 -v
 python harness/evaluate_patches.py --instance zephyr__zephyr-65697 --model claude-opus-4-6
@@ -114,7 +113,9 @@ Every command takes the same three selection flags:
 ```
 
 Instance ids are `<project>__<project>-<PR>`, matching the directory names under
-`docker/instances/` (or `generated/` for Zephyr). Use lowercase.
+`apptainer/instances/` (Zephyr) and `docker/instances/` (NuttX, RIOT). Use
+lowercase. `EMBEDEVAL_INSTANCES_DIR` points every command at another folder
+instead -- `generated/`, say, to work on instances before they are promoted.
 
 ## Selecting models
 
@@ -157,10 +158,13 @@ A NuttX or RIOT directory under `docker/instances/` holds four things:
 | `run_tests.sh` | installed as `run_tests`; exits 0 pass, 1 fail, 2 timeout |
 | `metadata.json` | commits, problem statement, expected failing tests |
 
-A Zephyr instance under `generated/` holds an Apptainer recipe instead:
-`instance.def`, `instance.json` (board, scenario, twister options),
+A Zephyr instance under `apptainer/instances/` holds an Apptainer recipe
+instead: `instance.def`, `instance.json` (board, scenario, twister options),
 `run_tests.py` (runs twister for that one scenario and reports every test),
-`test_patch.diff`, `metadata.json`, and `validation.json` once validated.
+`test_patch.diff`, `metadata.json`, and `validation.json` -- the record that
+it fails before the fix and passes after, with a fingerprint of the recipe it
+validated. Only `scripts/promote_instance.py` writes there, and only for a
+valid instance whose recipe still matches that fingerprint.
 
 The agent is given the problem statement and a shell. It never sees the real
 fix. Test files are protected — the runner diffs against `protected_paths` and
@@ -181,7 +185,7 @@ commit, expects failure, applies the real upstream fix, and expects a pass.
 
 ```bash
 python scripts/validate_instance.py nuttx__nuttx-11889 --verbose
-EMBEDEVAL_INSTANCES_DIR=generated python scripts/validate_instance.py zephyr__zephyr-65697
+python scripts/validate_instance.py zephyr__zephyr-65697
 ```
 
 Run this on any instance you build or change. An instance that passes step 1 is
@@ -202,7 +206,7 @@ python scripts/filter_candidates.py enrich          # GitHub context + twister f
 python scripts/dry_run.py <pr>...                   # which scenario/board pairs can run
 python scripts/triage_prs.py run --profile qwen38-nvfp4 --pr <pr>...   # model verdicts
 python scripts/twister_pipeline.py --pr <pr>... --verdicts <dir>       # generate, build,
-                                                    #   validate, clean up
+                                                    #   validate, promote, clean up
 ```
 
 - **enrich** adds a `twister` block read from the PR's own commits: the
@@ -214,7 +218,10 @@ python scripts/twister_pipeline.py --pr <pr>... --verdicts <dir>       # generat
   statement and the test lists.
 - **generate → build → validate** turns a verdict into an Apptainer image
   layered on shared Python and SDK images for its era, then checks that
-  `run_tests` fails as built and passes with the upstream fix.
+  `run_tests` fails as built and passes with the upstream fix. Work happens in
+  `generated/` (not in git).
+- **promote** copies a valid instance to `apptainer/instances/`, the committed
+  benchmark that evaluation runs on.
 
 Builds and runs need a node where Apptainer can build; on Scholar, inside a
 `spark-batch` job (see `docs/spark_triage_setup.md`).
@@ -234,7 +241,9 @@ templates/zephyr/   Apptainer recipes, run_tests, lookup tables
 docker/bases/       Docker base images (NuttX, RIOT)
 docker/instances/   NuttX and RIOT instances; the hand-built Zephyr ones are
                     kept as reference metadata only and are not built
-generated/          generated Zephyr instances (not in git)
+apptainer/instances/  validated Zephyr instances: the benchmark (recipes; images
+                    are built from them)
+generated/          Zephyr instances being generated and validated (not in git)
 outputs/            agent runs and grades
 archive/            superseded work, kept for provenance
 ```

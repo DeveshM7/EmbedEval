@@ -15,7 +15,9 @@ Per PR, in order, stopping at the first stage that rejects it:
     4. generate        the instance recipe, into generated/
     5. build           the Apptainer image
     6. validate        run_tests fails as built, passes with the upstream fix
-    7. clean up        the image and other per-instance files, once validated
+    7. promote         a valid instance is copied to apptainer/instances/, the
+                       committed benchmark (scripts/promote_instance.py)
+    8. clean up        the image and other per-instance files, once validated
                        (unless --keep); recipe, report and logs stay
 
 Must run where Apptainer can build (on Scholar: inside a spark-batch job).
@@ -79,6 +81,11 @@ def run_pr(pr: int, verdicts: Path, keep: bool, logdir: Path) -> dict:
     rc = step(pr, "validate", [PY, s + "validate_instance.py", iid], logdir, env)
     report = json.loads((OUT / iid / "validation.json").read_text())
     res["validation"] = report.get("reason")
+    if rc == 0:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import promote_instance
+        promoted, msg = promote_instance.promote(iid, OUT)
+        res["promoted"] = msg
     if not keep:
         step(pr, "cleanup", [PY, s + "cleanup_instance.py", iid], logdir)
     return done("validate", "VALID" if rc == 0 else f"rejected: {report.get('reason')}")
