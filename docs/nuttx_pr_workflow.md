@@ -253,8 +253,11 @@ Generation diffs the apps PR branch's base-to-tip commits only for the
 reviewed test paths, checks that the patch applies at the apps base commit,
 and records the kernel PR branch's base-to-tip range for the validator's fix
 patch. Merge commits are not used as diff endpoints because they can include
-unrelated changes. The generated directory and Docker image use separate
-names from the checked-in instances; `--tag-suffix` permits another image tag.
+unrelated changes. By default the instance goes to `generated/` with a
+`-gen` image tag, apart from the checked-in instances. A validated instance
+joins the benchmark with `--out docker/instances --tag-suffix=` (the standard
+`embedeval:nuttx-<PR>` tag); the reviewed inputs for the checked-in NuttX
+instances are in `triage/nuttx_reviewed/`.
 
 Validation must show old kernel plus the new apps test fails for the intended
 reason and fixed kernel plus the *same* apps test passes. A timeout, unrelated
