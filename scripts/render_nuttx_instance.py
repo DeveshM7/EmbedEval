@@ -53,10 +53,13 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         raise ValueError("clean_after_patch must be a boolean")
     overrides = meta.get("config_overrides") or {}
     reserved = {"CONFIG_TESTING_OSTEST", "CONFIG_NSH_CONSOLE_LOGIN", "CONFIG_NDEBUG"}
+    # y/n for bools; decimal or hex for int-valued symbols (e.g. CONFIG_SMP_NCPUS=4,
+    # CONFIG_SMP_DEFAULT_CPUSET=0xffffffff); a quoted literal for string-valued ones.
+    value_pattern = re.compile(r'y|n|-?\d+|0x[0-9a-fA-F]+|"[^"\n]*"')
     for name, value in overrides.items():
         if name in reserved:
             raise ValueError(f"reserved config override: {name}")
-        if not re.fullmatch(r"CONFIG_[A-Z0-9_]+", name) or value not in ("y", "n"):
+        if not re.fullmatch(r"CONFIG_[A-Z0-9_]+", name) or not value_pattern.fullmatch(value):
             raise ValueError(f"invalid config override: {name}={value}")
 
     patch = patch_file.read_text()
