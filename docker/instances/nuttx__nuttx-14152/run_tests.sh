@@ -1,75 +1,43 @@
 #!/usr/bin/env bash
-# Run NuttX ostest on the sim target and exit as soon as results are available.
+# Run the whole ostest suite to completion, then classify its log once.
+# Exit 0 when ostest finished cleanly and ran every changed test, 1 for any
+# other completed run, and 2 for timeout.
 #
-# The setjmp_test added by apps PR #2725 calls longjmp(buf, 0) and asserts
-# that setjmp returns 1. On the base kernel the assert fires and ostest aborts
-# before reaching "Exiting with status 0", so a timeout here signals failure.
-# After the fix, ostest completes cleanly and "setjmp_test: Jump succeed"
-# appears in the output.
-#
-# Usage (from /testbed):
-#   run_tests
-#   run_tests [timeout_seconds]   (default: 300)
-#
-# Exit codes:
-#   0  — setjmp_test: Jump succeed + ostest_main: Exiting with status 0
-#   1  — ostest_main: Exiting with status N  (non-zero failure)
-#   2  — timed out before any completion string was seen
-
-set -euo pipefail
+# The simulator's own exit code is ignored: nsh's poweroff ends it with 0
+# even after ostest fails (status 256), so only the log decides.
+set -u
 
 TIMEOUT="${1:-300}"
+# The "user_main: ... test" lines ostest prints before each changed test.
+BANNERS=('user_main: setjmp test')
 OUTFILE="$(mktemp /tmp/nuttx_test_output.XXXXXX)"
-trap 'rm -f "${OUTFILE}"' EXIT
+trap 'rm -f "$OUTFILE"' EXIT
 
-cd /testbed
+cd /testbed || exit 1
+printf 'ostest\npoweroff\n' | timeout -k 10 "$TIMEOUT" ./nuttx >"$OUTFILE" 2>&1
+SIM_RC=$?
+cat "$OUTFILE"
 
-printf 'ostest\npoweroff\n' | setsid ./nuttx > "${OUTFILE}" 2>&1 &
-SIM_PID=$!
-SIM_PGID="${SIM_PID}"
+# 124: timeout's TERM worked; 137: it needed KILL (or something else killed
+# the simulator, so check the elapsed time too).
+if (( SIM_RC == 124 || (SIM_RC == 137 && SECONDS >= TIMEOUT) )); then
+    echo "run_tests: result=2 (timed out after ${TIMEOUT}s)"
+    exit 2
+fi
 
-tail -f "${OUTFILE}" &
-TAIL_PID=$!
-
-ELAPSED=0
-RESULT=""
-while [ "${ELAPSED}" -lt "${TIMEOUT}" ]; do
-    if grep -q "Exiting with status 0" "${OUTFILE}" 2>/dev/null; then
-        # Verify the setjmp fix specifically — "Jump succeed" must appear
-        if grep -q "setjmp_test: Jump succeed" "${OUTFILE}" 2>/dev/null; then
-            RESULT="PASS"
-        else
-            RESULT="FAIL"
-        fi
-        break
-    elif grep -qE "Exiting with status [^0]" "${OUTFILE}" 2>/dev/null; then
-        RESULT="FAIL"
-        break
-    fi
-    sleep 1
-    ELAPSED=$((ELAPSED + 1))
+REASONS=()
+grep -Fq 'user_main: Exiting' "$OUTFILE" || REASONS+=("no 'user_main: Exiting'")
+grep -Fq 'ostest_main: Exiting with status 0' "$OUTFILE" ||
+    REASONS+=("no 'ostest_main: Exiting with status 0'")
+grep -Fq 'ERROR' "$OUTFILE" && REASONS+=("ERROR in output")
+for banner in "${BANNERS[@]}"; do
+    grep -Fq -- "$banner" "$OUTFILE" || REASONS+=("changed test did not run: '$banner'")
 done
 
-kill "${TAIL_PID}" 2>/dev/null || true
-kill -- "-${SIM_PGID}" 2>/dev/null || true
-wait "${SIM_PID}" 2>/dev/null || true
-
-echo ""
-echo "--- Test Results ---"
-grep -E "setjmp_test|Exiting with status" "${OUTFILE}" || true
-echo "--------------------"
-
-case "${RESULT}" in
-    PASS)
-        echo "==> run_tests: setjmp_test: Jump succeed + Exiting with status 0 — PASSED"
-        exit 0
-        ;;
-    FAIL)
-        echo "==> run_tests: ostest failed or setjmp_test did not pass — FAILED"
-        exit 1
-        ;;
-    *)
-        echo "==> run_tests: TIMEOUT after ${TIMEOUT}s — ostest did not complete (base kernel bug?)"
-        exit 2
-        ;;
-esac
+if (( ${#REASONS[@]} == 0 )); then
+    echo "run_tests: result=0"
+    exit 0
+fi
+printf 'run_tests: %s\n' "${REASONS[@]}"
+echo "run_tests: result=1"
+exit 1

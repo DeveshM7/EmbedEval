@@ -29,3 +29,7 @@ RUN cd apps && git apply /tmp/test_patch.diff
 
 # Pre-build: EXPECTED to fail — event.h does not exist at base kernel commit
 RUN make -j$(nproc) 2>&1 || true
+
+# ── Install run_tests so agent can call it as a plain command
+COPY run_tests.sh /usr/local/bin/run_tests
+RUN chmod +x /usr/local/bin/run_tests
