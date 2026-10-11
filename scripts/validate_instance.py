@@ -87,6 +87,8 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
     cid = r.stdout.strip()
     workdir = Path(tempfile.mkdtemp())
 
+    step_log = "/tmp/embedeval_step.log"
+
     def dexec(cmd: str, t: int, label: str | None = None, capture: bool = False):
         # With --verbose the container output streams live; otherwise it is
         # captured and only shown when a step fails. Either way each step
@@ -95,8 +97,13 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         if label:
             print(f"    {label} ...", end="", flush=True)
         t0 = time.time()
+        stream = verbose and not capture
+        if stream:
+            # Streamed output isn't captured, so keep a copy in the container
+            # for step_output() to read back if this step fails.
+            cmd = f"set -o pipefail; ( {cmd} ) 2>&1 | tee {step_log}"
         r = sh(["docker", "exec", cid, "bash", "-c", cmd], timeout=t,
-               quiet=capture or not verbose)
+               quiet=not stream)
         if capture and verbose:
             print()
             if r.stdout:
@@ -106,6 +113,23 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         if label:
             print(f" {time.time() - t0:.1f}s (rc={r.returncode})")
         return r
+
+    def step_output(r) -> str:
+        """Full output of the step that produced r; call before the next dexec."""
+        out = (r.stdout or "") + (r.stderr or "")
+        if not out and verbose:
+            out = sh(["docker", "exec", cid, "cat", step_log], timeout=60).stdout or ""
+        return out
+
+    def build_errors(r) -> str:
+        # A parallel build's last lines are usually other files still
+        # compiling, so show the lines that look like errors instead.
+        out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", step_output(r))
+        lines = [line.strip() for line in re.split(r"[\r\n]+", out)
+                 if re.search(r"error:|undefined reference|Illegal instruction|\*\*\*",
+                              line, re.IGNORECASE)]
+        text = "\n".join(lines[-15:]) if lines else out[-400:]
+        return "  " + text.strip().replace("\n", "\n  ")
 
     try:
         # --- Step 1: tests must FAIL on the unfixed code -------------------
@@ -129,11 +153,14 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             if before_build.returncode == 0 or not diagnostic:
                 print("  FAIL: expected a compile or link error in the changed test "
                       "source naming the missing API")
+                if before_build.returncode != 0:
+                    print(build_errors(before_build))
                 return False
             print(f"  ok: expected test-side build error: {diagnostic.group(0).strip()}")
         else:
             if meta["project"] == "nuttx" and before_build.returncode != 0:
                 print(f"  FAIL: runtime test did not build (rc={before_build.returncode})")
+                print(build_errors(before_build))
                 return False
             r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
             if r1.returncode == 0:
@@ -158,13 +185,14 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         sh(["docker", "cp", str(pf), f"{cid}:/tmp/fix.diff"], timeout=60)
         ra = dexec("cd /testbed && git apply /tmp/fix.diff", 120, "git apply")
         if ra.returncode != 0:
-            print(f"  FAIL: git apply failed: {ra.stderr.strip()[:300]}")
+            print(f"  FAIL: git apply failed: {step_output(ra).strip()[:300]}")
             return False
 
         if meta["project"] == "nuttx" and meta.get("clean_after_patch"):
             clean = dexec("cd /testbed && make clean", 300, "make clean")
             if clean.returncode != 0:
                 print(f"  FAIL: make clean failed (rc={clean.returncode})")
+                print(build_errors(clean))
                 return False
         cleaned = cfg["clean_paths"]
         if cleaned:
@@ -174,13 +202,13 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         rb = dexec(f"cd /testbed && {build_cmd}", 900, "rebuild")
         if rb.returncode != 0:
             print(f"  FAIL: build failed after applying the fix (rc={rb.returncode})")
-            print("  " + ((rb.stdout or "") + (rb.stderr or ""))[-400:].replace("\n", "\n  "))
+            print(build_errors(rb))
             return False
 
         r2 = dexec("cd /testbed && run_tests", timeout, "run_tests")
         if r2.returncode != 0:
             print(f"  FAIL: tests still failing after the fix (rc={r2.returncode})")
-            print("  " + ((r2.stdout or "") + (r2.stderr or ""))[-400:].replace("\n", "\n  "))
+            print("  " + step_output(r2)[-400:].replace("\n", "\n  "))
             return False
 
         print("\n  VALID: fails before the fix, passes after")
