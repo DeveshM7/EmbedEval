@@ -195,6 +195,26 @@ class SuppliedPairTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cond_test"):
                 render.ostest_banners(ostest, ["testing/ostest/cond.c"])
 
+    def test_empty_tag_suffix_gives_the_standard_image_tag(self):
+        meta = {
+            "instance_id": "nuttx__nuttx-11", "project": "nuttx",
+            "kernel_repo": "https://github.com/apache/nuttx",
+            "apps_repo": "https://github.com/apache/nuttx-apps",
+            "fail_type": "runtime_assert", "kernel_base_commit": "1" * 40,
+            "kernel_merge_commit": "2" * 40, "apps_base_commit": "3" * 40,
+            "files_changed_by_fix": ["sched/example.c"],
+            "files_changed_by_test_patch": ["testing/ostest/example.c"],
+            "test_banners": ["user_main: example test"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            patch_file = Path(tmp) / "test.diff"
+            patch_file.write_text("diff --git a/testing/ostest/example.c b/testing/ostest/example.c\n")
+            inst = render.render(meta, patch_file, Path(tmp) / "out", tag_suffix="")
+            self.assertEqual(json.loads((inst / "metadata.json").read_text())["docker_image"],
+                             "embedeval:nuttx-11")
+            with self.assertRaisesRegex(ValueError, "tag_suffix"):
+                render.render(meta, patch_file, Path(tmp) / "out2", tag_suffix="gen")
+
     def test_runner_lists_each_banner_as_one_shell_word(self):
         runner = render.render_runner(["user_main: cancel test", "user_main: POSIX timer test"])
         self.assertIn("BANNERS=('user_main: cancel test' 'user_main: POSIX timer test')", runner)

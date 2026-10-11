@@ -78,8 +78,10 @@ def render(meta: dict, patch_file: Path, out_root: Path,
     instance_id = meta["instance_id"]
     if meta["project"] != "nuttx" or not re.fullmatch(r"nuttx__nuttx-\d+", instance_id):
         raise ValueError("expected a NuttX instance ID")
-    if not re.fullmatch(r"-[a-z0-9-]+", tag_suffix):
-        raise ValueError("tag_suffix must start with - and contain lowercase letters, digits, or -")
+    # Empty gives the standard embedeval:nuttx-<PR> tag of a checked-in instance.
+    if not re.fullmatch(r"(-[a-z0-9-]+)?", tag_suffix):
+        raise ValueError("tag_suffix must be empty, or start with - and contain "
+                         "lowercase letters, digits, or -")
     if meta["kernel_repo"] != "https://github.com/apache/nuttx" or \
             meta["apps_repo"] != "https://github.com/apache/nuttx-apps":
         raise ValueError("expected the Apache NuttX kernel and apps repositories")
