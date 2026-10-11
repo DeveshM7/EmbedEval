@@ -11,11 +11,28 @@ No API key and no LLM involved, so this is the cheapest way to confirm a built
 image actually works. Replaces validate_instance.sh and
 validate_riot_instance.sh, and gives NuttX a validator for the first time --
 previously it had only 16 hand-written per-PR scripts.
+
+Zephyr instances from the twister pipeline (metadata "pipeline": "twister")
+are validated in their Apptainer image instead, exactly as built:
+
+    EMBEDEVAL_INSTANCES_DIR=generated python scripts/validate_instance.py zephyr__zephyr-65697
+
+Each step runs in a throwaway container with a fresh writable overlay, so the
+image itself is never changed:
+
+    1. run_tests on the image as built     -> must FAIL (exit 1)
+    2. apply the upstream fix (base_commit..fix_commit outside tests/)
+    3. run_tests again                     -> must PASS (exit 0)
+
+"Fail" is any failure -- a test, the build or the configuration -- but not
+"nothing ran": a scenario filtered on the board (exit 3) is invalid, never a
+failure to fix. A report is written to <instance>/validation.json.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -25,6 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import apptainer_util as au
 import build_config
 import instances
 
@@ -62,9 +80,146 @@ def gold_patch(meta: dict, workdir: Path) -> str:
     return r.stdout
 
 
+def local_fix_patch(meta: dict) -> str:
+    """The upstream fix from the local Zephyr clone: every change of the PR
+    outside tests/. The same range the test patch comes from, so the two
+    never overlap."""
+    clone = Path(__file__).resolve().parent.parent / "candidates" / "zephyr.git"
+    base, fix = meta["base_commit"], meta["fix_commit"]
+    for sha in (base, fix):
+        if sh(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:
+            sh(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
+    r = sh(["git", "-C", str(clone), "diff", f"{base}..{fix}", "--", ".", ":(exclude)tests/"],
+           timeout=300)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise RuntimeError(f"could not produce the fix patch: {r.stderr.strip()[:200]}")
+    return r.stdout
+
+
+RUN_TESTS_MEANING = {0: "passed", 1: "failed", 2: "twister did not run", 3: "nothing ran"}
+
+
+def summary(output: str) -> list[str]:
+    """The per-test lines and verdict from run_tests' output."""
+    keep, on = [], False
+    for line in output.splitlines():
+        if line.startswith("--- twister:"):
+            on = True
+        if on or line.startswith("==> run_tests"):
+            keep.append(line)
+        if line.startswith("--- suite:"):
+            on = False
+    if len(keep) <= 40:
+        return keep
+    # Large suites: keep what matters -- every test that did not pass, the
+    # assertion lines, and the verdict -- and count the passes.
+    passed = [l for l in keep if l.strip().startswith("passed")]
+    rest = [l for l in keep if not l.strip().startswith(("passed", "| PASS"))]
+    return rest[:1] + [f"  ({len(passed)} tests passed)"] + rest[1:40]
+
+
+def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
+                       verbose: bool) -> bool:
+    meta = instances.load_metadata(instance_id)
+    image = au.instance_image(instance_id)
+    print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
+    print(f"  {meta['test_path']}/{meta['scenario']} on {meta['platform']}")
+    report = {"instance_id": instance_id, "image": str(image), "platform": meta["platform"],
+              "scenario": f"{meta['test_path']}/{meta['scenario']}", "valid": False}
+    if not image.exists():
+        print(f"  ERROR: image not built: {image}")
+        report["reason"] = "image not built"
+        return _finish(instance_id, report)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_dir = au.path("runs", f"{instance_id}-{stamp}", "x").parent
+    overlay = run_dir / "overlay"
+    overlay.mkdir(parents=True)
+    logdir = au.path("logs", instance_id, f"validate-{stamp}", "x").parent
+    logdir.mkdir(parents=True, exist_ok=True)
+    report["logs"] = str(logdir)
+    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay)
+
+    def step(label: str, cmd: list[str], log: str, t: int):
+        print(f"    {label} ...", end="", flush=True)
+        t0 = time.time()
+        try:
+            r = subprocess.run(container + cmd, capture_output=True, text=True, timeout=t)
+            rc, out = r.returncode, (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            rc, out = "timeout", str(e.stdout or "")
+        (logdir / log).write_text(out)
+        secs = time.time() - t0
+        print(f" {secs:.0f}s (rc={rc})")
+        if verbose:
+            print(out)
+        return rc, out, secs
+
+    try:
+        print("\n  Step 1: expecting run_tests to FAIL on the image as built")
+        rc1, out1, s1 = step("run_tests", ["run_tests"], "before.log", timeout)
+        report["before"] = {"rc": rc1, "meaning": RUN_TESTS_MEANING.get(rc1, str(rc1)),
+                            "seconds": round(s1), "summary": summary(out1)}
+        for line in summary(out1):
+            print(f"      {line}")
+        if rc1 != 1:
+            why = {0: "tests PASSED before the fix -- the instance does not detect the bug",
+                   3: "nothing ran: the scenario is filtered or skipped on this board",
+                   2: "twister did not run (environment problem)"}.get(
+                       rc1, f"run_tests ended with {rc1}")
+            print(f"  INVALID: {why}")
+            report["reason"] = why
+            return _finish(instance_id, report)
+
+        print("\n  Step 2: applying the upstream fix")
+        patch_text = (Path(patch_override).read_text() if patch_override
+                      else local_fix_patch(meta))
+        (run_dir / "fix.diff").write_text(patch_text)
+        rca, outa, _ = step("git apply", ["git", "-C", "/testbed", "apply",
+                                          "/embedeval-run/fix.diff"], "apply.log", 300)
+        if rca != 0:
+            print(f"  INVALID: the fix does not apply: {outa.strip()[:300]}")
+            report["reason"] = "the fix does not apply"
+            return _finish(instance_id, report)
+
+        print("\n  Step 3: expecting run_tests to PASS with the fix")
+        rc2, out2, s2 = step("run_tests", ["run_tests"], "after.log", timeout)
+        report["after"] = {"rc": rc2, "meaning": RUN_TESTS_MEANING.get(rc2, str(rc2)),
+                           "seconds": round(s2), "summary": summary(out2)}
+        for line in summary(out2):
+            print(f"      {line}")
+        if rc2 != 0:
+            why = {1: "tests still fail with the fix",
+                   3: "nothing ran with the fix",
+                   2: "twister did not run (environment problem)"}.get(
+                       rc2, f"run_tests ended with {rc2}")
+            print(f"  INVALID: {why}")
+            report["reason"] = why
+            return _finish(instance_id, report)
+
+        print("\n  VALID: fails before the fix, passes after")
+        report["valid"] = True
+        report["reason"] = "fails before the fix, passes after"
+        return _finish(instance_id, report)
+    except Exception as e:
+        print(f"  ERROR: {type(e).__name__}: {e}")
+        report["reason"] = f"error: {type(e).__name__}: {e}"
+        return _finish(instance_id, report)
+    finally:
+        au.remove(run_dir)
+
+
+def _finish(instance_id: str, report: dict) -> bool:
+    (instances.instance_dir(instance_id) / "validation.json").write_text(
+        json.dumps(report, indent=2) + "\n")
+    return report["valid"]
+
+
 def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
              verbose: bool = False) -> bool:
     meta = instances.load_metadata(instance_id)
+    if meta.get("pipeline") == "twister":
+        return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
     cfg = build_config.config(meta["project"])
     image = meta["docker_image"]
     build_cmd = meta.get("build_command")
