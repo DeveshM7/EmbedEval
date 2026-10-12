@@ -98,6 +98,19 @@ class CheckVerdictTests(unittest.TestCase):
         self.assertEqual(triage.check_verdict(good, "42", record()), [])
 
 
+class ParseVerdictTests(unittest.TestCase):
+    def test_json_after_prose_that_contains_braces(self):
+        reply = ('The tests only add `= {}` to locals.\n\n```json\n'
+                 '{"pr": 42, "verdict": "reject", "nested": {"a": 1}}\n```')
+        self.assertEqual(triage.parse_verdict(reply),
+                         {"pr": 42, "verdict": "reject", "nested": {"a": 1}})
+
+    def test_plain_object_and_no_object(self):
+        self.assertEqual(triage.parse_verdict('{"verdict": "accept"}'), {"verdict": "accept"})
+        self.assertIsNone(triage.parse_verdict("no verdict here {"))
+        self.assertIsNone(triage.parse_verdict(None))
+
+
 class RecordAndScoreTests(unittest.TestCase):
     def test_render_keeps_suite_sources_and_bounds_long_fields(self):
         rendered = json.loads(triage.render_record("42", record()))

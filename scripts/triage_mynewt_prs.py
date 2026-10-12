@@ -135,16 +135,21 @@ def render_record(case: str, record: dict, field_limit: int = 20000) -> str:
 
 
 def parse_verdict(content: str | None) -> dict | None:
+    """The last top-level JSON object in the reply. Prose before it can contain
+    braces (a verdict once quoted `= {}`), so first-{ to last-} is not enough."""
     if not content:
         return None
-    start, end = content.find("{"), content.rfind("}")
-    if start < 0 or end < start:
-        return None
-    try:
-        value = json.loads(content[start:end + 1])
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
+    decoder, found, i = json.JSONDecoder(), None, content.find("{")
+    while i >= 0:
+        try:
+            value, end = decoder.raw_decode(content, i)
+        except json.JSONDecodeError:
+            i = content.find("{", i + 1)
+            continue
+        if isinstance(value, dict):
+            found = value
+        i = content.find("{", end)
+    return found
 
 
 def check_names(field: str, names, sources: str, required: bool) -> list[str]:
