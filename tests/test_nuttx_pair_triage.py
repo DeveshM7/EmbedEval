@@ -270,6 +270,46 @@ class SuppliedPairTests(unittest.TestCase):
             self.assertNotIn("Platform (expected)", scorecard)
 
 
+class QemuLeadTests(unittest.TestCase):
+    """Only sim:nsh pairs are accepted; QEMU-only pairs are rejected as leads."""
+
+    def test_accept_must_run_on_sim(self):
+        record = pair_record()
+        verdict = {"case": "apps-7", "verdict": "accept", "reason": "r", "kernel_pr": 11,
+                   "platform": "qemu-armv8a:nsh_smp"}
+        issues = triage.check_verdict(verdict, "apps-7", record)
+        self.assertTrue(any("qemu_lead" in issue for issue in issues))
+
+    def test_reject_may_carry_a_checked_qemu_lead(self):
+        record = pair_record()
+        lead = {"platform": "qemu-armv8a:nsh_smp", "kernel_pr": 11,
+                "confidence": "medium", "why": "the needed arch hook is arm64-only"}
+        verdict = {"case": "apps-7", "verdict": "reject", "reason": "needs QEMU",
+                   "qemu_lead": lead}
+        self.assertEqual(triage.check_verdict(verdict, "apps-7", record), [])
+        verdict["qemu_lead"] = {**lead, "platform": "sim:nsh"}
+        self.assertTrue(triage.check_verdict(verdict, "apps-7", record))
+        verdict["qemu_lead"] = {**lead, "kernel_pr": 99}
+        self.assertTrue(triage.check_verdict(verdict, "apps-7", record))
+        verdict["qemu_lead"] = None
+        self.assertEqual(triage.check_verdict(verdict, "apps-7", record), [])
+
+    def test_leads_collect_the_latest_run_per_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            for run, why in (("2026-01-01_000000_m", "old"), ("2026-01-02_000000_m", "new")):
+                (runs / run).mkdir(parents=True)
+                (runs / run / "qemu_leads.jsonl").write_text(json.dumps(
+                    {"case": "apps-7", "platform": "qemu-armv8a:nsh", "kernel_pr": 11,
+                     "confidence": "high", "why": why}) + "\n")
+            out = Path(tmp) / "leads.jsonl"
+            with patch.object(triage, "RUNS", runs), patch.object(triage, "QEMU_LEADS", out), \
+                 patch.object(triage, "ROOT", Path(tmp)), patch("builtins.print"):
+                leads = triage.collect_leads()
+            self.assertEqual([lead["why"] for lead in leads], ["new"])
+            self.assertEqual(json.loads(out.read_text())["run"], "2026-01-02_000000_m")
+
+
 class RepositoryToolTests(unittest.TestCase):
     """read_file, list_dir and grep read a local clone at the PR's commits."""
 

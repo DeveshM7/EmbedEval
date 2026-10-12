@@ -37,11 +37,16 @@ size, timing, or its own implementation is not enough.
    Both PRs must be merged and have base/head branch commits. A passing
    upstream CI run alone does not prove this comparison. Compare merge timing
    for context, but use the actual branch commits to define the two revisions.
-3. Select a target on which the test can run. Native `sim:nsh` with `ostest`
-   is supported by the current generator. A concrete QEMU target is allowed
-   when the bug needs it, but it needs a matching runner/fixture. Other apps
-   test programs can be promising and likewise need a fixture. Note required
-   config settings and any hardware or external dependency.
+3. Check that the test runs on native `sim:nsh`, the only target the
+   generator and runner support. A kernel interface the test needs must be
+   implemented for the simulator itself (`arch/sim`, or generic code), not
+   only declared, or implemented for one hardware architecture: when the fix
+   relies on a per-architecture hook (an `up_*` function, an interrupt or IPI
+   path), `grep` the fixed kernel for its implementations. If the pair is
+   otherwise sound but its test can only run on a QEMU board, reject it and
+   describe that board in `qemu_lead`. Other apps test programs on `sim:nsh`
+   can be promising but need a fixture. Note required config settings and any
+   hardware or external dependency.
 4. Identify an issue if the record supplies one. Missing issue provenance and
    whether a feature qualifies are separate dataset-policy questions; do not
    reject a mechanically promising pair solely for either.
@@ -57,8 +62,7 @@ Decide from the available evidence and say what remains uncertain. Do not use
 outside knowledge about these examples.
 
 Reject if there is no credible kernel production change paired with a changed,
-executable apps regression test, or if the test cannot run on a plausible
-simulated target. For a plausible pair, accept with lower confidence when
+executable apps regression test, or if the test cannot run on `sim:nsh`. For a plausible pair, accept with lower confidence when
 some detail still needs validation. Never report a runtime result you did not
 observe. `evidence_status` is `observed` only when the supplied record has a
 trustworthy old-kernel/new-test failure **and** fixed-kernel/same-test pass
@@ -105,8 +109,12 @@ For an accepted pair, also include:
   test path, and `missing_api`, the exact interface token that source uses.
   Do not infer either from a compiler log alone when the source is available.
 - `config_overrides` maps required NuttX config names to their values; use
-  `{}` when the record shows none. `platform` is `sim:nsh` or a concrete
-  QEMU configuration such as `qemu-armv7a:nsh`.
+  `{}` when the record shows none. `platform` is `sim:nsh` for every accept.
+- A reject may add `qemu_lead` when the only obstacle is the target: the pair
+  has a real kernel fix and a detecting ostest test, but the test can only run
+  on a QEMU board. Give `{"platform": "qemu-armv7a:nsh", "kernel_pr":
+  <number>, "confidence": "high" | "medium" | "low", "why": "<what ties it
+  to that board>"}`. Use `null` or omit it for every other reject.
 - The runner judges the whole `ostest` run: it passes only when the suite
   completes with status 0, prints no `ERROR` line, and prints the
   `user_main: ... test` banner of every changed test. So every changed test
@@ -117,7 +125,6 @@ For an accepted pair, also include:
   `config_overrides` holds every setting those calls need on `sim:nsh`
   (check the `#ifdef` guards around the calls). Use `needs_reviewed_recipe`
   when you cannot tell whether a changed test runs there. Use
-  `needs_fixture` for QEMU, another apps test program, or another failure
-  mode. None of these statuses claims validation passed.
+  `needs_fixture` for another apps test program or another failure mode. None of these statuses claims validation passed.
 - `issue_url` may be null. Do not invent links, paths, target support,
   config settings, or test results.

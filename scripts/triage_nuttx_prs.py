@@ -6,6 +6,7 @@
     python scripts/triage_nuttx_prs.py run --profile qwen38-nvfp4 --apps-pr 2327 --kernel-pr 11889
     python scripts/triage_nuttx_prs.py run --profile qwen38-nvfp4 --pairs-file candidates/nuttx/pairs.jsonl
     python scripts/triage_nuttx_prs.py eval triage/nuttx_runs/<run>
+    python scripts/triage_nuttx_prs.py leads     # collect QEMU-only leads from all runs
 """
 
 from __future__ import annotations
@@ -30,6 +31,11 @@ PROMPT = ROOT / "docs" / "nuttx_pr_triage.md"
 GOLD = ROOT / "triage" / "nuttx_gold.json"
 MODELS = ROOT / "triage" / "models.json"
 RUNS = ROOT / "triage" / "nuttx_runs"
+# Pairs rejected only because their test needs a QEMU target, kept for when a
+# QEMU runner exists.
+QEMU_LEADS = ROOT / "triage" / "nuttx_qemu_leads.jsonl"
+QEMU_PLATFORM = re.compile(r"qemu-[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+")
+LEADS_LOCK = threading.Lock()
 # Full bare clones; the tools read and search them at a PR's pinned commits.
 CLONES = {"kernel": DATA / "kernel.git", "apps": DATA / "apps.git"}
 CLONE_URLS = {"kernel": "https://github.com/apache/nuttx.git",
@@ -182,6 +188,16 @@ def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
     if not str(verdict.get("reason") or "").strip():
         issues.append("reason is required")
     if verdict.get("verdict") != "accept":
+        lead = verdict.get("qemu_lead")
+        if lead is not None:
+            kernels = {pr["number"] for pr in record.get("kernel_candidates", [])}
+            if not isinstance(lead, dict) or not QEMU_PLATFORM.fullmatch(str(lead.get("platform"))):
+                issues.append("qemu_lead must be null or name a concrete qemu-<board>:<config> platform")
+            elif lead.get("kernel_pr") not in kernels:
+                issues.append("qemu_lead.kernel_pr must select a supplied kernel candidate")
+            elif lead.get("confidence") not in ("high", "medium", "low") or \
+                    not str(lead.get("why") or "").strip():
+                issues.append("qemu_lead needs confidence (high, medium, or low) and why")
         return issues
     apps = record.get("apps")
     kernels = {pr["number"]: pr for pr in record.get("kernel_candidates", [])}
@@ -205,9 +221,9 @@ def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
         missing = [p for p in paths if p not in changed]
         if missing:
             issues.append(f"{field} must name changed paths in the correct PR: {missing}")
-    if not isinstance(verdict.get("platform"), str) or not re.fullmatch(
-            r"(?:sim:nsh|qemu-[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+)", verdict.get("platform") or ""):
-        issues.append("platform must be sim:nsh or a concrete qemu-<board>:<config>")
+    if verdict.get("platform") != "sim:nsh":
+        issues.append("accept only pairs whose test runs on sim:nsh; if only a QEMU target "
+                      "can run it, reject and describe that target in qemu_lead")
     if verdict.get("evidence_status") not in ("observed", "needs_validation"):
         issues.append("evidence_status must be observed or needs_validation")
     elif verdict["evidence_status"] == "observed" and not record.get("validation"):
@@ -464,6 +480,10 @@ def triage_one(case: str, record: dict, profile: str, settings: dict,
     output = verdict if isinstance(verdict, dict) and not issues else {
         "case": case, "verdict": "error", "reason": trace["error"] or "; ".join(issues)}
     (run_dir / f"{case}.json").write_text(json.dumps(output, indent=2) + "\n")
+    if output.get("verdict") == "reject" and isinstance(output.get("qemu_lead"), dict):
+        with LEADS_LOCK, open(run_dir / "qemu_leads.jsonl", "a") as leads:
+            leads.write(json.dumps({"case": case, **output["qemu_lead"],
+                                    "reason": output.get("reason")}) + "\n")
     return {"case": case, "verdict": output.get("verdict"), "seconds": trace["seconds"],
             "error": trace["error"], "issues": issues}
 
@@ -521,6 +541,22 @@ def run(args) -> None:
         eval_run(run_dir)
 
 
+def collect_leads() -> list[dict]:
+    """Latest QEMU-only lead per case across all runs, written to QEMU_LEADS."""
+    latest = {}
+    for path in sorted(RUNS.glob("*/qemu_leads.jsonl")):   # run names sort by time
+        for line in path.read_text().splitlines():
+            if line.strip():
+                lead = json.loads(line)
+                latest[lead["case"]] = {**lead, "run": path.parent.name}
+    leads = [latest[case] for case in sorted(latest)]
+    QEMU_LEADS.write_text("".join(json.dumps(lead) + "\n" for lead in leads))
+    for lead in leads:
+        print(f"{lead['case']}: {lead['platform']} ({lead['confidence']}) {lead['why']}")
+    print(f"{len(leads)} leads -> {QEMU_LEADS.relative_to(ROOT)}")
+    return leads
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -536,9 +572,12 @@ def main() -> None:
     run_parser.add_argument("--parallel", type=int, default=4)
     eval_parser = commands.add_parser("eval")
     eval_parser.add_argument("run_dir", nargs="?")
+    commands.add_parser("leads")
     args = parser.parse_args()
     if args.command == "run":
         run(args)
+    elif args.command == "leads":
+        collect_leads()
     else:
         path = Path(args.run_dir) if args.run_dir else max(RUNS.iterdir())
         eval_run(path)

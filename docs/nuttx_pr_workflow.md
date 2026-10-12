@@ -268,9 +268,12 @@ completion, then reads its log once: pass needs `user_main: Exiting`,
 `user_main: ... test` banner of each changed test (derived by the generator
 from the patched `ostest_main.c`); anything else that completes fails, and a
 timeout returns 2. An unrelated `ostest` failure at the base commit therefore
-fails the fixed run too, which validation reports. Keep a QEMU lead
-when its bug requires that target; it needs its own target-specific template
-and runner before it can be generated.
+fails the fixed run too, which validation reports. Triage accepts only
+pairs that run on `sim:nsh`. A pair whose test can only run on a QEMU board is
+rejected with a `qemu_lead` (board, confidence, why);
+`triage_nuttx_prs.py leads` collects them from all runs into
+`triage/nuttx_qemu_leads.jsonl`, to revisit once a QEMU template and runner
+exist.
 
 ## Workflow coverage
 
