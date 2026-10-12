@@ -48,6 +48,15 @@ It contains:
 
 Read the linked issue, production diff, test diff, and complete selftest
 package. Filenames alone do not establish that a test detects the change.
+Long fields can be truncated in the model input.
+
+You also have read-only tools over a full clone of `apache/mynewt-core`:
+`read_file`, `list_dir` and `grep` at the PR's `base` commit, its `head`
+commit, or any of its commits by SHA, and `commit_diff` for the change one
+PR commit made. Use them for a specific missing fact, such as production
+code before the fix, a `syscfg.yml` default, or which commit changed tests
+and which changed production code. The tool budget is limited. Do not use
+outside knowledge about a PR.
 
 ---
 
@@ -138,27 +147,25 @@ Return exactly one JSON object, with no prose outside it:
 
 ```json
 {
-  "pr": 3680,
+  "pr": 1234,
   "verdict": "accept",
-  "confidence": "high",
+  "confidence": "medium",
   "change_type": "fix",
   "platform": "native",
   "failure_mode": "runtime",
-  "problem_statement": "JSON string values that do not fit in the destination including the terminating NUL must return JSON_ERR_STRLONG. Attribute names exactly JSON_ATTR_MAX characters long must be accepted for lookup and return JSON_ERR_BADATTR when unknown; longer names must return JSON_ERR_ATTRLEN.",
+  "problem_statement": "Describe the observed symptom and the required behavior without giving the implementation.",
   "fail_to_pass": [
-    "test_json_suite/test_json_decode_errors"
+    "example_suite/example_case_new"
   ],
   "pass_to_pass": [
-    "test_json_suite/test_json_simple_decode",
-    "test_json_suite/test_json_simple_encode"
+    "example_suite/example_case_old"
   ],
   "baseline_tests": [
-    "test_json_suite/test_json_simple_decode",
-    "test_json_suite/test_json_simple_encode"
+    "example_suite/example_case_old"
   ],
   "compatibility_cflags": [],
-  "detecting_test": "test_json_decode_errors checks the string-capacity and attribute-name boundaries and reports failed assertions on the unfixed decoder.",
-  "reason": "The changed native selftest directly exercises both boundary behaviors and fails deterministically without the production fix."
+  "detecting_test": "Name the testcase and assertion, and explain why it fails on the unfixed code and passes on the fixed code.",
+  "reason": "One or two sentences justifying the verdict."
 }
 ```
 
@@ -168,9 +175,9 @@ its own issue, test inventory, and problem statement:
 ```json
 {
   "failure_mode": "compile",
-  "compile_test_source": "kernel/os/selftest/src/testcases/os_msys_test_cases.c",
-  "missing_api": "os_msys_get_free",
-  "fail_to_pass": ["os_msys_test_suite/os_msys_get_free"]
+  "compile_test_source": "path/to/selftest/src/testcases/example_case_new.c",
+  "missing_api": "example_new_function",
+  "fail_to_pass": ["example_suite/example_case_new"]
 }
 ```
 
@@ -180,6 +187,7 @@ compilation stops first.
 
 Field rules:
 
+- `pr`: the record's `number`, as an integer.
 - `verdict`: `accept` or `reject`. A rejection may omit every later field
   except `confidence` and `reason`.
 - `confidence`: `high`, `medium`, or `low`.
