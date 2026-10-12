@@ -41,7 +41,7 @@ effort re-checking them:
   already applied twister's own selection rules -- whether the board exists at
   the base commit, `platform_allow`/`platform_exclude`, `arch_allow`/
   `arch_exclude`, `depends_on`, `min_ram`, toolchain -- to every scenario the
-  PR touches, on both of our boards. A pair marked `selected` passed all of
+  PR touches, on every board we can run. A pair marked `selected` passed all of
   them. You never need to work out board support from board files.
 - **Your verdict's form.** After you answer, code checks that your board and
   scenario are a selected pair and that your test names exist in the suite. If
@@ -113,10 +113,20 @@ configuration the test is built with.
 | board | what it is |
 |---|---|
 | the 64-bit native board | Zephyr compiled as a native Linux binary and run as an ordinary process. Its name depends on the era -- `native_posix_64`, `native_sim_64` or `native_sim/native/64` -- and the dry run spells it as valid at the base commit. |
-| `qemu_x86` | An emulated x86 machine, run under the QEMU bundled in the Zephyr SDK. |
+| `qemu_x86` | An emulated 32-bit x86 machine. |
+| `qemu_x86_64` | An emulated 64-bit x86 machine. |
+| `qemu_cortex_m3` | An emulated ARM Cortex-M3 microcontroller. |
+| `mps2/an385` | An emulated ARM Cortex-M3 development board (`mps2_an385` before 2024). |
+| `qemu_cortex_a53` | An emulated 64-bit ARM (Cortex-A53) machine. |
+| `qemu_riscv32` | An emulated 32-bit RISC-V machine. |
+| `qemu_riscv64` | An emulated 64-bit RISC-V machine. |
 
-Nothing else: no other QEMU targets, no other simulators (`renode`, `bsim`,
-`armfvp`), no physical boards, no 32-bit native boards.
+The QEMU boards all run under the QEMU bundled with the Zephyr SDK. The dry
+run lists every one of them that exists at the base commit.
+
+Nothing else: no other QEMU targets (ARC, Xtensa, MIPS, SPARC, ...), no other
+simulators (`renode`, `bsim`, `armfvp`), no physical boards, no 32-bit native
+boards.
 
 Results are read **per test case** from twister, so the scenario must use the
 `ztest` framework (the default) or the `console` harness. A `pytest`, `bsim`,
@@ -222,9 +232,8 @@ more than their prose.
   `selected`**, copied exactly as the table spells them: the board, the suite
   directory, and the scenario name under its `tests:`. Together they become
   the instance's build. Choose the scenario whose configuration makes your
-  detecting test detect the change. Between the two boards, prefer what the
-  suite's config points to -- `integration_platforms` first, then
-  `platform_allow` -- and otherwise the native board, which is faster.
+  detecting test detect the change, and a board on which the changed code
+  actually runs.
 - `fail_to_pass` — the tests that fail before the change and pass after, as
   ztest names written in the source: `ZTEST(suite, test_x)` gives `test_x`.
   The dry run lists twister's names, which drop the `test_` prefix and add

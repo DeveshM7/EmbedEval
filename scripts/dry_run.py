@@ -6,8 +6,9 @@ Twister dry run for a Zephyr PR: which of its scenarios can run on our boards.
     python scripts/dry_run.py 85079 99824 --keep-tree
 
 Runs between enrichment and triage. For every scenario in every test suite the
-PR changes, on every candidate board valid at the base commit (one native
-64-bit board and qemu_x86), it asks twister's own filters whether the pair is
+PR changes, on every candidate board valid at the base commit (the native
+64-bit board and the QEMU boards in zephyr_env.CANDIDATE_BOARDS), it asks
+twister's own filters whether the pair is
 selected, or filtered and why ("No hardware support for {'memc'}", "In test
 case arch exclude", ...). It also lists each scenario's real test names.
 

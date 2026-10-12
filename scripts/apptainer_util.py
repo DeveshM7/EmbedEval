@@ -58,12 +58,21 @@ def build_env() -> dict:
     return env
 
 
+def recipe_tag(definition: str) -> str:
+    """A short fingerprint of a shared image's recipe. It is part of the
+    image's name, so changing the recipe (e.g. adding a compiler to sdk.def)
+    builds a new image instead of silently reusing the old one."""
+    import hashlib
+    return hashlib.sha256((TEMPLATES / definition).read_bytes()).hexdigest()[:8]
+
+
 def python_image(py: str) -> Path:
-    return path("images", f"python-{py}.sif")
+    return path("images", f"python-{py}-{recipe_tag('python.def')}.sif")
 
 
 def sdk_image(sdk: str, py: str) -> Path:
-    return path("images", f"zephyr-sdk-{sdk}-py{py}.sif")
+    return path("images", f"zephyr-sdk-{sdk}-py{py}-{recipe_tag('python.def')}"
+                          f"{recipe_tag('sdk.def')}.sif")
 
 
 def instance_image(instance_id: str) -> Path:

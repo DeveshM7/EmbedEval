@@ -58,13 +58,22 @@ UBUNTU_PYTHON = {"18.04": "3.6", "20.04": "3.8", "22.04": "3.10", "24.04": "3.12
 # interpreters with today's packages are untested on ARM64.
 PYTHON_FLOOR = "3.9"
 
-# The boards an instance may use, in order of preference within each kind.
-# Names changed over the years (native_posix_64 -> native_sim_64 ->
-# native_sim/native/64), so each kind lists every spelling it has had.
+# The boards an instance may use: one entry per board, listing every spelling
+# it has had (native_posix_64 -> native_sim_64 -> native_sim/native/64;
+# mps2_an385 -> mps2/an385), newest first. The native board and the QEMU
+# boards whose compilers the SDK images install (templates/zephyr/apptainer/
+# sdk.def: x86, ARM, AArch64, RISC-V). Each of these was validated on a real
+# PR (65697) before being added.
 CANDIDATE_BOARDS = {
     "native64": ["native_sim/native/64", "native_sim_64",
                  "native_posix/native/64", "native_posix_64"],
     "qemu_x86": ["qemu_x86"],
+    "qemu_x86_64": ["qemu_x86_64"],
+    "qemu_cortex_m3": ["qemu_cortex_m3"],
+    "mps2_an385": ["mps2/an385", "mps2_an385"],
+    "qemu_cortex_a53": ["qemu_cortex_a53"],
+    "qemu_riscv32": ["qemu_riscv32"],
+    "qemu_riscv64": ["qemu_riscv64"],
 }
 
 SUITE_MARKERS = ("testcase.yaml", "tests.yaml", "sample.yaml")
@@ -212,9 +221,9 @@ def board_identifiers(commit: str) -> dict:
         name = path.rsplit("/", 1)[-1]
         if not name.endswith(".yaml"):
             continue
-        if not (name.startswith(("native_", "qemu_x86")) or name == "twister.yaml"):
+        if not (name.startswith(("native_", "qemu_", "mps2")) or name == "twister.yaml"):
             continue
-        if name == "twister.yaml" and "native" not in path and "qemu" not in path:
+        if name == "twister.yaml" and not any(k in path for k in ("native", "qemu", "mps2")):
             continue
         try:
             doc = yaml.safe_load(show(commit, path) or "") or {}
