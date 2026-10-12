@@ -1,6 +1,7 @@
 """Behavior checks for triaging a supplied NuttX apps/kernel PR pair."""
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -267,6 +268,62 @@ class SuppliedPairTests(unittest.TestCase):
             self.assertIn("Kernel PR (expected)", scorecard)
             self.assertNotIn("Test paths", scorecard)
             self.assertNotIn("Platform (expected)", scorecard)
+
+
+class RepositoryToolTests(unittest.TestCase):
+    """read_file, list_dir and grep read a local clone at the PR's commits."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        repo = Path(self.tmp.name) / "kernel"
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        repo.mkdir()
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (repo / "sched").mkdir()
+        (repo / "sched" / "Kconfig").write_text("config SCHED_EVENTS\n\tbool \"Events\"\n")
+        git("add", "-A"); git("commit", "-qm", "base")
+        self.base = git("rev-parse", "HEAD")
+        (repo / "sched" / "Kconfig").write_text("config SCHED_EVENTS\n\tbool \"Events\"\n\tdefault n\n")
+        git("commit", "-qam", "head")
+        self.head = git("rev-parse", "HEAD")
+        self.record = {"apps": {"base_commit": self.base, "head_commit": self.head},
+                       "kernel_candidates": [{"number": 11, "base_commit": self.base,
+                                              "head_commit": self.head}]}
+        self.clones = patch.dict(triage.CLONES, {"kernel": repo, "apps": repo})
+        self.clones.start()
+
+    def tearDown(self):
+        self.clones.stop()
+        self.tmp.cleanup()
+
+    def tool(self, name, **args):
+        return triage.run_tool(name, {"repo": "kernel", **args}, self.record)
+
+    def test_read_file_numbers_lines_at_the_pinned_commit(self):
+        self.assertNotIn("default n", self.tool("read_file", path="sched/Kconfig", ref="base"))
+        head = self.tool("read_file", path="sched/Kconfig", ref="head")
+        self.assertIn("    3  \tdefault n", head)
+        self.assertIn("lines in total", self.tool("read_file", path="sched/Kconfig",
+                                                  ref="head", max_lines=1))
+
+    def test_list_dir_and_grep_search_the_tree(self):
+        self.assertIn("tree  sched", self.tool("list_dir", path="", ref="head"))
+        self.assertIn("sched/Kconfig:3:", self.tool("grep", pattern="default n", path="", ref="head"))
+        self.assertEqual(self.tool("grep", pattern="default n", path="sched", ref="base"),
+                         "(no matches)")
+
+    def test_bad_requests_return_errors_instead_of_raising(self):
+        self.assertIn("invalid", self.tool("read_file", path="../etc/passwd", ref="head"))
+        self.assertIn("ref must be", self.tool("read_file", path="sched/Kconfig", ref="merge"))
+        self.assertIn("unknown tool", self.tool("rm", path="sched", ref="head"))
+        self.record["kernel_candidates"][0]["head_commit"] = "0" * 40
+        with patch.object(triage, "git", wraps=triage.git) as git:
+            self.assertIn("unavailable", self.tool("read_file", path="sched/Kconfig", ref="head"))
+            self.assertTrue(any(c.args[1] == "fetch" for c in git.call_args_list))
 
 
 if __name__ == "__main__":

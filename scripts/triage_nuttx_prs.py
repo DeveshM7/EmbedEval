@@ -16,29 +16,59 @@ import hashlib
 import json
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from nuttx_candidates import KERNEL, APPS, ENRICHED, enrich, full_pr, source_at
+from nuttx_candidates import DATA, ENRICHED, KERNEL, enrich, full_pr
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPT = ROOT / "docs" / "nuttx_pr_triage.md"
 GOLD = ROOT / "triage" / "nuttx_gold.json"
 MODELS = ROOT / "triage" / "models.json"
 RUNS = ROOT / "triage" / "nuttx_runs"
-TOOLS = [{"type": "function", "function": {
-    "name": "read_file",
-    "description": "Read a repository file at this PR's pinned base or head commit.",
-    "parameters": {"type": "object", "properties": {
-        "repo": {"type": "string", "enum": ["apps", "kernel"]},
-        "kernel_pr": {"type": "integer", "description": "Required if several kernel PRs are candidates"},
-        "path": {"type": "string", "description": "Repository-relative file path"},
-        "ref": {"type": "string", "enum": ["base", "head"]}},
-        "required": ["repo", "path", "ref"]}}}]
-MAX_TOOL_ROUNDS = 6
+# Full bare clones; the tools read and search them at a PR's pinned commits.
+CLONES = {"kernel": DATA / "kernel.git", "apps": DATA / "apps.git"}
+CLONE_URLS = {"kernel": "https://github.com/apache/nuttx.git",
+              "apps": "https://github.com/apache/nuttx-apps.git"}
+GIT_LOCKS = {repo: threading.Lock() for repo in CLONES}
+_WHERE = {
+    "repo": {"type": "string", "enum": ["apps", "kernel"]},
+    "kernel_pr": {"type": "integer", "description": "Required if several kernel PRs are candidates"},
+    "ref": {"type": "string", "enum": ["base", "head"],
+            "description": "The PR's base commit (before it) or head commit (its last commit)"}}
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "read_file",
+        "description": "Read a file in the apps or kernel repository at this PR's base or head commit.",
+        "parameters": {"type": "object", "properties": {
+            **_WHERE,
+            "path": {"type": "string", "description": "Repository-relative file path, e.g. testing/ostest/ostest_main.c"},
+            "start_line": {"type": "integer", "description": "1-based; default 1"},
+            "max_lines": {"type": "integer", "description": "Default 800"}},
+            "required": ["repo", "path", "ref"]}}},
+    {"type": "function", "function": {
+        "name": "list_dir",
+        "description": "List a directory in the apps or kernel repository at this PR's base or head commit.",
+        "parameters": {"type": "object", "properties": {
+            **_WHERE,
+            "path": {"type": "string", "description": "Repository-relative directory; empty for the top level"}},
+            "required": ["repo", "path", "ref"]}}},
+    {"type": "function", "function": {
+        "name": "grep",
+        "description": "Search file contents with an extended regular expression in the apps or "
+                       "kernel repository at this PR's base or head commit, under a directory or "
+                       "across the whole tree. Returns up to 300 matching lines as path:line:text.",
+        "parameters": {"type": "object", "properties": {
+            **_WHERE,
+            "pattern": {"type": "string"},
+            "path": {"type": "string", "description": "Repository-relative directory; empty for the whole tree"}},
+            "required": ["repo", "pattern", "path", "ref"]}}},
+]
+MAX_TOOL_ROUNDS = 8
 MAX_REPAIRS = 2
 
 
@@ -239,28 +269,83 @@ def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
     return issues
 
 
-def read_file(args: dict, record: dict) -> str:
-    if args.get("repo") == "apps":
+def git(repo: str, *args: str, timeout: int = 300) -> subprocess.CompletedProcess:
+    clone = CLONES[repo]
+    with GIT_LOCKS[repo]:
+        if not clone.exists():
+            clone.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "clone", "-q", "--bare", CLONE_URLS[repo], str(clone)],
+                           capture_output=True, text=True, timeout=3600, check=True)
+        return subprocess.run(["git", "-C", str(clone), *args],
+                              capture_output=True, text=True, timeout=timeout)
+
+
+def pinned_commit(args: dict, record: dict) -> tuple[str, str] | str:
+    """The (repo, commit) a tool call names, fetched if missing, or an error."""
+    repo = args.get("repo")
+    if repo == "apps":
         pr = record.get("apps")
-        repo = APPS
-    elif args.get("repo") == "kernel":
+    elif repo == "kernel":
         candidates = record.get("kernel_candidates", [])
         pr = next((p for p in candidates if p["number"] == args.get("kernel_pr")), None)
         if pr is None and len(candidates) == 1:
             pr = candidates[0]
-        repo = KERNEL
     else:
         return "error: repo must be apps or kernel"
     if not pr:
-        return "error: repository PR is unavailable or ambiguous"
-    path = args.get("path", "")
-    if not isinstance(path, str) or not path or path.startswith("/") or ".." in Path(path).parts:
+        return "error: repository PR is unavailable or ambiguous; pass kernel_pr"
+    sha = {"base": pr.get("base_commit"), "head": pr.get("head_commit")}.get(args.get("ref"))
+    if not sha:
+        return "error: ref must be base or head, and this PR must have that commit"
+    # PR branch commits live on forks, not in the clone's branches; GitHub
+    # serves them by ID.
+    if git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode:
+        git(repo, "fetch", "-q", "origin", sha, timeout=600)
+        if git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode:
+            return f"error: commit {sha[:12]} is unavailable"
+    return repo, sha
+
+
+def run_tool(name: str, args: dict, record: dict) -> str:
+    path = args.get("path") or ""
+    if not isinstance(path, str) or path.startswith("/") or ".." in Path(path).parts:
         return "error: invalid repository-relative path"
-    ref = {"base": pr.get("base_commit"), "head": pr.get("head_commit")}.get(args.get("ref"))
-    if not ref:
-        return "error: this PR has no requested commit"
-    content = source_at(repo, path, ref)
-    return content[:60000] if content is not None else "error: file unavailable or over 100 KB"
+    path = path.strip().strip("/")
+    if name not in ("read_file", "list_dir", "grep"):
+        return f"error: unknown tool {name}"
+    if name == "read_file" and not path:
+        return "error: read_file needs a file path"
+    where = pinned_commit(args, record)
+    if isinstance(where, str):
+        return where
+    repo, sha = where
+
+    if name == "read_file":
+        r = git(repo, "show", f"{sha}:{path}")
+        if r.returncode:
+            return f"error: {r.stderr.strip()[:300]}"
+        lines = r.stdout.splitlines()
+        start = max(1, int(args.get("start_line") or 1))
+        count = max(1, int(args.get("max_lines") or 800))
+        chunk = lines[start - 1:start - 1 + count]
+        body = "\n".join(f"{i:>5}  {line}" for i, line in enumerate(chunk, start))
+        more = start - 1 + count < len(lines)
+        return (body[:60000] + (f"\n... ({len(lines)} lines in total; pass start_line to read on)"
+                                if more else "")) or "(empty file)"
+
+    if name == "list_dir":
+        r = git(repo, "ls-tree", f"{sha}:{path}" if path else sha)
+        if r.returncode:
+            return f"error: {r.stderr.strip()[:300]}"
+        return "\n".join(f"{line.split()[1]:<5} {line.split(chr(9))[1]}"
+                         for line in r.stdout.splitlines()) or "(empty)"
+
+    r = git(repo, "grep", "-n", "-E", "-e", args.get("pattern") or "", sha, "--", path or ".")
+    if r.returncode not in (0, 1):
+        return f"error: {r.stderr.strip()[:300]}"
+    hits = [line.split(":", 1)[1] for line in r.stdout.splitlines()]   # drop "<sha>:"
+    return ("\n".join(hits[:300]) + (f"\n... {len(hits) - 300} more" if len(hits) > 300 else "")
+            or "(no matches)")
 
 
 def score(gold: dict[str, str], verdicts: dict[str, dict]) -> dict:
@@ -352,7 +437,8 @@ def triage_one(case: str, record: dict, profile: str, settings: dict,
                 turn["tool_results"] = []
                 for call in calls:
                     try:
-                        result = read_file(json.loads(call.function.arguments or "{}"), record)
+                        result = run_tool(call.function.name,
+                                          json.loads(call.function.arguments or "{}"), record)
                     except (ValueError, RuntimeError) as exc:
                         result = f"error: {exc}"
                     turn["tool_results"].append(result)

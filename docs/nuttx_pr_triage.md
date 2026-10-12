@@ -49,8 +49,10 @@ size, timing, or its own implementation is not enough.
 The record includes PR diffs, discussion, branch commit boundaries, changed
 apps test contents under `testing/`, and kernel source before the fix when
 available. Long fields can be truncated in the model input.
-Use `read_file` at a pinned base or head commit for a specific missing fact,
-such as test registration or a config default. A large file may be unavailable.
+Use `read_file`, `list_dir` and `grep` on the apps or kernel repository at a
+PR's base or head commit for a specific missing fact, such as test
+registration, an `#ifdef` guard, or a config default (`grep` across the tree
+finds a Kconfig symbol in one call). The tool budget is limited.
 Decide from the available evidence and say what remains uncertain. Do not use
 outside knowledge about these examples.
 
