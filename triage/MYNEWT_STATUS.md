@@ -5,6 +5,31 @@ Worktree `/Users/alexz/Desktop/VIP/EmbedEval-mynewt`, branch
 set, nothing pushed). Scholar copy: `~/EmbedEval-mynewt` (venv is a symlink to
 `~/EmbedEval/.venv`; mynewt-core bare clone in `/scratch/scholar/zhan5136/repos/mynewt-core.git`).
 
+## Summary
+
+- **Phase 1 target met.** `docs/mynewt_pr_triage.md` at a4517d3 scored 7/7 on
+  3 runs in a row with zero repairs and zero errors (runs 6-8). The previous
+  prompt (only gold leaks removed) was 7/7 on all five of its runs, but needed
+  repairs; round 1 fixed the testcase-list ambiguity behind them.
+- Instances regenerated and validated 3/3 each (section A).
+- Scholar job 474610 (mine) was cancelled after run 8; no jobs of mine are
+  running. Nothing is pushed.
+
+## Things for you to decide
+
+1. **Gold is thin on the reject side.** 3 of 4 scored rejects are decided by
+   the missing linked issue alone. More rejects with a linked issue and a
+   changed selftest would test real judgment; I'd propose candidates rather
+   than add them.
+2. **Accept verdicts are not instance recipes yet.** The verdict is reliable;
+   the testcase lists, `test_commit` and `compatibility_cflags` are not always
+   right (see notes below). For Phase 2, treat each accept as needing a
+   validator run (generate -> validate -> fix the reviewed input), as NuttX does
+   with `needs_reviewed_recipe`.
+3. **Push/merge:** branch `feature/mynewt-triage` is local only. The shared
+   pieces (serve script, models.json, Spark guide, project-aware
+   `scholar_triage_remote.sh`) duplicate the NuttX branch; merge order matters.
+
 ## A. Instances: done
 
 - The three instances were hand-made. With your approval they were replaced
