@@ -28,9 +28,11 @@ size, timing, or its own implementation is not enough.
 ## How to review the record
 
 1. Name the kernel production hunk and the apps test function or assertion.
-   Check that the apps PR actually changes the test, registers it, and enables
-   it in the selected configuration. Include registration/configuration files
-   in `test_paths` when the test patch needs them.
+   Check that the apps PR actually changes the test, and that the test is
+   registered and enabled in the selected configuration. `test_paths` lists
+   only files the apps PR changed: include its changed registration or build
+   files (`Makefile`, `CMakeLists.txt`, `ostest.h`, `ostest_main.c`) only when
+   the PR changed them. A test that ostest already registers needs none.
 2. Compare the apps test with the kernel code at its base and head commits.
    Explain the expected old failure and fixed pass using those exact PR
    boundaries. Check whether the apps test can apply to the old apps revision.

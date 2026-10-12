@@ -294,6 +294,19 @@ class QemuLeadTests(unittest.TestCase):
         verdict["qemu_lead"] = None
         self.assertEqual(triage.check_verdict(verdict, "apps-7", record), [])
 
+    def test_unchanged_test_paths_are_named_for_removal_with_the_allowed_files(self):
+        record = pair_record()
+        record["apps"]["url"] = "https://example.test/apps"
+        verdict = {"case": "apps-7", "verdict": "accept", "reason": "r", "kernel_pr": 11,
+                   "platform": "sim:nsh",
+                   "test_paths": ["testing/ostest/example.c", "testing/ostest/Makefile"],
+                   "fix_paths": ["sched/example.c"]}
+        issue = next(i for i in triage.check_verdict(verdict, "apps-7", record)
+                     if i.startswith("test_paths"))
+        self.assertIn("remove ['testing/ostest/Makefile']", issue)
+        self.assertIn("Choose only from the files the apps PR changed: "
+                      "['testing/ostest/example.c']", issue)
+
     def test_leads_collect_the_latest_run_per_case(self):
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

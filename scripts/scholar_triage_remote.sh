@@ -16,8 +16,8 @@
 #     PATH can hold x86_64 tools (e.g. a `conda init` block from another
 #     course), which fail on the aarch64 Spark nodes with "Exec format error".
 #     Every remote command first drops /apps/cent7 entries from PATH.
-#   * `pgrep -f pattern` run through ssh also matches the ssh command line
-#     itself; the pattern is written "[t]riage..." so it cannot.
+#   * Scholar has several login nodes and each ssh may land on another, so
+#     "is a run active" is asked of Slurm (job steps), not pgrep.
 set -u
 
 HOST="${SCHOLAR_HOST:-scholar.rcac.purdue.edu}"
@@ -56,7 +56,9 @@ case "${1:-}" in
     # whole list in a subshell that keeps the ssh session open.
     remote "cd ~/$REMOTE_REPO || exit 1; nohup setsid bash -c 'srun --jobid=$job --overlap -n1 -c 4 .venv/bin/python scripts/triage_nuttx_prs.py run --profile $PROFILE $args' > triage_run_$job.log 2>&1 < /dev/null & disown; echo 'started; log: ~/$REMOTE_REPO/triage_run_$job.log'" ;;
   wait)
-    while "${SSH[@]}" 'pgrep -u $USER -f "[t]riage_nuttx_prs.py run" >/dev/null' 2>/dev/null; do
+    # Ask Slurm, not pgrep: each ssh may land on a different login node.
+    # Triage runs are srun steps named after their executable, python.
+    while "${SSH[@]}" 'squeue -s -h -u $USER -o %j | grep -qx python' 2>/dev/null; do
       sleep 60
     done
     remote "for f in ~/$REMOTE_REPO/triage_run_*.log; do echo \"== \$f\"; tail -22 \"\$f\"; done" ;;

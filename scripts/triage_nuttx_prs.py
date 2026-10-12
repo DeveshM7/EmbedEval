@@ -212,7 +212,7 @@ def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
             issues.append(f"{name} PR must be merged")
         if pr and (not pr.get("base_commit") or not pr.get("head_commit")):
             issues.append(f"{name} PR requires base and head commits")
-    for field, pr in (("test_paths", apps), ("fix_paths", kernel)):
+    for field, pr, name in (("test_paths", apps, "apps"), ("fix_paths", kernel, "kernel")):
         paths = verdict.get(field)
         if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
             issues.append(f"{field} must be a non-empty list of paths")
@@ -220,7 +220,11 @@ def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
         changed = {f["filename"] for f in (pr or {}).get("files", [])}
         missing = [p for p in paths if p not in changed]
         if missing:
-            issues.append(f"{field} must name changed paths in the correct PR: {missing}")
+            # Say which paths are wrong and which are allowed: a bare list of the
+            # wrong paths was once read as the list to use.
+            issues.append(f"{field} lists paths the {name} PR did not change; remove "
+                          f"{missing}. Choose only from the files the {name} PR changed: "
+                          f"{sorted(changed)}")
     if verdict.get("platform") != "sim:nsh":
         issues.append("accept only pairs whose test runs on sim:nsh; if only a QEMU target "
                       "can run it, reject and describe that target in qemu_lead")
