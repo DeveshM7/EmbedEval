@@ -50,6 +50,25 @@ server job (474610). Job 474606 was already running and is not mine (likely the 
 | 1 | `triage/mynewt_runs/2026-10-12_121556_qwen38-nvfp4` | 7/7 | 0 | 0 |
 | 2 | `triage/mynewt_runs/2026-10-12_124856_qwen38-nvfp4` | 7/7 | 0 | 0 |
 | 3 | `triage/mynewt_runs/2026-10-12_130446_qwen38-nvfp4` | 7/7 | 1 (3381, parse) | 0 |
+| 4* | `triage/mynewt_runs/2026-10-12_132827_qwen38-nvfp4` | 7/7 | 2 (3680: bare names, then a case in both lists) | 0 |
+| 5* | `triage/mynewt_runs/2026-10-12_135820_qwen38-nvfp4` | 7/7 | 1+1 (3299, 3680: invented suite names) | 0 |
+
+\* runs 4-5: same prompt, verdict parser fixed (commit after b6937e3) so
+prose with braces before the JSON no longer costs a repair.
+
+### Round 1 (prompt a4517d3, sha256 prefix `4b02baac16f2046f`)
+
+The previous prompt is 5/5 runs at 7/7, but run 4's #3680 used both repairs
+(one more and it would have been an `error`). Trace: after a repair for bare
+testcase names, the model added the detecting testcase to `pass_to_pass`,
+following the old rule "must include ... any newly added passing cases".
+Run 5 also spent repairs on made-up suite names. Change: `pass_to_pass` is
+defined as cases passing both without and with the fix, disjoint from
+`fail_to_pass`, and the `suite/testcase` form (TEST_SUITE name / TEST_CASE
+name, as printed by the runner) is stated once for all three lists.
+
+| Run | Folder | Score | Repairs | Errors |
+|---|---|---|---|---|
 
 Run 1 notes (not verdict misses, but they matter for Phase 2 generation):
 - 2809: the model's `compatibility_cflags` is `[]`; the instance needs
@@ -65,3 +84,10 @@ Run 1 notes (not verdict misses, but they matter for Phase 2 generation):
 - Run 3, 3381: the first reply had prose before the JSON, and the prose
   quoted `= {}`, so `parse_verdict` (first `{` to last `}`) failed; the repair
   turn fixed it. That is a checker weakness, not a prompt one (see below).
+
+Inventory judgment (not scored; validation would catch it): across runs
+1-5 the accepted cases' testcase lists matched the validated ones 11 of 15
+times. The misses were classification calls, e.g. 2809's modified
+`fcb_test_append_fill` put in `fail_to_pass`, and 3299's limit2/limit3 put in
+`pass_to_pass`. `baseline_tests` names are only format-checked (a testcase
+removed by a PR would not be in the head sources); no run got them wrong.
