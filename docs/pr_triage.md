@@ -155,7 +155,13 @@ Results are read **per test case** from twister, so the scenario must use the
    - the scenario has a Kconfig/devicetree `filter:` our board cannot meet
      (the dry run does not evaluate `filter:`);
    - the test needs real hardware, an external service, or a host tool;
-   - the test's timing assumes real hardware rather than emulation.
+   - the test's timing assumes real hardware rather than emulation;
+   - the test **skips itself** on our board -- `ztest_test_skip()`,
+     `Z_TEST_SKIP_IFDEF`/`Z_TEST_SKIP_IFNDEF`, or an early return under a
+     condition that depends on the board's configuration (a driver, backend or
+     option that is on by default on some boards). Upstream CI counts a skipped
+     test as passing; validation does not, so on such a board the instance is
+     lost. Choose a board where the condition does not hold.
 
    Anything the suite sets up itself -- its own `prj.conf`, overlays, emulated
    devices -- was built by upstream CI along with it, so do not go looking for
@@ -242,13 +248,18 @@ more than their prose.
   because the scenario does not build, every test in it fails; list the ones
   that exercise the change.
 - `pass_to_pass` — a few other tests of the same scenario that pass before and
-  must still pass after. These catch a fix that breaks something else. An
-  empty list is fine when there are none.
+  must still pass after. These catch a fix that breaks something else. Other
+  tests that exercise the changed code may fail before the change too; those
+  belong in `fail_to_pass`, so keep `pass_to_pass` to tests unrelated to the
+  change. An empty list is fine when there are none.
 - `problem_statement` — what the agent is shown, and the one field where
   wording matters. Describe the **symptom and the expected behaviour** for a
   fix, or the **capability required and how it should behave** for a feature.
-  Never name the implementation, the function to write or change, or the line
-  to edit -- finding those is the task.
+  Describe only behaviour that can be observed from outside the code -- what a
+  caller sees. Do not mention internal data structures, variables, or how the
+  bug comes about inside the code, and never name the implementation, the
+  function to write or change, or the line to edit -- finding those is the
+  task.
 - `detecting_test` — the test, how it fails without the change, and why it
   will pass after the change on the chosen board. This is your justification
   for `fail_to_pass`; it is read by humans, not parsed.
