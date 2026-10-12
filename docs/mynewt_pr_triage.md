@@ -206,12 +206,16 @@ Field rules:
 - `fail_to_pass`: full `suite/testcase` identifiers for changed tests that fail
   before the fix and pass after it in runtime mode. In compile mode, these are
   the changed tests expected to pass after the API is implemented.
-- `pass_to_pass`: every other testcase expected when the patched selftest
-  package runs. This must include unchanged passing cases and any newly added
-  passing cases.
+- `pass_to_pass`: every other testcase the patched selftest package runs,
+  each expected to pass both without and with the fix: unchanged cases, plus
+  added cases that do not detect the change. A testcase is in exactly one of
+  `fail_to_pass` and `pass_to_pass`; never repeat a `fail_to_pass` case here.
 - `baseline_tests`: testcase identifiers present and passing before the
   selftest patch is applied. This is usually `pass_to_pass` minus newly added
   cases. It may be empty for a new package.
+- All three lists use the runner's `suite/testcase` form: the `TEST_SUITE`
+  name, a slash, and the `TEST_CASE` name, as in a `[pass] suite/testcase`
+  line. A bare testcase name is invalid.
 - `test_commit`: optional SHA of the final test-only commit when tests and
   their support changes land before the production fix. Omit this when the PR
   does not need a commit boundary between test setup and production code. You
