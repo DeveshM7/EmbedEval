@@ -64,6 +64,8 @@ PROJECTS = {
     "mynewt": {
         "github_repo": "apache/mynewt-core",
         "known_good": [2809, 3299, 3680],
+        # triage/mynewt_gold.json's hard_filter_reject: never shown to the model.
+        "known_filtered": [3708, 3707, 2511, 821, 251],
     },
 }
 
@@ -561,7 +563,7 @@ def fetch_full(number: int, project: str = "zephyr") -> dict | None:
 
 
 def cmd_selftest(args) -> None:
-    """Every known-good PR must survive the filters."""
+    """Every known-good PR must survive the filters, and every known-filtered one not."""
     known_good = project_config(args.repo)["known_good"]
     print(f"Checking the {len(known_good)} hand-validated {args.repo} instances "
           f"against the hard filters.\n")
@@ -577,10 +579,16 @@ def cmd_selftest(args) -> None:
         if not kept:
             failures.append((n, reason))
 
+    for n in project_config(args.repo).get("known_filtered", []):
+        pr = fetch_pr(n, args.repo)
+        kept, reason = classify(pr, args.repo) if pr else (True, "could not fetch")
+        print(f"  [{'KEEP  ' if kept else 'REJECT'}] {n}  {reason} (expected REJECT)")
+        if kept:
+            failures.append((n, "expected the hard filters to reject it"))
+
     print()
     if failures:
-        print(f"  {len(failures)}/{len(known_good)} known-good PRs were "
-              f"rejected. The filter is too strict:")
+        print(f"  {len(failures)} PRs were classified wrongly:")
         for n, r in failures:
             print(f"    {n}: {r}")
         sys.exit(1)
