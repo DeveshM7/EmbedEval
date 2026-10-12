@@ -52,7 +52,9 @@ case "${1:-}" in
     args="${*:---gold}"
     # bash -c plus disown detaches the srun step, so ssh returns at once and
     # the run survives the connection closing.
-    remote "cd ~/$REMOTE_REPO && nohup setsid bash -c 'srun --jobid=$job --overlap -n1 -c 4 .venv/bin/python scripts/triage_nuttx_prs.py run --profile $PROFILE $args' > triage_run_$job.log 2>&1 < /dev/null & disown; echo 'started; log: ~/$REMOTE_REPO/triage_run_$job.log'" ;;
+    # `cd || exit;` not `cd &&`: with &&, the trailing & would background the
+    # whole list in a subshell that keeps the ssh session open.
+    remote "cd ~/$REMOTE_REPO || exit 1; nohup setsid bash -c 'srun --jobid=$job --overlap -n1 -c 4 .venv/bin/python scripts/triage_nuttx_prs.py run --profile $PROFILE $args' > triage_run_$job.log 2>&1 < /dev/null & disown; echo 'started; log: ~/$REMOTE_REPO/triage_run_$job.log'" ;;
   wait)
     while "${SSH[@]}" 'pgrep -u $USER -f "[t]riage_nuttx_prs.py run" >/dev/null' 2>/dev/null; do
       sleep 60
