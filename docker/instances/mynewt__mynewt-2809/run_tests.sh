@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build and execute this instance's native Mynewt selftests. The embedded
-# result parser rejects missing tests, unexpected tests, and crashed binaries.
+# Build and execute one native Mynewt selftest package. The result parser
+# rejects missing tests, unexpected tests, and crashed binaries.
 set -euo pipefail
 
 exec python3 - "$@" <<'PY'
@@ -28,16 +28,74 @@ def classify(output, returncode, expected):
     return (0 if returncode == 0 else 3), result
 
 
+def compile_diagnostic(output, source, api):
+    if not source or not api:
+        return None
+    if re.search(r"internal compiler error", output, re.IGNORECASE):
+        return None
+    diagnostic = None
+    missing_function = False
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        if not re.search(r"(?:fatal )?error:", line):
+            continue
+        match = re.match(r"(.+?):(\d+)(?::(\d+))?:\s*(?:fatal )?error:\s*(.*)", line)
+        if not match:
+            return None
+        path, row, column, message = match.groups()
+        if not (path == source or path.endswith("/" + source)):
+            return None
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", message):
+            if diagnostic is None:
+                diagnostic = line
+            if re.search(rf"implicit declaration of function ['‘]{re.escape(api)}['’]", message):
+                missing_function = True
+            continue
+        # GCC reports later assignments from an undeclared function as int-to-
+        # pointer conversions. Attribute only direct calls at this error's location.
+        excerpt = re.match(rf"\s*{row}\s*\| (.*)$", lines[index + 1]) if index + 1 < len(lines) else None
+        assignment = re.fullmatch(
+            rf"\s*[A-Za-z_]\w*\s*(?P<operator>=)\s*{re.escape(api)}\s*\([^();]*\);\s*",
+            excerpt[1],
+        ) if excerpt else None
+        if not (
+            missing_function
+            and re.fullmatch(
+                r"assignment to ['‘][^'’]+\*['’] from ['‘]int['’] "
+                r"makes pointer from integer without a cast \[-Werror=int-conversion\]",
+                message,
+            )
+            and assignment
+            and column
+            and int(column) == assignment.start("operator") + 1
+        ):
+            return None
+    return diagnostic
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--baseline", action="store_true")
 args = parser.parse_args()
 meta = json.loads(Path("/opt/benchmark/metadata.json").read_text())
+mode = "runtime" if args.baseline else meta.get("failure_mode", "runtime")
 expected = (
     meta["baseline_tests"]
     if args.baseline
     else meta["fail_to_pass"] + meta["pass_to_pass"]
 )
-result = {"build_ok": False, "passed": [], "failed": [], "error": None}
+result = {
+    "failure_mode": mode,
+    "build_ok": False,
+    "compile_failure": False,
+    "compile_test_source": meta.get("compile_test_source"),
+    "missing_api": meta.get("missing_api"),
+    "diagnostic": None,
+    "passed": [],
+    "failed": [],
+    "missing": [],
+    "unexpected": [],
+    "error": None,
+}
 code = 3
 try:
     # Fresh build and runtime directories prevent stale binaries or simulated flash.
@@ -52,7 +110,17 @@ try:
     output = build.stdout + build.stderr
     print(output, flush=True)
     binaries = list(Path("/project/bin").rglob("*.elf"))
-    if (
+    if mode == "compile" and build.returncode > 0 and "Executing test: " not in output:
+        diagnostic = compile_diagnostic(
+            output, meta.get("compile_test_source"), meta.get("missing_api")
+        )
+        if diagnostic is not None:
+            result["compile_failure"] = True
+            result["diagnostic"] = diagnostic
+            code = 1
+        else:
+            result["error"] = "build failed without expected compile diagnostic"
+    elif (
         "Executing test: " not in output
         or len(binaries) != 1
         or build.returncode not in (0, 1)

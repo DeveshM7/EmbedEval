@@ -1,15 +1,23 @@
 FROM embedeval-mynewt-base:latest
-ARG BASE_COMMIT
+
+ARG BASE_COMMIT=53ed93aa4f874675e2df546ef5e6118109f3db09
 RUN git init /testbed \
     && cd /testbed \
     && git remote add origin https://github.com/apache/mynewt-core.git \
     && git fetch --depth 1 origin ${BASE_COMMIT} \
     && git checkout --detach FETCH_HEAD
+
+# Apply only the PR's native selftest changes, leaving production code at the
+# pre-PR commit that the coding agent must repair.
 COPY metadata.json test_patch.diff /opt/benchmark/
 RUN cd /testbed \
     && git apply /opt/benchmark/test_patch.diff \
     && git add -A \
-    && git -c user.name=EmbedEval -c user.email=benchmark@localhost commit -m "Benchmark starting snapshot with regression tests"
+    && git -c user.name=EmbedEval -c user.email=benchmark@localhost \
+        commit -m "Benchmark starting snapshot with regression tests"
+
+# Mynewt's supported simulator is a host-native BSP/compiler pair. It builds
+# and executes an amd64 Linux ELF directly; QEMU is intentionally not used.
 RUN mkdir -p /project/repos /project/targets/unittest \
     && ln -s /testbed /project/repos/apache-mynewt-core \
     && printf '%s\n' \
@@ -27,11 +35,9 @@ RUN mkdir -p /project/repos /project/targets/unittest \
         'target.build_profile: "debug"' \
         'target.compiler: "@apache-mynewt-core/compiler/sim"' \
         > /project/targets/unittest/target.yml \
-    && printf '%s\n' \
-        'pkg.name: targets/unittest' \
-        'pkg.type: target' \
-        > /project/targets/unittest/pkg.yml \
-    && python3 -c 'import json; from pathlib import Path; p = Path("/opt/benchmark/metadata.json"); m = json.loads(p.read_text()); p.write_text(json.dumps({k: m[k] for k in ("test_path", "baseline_tests", "fail_to_pass", "pass_to_pass")}))'
+    && python3 -c 'import json; from pathlib import Path; p = Path("/opt/benchmark/metadata.json"); m = json.loads(p.read_text()); flags = m.get("compatibility_cflags", []); lines = ["pkg.name: targets/unittest", "pkg.type: target"]; lines += (["pkg.cflags:"] + ["    - " + flag for flag in flags]) if flags else []; Path("/project/targets/unittest/pkg.yml").write_text("\n".join(lines) + "\n"); p.write_text(json.dumps({k: m[k] for k in ("test_path", "baseline_tests", "fail_to_pass", "pass_to_pass", "failure_mode", "compile_test_source", "missing_api")}))'
+
 COPY run_tests.sh /usr/local/bin/run_tests
 RUN chmod +x /usr/local/bin/run_tests
+
 WORKDIR /testbed
