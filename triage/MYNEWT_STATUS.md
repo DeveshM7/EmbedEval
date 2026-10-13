@@ -61,10 +61,10 @@ set, nothing pushed). Scholar copy: `~/EmbedEval-mynewt` (venv is a symlink to
 
 ## C/D. Scholar runs and the improvement loop
 
-**Target met with the unchanged prompt: 7/7 on 3 runs of the same prompt, no
-errors.** No prompt round was needed; the only prompt edits were removing the
-gold answers from its examples and describing the tools, both before run 1.
-Run folders are local (gitignored) under `triage/mynewt_runs/`.
+Runs 1-5 used the starting prompt (gold answers removed from its examples,
+tools described, both before run 1): 7/7 every time, but with repairs. Round 1
+removed the cause of those repairs; runs 6-8 are 7/7 with none. Run folders
+are local (gitignored) under `triage/mynewt_runs/`.
 
 Prompt under test: `docs/mynewt_pr_triage.md` at commit 702255f
 (prompt sha256 prefix `29fd484fe820d485`), model `qwen38-nvfp4` on my own
@@ -94,6 +94,14 @@ name, as printed by the runner) is stated once for all three lists.
 
 | Run | Folder | Score | Repairs | Errors |
 |---|---|---|---|---|
+| 6 | `triage/mynewt_runs/2026-10-12_142312_qwen38-nvfp4` | 7/7 | 0 | 0 |
+| 7 | `triage/mynewt_runs/2026-10-12_143948_qwen38-nvfp4` | 7/7 | 0 | 0 |
+| 8 | `triage/mynewt_runs/2026-10-12_145831_qwen38-nvfp4` | 7/7 | 0 | 0 |
+
+Round 1 accepts against the reviewed inputs: runs 7 and 8 match on 3299 and
+3680 exactly and on 2809's `fail_to_pass`. Run 6 put 2809's modified
+`fcb_test_append_fill` in `fail_to_pass` and gave 3299 only `alloc1` with no
+`test_commit`. No run proposed 2809's compiler flag.
 
 Run 1 notes (not verdict misses, but they matter for Phase 2 generation):
 - 2809: the model's `compatibility_cflags` is `[]`; the instance needs
