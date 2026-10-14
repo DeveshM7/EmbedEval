@@ -367,7 +367,7 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
     print(f"  instance : {instance_id}")
     print(f"  model    : {full_model}")
     print(f"  image    : {meta.get('docker_image') or meta.get('apptainer_image')}")
-    print(f"  output   : {out_dir.relative_to(paths.REPO_ROOT)}")
+    print(f"  output   : {paths.show(out_dir)}")
 
     result = {
         "instance_id": instance_id,
@@ -504,7 +504,7 @@ def main() -> None:
     if args.dry_run:
         for m in models:
             for i in instances:
-                print(f"  {m:46s} {i:24s} -> {paths.run_dir(i, m).relative_to(paths.REPO_ROOT)}")
+                print(f"  {m:46s} {i:24s} -> {paths.show(paths.run_dir(i, m))}")
         return
 
     for m in models:

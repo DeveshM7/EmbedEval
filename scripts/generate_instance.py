@@ -40,14 +40,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENRICHED = REPO_ROOT / "candidates" / "enriched"
-DRYRUN = REPO_ROOT / "candidates" / "dryrun"
+ENRICHED = layout.enriched()
+DRYRUN = layout.dryrun()
 TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
-DEFAULT_OUT = REPO_ROOT / "generated"
+DEFAULT_OUT = layout.generated()
 
 REPO_URL = "https://github.com/zephyrproject-rtos/zephyr"
-CLONE_CACHE = REPO_ROOT / "candidates" / "zephyr.git"
+CLONE_CACHE = layout.zephyr_clone()
 
 
 def run(cmd: list[str], timeout: int = 300, check: bool = True):
@@ -256,7 +259,7 @@ def main() -> None:
         sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
 
     inst = generate(args.pr, triage, Path(args.out), args.force)
-    print(f"  wrote {inst.relative_to(REPO_ROOT) if REPO_ROOT in inst.parents else inst}")
+    print(f"  wrote {layout.show(inst)}")
     for f in sorted(inst.iterdir()):
         print(f"    {f.name:<20} {f.stat().st_size:>7} B")
 

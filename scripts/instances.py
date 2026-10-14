@@ -13,7 +13,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASES_DIR = REPO_ROOT / "docker" / "bases"
@@ -23,11 +27,13 @@ BASES_DIR = REPO_ROOT / "docker" / "bases"
 # scripts/promote_instance.py), then the Docker instances in docker/instances/.
 # EMBEDEVAL_INSTANCES_DIR replaces both -- e.g. generated/, so a freshly
 # generated instance can be built and validated before it is promoted, and
-# without any chance of overwriting a committed one.
+# without any chance of overwriting a committed one. With --run-dir the run's
+# own instances/ is the default.
 APPTAINER_INSTANCES = REPO_ROOT / "apptainer" / "instances"
 _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
-                  if _override else [APPTAINER_INSTANCES, REPO_ROOT / "docker" / "instances"])
+                  if _override else [layout.generated()] if layout.run_dir()
+                  else [APPTAINER_INSTANCES, REPO_ROOT / "docker" / "instances"])
 
 PROJECTS = ("zephyr", "nuttx", "riot")
 

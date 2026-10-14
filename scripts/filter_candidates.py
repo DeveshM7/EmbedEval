@@ -63,13 +63,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
 import zephyr_env  # noqa: E402
 
 REPO = "zephyrproject-rtos/zephyr"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CACHE = REPO_ROOT / "candidates" / "cache"
-OUT = REPO_ROOT / "candidates" / "candidates.jsonl"
-ENRICHED = REPO_ROOT / "candidates" / "enriched"
+CACHE = layout.candidates() / "cache"
+OUT = layout.candidates() / "candidates.jsonl"
+ENRICHED = layout.enriched()
 
 # Paths that are never the fix itself. A PR touching only these has nothing
 # for an agent to repair.
@@ -572,7 +573,7 @@ def cmd_fetch(args) -> None:
         got = fetch_pr(n)
         mark = "ok" if got else "FAIL"
         print(f"  [{i}/{len(numbers)}] {n} {mark}")
-    print(f"\ncached under {CACHE.relative_to(REPO_ROOT)}")
+    print(f"\ncached under {layout.show(CACHE)}")
 
 
 def cmd_filter(_args) -> None:
@@ -600,7 +601,7 @@ def cmd_filter(_args) -> None:
         print("  rejected:")
         for r, c in sorted(reasons.items(), key=lambda kv: -kv[1]):
             print(f"    {c:>5}  {r}")
-    print(f"\n  written to {OUT.relative_to(REPO_ROOT)}")
+    print(f"\n  written to {layout.show(OUT)}")
 
 
 
@@ -638,7 +639,7 @@ def cmd_enrich(args) -> None:
             ok += report_enriched(i, len(numbers), n, rec, error)
 
     print(f"\n  {ok}/{len(numbers)} enriched  ->  "
-          f"{ENRICHED.relative_to(REPO_ROOT)}")
+          f"{layout.show(ENRICHED)}")
 
 
 def report_enriched(i: int, total: int, n: int, rec: dict | None, error: str | None) -> int:

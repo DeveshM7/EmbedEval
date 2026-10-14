@@ -42,6 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au
 import build_config
 import instances
@@ -84,7 +85,7 @@ def local_fix_patch(meta: dict) -> str:
     """The upstream fix from the local Zephyr clone: every change of the PR
     outside tests/. The same range the test patch comes from, so the two
     never overlap."""
-    clone = Path(__file__).resolve().parent.parent / "candidates" / "zephyr.git"
+    clone = layout.zephyr_clone()
     base, fix = meta["base_commit"], meta["fix_commit"]
     for sha in (base, fix):
         if sh(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:

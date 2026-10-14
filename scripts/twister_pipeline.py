@@ -36,9 +36,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
-OUT = REPO_ROOT / "generated"
+OUT = layout.generated()
 
 
 def step(pr: int, name: str, cmd: list[str], logdir: Path, env: dict | None = None) -> int:
@@ -65,7 +68,7 @@ def run_pr(pr: int, verdicts: Path, keep: bool, logdir: Path) -> dict:
         return done("enrich", "error")
     if step(pr, "dryrun", [PY, s + "dry_run.py", str(pr)], logdir):
         return done("dry run", "error")
-    dr = json.loads((REPO_ROOT / "candidates" / "dryrun" / f"{pr}.json").read_text())
+    dr = json.loads((layout.dryrun() / f"{pr}.json").read_text())
     if dr["auto_reject"]:
         return done("dry run", "rejected: no board/scenario pair can run")
     vpath = verdicts / f"{pr}.json"

@@ -47,6 +47,7 @@ import argparse
 import concurrent.futures as cf
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -56,17 +57,18 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
 from generate_instance import ensure_clone  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENRICHED = REPO_ROOT / "candidates" / "enriched"
+ENRICHED = layout.enriched()
 INSTRUCTIONS = REPO_ROOT / "docs" / "pr_triage.md"
 TRIAGE = REPO_ROOT / "triage"
-RUNS = TRIAGE / "runs"
+RUNS = layout.triage_runs()
 
 # Board names pr_triage.md allows. native_sim_64 is the pre-2024 spelling of
 # native_sim/native/64; the hand-built instances use both.
-DRYRUN = REPO_ROOT / "candidates" / "dryrun"
+DRYRUN = layout.dryrun()
 # Spellings of one board across Zephyr's history, for comparing with gold.
 SAME_BOARD = {"native_sim_64": "native_sim/native/64", "native_posix_64": "native_sim/native/64"}
 
@@ -598,7 +600,8 @@ def previous_verdicts(run_dir: Path) -> dict[int, str]:
 
 
 def cmd_eval(args) -> None:
-    run_dir = Path(args.run_dir) if args.run_dir else max(RUNS.iterdir(), key=lambda p: p.name)
+    run_dir = (Path(args.run_dir) if args.run_dir
+               else RUNS if layout.run_dir() else max(RUNS.iterdir(), key=lambda p: p.name))
     gold, prev = load_gold(), previous_verdicts(run_dir)
     rows, scored, correct, changed = [], 0, 0, []
     verdicts = [f for f in run_dir.glob("[0-9]*.json") if not f.name.endswith(".trace.json")]
@@ -685,18 +688,28 @@ def cmd_run(args) -> None:
     if r.returncode:
         print(f"  warning: fetch failed; tools may not see every commit:\n  {r.stderr.strip()[:300]}")
 
-    run_dir = RUNS / f"{datetime.now():%Y-%m-%d_%H%M}_{args.profile}"
-    run_dir.mkdir(parents=True, exist_ok=False)
+    stamp = f"{datetime.now():%Y-%m-%d_%H%M%S}"
+    if layout.run_dir():
+        # A run folder: verdicts go straight into <run>/triage/, one file per
+        # PR, so any number of triage calls (nodes, slots) can share it. Each
+        # call keeps its own manifest and copy of the instructions.
+        run_dir = RUNS
+        run_dir.mkdir(parents=True, exist_ok=True)
+        tag = f"-{stamp}-{os.getpid()}"
+    else:
+        run_dir = RUNS / f"{datetime.now():%Y-%m-%d_%H%M}_{args.profile}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+        tag = ""
     prompt = INSTRUCTIONS.read_text()
-    (run_dir / "pr_triage.md").write_text(prompt)
+    (run_dir / f"pr_triage{tag}.md").write_text(prompt)
     manifest = {"profile": args.profile, "api_base": args.api_base,
                 "sampling": prof.get("sampling"), "max_tokens": prof.get("max_tokens"),
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()[:16],
                 "git": git_state(), "prs": prs, "parallel": args.parallel,
                 "started": datetime.now().isoformat(timespec="seconds")}
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (run_dir / f"manifest{tag}.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Triage of {len(prs)} PRs with {args.profile}, {args.parallel} at a time "
-          f"-> {run_dir.relative_to(REPO_ROOT)}\n")
+          f"-> {layout.show(run_dir)}\n")
 
     with cf.ThreadPoolExecutor(max_workers=args.parallel) as pool:
         futures = {pool.submit(triage_one, p, args.profile, prof, args.api_base, run_dir): p
@@ -709,8 +722,14 @@ def cmd_run(args) -> None:
                   f"{' (budget hit)' if s['budget_hit'] else ''}  {note[:120]}", flush=True)
 
     manifest["finished"] = datetime.now().isoformat(timespec="seconds")
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (run_dir / f"manifest{tag}.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print()
+    if layout.run_dir():
+        # Other triage calls may be writing to the same folder: the scorecard
+        # is made once all are done, with `triage_prs.py --run-dir R eval`.
+        print(f"  verdicts in {layout.show(run_dir)}; scorecard: triage_prs.py --run-dir "
+              f"{layout.run_dir()} eval")
+        return
     args.run_dir = str(run_dir)
     cmd_eval(args)
 

@@ -36,7 +36,7 @@ Not covered: the Kconfig/devicetree `filter:` expressions, which need CMake
 and an SDK. A selected pair can still be filtered at build time; validation
 finds out.
 
-Writes candidates/dryrun/<pr>.json:
+Writes candidates/dryrun/<pr>.json (with --run-dir: <run>/dryrun/<pr>.json):
 
     pairs        [{suite, scenario, board, status: selected|filtered, reason}]
     tests        {suite/scenario: [test identifiers]}
@@ -57,12 +57,13 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au  # noqa: E402
 import zephyr_env  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENRICHED = REPO_ROOT / "candidates" / "enriched"
-OUT_DIR = REPO_ROOT / "candidates" / "dryrun"
+ENRICHED = layout.enriched()
+OUT_DIR = layout.dryrun()
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -120,7 +121,7 @@ def make_venv(py: str, tree: Path, log: Path, binds: dict) -> Path:
     h = hashlib.sha256()
     for r in reqs:
         h.update((tree / "scripts" / r).read_bytes())
-    venv = au.path("venvs", f"py{py}-{h.hexdigest()[:12]}")
+    venv = au.shared_path("venvs", f"py{py}-{h.hexdigest()[:12]}")
     if (venv / ".embedeval-ready").exists():
         return venv
     image = au.python_image(py)
@@ -130,7 +131,7 @@ def make_venv(py: str, tree: Path, log: Path, binds: dict) -> Path:
                         au.path("logs", "bases", f"build-{image.stem}.log")):
             raise RuntimeError(f"could not build {image.name}")
     base = au.exec_args(image, binds=binds,
-                        env={"UV_CACHE_DIR": str(au.path("cache", "uv", "x").parent)})
+                        env={"UV_CACHE_DIR": str(au.shared_path("cache", "uv", "x").parent)})
     if run(base + ["uv", "venv", "-q", "--seed", "--python", py, str(venv)], log):
         raise RuntimeError("uv venv failed")
     install = ["uv", "pip", "install", "-q", "--python", str(venv / "bin" / "python"),
@@ -234,7 +235,7 @@ def dry_run(pr: int, keep_tree: bool = False) -> dict:
     if log.exists():
         log.unlink()
     zephyr_env.ensure_commits(base, head)
-    root = au.work_root()
+    root, shared = au.work_root(), au.shared_root()
     if keep_tree:
         # For inspection: on the work root, kept after the run.
         local = work / "local"
@@ -251,7 +252,7 @@ def dry_run(pr: int, keep_tree: bool = False) -> dict:
         local = Path(scratch.name)
     try:
         return _dry_run(pr, facts, suites, boards, py, base, head, local, work, log,
-                        {root: str(root), local: str(local)})
+                        {root: str(root), shared: str(shared), local: str(local)})
     finally:
         if scratch:
             scratch.cleanup()

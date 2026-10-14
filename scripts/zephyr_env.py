@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -45,10 +46,13 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CLONE = REPO_ROOT / "candidates" / "zephyr.git"
+CLONE = layout.zephyr_clone()
 LOOKUP = REPO_ROOT / "templates" / "zephyr" / "lookup"
-ENRICHED = REPO_ROOT / "candidates" / "enriched"
+ENRICHED = layout.enriched()
 
 # Ubuntu release -> its default python3. The CI images use the distribution's
 # Python, so this is what upstream CI ran.
@@ -289,13 +293,23 @@ def changed_suites(base: str, head: str) -> dict:
 
 
 def _load(name: str) -> dict:
-    p = LOOKUP / name
-    return json.loads(p.read_text()) if p.exists() else {}
+    """The repository's table, plus what this run has learned (--run-dir)."""
+    table = {}
+    for d in (LOOKUP, layout.lookup_overlay()):
+        if d is not None and (d / name).exists():
+            table.update(json.loads((d / name).read_text()))
+    return table
 
 
 def _save(name: str, data: dict) -> None:
-    LOOKUP.mkdir(parents=True, exist_ok=True)
-    (LOOKUP / name).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    # In a run, new entries go to the run folder, never into the repository
+    # (and never by many nodes into one file). Fold them into the repository's
+    # table deliberately, like any other change.
+    d = layout.lookup_overlay() or LOOKUP
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f".{name}.{os.getpid()}"
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    tmp.replace(d / name)
 
 
 def _http(url: str) -> str | None:

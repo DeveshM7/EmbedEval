@@ -13,21 +13,27 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import layout  # noqa: E402  (first: reads --run-dir; see scripts/layout.py)
+from layout import show  # noqa: E402,F401
+
 # Where instance directories are read from: the validated twister-pipeline
 # Zephyr instances in apptainer/instances/ (written there only by
 # scripts/promote_instance.py), then the Docker instances in docker/instances/.
 # EMBEDEVAL_INSTANCES_DIR replaces both -- e.g. generated/, so a freshly
 # generated instance can be built and validated before it is promoted, and
 # without any chance of overwriting a committed one.
-# The same rule as scripts/instances.py on the build side.
+# With --run-dir the run's own instances/ is the default, and outputs go to
+# the run's outputs/. The same rule as scripts/instances.py on the build side.
 _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
-                  if _override else [REPO_ROOT / "apptainer" / "instances",
-                                     REPO_ROOT / "docker" / "instances"])
-OUTPUTS_DIR = REPO_ROOT / "outputs"
+                  if _override else [layout.generated()] if layout.run_dir()
+                  else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "docker" / "instances"])
+OUTPUTS_DIR = layout.outputs()
 
 PATCH_NAME = "patch.diff"
 TRAJECTORY_NAME = "trajectory.json"

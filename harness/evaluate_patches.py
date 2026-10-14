@@ -55,7 +55,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
 
     patch_path = paths.patch_path(instance_id, model_name)
     result = {"instance_id": instance_id, "model": paths.resolve_model(model_name),
-              "patch_file": str(patch_path.relative_to(paths.REPO_ROOT)),
+              "patch_file": str(paths.show(patch_path)),
               "patch_empty": False, "patch_applied": False, "build_ok": False,
               "tests_passed": False, "grade": "fail", "error": None, "elapsed_seconds": 0}
     if not patch_path.exists():
@@ -122,7 +122,7 @@ def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dic
     result = {
         "instance_id": instance_id,
         "model": paths.resolve_model(model_name),
-        "patch_file": str(patch_path.relative_to(paths.REPO_ROOT)),
+        "patch_file": str(paths.show(patch_path)),
         "patch_empty": False,
         "patch_applied": False,
         "build_ok": False,
@@ -279,7 +279,7 @@ def main() -> None:
         for i, m in pairs:
             pp = paths.patch_path(i, m)
             mark = "ok     " if pp.exists() else "MISSING"
-            print(f"  [{mark}] {pp.relative_to(paths.REPO_ROOT)}")
+            print(f"  [{mark}] {paths.show(pp)}")
         return
 
     results = []
@@ -303,7 +303,7 @@ def main() -> None:
     print(f"\n  {passed}/{len(graded)} graded patches pass"
           + (f"   ({missing} not run)" if missing else ""))
 
-    out = paths.REPO_ROOT / args.output
+    out = paths.layout.base() / args.output
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -313,7 +313,7 @@ def main() -> None:
         "passed": passed,
         "results": results,
     }, indent=2))
-    print(f"  written to {out.relative_to(paths.REPO_ROOT)}")
+    print(f"  written to {paths.show(out)}")
 
 
 if __name__ == "__main__":

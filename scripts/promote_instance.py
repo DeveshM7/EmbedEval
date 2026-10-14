@@ -25,10 +25,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GENERATED = REPO_ROOT / "generated"
+GENERATED = layout.generated()
 DEST = REPO_ROOT / "apptainer" / "instances"
 FILES = (*au.RECIPE_FILES, "metadata.json", "validation.json")
 
@@ -53,7 +54,7 @@ def promote(instance_id: str, source: Path = GENERATED) -> tuple[bool, str]:
     dst.mkdir(parents=True, exist_ok=True)
     for f in FILES:
         shutil.copy2(src / f, dst / f)
-    return True, f"promoted to {dst.relative_to(REPO_ROOT)}"
+    return True, f"promoted to {layout.show(dst)}"
 
 
 def main() -> None:

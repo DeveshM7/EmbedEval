@@ -14,8 +14,12 @@ Images are layered, each built FROM the previous one (Bootstrap: localimage):
                                  pre-build. One per instance; deleted once the
                                  instance has been validated.
 
-All of it lives under the work root -- $EMBEDEVAL_WORK, else
-$SCRATCH/embedeval-twister, else work/ in the repo -- never in the repo itself.
+All of it lives under the work root -- $EMBEDEVAL_WORK, else <run dir>/work
+with --run-dir (scripts/layout.py), else $SCRATCH/embedeval-twister, else
+work/ in the repo -- never in the repo itself. What every run reuses (the
+Python and SDK images, dry-run venvs, the uv cache) lives under the shared
+root, $EMBEDEVAL_SHARED; without it that is the work root, or, in a run, the
+default work root, where the shared images have always been.
 """
 
 from __future__ import annotations
@@ -26,23 +30,50 @@ import subprocess
 import time
 from pathlib import Path
 
+import layout
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
 
 
+def _default_root() -> Path:
+    if os.environ.get("SCRATCH"):
+        return Path(os.environ["SCRATCH"]) / "embedeval-twister"
+    return REPO_ROOT / "work"
+
+
 def work_root() -> Path:
+    """This run's images, logs, overlays and temp files."""
     if os.environ.get("EMBEDEVAL_WORK"):
         root = Path(os.environ["EMBEDEVAL_WORK"])
-    elif os.environ.get("SCRATCH"):
-        root = Path(os.environ["SCRATCH"]) / "embedeval-twister"
+    elif layout.run_dir():
+        root = layout.run_dir() / "work"
     else:
-        root = REPO_ROOT / "work"
+        root = _default_root()
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def shared_root() -> Path:
+    """What every run reuses: Python and SDK images, dry-run venvs, uv cache."""
+    if os.environ.get("EMBEDEVAL_SHARED"):
+        root = Path(os.environ["EMBEDEVAL_SHARED"])
+    elif layout.run_dir() and not os.environ.get("EMBEDEVAL_WORK"):
+        root = _default_root()
+    else:
+        return work_root()
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
 
 def path(*parts: str) -> Path:
     p = work_root().joinpath(*parts)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def shared_path(*parts: str) -> Path:
+    p = shared_root().joinpath(*parts)
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -67,12 +98,12 @@ def recipe_tag(definition: str) -> str:
 
 
 def python_image(py: str) -> Path:
-    return path("images", f"python-{py}-{recipe_tag('python.def')}.sif")
+    return shared_path("images", f"python-{py}-{recipe_tag('python.def')}.sif")
 
 
 def sdk_image(sdk: str, py: str) -> Path:
-    return path("images", f"zephyr-sdk-{sdk}-py{py}-{recipe_tag('python.def')}"
-                          f"{recipe_tag('sdk.def')}.sif")
+    return shared_path("images", f"zephyr-sdk-{sdk}-py{py}-{recipe_tag('python.def')}"
+                                 f"{recipe_tag('sdk.def')}.sif")
 
 
 def instance_image(instance_id: str) -> Path:
