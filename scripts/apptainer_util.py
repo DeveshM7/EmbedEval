@@ -78,15 +78,95 @@ def shared_path(*parts: str) -> Path:
     return p
 
 
-def build_env() -> dict:
-    """Keep Apptainer's cache and temporary build trees on the work root: home
-    has a small quota and /tmp is node-local and small."""
+def build_env(tmp: Path | None = None) -> dict:
+    """Keep Apptainer's download cache on the shared root and its temporary
+    build trees on the work root: home has a small quota and /tmp is
+    node-local and small."""
     env = dict(os.environ)
-    env["APPTAINER_CACHEDIR"] = str(path("cache", "apptainer", "x").parent)
-    tmp = path("tmp", "x").parent
+    env["APPTAINER_CACHEDIR"] = str(shared_path("cache", "apptainer", "x").parent)
+    tmp = tmp or path("tmp", "x").parent
     tmp.mkdir(parents=True, exist_ok=True)
     env["APPTAINER_TMPDIR"] = str(tmp)
     return env
+
+
+def _descendants(pid: int) -> list[int]:
+    """Every process below `pid`, from /proc."""
+    children: dict[int, list[int]] = {}
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                ppid = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            children.setdefault(ppid, []).append(int(d.name))
+    out, todo = [], [pid]
+    while todo:
+        for c in children.get(todo.pop(), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def _holders(folder: Path) -> list[int]:
+    """This user's processes whose working directory, root or an open file is
+    inside `folder` -- such as the fakeroot daemon of a build, which detaches
+    itself and so is no descendant of the build."""
+    root = Path(folder).resolve()
+    folder = str(root)
+    # A process in its own mount namespace (the container's) shows its root as
+    # "/", so match it by inode: its root is a directory near the top of the
+    # build's temporary folder (<tmp>/build-temp-*/rootfs).
+    inodes = set()
+    for d, dirs, _ in os.walk(root):
+        depth = len(Path(d).relative_to(root).parts)
+        if depth >= 3:
+            dirs.clear()
+        try:
+            st = os.stat(d)
+            inodes.add((st.st_dev, st.st_ino))
+        except OSError:
+            pass
+    me, out = os.getuid(), []
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit() or int(d.name) == os.getpid():
+            continue
+        try:
+            if d.stat().st_uid != me:
+                continue
+            st = os.stat(d / "root")
+            links = [os.readlink(d / "cwd"), os.readlink(d / "root")]
+            links += [os.readlink(f) for f in (d / "fd").iterdir()]
+        except OSError:
+            continue
+        if (st.st_dev, st.st_ino) in inodes or any(
+                l == folder or l.startswith(folder + "/") for l in links):
+            out.append(int(d.name))
+    return out
+
+
+def _stop(pids: list[int]) -> None:
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        time.sleep(3)
+
+
+def _run_build(cmd: list[str], fh, env: dict, cwd: Path, timeout: int) -> int | str:
+    """Run one build; on a timeout stop it with everything it started.
+    Killing `apptainer build` alone leaves the container's processes (apt-get,
+    the fakeroot daemon) running, holding its temporary files open."""
+    proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env, cwd=cwd)
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _stop([proc.pid] + _descendants(proc.pid))
+        proc.wait()
+        return "timeout"
 
 
 def recipe_tag(definition: str) -> str:
@@ -122,23 +202,36 @@ def build(image: Path, definition: Path, build_args: dict, log: Path,
     # Absolute paths: the build runs from the recipe's directory, so that the
     # recipe's %files entries resolve next to it.
     image, definition = Path(image).resolve(), Path(definition).resolve()
+    # Built under a temporary name and renamed only once complete: Apptainer
+    # writes straight to its output, so an interrupted build would otherwise
+    # leave a truncated image that every later check takes for a built one.
+    partial = image.with_name(f".{image.name}.partial-{os.getpid()}")
     cmd = ["apptainer", "build", "--fakeroot", "--force"]
     for k, v in build_args.items():
         cmd += ["--build-arg", f"{k}={v}"]
-    cmd += [str(image), str(definition)]
+    cmd += [str(partial), str(definition)]
     for attempt in range(1, attempts + 1):
         start = time.time()
+        # A temporary folder of its own, removed whatever happens: parallel
+        # builds stay apart, and a failed one leaves nothing behind.
+        tmp = path("tmp", f"build-{image.stem}-{os.getpid()}-{attempt}", "x").parent
         with open(log, "a") as fh:
             fh.write(f"\n=== attempt {attempt}: {' '.join(cmd)}\n")
             fh.flush()
             try:
-                rc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, env=build_env(),
-                                    cwd=definition.parent, timeout=timeout_min * 60).returncode
-            except subprocess.TimeoutExpired:
-                rc = "timeout"
+                rc = _run_build(cmd, fh, build_env(tmp), definition.parent, timeout_min * 60)
+            finally:
+                _stop(_holders(tmp))     # e.g. a detached fakeroot daemon
+                try:
+                    remove(tmp)
+                except OSError as e:
+                    fh.write(f"=== could not remove {tmp}: {e}\n")
             fh.write(f"=== attempt {attempt}: rc={rc} after {(time.time() - start) / 60:.1f} min\n")
-        if rc == 0 and image.exists():
+        if rc == 0 and partial.exists():
+            partial.replace(image)
             return True
+        if partial.exists():
+            partial.unlink()
         print(f"    build attempt {attempt} failed (rc={rc}); log: {log}")
     return False
 

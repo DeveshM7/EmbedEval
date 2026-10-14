@@ -124,6 +124,16 @@ def make_venv(py: str, tree: Path, log: Path, binds: dict) -> Path:
     venv = au.shared_path("venvs", f"py{py}-{h.hexdigest()[:12]}")
     if (venv / ".embedeval-ready").exists():
         return venv
+    # Dry runs run in parallel; two of one era must not build its venv at once.
+    import fcntl
+    with open(venv.with_name(venv.name + ".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if (venv / ".embedeval-ready").exists():
+            return venv                   # built by another dry run while we waited
+        return _build_venv(py, venv, tree, log, binds, reqs)
+
+
+def _build_venv(py: str, venv: Path, tree: Path, log: Path, binds: dict, reqs: list[str]) -> Path:
     image = au.python_image(py)
     if not image.exists():
         print(f"  building shared image {image.name} ...")

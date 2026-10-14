@@ -26,6 +26,7 @@ Images go under the work root, never into the repo.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -63,8 +64,10 @@ def build_apptainer(instance_id: str, dry_run: bool = False) -> bool:
     except RuntimeError as e:
         print(f"  ERROR: {e}")
         return False
-    ok = au.build(image, d / "instance.def", {"BASE_IMAGE": str(base)},
-                  logdir / "build.log", timeout_min=120)
+    # EMBEDEVAL_BUILD_TIMEOUT_MIN: the cluster worker passes its build cap, so
+    # this limit (which stops a build cleanly) fires before the worker's own.
+    ok = au.build(image, d / "instance.def", {"BASE_IMAGE": str(base)}, logdir / "build.log",
+                  timeout_min=int(os.environ.get("EMBEDEVAL_BUILD_TIMEOUT_MIN", "120")))
     mins = (time.time() - start) / 60
     size = f", {image.stat().st_size / 2**30:.1f} GB" if ok else ""
     print(f"  {'built' if ok else 'FAILED'} in {mins:.1f} min{size}; log: {logdir / 'build.log'}")

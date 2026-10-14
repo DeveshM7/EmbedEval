@@ -76,8 +76,8 @@ export APPTAINERENV_LD_LIBRARY_PATH=/opt/hostnv:/usr/local/nvidia/lib64:/usr/loc
 export APPTAINERENV_HF_HUB_OFFLINE=1
 export APPTAINERENV_HF_HOME="$SCRATCH_ROOT/hf/.cache"
 export APPTAINERENV_XDG_CACHE_HOME="$SCRATCH_ROOT/cache"
-export APPTAINERENV_VLLM_CACHE_ROOT="$SCRATCH_ROOT/cache/vllm"
-mkdir -p "$SCRATCH_ROOT/cache"
+export APPTAINERENV_VLLM_CACHE_ROOT="${EMBEDEVAL_VLLM_CACHE:-$SCRATCH_ROOT/cache/vllm}"
+mkdir -p "$SCRATCH_ROOT/cache" "$APPTAINERENV_VLLM_CACHE_ROOT"
 
 echo "profile=$PROFILE node=$(hostname) port=$PORT start=$(date +%T)"
 echo "weights=$WEIGHTS"

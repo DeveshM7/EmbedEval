@@ -683,9 +683,12 @@ def cmd_run(args) -> None:
     for p in prs:
         rec = json.loads((ENRICHED / f"{p}.json").read_text())
         commits |= {c for c in (rec.get("base_commit"), rec.get("merge_commit_sha")) if c}
-    print(f"Fetching {len(commits)} commits into the Zephyr clone ...")
-    r = git("fetch", "-q", "origin", *sorted(commits), timeout=1800)
-    if r.returncode:
+    # Only what is missing: in a cluster run prepare.py has fetched them all,
+    # and many triage calls fetching into one clone at once collide on locks.
+    missing = [c for c in sorted(commits) if git("cat-file", "-e", f"{c}^{{commit}}").returncode]
+    print(f"Fetching {len(missing)} of {len(commits)} commits into the Zephyr clone ...")
+    r = git("fetch", "-q", "origin", *missing, timeout=1800) if missing else None
+    if r is not None and r.returncode:
         print(f"  warning: fetch failed; tools may not see every commit:\n  {r.stderr.strip()[:300]}")
 
     stamp = f"{datetime.now():%Y-%m-%d_%H%M%S}"
