@@ -53,12 +53,13 @@ Requires the `gh` CLI, authenticated. Read-only.
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import re
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -248,6 +249,8 @@ def gh_paged(path: str, cap: int = 1000) -> list:
 # the same directory because a suite has both.
 SUITE_MARKERS = ("testcase.yaml", "tests.yaml", "sample.yaml")
 
+_FETCH_LOCK = threading.Lock()
+
 
 def find_suite_root(file_path: str, sha: str, cache: dict) -> tuple[str | None, str | None]:
     """Walk up from a changed test file to the directory that owns it.
@@ -261,51 +264,69 @@ def find_suite_root(file_path: str, sha: str, cache: dict) -> tuple[str | None, 
     for depth in range(len(parts) - 1, 1, -1):     # deepest first, stop above tests/
         d = "/".join(parts[:depth])
         if d not in cache:
-            listing = gh(f"repos/{REPO}/contents/{d}?ref={sha}")
-            names = {f["name"] for f in listing} if isinstance(listing, list) else set()
+            names = {e["path"].rsplit("/", 1)[-1] for e in _ls_tree(sha, d + "/")}
             cache[d] = next((m for m in SUITE_MARKERS if m in names), None)
         if cache[d]:
             return d, cache[d]
     return None, None
 
 
+# Code is read from the local Zephyr clone (zephyr_env.CLONE), not the GitHub
+# API. The API needs one call per file -- a suite of 40 files was 40 calls in
+# a row, about a minute per PR -- while the clone answers in milliseconds.
+# Only the discussion (PR, comments, reviews, issues, commits) needs GitHub.
+
+
+def _ls_tree(sha: str, path: str, recursive: bool = False) -> list[dict]:
+    """Entries under `path` at `sha`: [{path, type, object, size}]. A path
+    ending in "/" lists that directory; without it, the one entry itself."""
+    args = ["ls-tree", "-l", "-z", *(["-r"] if recursive else []), sha, "--", path]
+    out = []
+    for line in zephyr_env.git(*args, check=False).split("\0"):
+        if not line:
+            continue
+        meta, name = line.split("\t", 1)
+        _, kind, obj, size = meta.split()
+        out.append({"path": name, "type": kind, "object": obj,
+                    "size": int(size) if size.isdigit() else None})
+    return out
+
+
+def _blob_text(obj: str) -> str | None:
+    """A blob's contents as text; None for binary (not valid UTF-8)."""
+    r = subprocess.run(["git", "-C", str(zephyr_env.CLONE), "cat-file", "blob", obj],
+                       capture_output=True)
+    if r.returncode != 0:
+        return None
+    try:
+        return r.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def fetch_suite(root: str, sha: str) -> dict:
-    """Every file in a test suite directory, with contents.
+    """Every file in a test suite directory, with contents, keyed by its path
+    inside the suite.
 
     No size cap. Most Zephyr suites are four files; the occasional large
     shared suite is a problem for later, not now.
     """
-    tree = gh(f"repos/{REPO}/git/trees/{sha}:{root}?recursive=1")
-    if not tree:
-        return {}
     out = {}
-    for b in tree.get("tree", []):
-        if b.get("type") != "blob":
+    for e in _ls_tree(sha, root + "/", recursive=True):
+        if e["type"] != "blob":
             continue
-        blob = gh(f"repos/{REPO}/git/blobs/{b['sha']}")
-        content = None
-        if blob and blob.get("encoding") == "base64":
-            try:
-                content = base64.b64decode(blob["content"]).decode("utf-8")
-            except (ValueError, UnicodeDecodeError):
-                content = None          # binary; recorded by name and size only
-        out[b["path"]] = {"size": b.get("size"), "content": content}
+        # binary files are recorded by name and size only
+        out[e["path"][len(root) + 1:]] = {"size": e["size"], "content": _blob_text(e["object"])}
     return out
 
 
 def fetch_file(path: str, sha: str) -> dict:
     """One file at one commit: {size, content}. content is None for binary
-    files and for files over the contents API's 1 MB limit."""
-    meta = gh(f"repos/{REPO}/contents/{path}?ref={sha}")
-    if not isinstance(meta, dict) or meta.get("type") != "file":
+    files."""
+    entry = next((e for e in _ls_tree(sha, path) if e["type"] == "blob"), None)
+    if entry is None:
         return {"size": None, "content": None, "omitted": "not found at this commit"}
-    content = None
-    if meta.get("encoding") == "base64" and meta.get("content"):
-        try:
-            content = base64.b64decode(meta["content"]).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            content = None
-    return {"size": meta.get("size"), "content": content}
+    return {"size": entry["size"], "content": _blob_text(entry["object"])}
 
 
 # Budget for the pre-change source files, in characters: roughly 30K tokens.
@@ -336,7 +357,7 @@ def fetch_base_sources(files: list[dict], base: str) -> dict:
         path = f.get("previous_filename") or f["filename"]
         got = fetch_file(path, base)
         if got["content"] is None:
-            got.setdefault("omitted", "binary, or over the 1 MB API limit")
+            got.setdefault("omitted", "binary")
         elif spent + len(got["content"]) > BASE_SOURCE_BUDGET:
             got = {"size": got["size"], "content": None,
                    "omitted": f"over the {BASE_SOURCE_BUDGET:,}-character budget "
@@ -488,6 +509,10 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
     # shapes -- for an existing suite the yaml is present at base and merge,
     # for a new suite it exists only at merge.
     ref = pr.get("merge_commit_sha") or pr["head"]["sha"]
+    # Every commit read below (and by add_twister_facts), fetched up front, one
+    # fetch into the clone at a time when enriching in parallel.
+    with _FETCH_LOCK:
+        zephyr_env.ensure_commits(ref, base_commit, record["head_commit"])
     cache, suites = {}, {}
     for f in record["files"]:
         name = f["filename"]
@@ -600,27 +625,38 @@ def cmd_enrich(args) -> None:
         if args.limit:
             numbers = numbers[:args.limit]
 
-    print(f"Enriching {len(numbers)} candidates with full GitHub context.\n")
+    print(f"Enriching {len(numbers)} candidates, {args.parallel} at a time.\n")
     ok = 0
-    for i, n in enumerate(numbers, 1):
-        rec = fetch_full(n, refresh=args.refresh)
-        if not rec:
-            print(f"  [{i}/{len(numbers)}] {n}  FAILED")
-            continue
-        ok += 1
-        patched = sum(1 for f in rec["files"] if f.get("patch"))
-        suites = rec.get("test_suites", {})
-        nfiles = sum(len(s["files"]) for s in suites.values())
-        print(f"  [{i}/{len(numbers)}] {n}  "
-              f"{patched}/{len(rec['files'])} files with diff, "
-              f"{len(rec['commits'])} commits, "
-              f"{len(rec['comments']) + len(rec['review_comments'])} comments, "
-              f"{len(rec['linked_issues'])} linked issues, "
-              f"{len(suites)} suite(s)/{nfiles} files, "
-              f"{describe_context(rec)}")
+    with ThreadPoolExecutor(args.parallel) as pool:
+        futures = {pool.submit(fetch_full, n, args.refresh): n for n in numbers}
+        for i, fut in enumerate(as_completed(futures), 1):
+            n = futures[fut]
+            try:
+                rec, error = fut.result(), None
+            except Exception as e:  # one PR's failure must not stop the rest
+                rec, error = None, f"{type(e).__name__}: {e}"
+            ok += report_enriched(i, len(numbers), n, rec, error)
 
     print(f"\n  {ok}/{len(numbers)} enriched  ->  "
           f"{ENRICHED.relative_to(REPO_ROOT)}")
+
+
+def report_enriched(i: int, total: int, n: int, rec: dict | None, error: str | None) -> int:
+    """One progress line per PR; returns 1 if it was enriched, else 0."""
+    if not rec:
+        print(f"  [{i}/{total}] {n}  FAILED{': ' + error if error else ''}", flush=True)
+        return 0
+    patched = sum(1 for f in rec["files"] if f.get("patch"))
+    suites = rec.get("test_suites", {})
+    nfiles = sum(len(s["files"]) for s in suites.values())
+    print(f"  [{i}/{total}] {n}  "
+          f"{patched}/{len(rec['files'])} files with diff, "
+          f"{len(rec['commits'])} commits, "
+          f"{len(rec['comments']) + len(rec['review_comments'])} comments, "
+          f"{len(rec['linked_issues'])} linked issues, "
+          f"{len(suites)} suite(s)/{nfiles} files, "
+          f"{describe_context(rec)}", flush=True)
+    return 1
 
 
 def cmd_enrich_twister(args) -> None:
@@ -666,6 +702,8 @@ def main() -> None:
                        help="full GitHub context for PRs that passed filtering")
     e.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
     e.add_argument("--limit", type=int, help="only the first N candidates")
+    e.add_argument("--parallel", type=int, default=4,
+                   help="PRs enriched at once (default 4; GitHub calls stay well under its rate limit)")
     e.add_argument("--refresh", action="store_true",
                    help="re-fetch records that already exist instead of reusing them")
 

@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -289,9 +290,24 @@ def make_verbose_agent_class(base_class):
 # --------------------------------------------------------------------------
 
 
-def capture_patch(env, meta: dict) -> tuple[str, list[str]]:
+def start_commit(env) -> str:
+    """The commit the agent starts from (after any setup commit), so the patch
+    is everything since -- whatever the agent did with git along the way."""
+    out = env.execute({"command": "cd /testbed && git rev-parse HEAD"})
+    sha = out.get("output", "").strip()
+    return sha if out.get("returncode") == 0 and len(sha) == 40 else "HEAD"
+
+
+def capture_patch(env, meta: dict, start: str = "HEAD") -> tuple[str, list[str]]:
     """
     Return (patch, protected_files_touched).
+
+    Everything the agent changed since `start`: edits to tracked files, new
+    files, and changes it staged or committed itself (`git add -A`, then a diff
+    of the index against `start`; ignored paths such as build directories stay
+    out). A plain `git diff` saw only unstaged edits to tracked files and lost
+    the rest -- a new source file, or files the agent staged with `git
+    checkout <rev> -- <path>`.
 
     The full diff is captured, minus the project's protected paths, so a correct
     fix outside the gold patch's file set is preserved -- the old behaviour
@@ -301,11 +317,39 @@ def capture_patch(env, meta: dict) -> tuple[str, list[str]]:
     """
     protected = projects.config_for(meta)["protected_paths"]
     excludes = " ".join(f"':(exclude){p}'" for p in protected)
-    patch = env.execute({"command": f"cd /testbed && git diff -- . {excludes}"}).get("output", "")
+    patch = env.execute({"command": f"cd /testbed && git add -A && "
+                                    f"git diff --cached --binary {start} -- . {excludes}"}
+                        ).get("output", "")
     touched = env.execute(
-        {"command": "cd /testbed && git diff --name-only -- " + " ".join(f"'{p}'" for p in protected)}
+        {"command": f"cd /testbed && git diff --cached --name-only {start} -- "
+                    + " ".join(f"'{p}'" for p in protected)}
     ).get("output", "")
     return patch, [t for t in touched.splitlines() if t.strip()]
+
+
+# The run in progress, for the SIGTERM handler: {"save": callable, "env": env}.
+_CURRENT: dict = {}
+
+
+def _stop_on_sigterm(signum, frame):
+    """`timeout`, scancel and Slurm stop a run with SIGTERM, then SIGKILL a
+    little later. Save what the agent did and remove the overlay right here,
+    then exit. Raising an exception instead is not enough: SIGTERM usually
+    lands while the agent waits for the model, and the model client's retry
+    wrapper catches the exception and retries the call."""
+    print(f"\n  stopped by signal {signum}: saving the patch", flush=True)
+    try:
+        if _CURRENT.get("save"):
+            _CURRENT["save"]()
+            print("  patch saved", flush=True)
+    except BaseException as e:
+        print(f"  could not save the patch: {type(e).__name__}: {e}", flush=True)
+    try:
+        if _CURRENT.get("env") is not None:
+            _CURRENT["env"].cleanup()
+    except BaseException:
+        pass
+    os._exit(128 + signum)
 
 
 def run_one(instance_id: str, model_name: str, args) -> dict:
@@ -338,9 +382,18 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
         "error": None,
     }
     start = time.time()
-    env = None
+    env, captured, base = None, False, "HEAD"
+
+    def save_patch() -> None:
+        patch, touched = capture_patch(env, meta, base)
+        paths.patch_path(instance_id, full_model).write_text(patch)
+        result["patch_empty"] = not patch.strip()
+        result["protected_touched"] = touched
+
     try:
         env = make_environment(meta)
+        base = start_commit(env)
+        _CURRENT.update(save=save_patch, env=env)
         model = get_model(input_model_name=full_model, config=model_config(full_model))
         model.config.format_error_template = FORMAT_ERROR_TEMPLATE
 
@@ -352,15 +405,15 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
             instance_template=instance_template,
             step_limit=args.step_limit,
             cost_limit=args.cost_limit,
+            wall_time_limit_seconds=int(args.time_limit * 60),
             output_path=paths.trajectory_path(instance_id, full_model),
         )
         run_info = agent.run(task)
         result["exit_status"] = run_info.get("exit_status")
 
-        patch, touched = capture_patch(env, meta)
-        paths.patch_path(instance_id, full_model).write_text(patch)
-        result["patch_empty"] = not patch.strip()
-        result["protected_touched"] = touched
+        save_patch()
+        captured = True
+        touched = result["protected_touched"]
         result["status"] = "success"
         if touched:
             print(f"  WARNING: agent modified protected paths: {', '.join(touched)}")
@@ -372,6 +425,15 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
         result["error"] = f"{type(e).__name__}: {e}"
         print(f"  ERROR: {result['error']}")
     finally:
+        _CURRENT.clear()
+        if env is not None and not captured:
+            # Stopped early by an error:
+            # keep whatever the agent had done, so it can still be graded.
+            try:
+                save_patch()
+                result["patch_captured"] = "after interruption"
+            except BaseException as e:
+                print(f"  could not save the patch: {type(e).__name__}: {e}")
         result["elapsed_seconds"] = round(time.time() - start, 1)
         traj = paths.trajectory_path(instance_id, full_model)
         if traj.exists():
@@ -410,6 +472,7 @@ def select_instances(args) -> list[str]:
 
 
 def main() -> None:
+    signal.signal(signal.SIGTERM, _stop_on_sigterm)
     p = argparse.ArgumentParser(description="Run an agent on EmbedEval instances.")
     sel = p.add_mutually_exclusive_group(required=True)
     sel.add_argument("--instance", nargs="+", help="one or more instance ids")
@@ -419,6 +482,9 @@ def main() -> None:
                    help="one or more models (full LiteLLM name or shorthand)")
     p.add_argument("--step-limit", type=int, default=50)
     p.add_argument("--cost-limit", type=float, default=3.0)
+    p.add_argument("--time-limit", type=float, default=0,
+                   help="minutes of wall-clock time per run, checked before each model "
+                        "call; the patch is captured as usual (default 0: no limit)")
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="print the planned runs and exit without starting containers")

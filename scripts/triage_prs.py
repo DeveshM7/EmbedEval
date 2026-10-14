@@ -83,15 +83,28 @@ MAX_TURNS = MAX_TOOL_ROUNDS + MAX_REPAIRS + 2   # hard stop on requests per PR
 REQUEST_TIMEOUT = 3600  # seconds. LiteLLM's default of 600 silently retried a
                         # 10-minute Qwen3.8 request three times over.
 TOOL_OUTPUT_CAP = 60_000
+# The rendered record, in characters (~3.6 per token). The model's context is
+# 262,144 tokens; 32,768 are kept for its answer and ~4K go to the
+# instructions, which leaves ~110K tokens of record and ~115K for tool rounds.
+# Most records are far below; a few PRs that touch a big suite or carry long
+# review hunks ran to 200-350K tokens and failed outright. Records under the
+# budget are rendered unchanged (see fit_record).
+RECORD_BUDGET = 400_000
+HUNK_TAIL = 15          # lines of a review comment's diff hunk kept when trimming
+OMITTED_LISTED = 30     # left-out files of one suite listed by name; more are counted
 
 
 # ---------------------------------------------------------------- the record
 
 
-def render_record(rec: dict) -> str:
+def render_record(rec: dict, budget: int | None = RECORD_BUDGET) -> str:
     """The enriched record as readable markdown: the same substance as the
     GitHub page, with diffs and test sources in fenced blocks rather than
-    escaped inside JSON strings."""
+    escaped inside JSON strings. Over `budget` characters, parts are left out
+    (fit_record); budget=None renders everything."""
+    if budget is not None:
+        return fit_record(rec, budget)
+    trimmed = rec.get("_trimmed") or []
     out = [f"# PR #{rec['number']}: {rec['title']}", "",
            f"- URL: {rec['url']}",
            f"- Merged: {rec.get('merged_at')}",
@@ -99,8 +112,12 @@ def render_record(rec: dict) -> str:
            f"- Base commit (repo before this PR): {rec.get('base_commit')}",
            f"- Merge commit (repo after this PR): {rec.get('merge_commit_sha')}",
            f"- Size: +{rec.get('additions')} -{rec.get('deletions')} "
-           f"in {len(rec['files'])} files", "",
-           "## Description", "", rec.get("body") or "(empty)", ""]
+           f"in {len(rec['files'])} files", ""]
+    if trimmed:
+        out += ["**This record is too large to show in full. Left out to fit:** "
+                + "; ".join(trimmed) + ". Everything left out is still listed by name; "
+                "read what you need with `read_file`.", ""]
+    out += ["## Description", "", rec.get("body") or "(empty)", ""]
 
     for issue in rec.get("linked_issues") or []:
         out += [f"## Linked issue #{issue['number']}: {issue['title']}",
@@ -116,7 +133,9 @@ def render_record(rec: dict) -> str:
     out += [f"## Changed files ({len(rec['files'])})", ""]
     for f in rec["files"]:
         out.append(f"### {f['filename']} ({f['status']}, +{f['additions']} -{f['deletions']})")
-        if f.get("patch"):
+        if f.get("_omitted"):
+            out += [f"(diff not included to fit the prompt; {len(f['patch'])} characters)", ""]
+        elif f.get("patch"):
             out += ["```diff", f["patch"], "```", ""]
         else:
             out += ["(no diff shown by GitHub: binary, or too large to render)", ""]
@@ -128,8 +147,11 @@ def render_record(rec: dict) -> str:
         for r in rec.get("reviews") or []:
             out += [f"**{r['author']}** reviewed ({r['state']}):", "", r["body"], ""]
         for c in rec.get("review_comments") or []:
+            hunk = c.get("diff_hunk") or ""
+            if rec.get("_short_hunks") and hunk.count("\n") >= HUNK_TAIL:
+                hunk = "...\n" + "\n".join(hunk.split("\n")[-HUNK_TAIL:])
             out += [f"**{c['author']}** on {c['path']}:{c['line']}:",
-                    "```diff", c.get("diff_hunk") or "", "```", "", c["body"], ""]
+                    "```diff", hunk, "```", "", c["body"], ""]
 
     suites = rec.get("test_suites") or {}
     out += ["## Test suites touched by this PR, in full, at the merge commit", ""]
@@ -137,8 +159,19 @@ def render_record(rec: dict) -> str:
         out += ["(this PR touches no test suite)", ""]
     for root, suite in suites.items():
         out += [f"### Suite {root} (config: {suite['config']})", ""]
+        left_out = [n for n, f in suite["files"].items() if f.get("_omitted")]
+        if len(left_out) > OMITTED_LISTED:
+            # too many to list one by one: the listing alone would not fit
+            out += [f"({len(left_out)} files of this suite, "
+                    f"{sum(suite['files'][n]['size'] or 0 for n in left_out):,} bytes, are not "
+                    f"included to fit the prompt; list_dir and read_file at the merge commit)", ""]
         for name, f in sorted(suite["files"].items()):
-            if f["content"] is None:
+            if f.get("_omitted") and len(left_out) > OMITTED_LISTED:
+                continue
+            if f.get("_omitted"):
+                out += [f"#### {root}/{name}", f"(not included to fit the prompt; {f['size']} "
+                        "bytes; read_file at the merge commit)", ""]
+            elif f["content"] is None:
                 out += [f"#### {root}/{name}", f"(binary, {f['size']} bytes)", ""]
             else:
                 out += [f"#### {root}/{name}", "```", f["content"], "```", ""]
@@ -155,8 +188,11 @@ def render_record(rec: dict) -> str:
                 "expressions are not evaluated here, so a selected pair can still "
                 "be filtered when it is built.", "",
                 "| suite | scenario | board | status | reason |", "|---|---|---|---|---|"]
-        out += [f"| {p['suite']} | {p['scenario']} | {p['board']} | {p['status']} | "
-                f"{p['reason']} |" for p in dr["pairs"]]
+        if rec.get("_compact_dry_run"):
+            out += compact_pairs(dr["pairs"])
+        else:
+            out += [f"| {p['suite']} | {p['scenario']} | {p['board']} | {p['status']} | "
+                    f"{p['reason']} |" for p in dr["pairs"]]
         out += ["", "### Test cases per scenario (twister's names)", ""]
         for scen, names in dr["tests"].items():
             out += [f"- {scen}: {', '.join(names) or '(none found)'}"]
@@ -167,11 +203,94 @@ def render_record(rec: dict) -> str:
     if not sources:
         out += ["(this PR modifies no existing non-test file)", ""]
     for path, f in sources.items():
-        if f.get("content") is None:
+        if f.get("_omitted"):
+            out += [f"### {path}", f"(not included to fit the prompt; {f.get('size')} bytes; "
+                    "read_file at the base commit)", ""]
+        elif f.get("content") is None:
             out += [f"### {path}", f"(not included: {f.get('omitted')}; {f.get('size')} bytes)", ""]
         else:
             out += [f"### {path}", "```", f["content"], "```", ""]
     return "\n".join(out)
+
+
+def compact_pairs(pairs: list[dict]) -> list[str]:
+    """The dry-run table with every selected pair, and the filtered ones
+    folded into one row per suite, scenario and reason."""
+    rows = [f"| {p['suite']} | {p['scenario']} | {p['board']} | selected | |"
+            for p in pairs if p["status"] == "selected"]
+    groups: dict[tuple, list[str]] = {}
+    for p in pairs:
+        if p["status"] != "selected":
+            groups.setdefault((p["suite"], p["scenario"], p["reason"]), []).append(p["board"])
+    rows += [f"| {suite} | {scen} | {', '.join(boards)} | filtered | {why} |"
+             for (suite, scen, why), boards in groups.items()]
+    return rows
+
+
+def fit_record(rec: dict, budget: int) -> str:
+    """render_record within `budget` characters. A record that fits is
+    rendered exactly as before. One that does not loses, in this order and
+    only until it fits: the start of long review-comment hunks (the commented
+    line is the hunk's last), unchanged test-suite files (largest first; the
+    PR's own test files and the suite yaml stay), the filtered rows of the dry
+    run (folded per reason), pre-change source files (largest first), and
+    finally the largest diffs. All of it stays listed by name."""
+    text = render_record(rec, budget=None)
+    if len(text) <= budget:
+        return text
+    import copy
+    rec = copy.deepcopy(rec)
+    trimmed = rec["_trimmed"] = []
+    changed = {f["filename"] for f in rec["files"]}
+
+    def size() -> int:
+        return len(render_record(rec, budget=None))
+
+    if any((c.get("diff_hunk") or "").count("\n") >= HUNK_TAIL for c in rec.get("review_comments") or []):
+        rec["_short_hunks"] = True
+        trimmed.append(f"review comments show the last {HUNK_TAIL} lines of their diff hunk")
+    over = size() - budget
+    suite_files = sorted(((f["size"] or 0, root, name, f)
+                          for root, s in (rec.get("test_suites") or {}).items()
+                          for name, f in s["files"].items()
+                          if f["content"] is not None and f"{root}/{name}" not in changed
+                          and name != s["config"]), key=lambda x: -x[0])
+    dropped = 0
+    for _, _, _, f in suite_files:
+        if over <= 0:
+            break
+        f["_omitted"] = True
+        over -= len(f["content"])
+        dropped += 1
+    if dropped:
+        trimmed.append(f"{dropped} test-suite files the PR does not change")
+    if size() > budget:
+        rec["_compact_dry_run"] = True
+        trimmed.append("the dry run's filtered pairs, folded per reason")
+    over = size() - budget
+    dropped = 0
+    for _, f in sorted((rec.get("base_sources") or {}).items(),
+                       key=lambda kv: -len(kv[1].get("content") or "")):
+        if over <= 0:
+            break
+        if f.get("content"):
+            f["_omitted"] = True
+            over -= len(f["content"])
+            dropped += 1
+    if dropped:
+        trimmed.append(f"{dropped} pre-change source files")
+    over = size() - budget
+    dropped = 0
+    for f in sorted(rec["files"], key=lambda f: -len(f.get("patch") or "")):
+        if over <= 0:
+            break
+        if f.get("patch"):
+            f["_omitted"] = True
+            over -= len(f["patch"])
+            dropped += 1
+    if dropped:
+        trimmed.append(f"the {dropped} largest diffs")
+    return render_record(rec, budget=None)
 
 
 def test_sources(rec: dict) -> str:

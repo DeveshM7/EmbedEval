@@ -10,6 +10,7 @@ Removes only what belongs to that instance, all under the work root:
     images/instances/<id>.sif   the instance image (2-5 GB)
     dryrun/<pr>/                the dry run's exported tree and outputs
     runs/<id>-*/                any validation overlay left by an interrupted run
+    runs/agent-<id>-*/          any agent overlay left by an interrupted run
 
 Keeps everything small or shared: the recipe and validation.json in the
 instance directory, logs/<id>/, candidates/dryrun/<pr>.json, and the shared
@@ -35,6 +36,7 @@ def targets(instance_id: str) -> list[Path]:
     root = au.work_root()
     found = [au.instance_image(instance_id), root / "dryrun" / pr]
     found += sorted((root / "runs").glob(f"{instance_id}-*"))
+    found += sorted((root / "runs").glob(f"agent-{instance_id}-*"))   # agent overlays
     return [t for t in found if t.exists()]
 
 

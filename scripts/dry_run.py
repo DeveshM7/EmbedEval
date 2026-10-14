@@ -27,6 +27,11 @@ Cheap on purpose -- seconds per PR, no SDK, no compilers, no west modules:
             --force-toolchain stops toolchain support from filtering boards.
             Our boards are all supported by the Zephyr SDK anyway.
 
+A suite yaml naming a board twister does not know at the base commit (one the
+PR adds, say) would stop twister altogether; that name is removed from the
+exported yaml and twister rerun, and a scenario left with no allowed board is
+recorded as filtered (drop_unknown_board).
+
 Not covered: the Kconfig/devicetree `filter:` expressions, which need CMake
 and an SDK. A selected pair can still be filtered at build time; validation
 finds out.
@@ -147,6 +152,59 @@ def twister(py: str, venv: Path, tree: Path, args: list[str], log: Path, binds: 
                + args, log)
 
 
+# Twister (2022 on) exits with code 2 if a suite's yaml names a board it does
+# not know, e.g. "platform_allow in drivers.adc.accuracy.ref_volt -
+# unrecognized platform - bg29_rb4420a". At the base commit that happens for a
+# board the PR itself adds, a board variant added later, or a platform outside
+# our export (unit_testing lives in subsys/testsuite/). One unknown name must
+# not fail the whole PR.
+UNKNOWN_BOARD = re.compile(r"(platform_allow|platform_exclude|integration_platforms) in "
+                           r"(\S+) - unrecognized platform - (\S+)")
+
+
+def drop_unknown_board(tree: Path, suites: dict, key: str, scenario: str, board: str,
+                       unrunnable: dict) -> bool:
+    """Remove `board` from `key` of `scenario` (or of its yaml's `common:`) in
+    the exported tree, so twister can load the suite. A scenario whose
+    platform_allow is left empty only ever ran on boards unknown here: it is
+    removed and recorded in `unrunnable` as filtered on every board of ours.
+    Returns False if the yaml entry cannot be found."""
+    import yaml
+    scen = scenario.rsplit("/", 1)[-1]          # "<path>/<scenario>" up to 2024
+    for suite, info in suites.items():
+        if scen not in info["scenarios"]:
+            continue
+        yml = next((tree / suite / m for m in zephyr_env.SUITE_MARKERS
+                    if (tree / suite / m).exists()), None)
+        if yml is None:
+            return False
+        doc = yaml.safe_load(yml.read_text()) or {}
+        tests = doc.get("tests") or {}
+
+        def names_in(section: dict) -> list[str]:   # a yaml list or a space-separated string
+            value = section.get(key)
+            return value.split() if isinstance(value, str) else list(value or [])
+
+        holder = tests.get(scen) or {}
+        if board not in names_in(holder):
+            holder = doc.get("common") or {}    # set once for every scenario of the file
+        names = names_in(holder)
+        if board not in names:
+            return False
+        names.remove(board)
+        holder[key] = names
+        if key == "platform_allow" and not names:
+            # common: applies to all the file's scenarios; else just this one
+            gone = list(tests) if holder is doc.get("common") else [scen]
+            for s in gone:
+                tests.pop(s, None)
+                unrunnable[(suite, s)] = (f"platform_allow names only boards not known at the "
+                                          f"base commit ({board})")
+        yml.write_text(yaml.safe_dump(doc, sort_keys=False))
+        return True
+    return False
+
+
 def board_matches(reported: str, board: str) -> bool:
     """twister may report a board under a qualified name: qemu_x86 runs as
     qemu_x86/atom from 2024 on."""
@@ -217,7 +275,23 @@ def _dry_run(pr, facts, suites, boards, py, base, head, local, work, log, binds)
         # Older twister has no --report-filtered: the plan (filtered pairs
         # marked skipped) comes from --save-tests, the reasons from -vv.
         args += ["--save-tests", str(plan_csv), "-vv"]
-    rc = twister(py, venv, tree, args, log, binds)
+    unrunnable: dict[tuple[str, str], str] = {}      # (suite, scenario) -> reason
+    unknown = []
+    for _ in range(25):     # twister reports one unknown name per run
+        start = log.stat().st_size if log.exists() else 0
+        rc = twister(py, venv, tree, args, log, binds)
+        new = ANSI.sub("", log.read_text(errors="replace")[start:])
+        bad = UNKNOWN_BOARD.findall(new) if rc else []
+        if not bad:
+            break
+        for key, scenario, board in bad:
+            if not drop_unknown_board(tree, suites, key, scenario, board, unrunnable):
+                raise RuntimeError(f"twister does not know board {board} ({key} in "
+                                   f"{scenario}) and it is not in the suite yaml; see {log}")
+            unknown.append(board)
+        if all((s, sc) in unrunnable for s, info in suites.items() for sc in info["scenarios"]):
+            rc = 0           # nothing left for twister to plan
+            break
     text = ANSI.sub("", log.read_text(errors="replace"))
     if rc != 0:
         raise RuntimeError(f"twister --dry-run failed (rc={rc}); see {log}")
@@ -265,7 +339,9 @@ def _dry_run(pr, facts, suites, boards, py, base, head, local, work, log, binds)
                             and board_matches(plat, b)), None)
                 why = reasons.get((name, b)) or next(
                     (r for (n, plat), r in reasons.items() if n == name and board_matches(plat, b)), "")
-                if hit:
+                if (suite, scen) in unrunnable:
+                    status, reason = "filtered", unrunnable[(suite, scen)]
+                elif hit:
                     status, reason = hit[0], hit[1] or why
                     if status == "selected":
                         reason = ""  # newer twister fills it with "Unknown Instance status."
@@ -303,6 +379,8 @@ def _dry_run(pr, facts, suites, boards, py, base, head, local, work, log, binds)
     result = {"pr": pr, "base_commit": base, "boards": boards, "pairs": pairs, "tests": tests,
               "selected": sum(p["status"] == "selected" for p in pairs),
               "auto_reject": not any(p["status"] == "selected" for p in pairs)}
+    if unknown:
+        result["unknown_boards"] = sorted(set(unknown))   # removed from the yaml to plan
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / f"{pr}.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
