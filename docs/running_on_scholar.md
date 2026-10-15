@@ -109,7 +109,7 @@ Times, for planning:
 |---|---|
 | prepare, 20 PRs | about 1 min (enrich and dry run, several at once) |
 | prepare, 100+ PRs | a few minutes, plus about 10 min per missing SDK image |
-| model server start | about 10 min the first time (it compiles), about 5 later |
+| model server start | about 10 min the first time (it compiles); faster once the compile cache is filled |
 | triage, one PR | 3-27 min, typically 7-11; 4 at once per node |
 | validation, one PR | 14-28 min (one build); 4 at once per node |
 | the 19 gold PRs on 4 nodes | 65 min |
@@ -323,6 +323,9 @@ run 2025-09: 15 PRs to triage, 0 to validate
   submitted: job 475314; log /scratch/scholar/you/embedeval/runs/2025-09/jobs/job-475314.out
 ```
 
+The forecast is Slurm's cautious guess; with idle nodes the job usually
+starts at once.
+
 The node count follows the work: one node per 4 PRs to triage (or to
 validate, if more), at most `nodes_max`. The job asks for a range,
 `-N <min>-<wanted>`, so it starts on what is free rather than waiting for
@@ -363,11 +366,13 @@ $SCRATCH/embedeval/runs/<name>/
 ├── report.md, report.json   the results (section 7)
 ├── status/<pr>.json         each PR's outcome, per phase: the single source of truth
 │
-├── candidates/              fetched PRs (cache/) and the hard filter's list
+├── candidates/              fetched PRs (cache/); with --since also the hard filter's list
 ├── enriched/<pr>.json       the full record triage reads
 ├── dryrun/<pr>.json         every scenario/board pair: selected, or filtered and why
 ├── triage/<pr>.json         the verdict: accept/reject, the pair, problem statement, tests
 ├── triage/<pr>.trace.json   the model's whole conversation: reasoning, tool calls, timings
+├── triage/manifest-*.json,  one pair per triage call: model, settings, code commit, and
+│   triage/pr_triage-*.md    the exact instructions the model was given
 ├── validate/                a verdict moved to another board for a retry (rare, 7.2)
 ├── instances/zephyr__zephyr-<pr>/
 │   ├── instance.def         the image recipe
@@ -383,9 +388,11 @@ $SCRATCH/embedeval/runs/<name>/
 │                            triage-<pr>.log, validate-<pr>.log
 ├── jobs/                    each submit: pipeline-<time>.sbatch, config-<time>.json,
 │                            job-<id>.out; submitted.jsonl lists them all
-├── nodes/node<N>/           each node's scratch space (images while building, caches);
-│                            empty of images once the job is done
-└── lookup/                  CI images and SDK releases looked up during the run
+├── nodes/node<N>/           each node's scratch space: images while building, build logs
+│                            (work/logs/<id>/), server caches; no images once the job is done
+├── work/                    prepare's scratch space (dry-run working files)
+└── lookup/                  CI images and SDK releases looked up during the run (only when
+                             one is new to the tables in templates/zephyr/lookup/)
 ```
 
 Images are never kept: each is deleted once its instance is validated. The
@@ -520,10 +527,16 @@ R=$SCRATCH/embedeval/runs/2025-09
   1/2 promoted
 ```
 
-Promotion copies the recipe files and `validation.json` into
-`apptainer/instances/<id>/`. It refuses an instance that is not VALID, or
-whose recipe changed after it was validated (edit the problem statement, and
-it must be validated again). Commit the new folders yourself.
+Promotion copies the recipe files, `metadata.json` and `validation.json`
+into `apptainer/instances/<id>/`. It refuses an instance that is not VALID,
+or whose recipe -- `instance.def`, `instance.json`, `run_tests.py`,
+`test_patch.diff` -- changed after it was validated; that needs validating
+again. The problem statement in `metadata.json` is not part of the recipe,
+so you can improve its wording by hand before promoting.
+
+Promoting an id that is already in `apptainer/instances/` replaces it
+(another run of the same PR, say); check `git diff` before committing.
+Commit the new folders yourself.
 
 A promoted instance is used like any other: build its image and run an
 agent on it, as in the [README](../README.md#quick-start).

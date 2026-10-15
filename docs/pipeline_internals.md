@@ -115,12 +115,13 @@ runs/<run>/
   jobs/                         submit.py, per submit
   status/<pr>.json              node_worker.py: the worker that owns the PR
   triage/<pr>.json, .trace.json triage_prs.py, run by that worker
-  triage/manifest-<t>-<pid>.json one per triage call
+  triage/manifest-<t>-<pid>.json one per triage call, with pr_triage-<t>-<pid>.md
   validate/<pr>-<board>.json    node_worker.py, for a board retry
   instances/<id>/               generate_instance.py, validate_instance.py
   logs/node<N>/                 that node's worker and its steps
   nodes/node<N>/work/           that node's images, overlays, temp files (EMBEDEVAL_WORK)
   nodes/node<N>/scr/            that node's model-server caches
+  work/                         prepare's own work root (dry-run working files)
   report.md, report.json        report.py
 ```
 
