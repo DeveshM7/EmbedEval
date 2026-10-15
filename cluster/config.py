@@ -86,6 +86,7 @@ def load(path: str | Path | None = None) -> dict:
         "runs": str(root / "runs"),
         "zephyr_clone": p["zephyr_clone"] or str(shared / "zephyr.git"),
         "vllm_cache": p["vllm_cache"] or str(shared / "vllm-cache"),
+        "ledger": str(shared / "ledger.jsonl"),
     }
     return cfg
 

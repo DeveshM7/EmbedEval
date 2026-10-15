@@ -60,11 +60,12 @@ Two layers, kept apart on purpose:
 |---|---|---|---|
 | `config.py` | (library) | loads `config.yaml` over `config.example.yaml`; strict: an unknown key or a wrong type is an error; derives paths; `env_for()` gives the environment the scripts read | -- |
 | `setup.py` | desktop | checks machine, Apptainer, `gh`, Slurm, weights, vLLM image; creates `shared/`, `runs/`; clones Zephyr; builds the base Python images. Never deletes | `shared/` |
-| `prepare.py` | desktop | the PR list (`--since/--until` or `--pr`), hard filters, enrich, dry runs, missing SDK images, commits, manifest | `runs/<run>/` up to `manifest.json` |
+| `prepare.py` | desktop | the PR list (`--since/--until` or `--pr`), minus PRs the ledger has settled, hard filters, enrich, dry runs, missing SDK images, commits, manifest | `runs/<run>/` up to `manifest.json` |
 | `submit.py` | desktop | what is left (from `status/`), node count, the job script, `sbatch` | `jobs/` |
 | `node_worker.py` | each batch node | one node's share of one phase (section 4) | `status/`, `triage/`, `instances/`, `logs/node<N>/`, `nodes/node<N>/` |
 | `status.py` | (library) | reads and writes `status/<pr>.json`; `triage_todo`, `validate_todo` | `status/` |
-| `report.py` | anywhere | the funnel and per-PR table, from the manifest and `status/` only | `report.md`, `report.json` |
+| `report.py` | anywhere | the funnel and per-PR table, from the manifest and `status/` only; appends settled outcomes to the ledger | `report.md`, `report.json`, `shared/ledger.jsonl` |
+| `ledger.py` | (library) | every PR's settled outcome across runs: which outcomes count as settled, `latest`, `record` (under a lock) | `shared/ledger.jsonl` |
 | `templates/pipeline.sbatch` | -- | the job script template | -- |
 
 ### 2.2 `scripts/`, the pipeline stages
@@ -341,6 +342,7 @@ The variables `cluster/` sets for every step (`config.env_for()`):
 | Python, SDK images | `shared/images/` | `setup.py`, `prepare.py` | every run |
 | dry-run venvs | `shared/venvs/` | `dry_run.py`, under a lock per venv | every run |
 | vLLM compile cache | `shared/vllm-cache/` | the first server, under a lock | every server |
+| ledger | `shared/ledger.jsonl` | `report.py`, under a lock | every `prepare.py` |
 | instance images | `nodes/node<N>/work/images/instances/` | `build_instances.py` | nobody: deleted after validation |
 | everything else | `runs/<run>/` | the run | nobody |
 
@@ -410,6 +412,7 @@ writes statuses as in a job.
 | Command | Flag | Does |
 |---|---|---|
 | `prepare.py` | `--pr ... --no-filter` | skip the hard filters |
+| `prepare.py` | `--redo` | also take PRs the ledger has settled |
 | `submit.py` | `--dry-run` | write the job script, print the plan, submit nothing |
 | `submit.py` | `--idle N` | plan as if N nodes were idle |
 | `report.py` | `--scorecard` | also score the verdicts against `triage/gold.json` |

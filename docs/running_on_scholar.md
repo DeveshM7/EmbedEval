@@ -281,7 +281,19 @@ Pick a name and the PRs:
 
 # these PRs, skipping the hard filters (to force a PR into triage)
 .venv/bin/python cluster/prepare.py --name forced --pr 110975 --no-filter
+
+# take PRs an earlier run already settled, again (see below)
+.venv/bin/python cluster/prepare.py --name again --pr 65697 --redo
 ```
+
+PRs an earlier run already settled are skipped: `prepare.py` looks them up
+in the ledger, `shared/ledger.jsonl`, which `report.py` fills at the end of
+every run. A PR is settled once it is VALID, INVALID, rejected by triage,
+dropped by a hard filter, or has no runnable pair. Everything else (a
+server that failed, a cap, an environment problem, a run cut short) is
+tried again by the next run that includes the PR. Skipped PRs show as
+`in ledger`, with the outcome and the run that settled it. Use `--redo`
+after changing the pipeline, to take them again.
 
 It prints its progress and ends with a count of where the PRs stand:
 
@@ -425,6 +437,7 @@ minutes spent in triage and validation.
 
 | Outcome | Meaning | What to do |
 |---|---|---|
+| `in ledger` | settled by an earlier run (the detail says how and which run); not done again | nothing, or `--redo` to take it again |
 | `hard filter` | dropped by a hard filter; the detail says which (`revert`, `touches no tests/`, ...) | nothing, or `--pr ... --no-filter` to force it |
 | `enrich failed` | GitHub or the clone could not give its record | see `logs/prepare/enrich.log`; prepare again |
 | `dry run error` | twister could not run on it | see `logs/prepare/dryrun/<pr>.log` |
@@ -563,6 +576,7 @@ On the network file systems, the same from every node:
     │   ├── images/zephyr-sdk-*.sif     one per Zephyr SDK + Python pair (~1 GB each)
     │   ├── venvs/                      dry-run Python environments, one per Zephyr era
     │   ├── vllm-cache/                 the model server's compiled kernels
+    │   ├── ledger.jsonl                every PR's settled outcome, across runs (+ its .lock)
     │   ├── cache/                      Apptainer and uv download caches
     │   └── logs/                       how the shared images were built
     └── runs/<name>/                    one folder per run (section 6)
@@ -572,7 +586,8 @@ What you can delete:
 
 | What | Safe to delete? |
 |---|---|
-| a folder in `runs/` | yes, when you no longer need its results (promote first) |
+| a folder in `runs/` | yes, when you no longer need its results (promote first); the ledger keeps its outcomes |
+| `shared/ledger.jsonl` | only to forget every past outcome: the next runs take all PRs again |
 | `shared/vllm-cache/`, `shared/venvs/` | yes; rebuilt on the next run (about 8 min for the cache, a minute or two per venv) |
 | `shared/images/` | yes; rebuilt when needed (minutes per image) |
 | `shared/zephyr.git` | yes; `setup.py` clones it again |

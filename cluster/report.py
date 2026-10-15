@@ -8,6 +8,8 @@ Reads only the manifest (the plan) and status/ (what happened), so it can be
 run at any time -- during a job it shows progress so far. Writes
 <run>/report.md and <run>/report.json, prints the funnel, and (with
 --scorecard) refreshes triage's scorecard of every verdict in the run.
+Settled outcomes also go into the ledger, <shared>/ledger.jsonl
+(cluster/ledger.py), so later runs skip those PRs.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from pathlib import Path
 CLUSTER = Path(__file__).resolve().parent
 REPO = CLUSTER.parent
 sys.path.insert(0, str(CLUSTER))
+import ledger  # noqa: E402
 import status  # noqa: E402
 
 
@@ -48,7 +51,7 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
     return "INVALID", "; ".join(x for x in (v["outcome"], v.get("note")) if x)
 
 
-ORDER = ["hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "triage: server failed",
+ORDER = ["in ledger", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "triage: server failed",
          "triage: cap", "triage: failed", "triage: error", "triage: reject", "triage: not yet",
          "accepted, validation not yet", "validation: skipped", "validation: failed",
          "INVALID", "VALID"]
@@ -107,6 +110,10 @@ def main() -> None:
         print(f"  {v:>5}  {k}")
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
     print(f"  -> {run / 'report.md'}")
+    m = status.manifest(run)
+    book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
+    n = ledger.record(book, rep["run"], m["code"]["commit"], rep["generated"], rep["rows"])
+    print(f"  ledger: {n} new settled outcomes -> {book}")
     if args.scorecard and (run / "triage").exists():
         subprocess.run([sys.executable, str(REPO / "scripts" / "triage_prs.py"), "--run-dir",
                         str(run), "eval"], cwd=REPO, env=os.environ, stdout=subprocess.DEVNULL)

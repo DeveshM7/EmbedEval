@@ -11,6 +11,8 @@ Creates <scratch_root>/runs/<name>/ and, in it:
                       hard filters (scripts/filter_candidates.py fetch, filter).
                       --pr: these PRs, through the same hard filters
                       (--no-filter: all of them, unfiltered).
+                      Either way, PRs an earlier run settled are skipped
+                      (cluster/ledger.py; --redo takes them again).
     2. enriched/      full GitHub context, several PRs at once
     3. dryrun/        twister's own selection on our boards, several at once
     4. shared SDK     any SDK image the PRs that reach triage need and that
@@ -40,6 +42,7 @@ CLUSTER = Path(__file__).resolve().parent
 REPO = CLUSTER.parent
 sys.path.insert(0, str(CLUSTER))
 import config as cluster_config  # noqa: E402
+import ledger  # noqa: E402
 
 PY = sys.executable
 
@@ -71,6 +74,8 @@ def main() -> None:
     src.add_argument("--since", help="fetch PRs merged on or after this date (YYYY-MM-DD)")
     src.add_argument("--pr", type=int, nargs="+", help="these PRs, hard filters applied")
     p.add_argument("--no-filter", action="store_true", help="with --pr: skip the hard filters")
+    p.add_argument("--redo", action="store_true",
+                   help="also take PRs the ledger has already settled in an earlier run")
     p.add_argument("--until", help="with --since: merged on or before this date")
     p.add_argument("--config", help="default: cluster/config.yaml")
     args = p.parse_args()
@@ -93,24 +98,37 @@ def main() -> None:
     timings = {}
     log(f"preparing {run}")
 
-    # 1. the PRs
+    # 1. the PRs; those an earlier run settled (ledger.py) are skipped
     stage, notes = {}, {}
+    done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]))
+
+    def skip_settled(prs):
+        for pr in prs:
+            if pr in done:
+                e = done[pr]
+                stage[pr], notes[pr] = "in ledger", f"{e['outcome']} in run {e['run']} ({e['date'][:10]})"
+        n = sum(1 for pr in prs if pr in done)
+        if n:
+            log(f"{n} already settled in earlier runs (ledger); --redo takes them again")
+
     if args.pr:
         prs = list(dict.fromkeys(args.pr))
-        source = {"pr": prs, "hard_filter": not args.no_filter}
-        if not args.no_filter:
+        source = {"pr": prs, "hard_filter": not args.no_filter, "redo": args.redo}
+        skip_settled(prs)
+        fresh = [pr for pr in prs if pr not in stage]
+        if not args.no_filter and fresh:
             log("hard filters")
-            script("filter_candidates.py", "fetch", "--pr", *map(str, prs), env=env,
+            script("filter_candidates.py", "fetch", "--pr", *map(str, fresh), env=env,
                    logfile=logs / "fetch.log")
             sys.path.insert(0, str(REPO / "scripts"))
             import filter_candidates as fc
-            for pr in prs:
+            for pr in fresh:
                 f = fc.CACHE / f"{pr}.json"
                 ok, why = fc.classify(json.loads(f.read_text())) if f.exists() else (False, "fetch failed")
                 if not ok:
                     stage[pr], notes[pr] = "hard filter", why
     else:
-        source = {"since": args.since, "until": args.until}
+        source = {"since": args.since, "until": args.until, "redo": args.redo}
         log(f"fetching PRs merged {args.since} .. {args.until}")
         if script("filter_candidates.py", "fetch", "--since", args.since, "--until", args.until,
                   env=env, logfile=logs / "fetch.log"):
@@ -118,6 +136,7 @@ def main() -> None:
         if script("filter_candidates.py", "filter", env=env, logfile=logs / "filter.log"):
             sys.exit(f"filter failed; see {logs / 'filter.log'}")
         prs = [json.loads(l)["number"] for l in open(run / "candidates" / "candidates.jsonl")]
+        skip_settled(prs)
     timings["select"] = time.time() - t0
     log(f"{len(prs)} PRs")
 
@@ -125,8 +144,9 @@ def main() -> None:
     t = time.time()
     log(f"enriching, {par['enrich']} at a time")
     kept = [pr for pr in prs if pr not in stage]
-    script("filter_candidates.py", "enrich", "--parallel", str(par["enrich"]),
-           "--pr", *map(str, kept), env=env, logfile=logs / "enrich.log")
+    if kept:
+        script("filter_candidates.py", "enrich", "--parallel", str(par["enrich"]),
+               "--pr", *map(str, kept), env=env, logfile=logs / "enrich.log")
     enriched = [pr for pr in kept if (run / "enriched" / f"{pr}.json").exists()]
     timings["enrich"] = time.time() - t
     log(f"enriched {len(enriched)}/{len(kept)} in {timings['enrich']:.0f} s")
