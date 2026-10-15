@@ -11,6 +11,9 @@ and the tests actually run.
 - **Zephyr** instances are built, validated and run with Zephyr's own test
   runner, **twister**, in **Apptainer** images (no Docker needed), and are
   generated from PRs by a pipeline — see [Zephyr: the twister pipeline](#zephyr-the-twister-pipeline).
+  On Purdue Scholar the pipeline runs as one Slurm job over many nodes:
+  [docs/running_on_scholar.md](docs/running_on_scholar.md) (how to use it) and
+  [docs/pipeline_internals.md](docs/pipeline_internals.md) (how it works).
 - **NuttX and RIOT** instances are hand-built **Docker** images in
   `docker/instances/`.
 
@@ -24,7 +27,7 @@ and the tests actually run.
 |---|---|
 | Python | 3.11 (tested) |
 | Docker | NuttX and RIOT: running, ~40 GB free for images |
-| Apptainer | Zephyr: 1.2+ with rootless `--fakeroot` builds; ~5 GB of shared images plus 1.3–2.2 GB per instance, under `$EMBEDEVAL_WORK` (default `$SCRATCH/embedeval-twister`) |
+| Apptainer | Zephyr: 1.2+ with rootless `--fakeroot` builds; ~9 GB of shared images plus 2–5 GB per instance while it is built. With `cluster/`, all under `$SCRATCH/embedeval/`; scripts run on their own use `$EMBEDEVAL_WORK` (default `$SCRATCH/embedeval-twister`) |
 | git | for cloning upstream repos during validation |
 | API key | for whichever model you run |
 
@@ -197,7 +200,11 @@ free pass on it. This is not theoretical; see the `CONFIG_NDEBUG` note in
 
 ## Zephyr: the twister pipeline
 
-Zephyr instances are generated from merged PRs, never written by hand:
+Zephyr instances are generated from merged PRs, never written by hand. On
+Scholar, run the whole pipeline with `cluster/` -- prepare a run, submit one
+Slurm job, review the report, promote -- as described in
+[docs/running_on_scholar.md](docs/running_on_scholar.md). The stages, run one
+at a time (each script also takes `--run-dir DIR` to write into a run folder):
 
 ```bash
 python scripts/filter_candidates.py fetch --since 2024-01-01 --until 2024-06-30
@@ -224,7 +231,8 @@ python scripts/twister_pipeline.py --pr <pr>... --verdicts <dir>       # generat
   benchmark that evaluation runs on.
 
 Builds and runs need a node where Apptainer can build; on Scholar, inside a
-`spark-batch` job (see `docs/spark_triage_setup.md`).
+`spark-batch` job. How the stages, the model server and the cluster job fit
+together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 
 ---
 
@@ -233,6 +241,12 @@ Builds and runs need a node where Apptainer can build; on Scholar, inside a
 ```
 harness/            run.py, evaluate_patches.py, paths.py, projects.py,
                     apptainer_env.py (Zephyr agent environment)
+cluster/            the Zephyr pipeline on Scholar: config, setup.py, prepare.py,
+                    submit.py, node_worker.py, report.py, the job template
+docs/               running_on_scholar.md (using the pipeline),
+                    pipeline_internals.md (how it works), pr_triage.md (the
+                    model's triage instructions), stage1_pr_candidates.md (the gold PRs)
+triage/             models.json (model profiles), gold.json (the gold set)
 scripts/            Zephyr pipeline: filter_candidates.py, zephyr_env.py,
                     dry_run.py, triage_prs.py, generate_instance.py,
                     build_instances.py, validate_instance.py, twister_pipeline.py, ...

@@ -81,10 +81,10 @@ def check_model(cfg: dict) -> None:
     found = (weights / "config.json").exists()
     report("found" if found else "FAIL", f"model weights ({profile})",
            str(weights) if found else f"missing {weights}: download the model there "
-           "(see docs/spark_triage_setup.md)")
+           "(see docs/running_on_scholar.md, 3.2)")
     img = Path(p["vllm_image"])
     report("found" if img.exists() else "FAIL", "vLLM image",
-           str(img) if img.exists() else f"missing {img} (see docs/spark_triage_setup.md)")
+           str(img) if img.exists() else f"missing {img} (see docs/running_on_scholar.md, 3.2)")
     cache = Path(cfg["derived"]["vllm_cache"])
     warm = (cache / ".warm").exists()
     report("found" if warm else "note", "vLLM compile cache",
