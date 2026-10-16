@@ -29,6 +29,7 @@ import argparse
 import fcntl
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -117,14 +118,24 @@ _filling = None    # the open lock file while this node fills the shared compile
 
 
 def compile_cache(cfg: dict, node_dir: Path) -> Path:
-    """The shared vLLM compile cache, once it is warm. vLLM writes its own path
-    into what it compiles, so it is never copied: the first server to start
-    fills it in place, holding a lock; servers starting meanwhile compile into
-    a private cache of their node."""
+    """The vLLM compile cache this node's server uses. The server sees it at
+    one fixed path, /vllm-cache (serve_triage_model.sh), so the paths vLLM
+    writes into it hold for any copy. The first server to start fills the
+    shared cache in place, holding a lock; servers starting meanwhile compile
+    into an empty cache of their node. Once the shared cache is warm, each
+    server gets a private copy of it: a warm cache can still lack a piece
+    (one model part compiled only later), and servers compiling that piece
+    into one shared cache at once break each other on NFS."""
     global _filling
     cache = Path(cfg["derived"]["vllm_cache"])
     if (cache / WARM).exists():
-        return cache
+        own = node_dir / "work" / "vllm-cache"
+        os.environ["EMBEDEVAL_WORK"] = str(node_dir / "work")
+        import apptainer_util as au
+        au.remove(own)
+        shutil.copytree(cache, own, ignore=shutil.ignore_patterns(".fill.lock"))
+        log(f"compile cache copied from {cache}")
+        return own
     cache.mkdir(parents=True, exist_ok=True)
     f = open(cache / ".fill.lock", "w")
     try:

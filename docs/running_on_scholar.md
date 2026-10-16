@@ -593,8 +593,8 @@ What you can delete:
 | `shared/zephyr.git` | yes; `setup.py` clones it again |
 | model weights, the vLLM image | only if you download them again |
 
-Do not move `shared/vllm-cache/` or `shared/venvs/`: both contain their own
-absolute path, so they break if moved. Delete them instead.
+Do not move `shared/venvs/`: the venvs contain their own absolute path, so
+they break if moved. Delete them instead.
 
 **Use `cluster/` (or `--run-dir`) for pipeline work.** The scripts in
 `scripts/` still work on their own, but without `--run-dir` they write next

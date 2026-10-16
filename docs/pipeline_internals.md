@@ -288,13 +288,17 @@ GiB, vLLM sees 120) and `--max-num-seqs 4`, which is why
 
 **The compile cache.** On its first start vLLM compiles kernels for the
 model (about 8 minutes) and saves them in its cache; later starts reuse
-them. The saved files contain the cache's absolute path, and vLLM writes
-through it, so a cache cannot be copied or moved: a copy keeps writing into
-the original. So every run uses one shared cache, `shared/vllm-cache`
-(`paths.vllm_cache`), in place. The first server to start takes a lock
-(`.fill.lock`) and fills it, then marks it `.warm`; servers starting
-meanwhile compile into their node's own folder instead of touching a
-half-filled cache. After that, every server starts from the warm cache.
+them. The saved files contain the cache's own path, so the server always
+sees its cache at one fixed path inside the container, `/vllm-cache`; then
+a copy of a cache works like the original. The shared cache is
+`shared/vllm-cache` (`paths.vllm_cache`). The first server to start takes a
+lock (`.fill.lock`), fills it in place and marks it `.warm`; servers starting
+meanwhile compile into an empty cache of their node. After that, each server
+starts from its own copy of the warm cache (`nodes/node<N>/work/vllm-cache`,
+84 MB). The copy matters: a warm cache can still lack a piece that vLLM
+compiles at start-up (the speculative-decoding head was one), and ten
+servers writing that piece into one shared cache on NFS at once crashed
+three of them (`Stale file handle`).
 
 Throughput, Qwen3.8 NVFP4 on one GB10: about 28 tokens/s for one request,
 43 in total for 4 at once (11 each). Each PR is slower when sharing the
@@ -330,7 +334,7 @@ The variables `cluster/` sets for every step (`config.env_for()`):
 | `EMBEDEVAL_ZEPHYR_CLONE` | the full bare clone | `paths.zephyr_clone` |
 | `EMBEDEVAL_MODELS` | the model weights folder | `paths.models` |
 | `EMBEDEVAL_VLLM_IMAGE` | the vLLM `.sif` | `paths.vllm_image` |
-| `EMBEDEVAL_VLLM_CACHE` | the compile cache the server uses | `paths.vllm_cache`, or the node's own while it is being filled |
+| `EMBEDEVAL_VLLM_CACHE` | the compile cache the server uses, seen as `/vllm-cache` | `paths.vllm_cache` while filling it; else the node's copy of it, or the node's own while another node fills it |
 | `EMBEDEVAL_SCRATCH` | where the server keeps its other caches | `nodes/node<N>/scr` |
 | `EMBEDEVAL_BUILD_TIMEOUT_MIN` | the cap of one image build | `caps.build` |
 
@@ -341,7 +345,7 @@ The variables `cluster/` sets for every step (`config.env_for()`):
 | Zephyr clone | `shared/zephyr.git` | `setup.py`; commits fetched by `prepare.py` | every run, read-only during jobs |
 | Python, SDK images | `shared/images/` | `setup.py`, `prepare.py` | every run |
 | dry-run venvs | `shared/venvs/` | `dry_run.py`, under a lock per venv | every run |
-| vLLM compile cache | `shared/vllm-cache/` | the first server, under a lock | every server |
+| vLLM compile cache | `shared/vllm-cache/` | the first server, under a lock | every server, each through its own copy |
 | ledger | `shared/ledger.jsonl` | `report.py`, under a lock | every `prepare.py` |
 | instance images | `nodes/node<N>/work/images/instances/` | `build_instances.py` | nobody: deleted after validation |
 | everything else | `runs/<run>/` | the run | nobody |
