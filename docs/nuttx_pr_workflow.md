@@ -275,6 +275,52 @@ rejected with a `qemu_lead` (board, confidence, why);
 `triage/nuttx_qemu_leads.jsonl`, to revisit once a QEMU template and runner
 exist.
 
+## Per-apps-PR search (new Phase 1)
+
+The pair mode above needs a link to propose a pair. The per-apps-PR mode
+gives the model one merged apps PR that changes `testing/ostest/` (189 of
+them, from `candidates/nuttx/apps_merged_file_scan.json`) and lets it
+classify the PR and find the kernel PRs itself. The prompt is
+`docs/nuttx_apps_triage.md`.
+
+```sh
+# apps-only records (PR, commits, comments, timeline, test sources)
+python scripts/nuttx_candidates.py enrich-apps --ostest-scan
+# search: --apps-pr N..., --gold, or --all-ostest; --blind hides links
+python scripts/triage_nuttx_prs.py apps --profile qwen38-nvfp4 --gold
+python scripts/triage_nuttx_prs.py eval triage/nuttx_runs/<run>
+# build a proposed high or medium pair
+python scripts/generate_nuttx_instance.py \
+  --triage triage/nuttx_runs/<run>/apps-3790.json --kernel-pr 20112
+# after validation: valid pairs join must_find, failures go to needs_review
+python scripts/triage_nuttx_prs.py gold-promote generated/nuttx__nuttx-20112
+```
+
+Its tools read either repository at the apps PR's base or head, a kernel
+PR's base or head, any commit, or the default branch as of a date;
+`git_log` searches history by date, symbol (`-S`), regex (`-G`), message and
+path; `open_ref` follows PR, issue and commit references (through `gh api`,
+cached in `candidates/nuttx/github/`) and maps a commit to its merged PR.
+Each apps PR has a budget, by default 40 tool calls and 30 minutes; a case
+that runs out without a valid verdict is recorded as `budget_exhausted`.
+`git_log` with `symbol` over the whole kernel history takes about two
+minutes on Scholar, so the model is told to narrow it.
+
+A verdict gives a `kind` (`kernel_test`, `test_only`, `apps_fix`,
+`qemu_only`), `kernel_search` (`found` or `nothing_found`), what was
+`searched`, and `pairs`, each with a confidence and evidence. High and
+medium pairs carry the generator fields and go to generation and
+validation; low ones are only recorded; QEMU pairs also go to
+`qemu_leads.jsonl`. A run writes `pairs.jsonl`, one line per pair.
+
+The gold `triage/nuttx_apps_gold.json` is partial: per apps PR a kind,
+`must_find` (known valid pairs, required at high or medium) and
+`must_not_propose` (known wrong pairs, forbidden at high or medium). Other
+proposals are unknown: not penalized, listed in the scorecard for
+validation. A `--blind` run strips kernel links, kernel URLs, commit hashes
+and the known partner numbers from the record and from apps-side tool
+output, to measure search without links; it is scored separately.
+
 ## Running NuttX triage on Scholar
 
 Triage runs on Scholar's Spark nodes against a vLLM model server; validation
@@ -330,7 +376,7 @@ What bit us, so the script handles it:
 | Native Docker image and whole-suite runner | Implemented; optional config settings and clean rebuild are recorded in metadata, changed-test banners are derived |
 | Old-fail/fixed-pass validation | Implemented through the shared validator; each new generated instance still needs a recorded local run |
 | QEMU-specific image and runner | Awaiting a concrete candidate that needs QEMU; discovery does not exclude it |
-| Unlinked-pair discovery (merge-window + symbol overlap) | Not implemented; a possible future option if linked-pool recall proves insufficient, see above |
+| Unlinked-pair discovery | Per-apps-PR model search over history and symbols (`triage_nuttx_prs.py apps`); `--blind` runs measure it on the gold; not yet run on all 189 PRs |
 
 The next small milestones are: check that the scripted pair pool rediscovers
 the six validated pairs; score the AI triage on that pool and the provisional
