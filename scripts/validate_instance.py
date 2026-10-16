@@ -27,12 +27,18 @@ image itself is never changed:
 "Fail" is any failure -- a test, the build or the configuration -- but not
 "nothing ran": a scenario filtered on the board (exit 3) is invalid, never a
 failure to fix. A report is written to <instance>/validation.json.
+
+NuttX instances rendered for Apptainer (metadata "runtime": "apptainer";
+scripts/render_nuttx_instance.py --runtime apptainer) are validated the same
+way in their image, with the NuttX steps of the Docker validator and the same
+validation.json report.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -60,7 +66,8 @@ def gold_patch(meta: dict, workdir: Path) -> str:
 
     Zephyr and RIOT are single-repo (base_commit..fix_commit). NuttX is two
     repos and the fix lives in the kernel one, between kernel_base_commit and
-    kernel_merge_commit.
+    kernel_merge_commit. With a local kernel clone (EMBEDEVAL_NUTTX_CLONE) the
+    diff is taken there, fetching only a commit it lacks.
     """
     project = meta["project"]
     if project == "nuttx":
@@ -68,10 +75,17 @@ def gold_patch(meta: dict, workdir: Path) -> str:
     else:
         repo, base, fix = meta["repo"], meta["base_commit"], meta["fix_commit"]
 
-    clone = workdir / "repo"
-    print(f"  cloning {repo} (blobless) ...")
-    sh(["git", "clone", "--filter=blob:none", "--no-checkout", repo, str(clone)], timeout=900)
-    sh(["git", "-C", str(clone), "fetch", "origin", base, fix], timeout=900)
+    local = layout.nuttx_clones()[0] if project == "nuttx" else None
+    if local:
+        clone = local
+        for sha in (base, fix):
+            if sh(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:
+                sh(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
+    else:
+        clone = workdir / "repo"
+        print(f"  cloning {repo} (blobless) ...")
+        sh(["git", "clone", "--filter=blob:none", "--no-checkout", repo, str(clone)], timeout=900)
+        sh(["git", "-C", str(clone), "fetch", "origin", base, fix], timeout=900)
 
     files = meta.get("files_changed_by_fix", [])
     cmd = ["git", "-C", str(clone), "diff", f"{base}..{fix}", "--"]
@@ -221,11 +235,176 @@ def _finish(instance_id: str, report: dict) -> bool:
     return report["valid"]
 
 
+def error_lines(output: str) -> str:
+    """The lines of a failed build that look like errors, indented. A parallel
+    build's last lines are usually other files still compiling."""
+    out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", output)
+    lines = [line.strip() for line in re.split(r"[\r\n]+", out)
+             if re.search(r"error:|undefined reference|Illegal instruction|\*\*\*",
+                          line, re.IGNORECASE)]
+    text = "\n".join(lines[-15:]) if lines else out[-400:]
+    return "  " + text.strip().replace("\n", "\n  ")
+
+
+def compile_diagnostic(meta: dict, output: str):
+    """A NuttX compile_error instance's expected diagnostic in a build's
+    output, or None.
+
+    Covers both a compiler diagnostic (missing symbol in the test source) and
+    a linker diagnostic (missing symbol at link time, e.g. a test calling a
+    kernel API the unfixed kernel doesn't implement yet) -- same bucket: the
+    unfixed tree can't build.
+    """
+    source, missing_api = meta.get("compile_test_source"), meta.get("missing_api")
+    if not source or not missing_api:
+        return None
+    return re.search(
+        rf"(?:^|[\s/]){re.escape(Path(source).name)}:\d+(?::\d+)?:\s*"
+        rf"(?:(?:fatal )?error:|undefined reference to)[^\n]*{re.escape(missing_api)}",
+        output,
+    )
+
+
+NUTTX_RUN_TESTS_MEANING = {0: "passed", 1: "failed", 2: "timed out"}
+
+
+def nuttx_summary(output: str) -> list[str]:
+    """run_tests' verdict lines, and the lines of ostest's output that say
+    what went wrong."""
+    return [l for l in output.splitlines()
+            if l.startswith(("run_tests:", "ostest_main: Exiting"))
+            or "ERROR" in l or re.search(r"assert", l, re.IGNORECASE)][-20:]
+
+
+def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
+                             verbose: bool) -> bool:
+    """A NuttX instance in its Apptainer image (metadata "runtime":
+    "apptainer"). The steps of the Docker validator below, in one writable
+    overlay on the image, and a validation.json report as for Zephyr:
+
+        1. build                -> runtime_assert: must build, run_tests must FAIL (exit 1)
+                                   compile_error: must fail, naming missing_api in
+                                   compile_test_source
+        2. apply the kernel fix (kernel_base_commit..kernel_merge_commit,
+           files_changed_by_fix only); make clean if clean_after_patch
+        3. build, run_tests     -> must PASS (exit 0)
+    """
+    meta = instances.load_metadata(instance_id)
+    image = au.instance_image(instance_id)
+    build_cmd = meta["build_command"]
+    compile_case = meta.get("fail_type") == "compile_error"
+    print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
+    report = {"instance_id": instance_id, "image": str(image), "host": platform.machine(),
+              "fail_type": meta.get("fail_type"), "valid": False,
+              "recipe_sha256": au.recipe_fingerprint(instances.instance_dir(instance_id),
+                                                     au.NUTTX_RECIPE_FILES),
+              "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if not image.exists():
+        print(f"  ERROR: image not built: {image}")
+        report["reason"] = "image not built"
+        return _finish(instance_id, report)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_dir = au.path("runs", f"{instance_id}-{stamp}", "x").parent
+    overlay = run_dir / "overlay"
+    overlay.mkdir(parents=True)
+    logdir = au.path("logs", instance_id, f"validate-{stamp}", "x").parent
+    logdir.mkdir(parents=True, exist_ok=True)
+    report["logs"] = str(logdir)
+    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay)
+
+    def step(label: str, cmd: str, log: str, t: int):
+        print(f"    {label} ...", end="", flush=True)
+        t0 = time.time()
+        try:
+            r = subprocess.run(container + ["bash", "-c", f"cd /testbed && {cmd}"],
+                               capture_output=True, text=True, timeout=t)
+            rc, out = r.returncode, (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            rc = "timeout"
+        (logdir / log).write_text(out)
+        secs = time.time() - t0
+        print(f" {secs:.0f}s (rc={rc})")
+        if verbose:
+            print(out)
+        return rc, out, secs
+
+    def invalid(why: str, detail: str = "") -> bool:
+        print(f"  INVALID: {why}")
+        if detail:
+            print(detail)
+        report["reason"] = why
+        return _finish(instance_id, report)
+
+    def run_tests(when: str):
+        rc, out, secs = step("run_tests", "run_tests", f"{when}.log", timeout)
+        report[when].update(rc=rc, meaning=NUTTX_RUN_TESTS_MEANING.get(rc, str(rc)),
+                            seconds=round(secs), summary=nuttx_summary(out))
+        for line in report[when]["summary"]:
+            print(f"      {line}")
+        return rc
+
+    try:
+        print("\n  Step 1: expecting the tests to FAIL at the base commit")
+        rc, out, secs = step("build", build_cmd, "build-before.log", 900)
+        report["before"] = {"build_rc": rc, "build_seconds": round(secs)}
+        if compile_case:
+            diagnostic = compile_diagnostic(meta, out)
+            if rc == 0 or not diagnostic:
+                return invalid("expected a compile or link error in the changed test source "
+                               "naming the missing API", error_lines(out) if rc != 0 else "")
+            report["before"]["diagnostic"] = diagnostic.group(0).strip()
+            print(f"  ok: expected test-side build error: {report['before']['diagnostic']}")
+        else:
+            if rc != 0:
+                return invalid(f"the runtime test did not build (rc={rc})", error_lines(out))
+            rc = run_tests("before")
+            if rc != 1:
+                return invalid({0: "tests PASSED before the fix -- the instance does not "
+                                   "isolate the bug"}.get(rc, f"expected a test failure (rc=1), "
+                                                              f"got rc={rc}"))
+
+        print("\n  Step 2: applying the upstream fix, expecting the tests to PASS")
+        patch_text = (Path(patch_override).read_text() if patch_override
+                      else gold_patch(meta, run_dir))
+        (run_dir / "fix.diff").write_text(patch_text)
+        rc, out, _ = step("git apply", "git apply /embedeval-run/fix.diff", "apply.log", 300)
+        if rc != 0:
+            return invalid("the fix does not apply", "  " + out.strip()[:300])
+        if meta.get("clean_after_patch"):
+            rc, out, _ = step("make clean", "make clean", "clean.log", 300)
+            if rc != 0:
+                return invalid(f"make clean failed (rc={rc})", error_lines(out))
+        rc, out, secs = step("rebuild", build_cmd, "build-after.log", 900)
+        report["after"] = {"build_rc": rc, "build_seconds": round(secs)}
+        if rc != 0:
+            return invalid(f"the build failed with the fix (rc={rc})", error_lines(out))
+        rc = run_tests("after")
+        if rc != 0:
+            return invalid({1: "tests still fail with the fix",
+                            2: "run_tests timed out with the fix"}.get(rc, f"run_tests ended "
+                                                                           f"with {rc}"))
+
+        print("\n  VALID: fails before the fix, passes after")
+        report["valid"] = True
+        report["reason"] = "fails before the fix, passes after"
+        return _finish(instance_id, report)
+    except Exception as e:
+        print(f"  ERROR: {type(e).__name__}: {e}")
+        report["reason"] = f"error: {type(e).__name__}: {e}"
+        return _finish(instance_id, report)
+    finally:
+        au.remove(run_dir)
+
+
 def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
              verbose: bool = False) -> bool:
     meta = instances.load_metadata(instance_id)
     if meta.get("pipeline") == "twister":
         return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
+    if meta["project"] == "nuttx" and meta.get("runtime") == "apptainer":
+        return validate_nuttx_apptainer(instance_id, patch_override, timeout, verbose)
     if meta["project"] == "zephyr":
         print(f"  SKIP: {instance_id} is a Docker Zephyr instance, kept as reference "
               f"metadata only; Zephyr instances are validated from the twister pipeline "
@@ -287,14 +466,7 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         return out
 
     def build_errors(r) -> str:
-        # A parallel build's last lines are usually other files still
-        # compiling, so show the lines that look like errors instead.
-        out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", step_output(r))
-        lines = [line.strip() for line in re.split(r"[\r\n]+", out)
-                 if re.search(r"error:|undefined reference|Illegal instruction|\*\*\*",
-                              line, re.IGNORECASE)]
-        text = "\n".join(lines[-15:]) if lines else out[-400:]
-        return "  " + text.strip().replace("\n", "\n  ")
+        return error_lines(step_output(r))
 
     try:
         # --- Step 1: tests must FAIL on the unfixed code -------------------
@@ -303,18 +475,8 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         before_build = dexec(f"cd /testbed && {build_cmd}", 900, "build",
                              capture=compile_before)
         if compile_before:
-            source = meta.get("compile_test_source")
-            missing_api = meta.get("missing_api")
             output = (before_build.stdout or "") + (before_build.stderr or "")
-            # Covers both a compiler diagnostic (missing symbol in the test
-            # source) and a linker diagnostic (missing symbol at link time,
-            # e.g. a test calling a kernel API the unfixed kernel doesn't
-            # implement yet) -- same bucket: the unfixed tree can't build.
-            diagnostic = re.search(
-                rf"(?:^|[\s/]){re.escape(Path(source).name)}:\d+(?::\d+)?:\s*"
-                rf"(?:(?:fatal )?error:|undefined reference to)[^\n]*{re.escape(missing_api)}",
-                output,
-            ) if source and missing_api else None
+            diagnostic = compile_diagnostic(meta, output)
             if before_build.returncode == 0 or not diagnostic:
                 print("  FAIL: expected a compile or link error in the changed test "
                       "source naming the missing API")

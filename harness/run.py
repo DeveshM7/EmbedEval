@@ -11,6 +11,8 @@ an Apptainer environment instead of Docker, e.g. with the local Qwen server:
     EMBEDEVAL_INSTANCES_DIR=generated python harness/run.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
 
+So do NuttX instances whose metadata says "runtime": "apptainer".
+
 Replaces run_instance.py, run_nuttx_instance.py, run_riot_instance.py and
 run_all.py, which were ~50% duplicated and disagreed on prompt format, .env
 handling and the API-key check.
@@ -247,8 +249,9 @@ def build_task(meta: dict) -> str:
 
 def make_environment(meta: dict):
     cfg = projects.config_for(meta)
-    if cfg.get("runtime") == "apptainer":
-        # Zephyr: an Apptainer image built by scripts/build_instances.py.
+    if projects.setting(meta, "runtime") == "apptainer":
+        # Zephyr, and NuttX instances rendered for Apptainer: an Apptainer
+        # image built by scripts/build_instances.py.
         sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
         import apptainer_util
         from apptainer_env import ApptainerEnvironment
@@ -258,13 +261,16 @@ def make_environment(meta: dict):
         # `git diff` show the agent's changes alone, so capture_patch's check
         # for edits to protected paths means what it says. Graded patches still
         # apply to the image as built: the same files, the same content.
+        # NuttX needs no such commit: its test changes are in apps/, a
+        # repository of its own that the image keeps out of the kernel's git.
         commit_tests = ("cd /testbed && git add -A -- tests/ && git -c user.name=EmbedEval "
                         "-c user.email=embedeval@localhost commit -q -m "
                         "'The PR test changes, without its fix'")
         return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
-                                    setup_commands=[commit_tests])
+                                    setup_commands=[commit_tests] if meta["project"] == "zephyr"
+                                    else [])
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed",

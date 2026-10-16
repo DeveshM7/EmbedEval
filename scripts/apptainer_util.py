@@ -1,6 +1,7 @@
 """
-Apptainer plumbing shared by the Zephyr twister pipeline: where large files
-live, how images are built, and the only way anything gets deleted.
+Apptainer plumbing shared by the Zephyr twister pipeline and the NuttX
+Apptainer instances: where large files live, how images are built, and the
+only way anything gets deleted.
 
 Images are layered, each built FROM the previous one (Bootstrap: localimage):
 
@@ -13,6 +14,14 @@ Images are layered, each built FROM the previous one (Bootstrap: localimage):
                                  commit, modules, requirements, test patch,
                                  pre-build. One per instance; deleted once the
                                  instance has been validated.
+
+NuttX has one shared layer, from templates/nuttx/apptainer/:
+
+    nuttx-sim-<hash>.sif         Ubuntu 24.04 and the tools sim:nsh builds
+                                 with, plus compatibility patches for old
+                                 kernels.
+    instances/<id>.sif           + the kernel and apps at their base commits,
+                                 configured, with the test patch.
 
 All of it lives under the work root -- $EMBEDEVAL_WORK, else <run dir>/work
 with --run-dir (scripts/layout.py), else $SCRATCH/embedeval-twister, else
@@ -34,6 +43,7 @@ import layout
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
+NUTTX_TEMPLATES = REPO_ROOT / "templates" / "nuttx" / "apptainer"
 
 
 def _default_root() -> Path:
@@ -186,13 +196,25 @@ def sdk_image(sdk: str, py: str) -> Path:
                                  f"{recipe_tag('sdk.def')}.sif")
 
 
+def nuttx_base_image() -> Path:
+    """The shared NuttX image. Named by a fingerprint of its recipe and of
+    the patch it carries, for the same reason as recipe_tag."""
+    import hashlib
+    h = hashlib.sha256()
+    for name in ("base.def", "sim_tcbinfo_arm64.patch"):
+        h.update((NUTTX_TEMPLATES / name).read_bytes())
+    return shared_path("images", f"nuttx-sim-{h.hexdigest()[:8]}.sif")
+
+
 def instance_image(instance_id: str) -> Path:
     return path("images", "instances", f"{instance_id}.sif")
 
 
 def build(image: Path, definition: Path, build_args: dict, log: Path,
-          timeout_min: int = 60, attempts: int = 2) -> bool:
-    """apptainer build --fakeroot, with a time limit and a retry.
+          timeout_min: int = 60, attempts: int = 2,
+          binds: dict[Path, str] | None = None) -> bool:
+    """apptainer build --fakeroot, with a time limit and a retry. `binds`
+    are host paths %post can read, such as a local clone to check out from.
 
     The retry is for the network, not for broken recipes: an image build once
     hung for 21 minutes inside `apt-get update`. A recipe that fails the same
@@ -209,6 +231,8 @@ def build(image: Path, definition: Path, build_args: dict, log: Path,
     cmd = ["apptainer", "build", "--fakeroot", "--force"]
     for k, v in build_args.items():
         cmd += ["--build-arg", f"{k}={v}"]
+    for src, dst in (binds or {}).items():
+        cmd += ["--bind", f"{src}:{dst}:ro"]
     cmd += [str(partial), str(definition)]
     for attempt in range(1, attempts + 1):
         start = time.time()
@@ -254,6 +278,17 @@ def ensure_base_images(py: str, sdk: str, sdk_archive: str, logdir: Path) -> Pat
     return simg
 
 
+def ensure_nuttx_base_image(logdir: Path) -> Path:
+    """Build the shared NuttX image if it does not exist yet."""
+    img = nuttx_base_image()
+    if not img.exists():
+        print(f"  building shared image {img.name} ...")
+        if not build(img, NUTTX_TEMPLATES / "base.def", {},
+                     logdir / f"build-{img.stem}.log"):
+            raise RuntimeError(f"could not build {img.name}")
+    return img
+
+
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
               overlay: Path | None = None, env: dict | None = None) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
@@ -272,12 +307,13 @@ def exec_args(image: Path, binds: dict[Path, str] | None = None,
 # The files an instance image is built from. Their fingerprint is recorded in
 # validation.json, so a recipe changed after validation is never promoted.
 RECIPE_FILES = ("instance.def", "instance.json", "run_tests.py", "test_patch.diff")
+NUTTX_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff")
 
 
-def recipe_fingerprint(instance_dir: Path) -> str:
+def recipe_fingerprint(instance_dir: Path, files: tuple[str, ...] = RECIPE_FILES) -> str:
     import hashlib
     h = hashlib.sha256()
-    for name in RECIPE_FILES:
+    for name in files:
         h.update(name.encode() + b"\0" + (Path(instance_dir) / name).read_bytes() + b"\0")
     return h.hexdigest()
 

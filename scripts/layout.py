@@ -22,6 +22,10 @@ Shared between runs, set by environment variable:
     EMBEDEVAL_SHARED        Python and SDK images, dry-run venvs, the uv cache
                             (scripts/apptainer_util.py)
     EMBEDEVAL_ZEPHYR_CLONE  the full Zephyr clone; default candidates/zephyr.git
+    EMBEDEVAL_NUTTX_CLONE, EMBEDEVAL_NUTTX_APPS_CLONE
+                            full NuttX kernel and apps clones, if any: NuttX
+                            Apptainer images check out from them instead of
+                            GitHub, and the validator diffs the fix there
 
 Imported before any module computes a path, so it reads `--run-dir` from the
 command line itself and removes it, before argparse sees the arguments.
@@ -105,6 +109,12 @@ def lookup_overlay() -> Path | None:
 def zephyr_clone() -> Path:
     value = os.environ.get("EMBEDEVAL_ZEPHYR_CLONE")
     return Path(value) if value else REPO_ROOT / "candidates" / "zephyr.git"
+
+
+def nuttx_clones() -> tuple[Path | None, Path | None]:
+    """The local NuttX kernel and apps clones; None for one not given."""
+    return tuple(Path(os.environ[v]) if os.environ.get(v) else None
+                 for v in ("EMBEDEVAL_NUTTX_CLONE", "EMBEDEVAL_NUTTX_APPS_CLONE"))
 
 
 def show(p: Path) -> str:
