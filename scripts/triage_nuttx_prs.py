@@ -440,6 +440,27 @@ def proposed(verdict: dict) -> list[dict]:
             and pair.get("confidence") in ("high", "medium")] if isinstance(pairs, list) else []
 
 
+def searched_followups(pair: dict, record: dict) -> bool:
+    kernel = next((pr for pr in record.get("kernel_candidates", [])
+                   if pr["number"] == pair["kernel_pr"]), None)
+    paths = pair.get("fix_paths") or []
+    if not kernel or not kernel.get("merged_at") or not paths:
+        return False
+    start = kernel["merged_at"][:10]
+    end = max(start, record["apps"]["merged_at"][:10])
+    for search in record["followup_searches"]:
+        searched = search.get("paths") or []
+        since, until = search.get("since"), search.get("until")
+        if (search.get("repo", "kernel") != "kernel" or not isinstance(searched, list)
+                or not isinstance(since, str) or not isinstance(until, str)):
+            continue
+        if (since <= start and until >= end
+                and any(fix == path or fix.startswith(path.rstrip("/") + "/")
+                        for fix in paths for path in searched)):
+            return True
+    return False
+
+
 def check_apps_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
     """A per-apps-PR verdict: its kind, its search outcome and every pair.
     Low pairs are recorded only, so they need just a kernel PR and evidence;
@@ -485,6 +506,12 @@ def check_apps_verdict(verdict: dict | None, case: str, record: dict) -> list[st
         if pair.get("confidence") in ("high", "medium"):
             issues.extend(f"{where}: {issue}" for issue in check_pair(pair, record))
     sent = proposed(verdict)
+    if "followup_searches" in record:
+        for pair in sent:
+            if not searched_followups(pair, record):
+                issues.append(f"kernel #{pair['kernel_pr']}: run the dated follow-up "
+                              "git_log search on its production paths from the kernel "
+                              "PR merge through the apps PR merge, then inspect later commits")
     if kind in ("test_only", "apps_fix") and sent:
         issues.append(f"kind {kind} has no kernel PR to pair; give its kernel leads "
                       "confidence low, or choose another kind")
@@ -1141,7 +1168,17 @@ def triage_apps_one(case: str, record: dict, profile: str, settings: dict, api_b
     messages = [{"role": "system", "content": APPS_PROMPT.read_text()},
                 {"role": "user", "content": "Apps PR record:\n" + render_apps_record(case, record)}]
     record.setdefault("kernel_candidates", [])   # kernel PRs opened during the search
+    record["followup_searches"] = []
     trace = {"case": case, "turns": [], "repairs": [], "error": None}
+
+    def checked_tool(name, args):
+        result = run_tool(name, args, record, free=True)
+        if name == "git_log" and not result.startswith("error:"):
+            search = dict(args)
+            if isinstance(search.get("paths"), str):
+                search["paths"] = [search["paths"]]
+            record["followup_searches"].append(search)
+        return result
 
     def check(reply):
         for pair in proposed(reply or {}):   # fetch the PRs the checks compare against
@@ -1157,7 +1194,7 @@ def triage_apps_one(case: str, record: dict, profile: str, settings: dict, api_b
     start = time.time()
     try:
         verdict, issues = converse(messages, options, APPS_TOOLS,
-                                   lambda name, args: run_tool(name, args, record, free=True),
+                                   checked_tool,
                                    check, trace, max_calls=max_calls,
                                    deadline=start + max_minutes * 60)
     except Exception as exc:

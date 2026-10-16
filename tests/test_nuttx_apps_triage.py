@@ -103,6 +103,20 @@ class AppsVerdictTests(unittest.TestCase):
     def record(self):
         return {**apps_record(), "kernel_candidates": [kernel_pr()]}
 
+    def test_pair_needs_a_dated_followup_search_on_its_fix_path(self):
+        record = self.record()
+        record["followup_searches"] = []
+        reply = verdict(full_pair())
+        self.assertTrue(any("follow-up" in issue for issue in
+                            triage.check_apps_verdict(reply, "apps-7", record)))
+        record["followup_searches"] = [
+            {"repo": "kernel", "since": "2024-01-01", "until": "2024-01-02",
+             "paths": ["sched/unrelated.c"]}]
+        self.assertTrue(any("follow-up" in issue for issue in
+                            triage.check_apps_verdict(reply, "apps-7", record)))
+        record["followup_searches"][0]["paths"] = ["sched/example.c"]
+        self.assertEqual(triage.check_apps_verdict(reply, "apps-7", record), [])
+
     def test_complete_pair_passes(self):
         self.assertEqual(triage.check_apps_verdict(verdict(full_pair()), "apps-7", self.record()), [])
 
@@ -429,13 +443,16 @@ class AppsConversationTests(unittest.TestCase):
         reply = verdict(full_pair(), {"kernel_pr": 12, "confidence": "low",
                                       "platform": "qemu-armv8a:nsh", "evidence": ["smp"]})
         result, output, llm, tool, run_dir = self.run_case([
-            {"tools": [("git_log", {"message": "example"}), ("open_ref", {"ref": "apache/nuttx#11"})]},
+            {"tools": [("git_log", {"message": "example"}),
+                       ("open_ref", {"ref": "apache/nuttx#11"}),
+                       ("git_log", {"repo": "kernel", "since": "2024-01-01",
+                                    "until": "2024-01-02", "paths": ["sched/example.c"]})]},
             {"content": json.dumps(reply)}])
         self.assertEqual(result["issues"], [])
-        self.assertEqual(tool.call_count, 2)
+        self.assertEqual(tool.call_count, 3)
         self.assertTrue(all(call.kwargs.get("free") for call in tool.call_args_list))
         self.assertEqual(output["kind"], "kernel_test")
-        self.assertEqual(output["budget"], {"tool_calls": 2, "seconds": output["budget"]["seconds"],
+        self.assertEqual(output["budget"], {"tool_calls": 3, "seconds": output["budget"]["seconds"],
                                             "exhausted": None})
         lead = json.loads((run_dir / "qemu_leads.jsonl").read_text())
         self.assertEqual((lead["case"], lead["kernel_pr"]), ("apps-7", 12))
