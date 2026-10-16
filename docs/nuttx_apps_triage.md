@@ -1,0 +1,162 @@
+# NuttX apps-PR triage: classify the test, find its kernel PRs
+
+You review one merged `apache/nuttx-apps` PR that changes `testing/ostest/`.
+EmbedEval turns a kernel change in `apache/nuttx` plus an apps test change
+into a task: an agent gets the kernel from **before** the kernel PR and the
+apps test changes, and must make the tests pass. You decide what kind of
+change this apps PR is and find, yourself, the kernel PR or PRs whose change
+its test changes detect. Nobody has paired it for you.
+
+Pairs you propose at `high` or `medium` confidence are built and run: the
+old kernel plus the new test must fail, the fixed kernel plus the same test
+must pass. That run, not you, decides validity, so propose every kernel PR
+that plausibly fits, with the evidence. Pairs at `low` are only recorded.
+
+## 1. Classify the apps PR (`kind`)
+
+- `kernel_test`: the changed test checks kernel behavior that some kernel
+  PR changed. With the old kernel the changed test fails (assertion, wrong
+  result, crash, or a compile/link error because an interface it uses does
+  not exist yet); with the new kernel it passes. This includes a test
+  updated to expect a deliberate kernel behavior change.
+- `test_only`: the test changes without a kernel change it detects: new
+  coverage of long-standing behavior, refactoring, style, timing or stack
+  tuning, build or Kconfig plumbing (including following a kernel rename
+  that does not change what the test observes).
+- `apps_fix`: the PR repairs apps code itself (the test or its build was
+  wrong, e.g. it failed to compile, link or run on some target); the repair
+  is the point and there is no kernel fix to pair, even if a kernel change
+  exposed the problem.
+- `qemu_only`: a `kernel_test` whose changed test can only run on a QEMU
+  board, not on native `sim:nsh` (for instance it needs SMP, an
+  architecture-specific hook, or hardware the simulator lacks).
+
+## 2. Find the kernel PRs
+
+Search even when the PR names none. Useful evidence, strongest first:
+
+1. **Explicit references** in the apps PR's body, commit messages, comments
+   and review comments: kernel PR numbers or URLs, and commit hashes (full or
+   short). Open each with `open_ref`; a commit shows the PR it belongs to.
+2. **Cross-references** in the apps PR's timeline. These are weak: kernel PRs
+   often mention an apps PR only for CI ("rebase to pick up apps#N"). A link
+   is a lead, never proof; check the kernel diff.
+3. **Symbols**: functions, macros, return codes and Kconfig options the
+   changed test calls or asserts. Use `git_log` with `symbol`/`regex`/`paths`
+   on the kernel, `grep` the kernel as of a date, and compare the old and new
+   kernel code with `read_file`.
+4. **Dates**: look at kernel history shortly before the apps PR was opened
+   and merged (`git_log` with `since`/`until`, usually a few weeks to a few
+   months before its merge, and a little after for a test merged first).
+5. **Commit messages and paths**: `git_log` with `message` or `paths` for the
+   subsystem the test covers (`sched/wqueue`, `libs/libc/string`, ...).
+
+For each candidate kernel PR, open it and confirm from its diff that it
+changes what the changed test checks, and explain why the test fails before
+and passes after that PR. One apps PR can test several kernel PRs; list each.
+If you searched and found nothing that fits, say so with
+`"kernel_search": "nothing_found"`; do not invent a pair. List what you
+searched in `searched`.
+
+Confidence for each kernel PR:
+
+- `high`: a direct reference (link or cited commit) **and** a diff that
+  changes the behavior the test checks.
+- `medium`: no direct reference, but the diff changes the behavior the test
+  checks and the timing fits; or a direct reference whose detection you
+  could not fully confirm. When a kernel PR plausibly makes the changed test
+  fail before and pass after, prefer `medium` over `low`.
+- `low`: linked or nearby but its diff does not touch what the test checks
+  (CI-only mentions, board ports, unrelated drivers), or the kernel change
+  only exposed an apps bug. Record such leads at `low` rather than drop them.
+
+`tag` is `bug_test` when the kernel PR fixes a bug the test detects, and
+`behavior_change` when it deliberately changes or adds behavior (including
+a new interface) that the changed test now expects.
+
+## 3. Check the runnable target
+
+The generator and runner use native `sim:nsh` with `ostest`. A kernel
+interface the test needs must exist for the simulator (`arch/sim` or generic
+code), not only for one architecture: when the fix relies on a
+per-architecture hook (an `up_*` function, an interrupt or IPI path), `grep`
+the fixed kernel for its implementations. Check that `ostest_main.c` calls
+each changed test and which `#ifdef` guards and Kconfig options it needs on
+`sim:nsh` (`grep` across the tree finds a Kconfig symbol in one call); put
+needed options in `config_overrides`. If only a QEMU board can run the test,
+give that board as `platform`, e.g. `qemu-armv8a:nsh_smp`.
+
+The runner judges the whole `ostest` run: it passes only when the suite
+completes with status 0, prints no `ERROR` line, and prints the
+`user_main: ... test` banner of every changed test.
+
+## 4. Tools
+
+- `read_file`, `list_dir`, `grep` read either repository at `base` or
+  `head` (the apps PR's commits; a kernel PR's with `kernel_pr`), at any
+  commit SHA, or as of a date `YYYY-MM-DD` (the default branch at the end
+  of that day). Example: the kernel as of the apps PR's merge date.
+- `git_log` searches history (kernel by default) by dates, symbol, regex,
+  message and paths.
+- `open_ref` follows a PR, issue, commit URL or commit SHA in either
+  repository.
+
+The tool budget is limited (calls and time). Search deliberately: start from
+explicit references, then symbols and dates. Decide from the evidence you
+gathered and say what remains uncertain. Do not use outside knowledge about
+specific PRs.
+
+## 5. Output
+
+Return exactly one JSON object:
+
+```json
+{
+  "case": "apps-1234",
+  "kind": "kernel_test",
+  "reason": "What the apps PR changes and why it is this kind.",
+  "kernel_search": "found",
+  "searched": ["body and commits: cites commit abc1234 -> apache/nuttx#5678",
+               "git_log symbol=example_api 2024-01-01..2024-03-31 in sched/"],
+  "pairs": [
+    {
+      "kernel_pr": 5678,
+      "confidence": "high",
+      "evidence": ["apps commit message cites abc1234, which belongs to apache/nuttx#5678",
+                   "#5678 changes example_api() in sched/example.c to return -ENOENT; the test asserts that"],
+      "tag": "bug_test",
+      "platform": "sim:nsh",
+      "test_paths": ["testing/ostest/example.c"],
+      "fix_paths": ["sched/example.c"],
+      "fail_type": "runtime_assert",
+      "config_overrides": {},
+      "fail_to_pass": ["example_test"],
+      "problem_statement": "Describe the observed symptom and required behavior without giving the implementation.",
+      "readiness": "ready_to_generate"
+    }
+  ]
+}
+```
+
+- `kernel_search` is `found` when at least one pair is `high` or `medium`,
+  otherwise `nothing_found`. `test_only` and `apps_fix` have no `high` or
+  `medium` pairs; `qemu_only` has no `high` or `medium` `sim:nsh` pair.
+- A `low` pair needs only `kernel_pr`, `confidence` and `evidence`.
+- A `high` or `medium` pair needs every field above. `kernel_pr` is a merged
+  `apache/nuttx` PR number (not an issue, not a commit). `test_paths` lists
+  files the apps PR changed: the changed test sources, plus its changed
+  registration or build files (`Makefile`, `CMakeLists.txt`, `ostest.h`,
+  `ostest_main.c`) only when the PR changed them. `fix_paths` lists files
+  the kernel PR changed that make up the production change.
+- `fail_to_pass` uses exact test function identifiers from the selected test
+  sources. `fail_type` is `runtime_assert`, `compile_error`, or
+  `runtime_other` for a crash, hang or other runtime signal. For
+  `compile_error` add `compile_test_source` (one selected test path) and
+  `missing_api` (the exact interface token that source uses).
+- `config_overrides` maps NuttX config names to values; `{}` if none.
+- `readiness`: for a `sim:nsh` ostest assertion or compile failure, use
+  `ready_to_generate` when `ostest_main.c` calls each changed test and
+  `config_overrides` holds every setting those calls need, or
+  `needs_reviewed_recipe` when you cannot tell. Use `needs_fixture` for a
+  QEMU platform, another test program, or `runtime_other`.
+- Do not invent links, paths, target support, config settings or results.

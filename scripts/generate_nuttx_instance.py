@@ -4,6 +4,10 @@
     python scripts/generate_nuttx_instance.py \
         --triage triage/nuttx_runs/<run>/apps-2329-kernel-11898.json
 
+    # a pair proposed by the per-apps-PR search (high or medium confidence)
+    python scripts/generate_nuttx_instance.py \
+        --triage triage/nuttx_runs/<run>_apps/apps-3790.json --kernel-pr 20112
+
     # rewrite an existing instance's run_tests.sh from the current template
     python scripts/generate_nuttx_instance.py \
         --rerender-runner docker/instances/nuttx__nuttx-8832
@@ -22,6 +26,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+import nuttx_candidates as candidates
 from render_nuttx_instance import DEFAULT_OUT, ostest_banners, render, render_runner
 
 
@@ -41,10 +46,13 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
     case = f"apps-{apps['number']}-kernel-{kernel_number}"
     if verdict.get("case", case) != case or verdict.get("kernel_pr", kernel_number) != kernel_number:
         raise ValueError("triage verdict selects a different PR pair")
-    matches = [k for k in record["kernel_candidates"] if k["number"] == kernel_number]
-    if len(matches) != 1:
+    matches = [k for k in record.get("kernel_candidates", []) if k["number"] == kernel_number]
+    if len(matches) > 1:
         raise ValueError(f"kernel PR #{kernel_number} is not an unambiguous linked lead")
-    kernel = matches[0]
+    # A kernel PR the triage found by search rather than by link.
+    kernel = matches[0] if matches else candidates.kernel_record(kernel_number)
+    if not kernel.get("merged_at"):
+        raise ValueError(f"kernel PR #{kernel_number} was not merged")
     test_paths = verdict.get("test_paths") or []
     fix_paths = verdict.get("fix_paths") or []
     apps_changed = {f["filename"] for f in apps["files"]}
@@ -167,7 +175,8 @@ def generate(apps_number: int, kernel_number: int, verdict: dict,
              out_root: Path = DEFAULT_OUT, tag_suffix: str = "-gen") -> Path:
     pair_path = ENRICHED / f"apps-{apps_number}-kernel-{kernel_number}.json"
     record_path = pair_path if pair_path.exists() else ENRICHED / f"{apps_number}.json"
-    record = json.loads(record_path.read_text())
+    record = (json.loads(record_path.read_text()) if record_path.exists()
+              else candidates.apps_record(apps_number))
     meta = metadata(record, kernel_number, verdict)
     patch, meta["test_banners"] = build_test_patch(
         meta["apps_base_commit"], meta["apps_merge_commit"],
@@ -176,6 +185,28 @@ def generate(apps_number: int, kernel_number: int, verdict: dict,
         patch_file = Path(tmp) / "test.diff"
         patch_file.write_text(patch)
         return render(meta, patch_file, out_root, tag_suffix)
+
+
+def pair_verdict(verdict: dict, kernel_number: int | None) -> tuple[int, int, dict]:
+    """The generator-ready verdict for one pair of a per-apps-PR triage
+    verdict: (apps PR, kernel PR, verdict). Only high and medium pairs are
+    built; low ones are recorded leads."""
+    apps = re.fullmatch(r"apps-(\d+)", verdict.get("case") or "")
+    if not apps:
+        raise ValueError("a per-apps-PR verdict needs a case ID apps-<N>")
+    sent = [p for p in verdict.get("pairs", []) if p.get("confidence") in ("high", "medium")]
+    if kernel_number is None:
+        if len(sent) != 1:
+            raise ValueError("choose the pair with --kernel-pr: "
+                             f"{[p.get('kernel_pr') for p in sent]}")
+        kernel_number = sent[0]["kernel_pr"]
+    pair = next((p for p in verdict.get("pairs", []) if p.get("kernel_pr") == kernel_number), None)
+    if pair is None:
+        raise ValueError(f"the verdict proposes no pair with kernel PR #{kernel_number}")
+    if pair not in sent:
+        raise ValueError(f"kernel PR #{kernel_number} has low confidence; it is only a lead")
+    case = f"apps-{apps[1]}-kernel-{kernel_number}"
+    return int(apps[1]), kernel_number, {**pair, "verdict": "accept", "case": case}
 
 
 def main() -> None:
@@ -194,6 +225,13 @@ def main() -> None:
     if not args.triage:
         parser.error("supply --triage or --rerender-runner")
     verdict = json.loads(args.triage.read_text())
+    if "pairs" in verdict:
+        try:
+            apps_number, kernel_number, verdict = pair_verdict(verdict, args.kernel_pr)
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(generate(apps_number, kernel_number, verdict, args.out, args.tag_suffix))
+        return
     pair = re.fullmatch(r"apps-(\d+)-kernel-(\d+)", verdict.get("case") or "")
     apps_number = args.apps_pr if args.apps_pr is not None else int(pair[1]) if pair else None
     kernel_number = args.kernel_pr if args.kernel_pr is not None else int(pair[2]) if pair else None
