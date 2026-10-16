@@ -1206,11 +1206,9 @@ def pair_matches(pair: dict | None, expected: dict) -> bool:
         return False
     platform = expected.get("platform")
     if platform == "qemu":
-        if not QEMU_PLATFORM.fullmatch(str(pair.get("platform"))):
-            return False
-    elif platform and pair.get("platform") != platform:
-        return False
-    return not expected.get("tag") or pair.get("tag") == expected["tag"]
+        return bool(QEMU_PLATFORM.fullmatch(str(pair.get("platform"))))
+    # The tag is recorded, not scored.
+    return not platform or pair.get("platform") == platform
 
 
 def score_apps(gold: dict, verdicts: dict[str, dict]) -> dict:

@@ -161,7 +161,9 @@ class ScoreTests(unittest.TestCase):
     def test_partial_gold_scores_recall_and_violations_but_not_extras(self):
         verdicts = {
             "apps-1": {"kind": "kernel_test", "pairs": [
-                {"kernel_pr": 10, "confidence": "medium", "platform": "sim:nsh", "tag": "bug_test"},
+                # The gold says bug_test: tags are recorded, not scored.
+                {"kernel_pr": 10, "confidence": "medium", "platform": "sim:nsh",
+                 "tag": "behavior_change"},
                 {"kernel_pr": 11, "confidence": "high", "platform": "sim:nsh"},
                 {"kernel_pr": 13, "confidence": "low"}]},
             "apps-2": {"kind": "apps_fix", "pairs": [{"kernel_pr": 20, "confidence": "low"}]},
