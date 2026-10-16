@@ -94,7 +94,8 @@ def gh(path: str, retries: int = 3):
         if "rate limit" in error or "submitted too quickly" in error:
             time.sleep(20 * (attempt + 1))
             continue
-        if "unexpected eof" in error or "connection reset" in error or "http 5" in error:
+        if "unexpected eof" in error or "connection reset" in error or "http 5" in error \
+                or "timed out" in error:
             time.sleep(attempt + 1)
             continue
         raise RuntimeError(f"gh api {path}: {proc.stderr.strip()[:300]}")
