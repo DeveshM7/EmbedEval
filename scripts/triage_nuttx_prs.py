@@ -1198,10 +1198,9 @@ def run_apps(args) -> None:
     if args.profile not in profiles or args.profile.startswith("_"):
         raise SystemExit(f"unknown profile: {args.profile}")
     gold = load_apps_gold()["cases"]
-    # A blind gold run needs a pair to find: the cases with a sim:nsh must_find.
+    # A blind gold run needs a pair to find: the cases with a must_find.
     gold_cases = [case for case, entry in gold.items()
-                  if not args.blind or any(item.get("platform", "sim:nsh") == "sim:nsh"
-                                           for item in entry.get("must_find", []))]
+                  if not args.blind or entry.get("must_find")]
     numbers = list(args.apps_pr or [])
     if args.all_ostest:
         numbers += candidates.ostest_apps_prs()
@@ -1220,8 +1219,9 @@ def run_apps(args) -> None:
     for case in cases:
         record = candidates.apps_record(int(case.split("-")[1]))
         if args.blind:   # hide general link forms, and the known partners by number
-            record = blind_record(record, [item["kernel_pr"] for item in
-                                           gold.get(case, {}).get("must_find", [])])
+            record = blind_record(record, [number for item in gold.get(case, {}).get("must_find", [])
+                                           for number in [item["kernel_pr"],
+                                                          *item.get("also_needs", [])]])
         records[case] = record
     run_dir = RUNS / (f"{datetime.now():%Y-%m-%d_%H%M%S}_{args.profile}_apps"
                       + ("_blind" if args.blind else ""))
