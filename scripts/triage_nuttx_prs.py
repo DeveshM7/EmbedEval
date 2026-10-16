@@ -36,6 +36,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 import nuttx_candidates as candidates
+import nuttx_config
 from nuttx_candidates import (APPS, DATA, ENRICHED, KERNEL, KERNEL_LINK, enrich,
                               full_pr)
 
@@ -162,6 +163,23 @@ APPS_TOOLS = [
             "repo": {"type": "string", "enum": ["kernel", "apps"],
                      "description": "For a bare number, or a SHA found in both repositories"}},
             "required": ["ref"]}}},
+    {"type": "function", "function": {
+        "name": "check_config",
+        "description": "Configure sim:nsh exactly as the benchmark does (ostest on), add your "
+                       "config_overrides, run make olddefconfig, and report for the kernel PR's "
+                       "head (fixed) and base (old), each with the apps PR's head: which "
+                       "overrides stuck, which were dropped and the dependencies they lack, and "
+                       "whether each changed ostest source is built and its entry function "
+                       "called. Takes about a minute.",
+        "parameters": {"type": "object", "properties": {
+            "kernel_pr": {"type": "integer"},
+            "config_overrides": {"type": "object", "additionalProperties": {"type": "string"},
+                                 "description": "e.g. {\"CONFIG_FOO\": \"y\"}; {} for none"},
+            "test_paths": {"type": "array", "items": {"type": "string"},
+                           "description": "Default: the apps PR's changed testing/ostest/ files"},
+            "platform": {"type": "string",
+                         "description": "board:config; default sim:nsh, or the QEMU pair's board"}},
+            "required": ["kernel_pr", "config_overrides"]}}},
 ]
 REPO_NAMES = {"kernel": KERNEL, "apps": APPS}
 KINDS = ("kernel_test", "test_only", "apps_fix", "qemu_only")
@@ -249,7 +267,7 @@ def render_record(case: str, record: dict, field_limit: int = 8000) -> str:
     def pr_view(pr):
         if pr is None:
             return None
-        keys = ("repo", "number", "url", "title", "body", "merged_at", "labels",
+        keys = ("repo", "number", "url", "title", "body", "created_at", "merged_at", "labels",
                 "base_commit", "head_commit", "merge_commit_sha", "commits",
                 "files", "files_truncated", "linked_issues", "base_sources",
                 "sim_nsh_defconfig", "timeline")
@@ -501,6 +519,23 @@ def check_pair(pair: dict, record: dict) -> list[str]:
         issues.append("platform must be sim:nsh or a concrete qemu-<board>:<config>")
     if not isinstance(pair.get("problem_statement"), str) or not pair["problem_statement"].strip():
         issues.append("problem_statement is required")
+    if isinstance(pair.get("config_overrides"), dict):
+        issues.extend(nuttx_config.check_overrides(pair["config_overrides"]))
+    also = pair.get("also_needs", [])
+    if not isinstance(also, list):
+        issues.append("also_needs must be a list (empty if none)")
+        also = []
+    for extra in also:
+        other = extra.get("kernel_pr") if isinstance(extra, dict) else None
+        evidence = extra.get("evidence") if isinstance(extra, dict) else None
+        if type(other) is not int or other == number:
+            issues.append("each also_needs entry needs another kernel_pr number")
+        elif not isinstance(evidence, list) or not evidence or not all(
+                isinstance(item, str) and item.strip() for item in evidence):
+            issues.append(f"also_needs #{other}: evidence must list why it is needed")
+        elif not any(pr["number"] == other and pr.get("merged_at")
+                     for pr in record.get("kernel_candidates", [])):
+            issues.append(f"also_needs #{other} must be a merged apache/nuttx PR")
     return issues + check_recipe(pair, apps, kernel, record)
 
 
@@ -652,7 +687,8 @@ def render_item(item: dict, budget: int = 20000) -> str:
     kind = item["kind"]
     lines = [f"{kind.upper()} {item['repo']}#{item['number']}: {item['title']}", item.get("url", "")]
     if kind == "pr":
-        lines.append(f"merged_at: {item.get('merged_at')}  base_commit: {item.get('base_commit')}  "
+        lines.append(f"created_at: {item.get('created_at')}  "
+                     f"merged_at: {item.get('merged_at')}  base_commit: {item.get('base_commit')}  "
                      f"head_commit: {item.get('head_commit')}  merge_commit: "
                      f"{item.get('merge_commit_sha')}")
     else:
@@ -813,6 +849,29 @@ def git_log(args: dict, record: dict) -> str:
     return hide_links(text, record["blind"]) if "blind" in record and repo == "apps" else text
 
 
+def check_config(args: dict, record: dict) -> str:
+    number = args.get("kernel_pr")
+    if type(number) is not int:
+        return "error: kernel_pr must be a kernel PR number"
+    kernel = load_kernel(record, number)
+    if kernel is None:
+        return f"error: apache/nuttx#{number} is not a pull request"
+    overrides = args.get("config_overrides")
+    overrides = {} if overrides is None else overrides
+    problems = nuttx_config.check_overrides(overrides)
+    if problems:
+        return "error: " + "; ".join(problems)
+    paths = args.get("test_paths") or [f["filename"] for f in record["apps"]["files"]
+                                       if f["filename"].startswith("testing/ostest/")
+                                       and f["status"] != "removed"]
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return "error: test_paths must be a list of paths"
+    platform = args.get("platform") or "sim:nsh"
+    return nuttx_config.describe(nuttx_config.check_pair(
+        record["apps"], kernel, overrides, paths, record.get("test_contents") or {},
+        platform=platform))
+
+
 def run_tool(name: str, args: dict, record: dict, free: bool = False) -> str:
     """One tool call. Pair mode pins reads to the supplied PRs' commits; free
     (per-apps-PR) mode reads any revision and adds git_log and open_ref."""
@@ -820,6 +879,8 @@ def run_tool(name: str, args: dict, record: dict, free: bool = False) -> str:
         return git_log(args, record)
     if free and name == "open_ref":
         return open_ref(args, record)
+    if free and name == "check_config":
+        return check_config(args, record)
     path = args.get("path") or ""
     if not isinstance(path, str) or path.startswith("/") or ".." in Path(path).parts:
         return "error: invalid repository-relative path"
@@ -1082,9 +1143,12 @@ def triage_apps_one(case: str, record: dict, profile: str, settings: dict, api_b
 
     def check(reply):
         for pair in proposed(reply or {}):   # fetch the PRs the checks compare against
-            if type(pair.get("kernel_pr")) is int:
-                with contextlib.suppress(RuntimeError):
-                    load_kernel(record, pair["kernel_pr"])
+            extras = pair.get("also_needs") if isinstance(pair.get("also_needs"), list) else []
+            for number in [pair.get("kernel_pr")] + [e.get("kernel_pr") for e in extras
+                                                      if isinstance(e, dict)]:
+                if type(number) is int:
+                    with contextlib.suppress(RuntimeError):
+                        load_kernel(record, number)
         return check_apps_verdict(reply, case, record)
 
     verdict, issues = None, ["no reply"]
@@ -1211,11 +1275,13 @@ def pair_matches(pair: dict | None, expected: dict) -> bool:
     return not platform or pair.get("platform") == platform
 
 
-def score_apps(gold: dict, verdicts: dict[str, dict]) -> dict:
+def score_apps(gold: dict, verdicts: dict[str, dict], config_problems=None) -> dict:
     """Score per-apps-PR verdicts against a partial gold: each case needs the
-    right kind, every must_find pair at high or medium, and no
-    must_not_propose pair at high or medium. Other high or medium pairs are
-    unknown: listed for validation, never penalized."""
+    right kind, every must_find pair at high or medium (with its also_needs
+    PRs, and a config that gives the listed settings and runs the changed
+    tests), and no must_not_propose pair at high or medium. Other high or
+    medium pairs are unknown: listed for validation, never penalized.
+    config_problems(case, pair, required) lists a pair's config problems."""
     rows, extras = [], []
     for case, entry in gold.items():
         verdict = verdicts.get(case, {})
@@ -1225,6 +1291,21 @@ def score_apps(gold: dict, verdicts: dict[str, dict]) -> dict:
         must_find = entry.get("must_find", [])
         missing = [item["kernel_pr"] for item in must_find
                    if not pair_matches(sent.get(item["kernel_pr"]), item)]
+        config = {}
+        for item in must_find:
+            pair = sent.get(item["kernel_pr"])
+            if item["kernel_pr"] in missing:
+                continue
+            found = []
+            listed = {e.get("kernel_pr") for e in pair.get("also_needs") or []
+                      if isinstance(e, dict)}
+            found += [f"also_needs lacks #{number}" for number in item.get("also_needs", [])
+                      if number not in listed]
+            if "config" in item and config_problems:
+                found += config_problems(case, pair, item["config"],
+                                         item.get("config_platform") or pair.get("platform"))
+            if found:
+                config[item["kernel_pr"]] = found
         must_not = [item["kernel_pr"] for item in entry.get("must_not_propose", [])]
         violations = [number for number in must_not if number in sent]
         known = {item["kernel_pr"] for item in must_find} | set(must_not)
@@ -1239,8 +1320,9 @@ def score_apps(gold: dict, verdicts: dict[str, dict]) -> dict:
                      "unknown": [item["kernel_pr"] for item in unknown],
                      "pairs": [f"#{p.get('kernel_pr')} {p.get('confidence')}"
                                for p in verdict.get("pairs", []) if isinstance(p, dict)],
-                     "budget": verdict.get("budget") or {},
-                     "correct": kind_ok and not missing and not violations})
+                     "budget": verdict.get("budget") or {}, "config": config,
+                     "tags": {p.get("kernel_pr"): p.get("tag") for p in sent.values()},
+                     "correct": kind_ok and not missing and not violations and not config})
     return {"correct": sum(row["correct"] for row in rows), "scored": len(rows),
             "must_find_found": sum(row["found"] for row in rows),
             "must_find_total": sum(row["must_find"] for row in rows),
@@ -1256,22 +1338,45 @@ def eval_apps_run(run_dir: Path, gold_path: Path | None = None) -> dict:
         raise ValueError("no gold cases in this run")
     verdicts = {case: json.loads((run_dir / f"{case}.json").read_text())
                 for case in gold if (run_dir / f"{case}.json").exists()}
-    result = score_apps(gold, verdicts)
+    # The effective configuration of each found pair, kept with the run so
+    # a later eval (e.g. off Scholar) does not need the NuttX image.
+    checks_path = run_dir / "config_checks.json"
+    checks = json.loads(checks_path.read_text()) if checks_path.exists() else {}
+
+    def config_problems(case, pair, required, platform):
+        overrides = pair.get("config_overrides") or {}
+        invalid = nuttx_config.check_overrides(overrides)
+        if invalid:
+            return invalid
+        key = f"{case}#{pair['kernel_pr']}"
+        if key not in checks:
+            record = candidates.apps_record(int(case.split("-")[1]))
+            checks[key] = nuttx_config.check_pair(
+                record["apps"], candidates.kernel_record(pair["kernel_pr"]), overrides,
+                pair.get("test_paths") or [], record["test_contents"], report=list(required),
+                sides=("fixed",), platform=platform)["fixed"]
+            checks_path.write_text(json.dumps(checks, indent=2) + "\n")
+        return nuttx_config.problems(checks[key], required)
+
+    result = score_apps(gold, verdicts, config_problems)
     blind = " (blind: explicit links hidden)" if manifest.get("blind") else ""
     lines = [f"# NuttX per-apps-PR triage: {run_dir.name}{blind}", "",
              f"Cases: {result['correct']}/{result['scored']} correct",
              f"must_find recall: {result['must_find_found']}/{result['must_find_total']}",
              f"must_not_propose violations: {result['violations']}",
+             f"Config or also_needs problems: {sum(bool(r['config']) for r in result['rows'])}",
              f"Unknown high/medium pairs, for validation: {len(result['unknown_extras'])}",
              f"Budget exhausted: {sum(bool(r['budget'].get('exhausted')) for r in result['rows'])}",
-             "", "| Case | Kind (expected) | Proposed | Missing | Violations | Unknown | "
-             "Tool calls / s | Correct |", "|---|---|---|---|---|---|---|---|"]
+             "", "| Case | Kind (expected) | Proposed | Missing | Violations | Config | Unknown | "
+             "Tags | Tool calls / s | Correct |", "|---|---|---|---|---|---|---|---|---|---|"]
     for row in result["rows"]:
         expected = "/".join(row["expected_kind"] or ["any"])
         lines.append(f"| {row['case']} | {row['got_kind']} ({expected}) | "
                      f"{', '.join(row['pairs'])} | {', '.join(map(str, row['missing']))} | "
                      f"{', '.join(map(str, row['violations']))} | "
+                     f"{'; '.join(f'#{k}: ' + ', '.join(v) for k, v in row['config'].items())} | "
                      f"{', '.join(map(str, row['unknown']))} | "
+                     f"{', '.join(f'#{k} {v}' for k, v in row['tags'].items() if v)} | "
                      f"{row['budget'].get('tool_calls')} / {row['budget'].get('seconds')}"
                      f"{' (' + row['budget']['exhausted'] + ' budget)' if row['budget'].get('exhausted') else ''} | "
                      f"{'yes' if row['correct'] else 'no'} |")

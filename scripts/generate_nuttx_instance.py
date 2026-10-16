@@ -110,6 +110,21 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
     issues = kernel.get("linked_issues") or []
     if issues:
         meta["issue_url"] = issues[0]["url"]
+    # Kernel PRs the fix needs as well (follow-ups, prerequisites); validation
+    # applies them with the primary PR in merge order.
+    extras = []
+    for extra in verdict.get("also_needs") or []:
+        number = extra["kernel_pr"]
+        pr = next((k for k in record.get("kernel_candidates", []) if k["number"] == number),
+                  None) or candidates.kernel_record(number)
+        if not pr.get("merged_at") or not pr.get("base_commit") or not pr.get("head_commit"):
+            raise ValueError(f"also_needs kernel PR #{number} must be merged with branch commits")
+        extras.append({"kernel_pr": number, "url": pr["url"], "merged_at": pr["merged_at"],
+                       "base_commit": pr["base_commit"], "head_commit": pr["head_commit"],
+                       "files_changed": [f["filename"] for f in pr["files"]]})
+    if extras:
+        meta["kernel_merged_at"] = kernel["merged_at"]
+        meta["extra_fix_prs"] = sorted(extras, key=lambda e: e["merged_at"])
     return meta
 
 

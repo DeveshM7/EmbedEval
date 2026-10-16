@@ -207,7 +207,7 @@ def full_pr(repo: str, number: int) -> dict:
     return {
         "repo": repo, "number": number, "url": pr["html_url"],
         "title": pr["title"], "body": pr.get("body") or "",
-        "merged_at": pr.get("merged_at"),
+        "created_at": pr.get("created_at"), "merged_at": pr.get("merged_at"),
         "labels": [label["name"] for label in pr.get("labels", [])],
         "additions": pr.get("additions"), "deletions": pr.get("deletions"),
         "merge_commit_sha": pr.get("merge_commit_sha"),

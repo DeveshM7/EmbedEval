@@ -484,5 +484,94 @@ class GeneratorTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[2]["case"], "apps-7-kernel-11")
 
 
+class AlsoNeedsAndConfigTests(unittest.TestCase):
+    def record(self):
+        return {**apps_record(), "kernel_candidates": [kernel_pr(), kernel_pr(12)]}
+
+    def test_also_needs_entries_are_merged_prs_with_evidence(self):
+        ok = full_pair(also_needs=[{"kernel_pr": 12, "evidence": ["fixes a hang in #11"]}])
+        self.assertEqual(triage.check_apps_verdict(verdict(ok), "apps-7", self.record()), [])
+        for bad, words in (([{"kernel_pr": 11, "evidence": ["x"]}], "another kernel_pr"),
+                           ([{"kernel_pr": 12}], "evidence"),
+                           ([{"kernel_pr": 13, "evidence": ["x"]}], "merged"),
+                           ({"kernel_pr": 12}, "list")):
+            issues = triage.check_apps_verdict(verdict(full_pair(also_needs=bad)),
+                                               "apps-7", self.record())
+            self.assertTrue(any(words in i for i in issues), (bad, issues))
+
+    def test_reserved_overrides_are_refused(self):
+        issues = triage.check_apps_verdict(
+            verdict(full_pair(config_overrides={"CONFIG_NDEBUG": "n"})), "apps-7", self.record())
+        self.assertTrue(any("reserved" in i for i in issues))
+
+    def test_scoring_needs_also_needs_and_a_working_config(self):
+        gold = {"apps-7": {"kind": "kernel_test", "must_find": [
+            {"kernel_pr": 11, "platform": "qemu", "config_platform": "qemu-armv8a:nsh_smp",
+             "config": {"CONFIG_SMP_CALL": "y"}, "also_needs": [12]}]}}
+        pair = {"kernel_pr": 11, "confidence": "high", "platform": "qemu-armv8a:nsh_smp",
+                "also_needs": [{"kernel_pr": 12, "evidence": ["x"]},
+                               {"kernel_pr": 14, "evidence": ["extra is fine"]}]}
+        seen = []
+
+        def config_problems(case, got, required, platform):
+            seen.append((case, got["kernel_pr"], required, platform))
+            return []
+        result = triage.score_apps(gold, {"apps-7": {"kind": "kernel_test", "pairs": [pair]}},
+                                   config_problems)
+        self.assertEqual(result["correct"], 1)
+        self.assertEqual(seen, [("apps-7", 11, {"CONFIG_SMP_CALL": "y"}, "qemu-armv8a:nsh_smp")])
+        pair["also_needs"] = []
+        row = triage.score_apps(gold, {"apps-7": {"kind": "kernel_test", "pairs": [pair]}},
+                                config_problems)["rows"][0]
+        self.assertEqual(row["config"], {11: ["also_needs lacks #12"]})
+        self.assertFalse(row["correct"])
+        pair["also_needs"] = [{"kernel_pr": 12, "evidence": ["x"]}]
+        row = triage.score_apps(gold, {"apps-7": {"kind": "kernel_test", "pairs": [pair]}},
+                                lambda *args: ["testing/ostest/t.c is not built"])["rows"][0]
+        self.assertEqual(row["config"], {11: ["testing/ostest/t.c is not built"]})
+        self.assertFalse(row["correct"])
+
+    def test_eval_checks_the_fixed_side_once_and_keeps_it_with_the_run(self):
+        gold = {"cases": {"apps-7": {"kind": "kernel_test", "must_find": [
+            {"kernel_pr": 11, "platform": "sim:nsh", "config": {"CONFIG_SCHED_WORKQUEUE": "y"}}]}}}
+        reply = verdict(full_pair(config_overrides={"CONFIG_SCHED_HPWORK": "y"}))
+        fixed = {"ostest": True, "settings": {"CONFIG_SCHED_WORKQUEUE": "y"},
+                 "tests": [{"path": "testing/ostest/example.c", "built": True, "runs": True}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir, gold_path = Path(tmp) / "run", Path(tmp) / "gold.json"
+            run_dir.mkdir()
+            gold_path.write_text(json.dumps(gold))
+            (run_dir / "manifest.json").write_text(json.dumps({"cases": ["apps-7"]}))
+            (run_dir / "apps-7.json").write_text(json.dumps(reply))
+            with patch.object(candidates, "apps_record", return_value=apps_record()), \
+                 patch.object(candidates, "kernel_record", return_value=kernel_pr()), \
+                 patch.object(triage.nuttx_config, "check_pair",
+                              return_value={"fixed": fixed}) as check, \
+                 patch("builtins.print"):
+                first = triage.eval_apps_run(run_dir, gold_path)
+                second = triage.eval_apps_run(run_dir, gold_path)
+            self.assertEqual((first["correct"], second["correct"]), (1, 1))
+            self.assertEqual(check.call_count, 1)
+            self.assertEqual(check.call_args.args[2], {"CONFIG_SCHED_HPWORK": "y"})
+            self.assertEqual(check.call_args.kwargs["sides"], ("fixed",))
+            self.assertIn("apps-7#11", json.loads((run_dir / "config_checks.json").read_text()))
+
+    def test_generator_records_extra_fix_prs_in_merge_order(self):
+        record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
+        later = {**kernel_pr(13), "merged_at": "2024-02-01"}
+        earlier = {**kernel_pr(12), "merged_at": "2023-12-01"}
+        reply = {**full_pair(also_needs=[{"kernel_pr": 13, "evidence": ["x"]},
+                                         {"kernel_pr": 12, "evidence": ["y"]}]),
+                 "verdict": "accept", "case": "apps-7-kernel-11"}
+        with patch.object(candidates, "kernel_record",
+                          side_effect=lambda n: {12: earlier, 13: later}[n]):
+            meta = generator.metadata(record, 11, reply)
+        self.assertEqual([e["kernel_pr"] for e in meta["extra_fix_prs"]], [12, 13])
+        self.assertEqual(meta["extra_fix_prs"][0]["head_commit"], "k1")
+        self.assertEqual(meta["kernel_merged_at"], "2024-01-01")
+        self.assertNotIn("extra_fix_prs", generator.metadata(
+            record, 11, {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}))
+
+
 if __name__ == "__main__":
     unittest.main()
