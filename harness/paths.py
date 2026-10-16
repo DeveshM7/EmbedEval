@@ -11,12 +11,29 @@ evaluator reports `grade: fail` for a patch it simply could not find.
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-INSTANCES_DIR = REPO_ROOT / "docker" / "instances"
-OUTPUTS_DIR = REPO_ROOT / "outputs"
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import layout  # noqa: E402  (first: reads --run-dir; see scripts/layout.py)
+from layout import show  # noqa: E402,F401
+
+# Where instance directories are read from: the validated twister-pipeline
+# Zephyr instances in apptainer/instances/ (written there only by
+# scripts/promote_instance.py), then the Docker instances in docker/instances/.
+# EMBEDEVAL_INSTANCES_DIR replaces both -- e.g. generated/, so a freshly
+# generated instance can be built and validated before it is promoted, and
+# without any chance of overwriting a committed one.
+# With --run-dir the run's own instances/ is the default, and outputs go to
+# the run's outputs/. The same rule as scripts/instances.py on the build side.
+_override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
+INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
+                  if _override else [layout.generated()] if layout.run_dir()
+                  else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "docker" / "instances"])
+OUTPUTS_DIR = layout.outputs()
 
 PATCH_NAME = "patch.diff"
 TRAJECTORY_NAME = "trajectory.json"
@@ -31,6 +48,9 @@ MODEL_DIRS: dict[str, str] = {
     "openai/gpt-5.4": "gpt-5.4",
     "together_ai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": "Qwen-3-coder",
     "together_ai/deepseek-ai/DeepSeek-V3": "DeepSeek-V3",
+    # Local open-weights model served by scripts/serve_triage_model.sh (vLLM,
+    # OpenAI-compatible); see LOCAL_MODELS in harness/run.py.
+    "openai/qwen38-nvfp4": "qwen38-nvfp4",
 }
 
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.
@@ -85,7 +105,10 @@ def trajectory_path(instance_id: str, model_name: str) -> Path:
 
 
 def instance_dir(instance_id: str) -> Path:
-    return INSTANCES_DIR / instance_id
+    for root in INSTANCE_ROOTS:
+        if (root / instance_id / "metadata.json").exists():
+            return root / instance_id
+    return INSTANCE_ROOTS[0] / instance_id
 
 
 def load_metadata(instance_id: str) -> dict:
@@ -99,10 +122,15 @@ def load_metadata(instance_id: str) -> dict:
 def discover_instances(project: str | None = None) -> list[str]:
     """All instance ids that have a metadata.json, optionally filtered by project."""
     found = []
-    for d in sorted(INSTANCES_DIR.iterdir()):
-        if not (d.is_dir() and (d / "metadata.json").exists()):
-            continue
-        if project and split_instance(d.name)[0] != project:
-            continue
-        found.append(d.name)
-    return found
+    for root in INSTANCE_ROOTS:
+        for d in sorted(root.iterdir()) if root.is_dir() else []:
+            if d.name in found or not (d.is_dir() and (d / "metadata.json").exists()):
+                continue
+            if project and split_instance(d.name)[0] != project:
+                continue
+            # Zephyr instances come from the twister pipeline (an instance.def).
+            # The hand-built Zephyr Docker folders are reference metadata only.
+            if split_instance(d.name)[0] == "zephyr" and not (d / "instance.def").exists():
+                continue
+            found.append(d.name)
+    return sorted(found)

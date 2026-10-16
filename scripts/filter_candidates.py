@@ -6,6 +6,7 @@ Hard filters for Zephyr and NuttX PR candidates.
     python scripts/filter_candidates.py fetch --since 2024-01-01 --until 2024-06-30
     python scripts/filter_candidates.py filter
     python scripts/filter_candidates.py enrich
+    python scripts/filter_candidates.py enrich-twister
 
     python scripts/filter_candidates.py selftest --repo nuttx
     python scripts/filter_candidates.py fetch --repo nuttx --since 2024-01-01 --until 2024-03-31
@@ -19,9 +20,15 @@ Three stages, deliberately separate:
     filter   free, instant -- cuts the pool to PRs that could become instances.
     enrich   costly, narrow-- full GitHub context for the survivors only:
                              diffs, review threads, linked issues, commits,
-                             the complete test suite each PR touches, the
-                             pre-change source it modifies, and the board
-                             files of our platforms at its base commit.
+                             the complete test suite each PR touches, and
+                             the pre-change source it modifies.
+
+enrich also adds a `twister` block (scripts/zephyr_env.py): the facts the
+twister pipeline needs, read from the PR's own commits in the local clone --
+the suites and scenarios it changes, the board names valid at its base, the
+Python and SDK of its era, and which twister options that era has.
+`enrich-twister` adds just that block to records enriched before it existed,
+with no GitHub calls.
 
 Enrich runs last because only ~15% of PRs survive filtering. Pulling the
 expensive context for the whole pool would be about six times the API calls
@@ -51,19 +58,24 @@ Requires the `gh` CLI, authenticated. Read-only.
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import re
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
+import zephyr_env  # noqa: E402
 
 REPO = "zephyrproject-rtos/zephyr"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CACHE = REPO_ROOT / "candidates" / "cache"
-OUT = REPO_ROOT / "candidates" / "candidates.jsonl"
-ENRICHED = REPO_ROOT / "candidates" / "enriched"
+CACHE = layout.candidates() / "cache"
+OUT = layout.candidates() / "candidates.jsonl"
+ENRICHED = layout.enriched()
 
 # Paths that are never the fix itself. A PR touching only these has nothing
 # for an agent to repair.
@@ -243,6 +255,8 @@ def gh_paged(path: str, cap: int = 1000) -> list:
 # the same directory because a suite has both.
 SUITE_MARKERS = ("testcase.yaml", "tests.yaml", "sample.yaml")
 
+_FETCH_LOCK = threading.Lock()
+
 
 def find_suite_root(file_path: str, sha: str, cache: dict) -> tuple[str | None, str | None]:
     """Walk up from a changed test file to the directory that owns it.
@@ -256,51 +270,69 @@ def find_suite_root(file_path: str, sha: str, cache: dict) -> tuple[str | None, 
     for depth in range(len(parts) - 1, 1, -1):     # deepest first, stop above tests/
         d = "/".join(parts[:depth])
         if d not in cache:
-            listing = gh(f"repos/{REPO}/contents/{d}?ref={sha}")
-            names = {f["name"] for f in listing} if isinstance(listing, list) else set()
+            names = {e["path"].rsplit("/", 1)[-1] for e in _ls_tree(sha, d + "/")}
             cache[d] = next((m for m in SUITE_MARKERS if m in names), None)
         if cache[d]:
             return d, cache[d]
     return None, None
 
 
+# Code is read from the local Zephyr clone (zephyr_env.CLONE), not the GitHub
+# API. The API needs one call per file -- a suite of 40 files was 40 calls in
+# a row, about a minute per PR -- while the clone answers in milliseconds.
+# Only the discussion (PR, comments, reviews, issues, commits) needs GitHub.
+
+
+def _ls_tree(sha: str, path: str, recursive: bool = False) -> list[dict]:
+    """Entries under `path` at `sha`: [{path, type, object, size}]. A path
+    ending in "/" lists that directory; without it, the one entry itself."""
+    args = ["ls-tree", "-l", "-z", *(["-r"] if recursive else []), sha, "--", path]
+    out = []
+    for line in zephyr_env.git(*args, check=False).split("\0"):
+        if not line:
+            continue
+        meta, name = line.split("\t", 1)
+        _, kind, obj, size = meta.split()
+        out.append({"path": name, "type": kind, "object": obj,
+                    "size": int(size) if size.isdigit() else None})
+    return out
+
+
+def _blob_text(obj: str) -> str | None:
+    """A blob's contents as text; None for binary (not valid UTF-8)."""
+    r = subprocess.run(["git", "-C", str(zephyr_env.CLONE), "cat-file", "blob", obj],
+                       capture_output=True)
+    if r.returncode != 0:
+        return None
+    try:
+        return r.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def fetch_suite(root: str, sha: str) -> dict:
-    """Every file in a test suite directory, with contents.
+    """Every file in a test suite directory, with contents, keyed by its path
+    inside the suite.
 
     No size cap. Most Zephyr suites are four files; the occasional large
     shared suite is a problem for later, not now.
     """
-    tree = gh(f"repos/{REPO}/git/trees/{sha}:{root}?recursive=1")
-    if not tree:
-        return {}
     out = {}
-    for b in tree.get("tree", []):
-        if b.get("type") != "blob":
+    for e in _ls_tree(sha, root + "/", recursive=True):
+        if e["type"] != "blob":
             continue
-        blob = gh(f"repos/{REPO}/git/blobs/{b['sha']}")
-        content = None
-        if blob and blob.get("encoding") == "base64":
-            try:
-                content = base64.b64decode(blob["content"]).decode("utf-8")
-            except (ValueError, UnicodeDecodeError):
-                content = None          # binary; recorded by name and size only
-        out[b["path"]] = {"size": b.get("size"), "content": content}
+        # binary files are recorded by name and size only
+        out[e["path"][len(root) + 1:]] = {"size": e["size"], "content": _blob_text(e["object"])}
     return out
 
 
 def fetch_file(path: str, sha: str) -> dict:
     """One file at one commit: {size, content}. content is None for binary
-    files and for files over the contents API's 1 MB limit."""
-    meta = gh(f"repos/{REPO}/contents/{path}?ref={sha}")
-    if not isinstance(meta, dict) or meta.get("type") != "file":
+    files."""
+    entry = next((e for e in _ls_tree(sha, path) if e["type"] == "blob"), None)
+    if entry is None:
         return {"size": None, "content": None, "omitted": "not found at this commit"}
-    content = None
-    if meta.get("encoding") == "base64" and meta.get("content"):
-        try:
-            content = base64.b64decode(meta["content"]).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            content = None
-    return {"size": meta.get("size"), "content": content}
+    return {"size": entry["size"], "content": _blob_text(entry["object"])}
 
 
 # Budget for the pre-change source files, in characters: roughly 30K tokens.
@@ -331,7 +363,7 @@ def fetch_base_sources(files: list[dict], base: str) -> dict:
         path = f.get("previous_filename") or f["filename"]
         got = fetch_file(path, base)
         if got["content"] is None:
-            got.setdefault("omitted", "binary, or over the 1 MB API limit")
+            got.setdefault("omitted", "binary")
         elif spent + len(got["content"]) > BASE_SOURCE_BUDGET:
             got = {"size": got["size"], "content": None,
                    "omitted": f"over the {BASE_SOURCE_BUDGET:,}-character budget "
@@ -342,42 +374,18 @@ def fetch_base_sources(files: list[dict], base: str) -> dict:
     return out
 
 
-# The boards we can run, as pr_triage.md names them, and the board file each
-# is defined by. Board folders moved over the years (boards/x86/qemu_x86/ ->
-# boards/qemu/x86/), so the file is found by name anywhere under boards/.
-OUR_PLATFORMS = {
-    "native_sim": "native_sim.yaml",
-    "native_sim/native/64": "native_sim_native_64.yaml",
-    "native_sim_64": "native_sim_64.yaml",
-    "qemu_x86": "qemu_x86.yaml",
-}
+def add_twister_facts(record: dict) -> dict:
+    """Attach the twister pipeline's facts (zephyr_env.twister_facts).
 
-
-def fetch_platforms(base: str) -> dict:
-    """Which of our platforms exist at the PR's base commit, and what each
-    declares it supports.
-
-    A suite that `depends_on` a capability the board does not declare never
-    runs there, and a board that does not exist yet cannot be built at all --
-    native_sim arrived in 2023, so a 2022 PR cannot use it. Neither fact is in
-    the PR itself. The board yaml is kept raw rather than parsed; it is short,
-    and the model reads it as written.
+    Local git only, so a failure here -- a head commit that cannot be fetched,
+    say -- is recorded on the record instead of aborting the enrichment.
     """
-    tree = gh(f"repos/{REPO}/git/trees/{base}:boards?recursive=1")
-    paths = [b["path"] for b in (tree or {}).get("tree", []) if b.get("type") == "blob"]
-    out = {}
-    for name, filename in OUR_PLATFORMS.items():
-        hits = [p for p in paths if p.rsplit("/", 1)[-1] == filename]
-        found = None
-        for p in hits:
-            f = fetch_file(f"boards/{p}", base)
-            if f["content"] and re.search(rf"(?m)^identifier:\s*{re.escape(name)}\s*$", f["content"]):
-                found = {"exists": True, "path": f"boards/{p}", "content": f["content"]}
-                break
-        out[name] = found or {"exists": False}
-    if tree and tree.get("truncated"):
-        out["_note"] = "boards/ listing was truncated by GitHub; absence may be unreliable"
-    return out
+    try:
+        record["twister"] = zephyr_env.twister_facts(record["base_commit"],
+                                                     record["head_commit"])
+    except Exception as e:  # recorded, not raised: the rest of the record is still good
+        record["twister"] = {"error": f"{type(e).__name__}: {e}"}
+    return record
 
 
 def fetch_full(number: int, refresh: bool = False) -> dict | None:
@@ -507,6 +515,10 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
     # shapes -- for an existing suite the yaml is present at base and merge,
     # for a new suite it exists only at merge.
     ref = pr.get("merge_commit_sha") or pr["head"]["sha"]
+    # Every commit read below (and by add_twister_facts), fetched up front, one
+    # fetch into the clone at a time when enriching in parallel.
+    with _FETCH_LOCK:
+        zephyr_env.ensure_commits(ref, base_commit, record["head_commit"])
     cache, suites = {}, {}
     for f in record["files"]:
         name = f["filename"]
@@ -521,7 +533,9 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
     # agent is given, before the change.
     if base_commit:
         record["base_sources"] = fetch_base_sources(record["files"], base_commit)
-        record["platforms"] = fetch_platforms(base_commit)
+        # Which boards exist and which scenarios can run on them now come from
+        # the local clone (the twister block) and from scripts/dry_run.py.
+        add_twister_facts(record)
 
     ENRICHED.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, indent=2))
@@ -564,7 +578,7 @@ def cmd_fetch(args) -> None:
         got = fetch_pr(n)
         mark = "ok" if got else "FAIL"
         print(f"  [{i}/{len(numbers)}] {n} {mark}")
-    print(f"\ncached under {CACHE.relative_to(REPO_ROOT)}")
+    print(f"\ncached under {layout.show(CACHE)}")
 
 
 def cmd_filter(_args) -> None:
@@ -592,20 +606,19 @@ def cmd_filter(_args) -> None:
         print("  rejected:")
         for r, c in sorted(reasons.items(), key=lambda kv: -kv[1]):
             print(f"    {c:>5}  {r}")
-    print(f"\n  written to {OUT.relative_to(REPO_ROOT)}")
+    print(f"\n  written to {layout.show(OUT)}")
 
 
 
 def describe_context(rec: dict) -> str:
-    """The two sections read at the base commit, for the progress line."""
+    """The base-commit context, for the progress line."""
     if "base_sources" not in rec:
         return "no base-commit context (enriched before it existed; use --refresh)"
     src = rec["base_sources"]
     kept = sum(1 for f in src.values() if f.get("content") is not None)
-    plats = [k for k, v in rec.get("platforms", {}).items()
-             if not k.startswith("_") and v.get("exists")]
+    boards = [b for b in (rec.get("twister") or {}).get("boards", {}).values() if b]
     return (f"{kept}/{len(src)} pre-change sources, "
-            f"platforms at base: {', '.join(plats) or 'none'}")
+            f"boards at base: {', '.join(boards) or 'none'}")
 
 
 def cmd_enrich(args) -> None:
@@ -618,27 +631,63 @@ def cmd_enrich(args) -> None:
         if args.limit:
             numbers = numbers[:args.limit]
 
-    print(f"Enriching {len(numbers)} candidates with full GitHub context.\n")
+    print(f"Enriching {len(numbers)} candidates, {args.parallel} at a time.\n")
     ok = 0
-    for i, n in enumerate(numbers, 1):
-        rec = fetch_full(n, refresh=args.refresh)
-        if not rec:
-            print(f"  [{i}/{len(numbers)}] {n}  FAILED")
-            continue
-        ok += 1
-        patched = sum(1 for f in rec["files"] if f.get("patch"))
-        suites = rec.get("test_suites", {})
-        nfiles = sum(len(s["files"]) for s in suites.values())
-        print(f"  [{i}/{len(numbers)}] {n}  "
-              f"{patched}/{len(rec['files'])} files with diff, "
-              f"{len(rec['commits'])} commits, "
-              f"{len(rec['comments']) + len(rec['review_comments'])} comments, "
-              f"{len(rec['linked_issues'])} linked issues, "
-              f"{len(suites)} suite(s)/{nfiles} files, "
-              f"{describe_context(rec)}")
+    with ThreadPoolExecutor(args.parallel) as pool:
+        futures = {pool.submit(fetch_full, n, args.refresh): n for n in numbers}
+        for i, fut in enumerate(as_completed(futures), 1):
+            n = futures[fut]
+            try:
+                rec, error = fut.result(), None
+            except Exception as e:  # one PR's failure must not stop the rest
+                rec, error = None, f"{type(e).__name__}: {e}"
+            ok += report_enriched(i, len(numbers), n, rec, error)
 
     print(f"\n  {ok}/{len(numbers)} enriched  ->  "
-          f"{ENRICHED.relative_to(REPO_ROOT)}")
+          f"{layout.show(ENRICHED)}")
+
+
+def report_enriched(i: int, total: int, n: int, rec: dict | None, error: str | None) -> int:
+    """One progress line per PR; returns 1 if it was enriched, else 0."""
+    if not rec:
+        print(f"  [{i}/{total}] {n}  FAILED{': ' + error if error else ''}", flush=True)
+        return 0
+    patched = sum(1 for f in rec["files"] if f.get("patch"))
+    suites = rec.get("test_suites", {})
+    nfiles = sum(len(s["files"]) for s in suites.values())
+    print(f"  [{i}/{total}] {n}  "
+          f"{patched}/{len(rec['files'])} files with diff, "
+          f"{len(rec['commits'])} commits, "
+          f"{len(rec['comments']) + len(rec['review_comments'])} comments, "
+          f"{len(rec['linked_issues'])} linked issues, "
+          f"{len(suites)} suite(s)/{nfiles} files, "
+          f"{describe_context(rec)}", flush=True)
+    return 1
+
+
+def cmd_enrich_twister(args) -> None:
+    """Add the twister block to records that were enriched without it."""
+    numbers = args.pr or sorted(int(p.stem) for p in ENRICHED.glob("*.json"))
+    print(f"Adding twister facts to {len(numbers)} enriched records.\n")
+    for i, n in enumerate(numbers, 1):
+        path = ENRICHED / f"{n}.json"
+        if not path.exists():
+            print(f"  [{i}/{len(numbers)}] {n}  no enriched record; run `enrich` first")
+            continue
+        rec = json.loads(path.read_text())
+        if "twister" in rec and "error" not in rec["twister"] and not args.refresh:
+            print(f"  [{i}/{len(numbers)}] {n}  already has twister facts")
+            continue
+        add_twister_facts(rec)
+        path.write_text(json.dumps(rec, indent=2))
+        t = rec["twister"]
+        if "error" in t:
+            print(f"  [{i}/{len(numbers)}] {n}  ERROR {t['error']}")
+            continue
+        print(f"  [{i}/{len(numbers)}] {n}  {t['base_date']}  python {t['python']}, "
+              f"SDK {t['sdk']}, boards {t['boards']}, "
+              f"{sum(len(s.get('scenarios', {})) for s in t['suites'].values())} scenario(s) "
+              f"in {len(t['suites'])} suite(s)")
 
 
 def main() -> None:
@@ -666,16 +715,23 @@ def main() -> None:
     add_repo(e)
     e.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
     e.add_argument("--limit", type=int, help="only the first N candidates")
+    e.add_argument("--parallel", type=int, default=4,
+                   help="PRs enriched at once (default 4; GitHub calls stay well under its rate limit)")
     e.add_argument("--refresh", action="store_true",
                    help="re-fetch records that already exist instead of reusing them")
 
+    t = sub.add_parser("enrich-twister",
+                       help="add twister facts to enriched records (local git only)")
+    t.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
+    t.add_argument("--refresh", action="store_true", help="recompute existing blocks")
+
     args = p.parse_args()
-    if args.repo == "nuttx":
+    if getattr(args, "repo", "zephyr") == "nuttx":
         import nuttx_candidates
         nuttx_candidates.dispatch(args)
         return
-    {"selftest": cmd_selftest, "fetch": cmd_fetch,
-     "filter": cmd_filter, "enrich": cmd_enrich}[args.cmd](args)
+    {"selftest": cmd_selftest, "fetch": cmd_fetch, "filter": cmd_filter,
+     "enrich": cmd_enrich, "enrich-twister": cmd_enrich_twister}[args.cmd](args)
 
 
 if __name__ == "__main__":

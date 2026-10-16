@@ -11,11 +11,22 @@ NuttX, which previously had no general build path -- only 16 hand-written
 per-PR scripts, now under archive/nuttx-validation/.
 
 Requires the project's base image; see scripts/build_bases.py.
+
+Zephyr instances generated for the twister pipeline (they carry an
+instance.def instead of a Dockerfile) are built with Apptainer instead:
+
+    EMBEDEVAL_INSTANCES_DIR=generated python scripts/build_instances.py \
+        --instance zephyr__zephyr-65697
+
+The shared Python and SDK layers of the PR's era are built first if they do
+not exist yet (scripts/apptainer_util.py), then the instance image FROM them.
+Images go under the work root, never into the repo.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -23,14 +34,55 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import apptainer_util as au
 import build_config
 import instances
 
 REQUIRED_FILES = ("Dockerfile", "metadata.json", "test_patch.diff", "run_tests.sh")
+APPTAINER_FILES = ("instance.def", "instance.json", "metadata.json", "test_patch.diff",
+                   "run_tests.py")
+
+
+def build_apptainer(instance_id: str, dry_run: bool = False) -> bool:
+    """Build a twister-pipeline Zephyr instance as an Apptainer image."""
+    d = instances.instance_dir(instance_id)
+    missing = [f for f in APPTAINER_FILES if not (d / f).exists()]
+    if missing:
+        print(f"  ERROR: {instance_id} missing {', '.join(missing)}")
+        return False
+    meta = instances.load_metadata(instance_id)
+    image = au.instance_image(instance_id)
+    logdir = au.path("logs", instance_id, "x").parent
+    print(f"\n=== {instance_id} -> {image} ===")
+    print(f"  era: Python {meta['python_version']}, SDK {meta['sdk_version']}")
+    if dry_run:
+        return True
+    start = time.time()
+    try:
+        base = au.ensure_base_images(meta["python_version"], meta["sdk_version"],
+                                     meta["sdk_archive"], au.path("logs", "bases", "x").parent)
+    except RuntimeError as e:
+        print(f"  ERROR: {e}")
+        return False
+    # EMBEDEVAL_BUILD_TIMEOUT_MIN: the cluster worker passes its build cap, so
+    # this limit (which stops a build cleanly) fires before the worker's own.
+    ok = au.build(image, d / "instance.def", {"BASE_IMAGE": str(base)}, logdir / "build.log",
+                  timeout_min=int(os.environ.get("EMBEDEVAL_BUILD_TIMEOUT_MIN", "120")))
+    mins = (time.time() - start) / 60
+    size = f", {image.stat().st_size / 2**30:.1f} GB" if ok else ""
+    print(f"  {'built' if ok else 'FAILED'} in {mins:.1f} min{size}; log: {logdir / 'build.log'}")
+    return ok
 
 
 def build_instance(instance_id: str, dry_run: bool = False, no_cache: bool = False) -> bool:
     d = instances.instance_dir(instance_id)
+    if (d / "instance.def").exists():
+        return build_apptainer(instance_id, dry_run)
+    if instances.split_instance(instance_id)[0] == "zephyr":
+        print(f"  SKIP: {instance_id} has no instance.def. Zephyr instances are built with "
+              f"Apptainer from the twister pipeline (generated/); the Docker ones in "
+              f"docker/instances/ are kept as reference metadata only.")
+        return False
     missing = [f for f in REQUIRED_FILES if not (d / f).exists()]
     if missing:
         print(f"  ERROR: {instance_id} missing {', '.join(missing)}")

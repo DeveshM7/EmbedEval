@@ -8,8 +8,8 @@
 #     scripts/scholar_triage_remote.sh wait             # block until no run is active
 #     scripts/scholar_triage_remote.sh pull             # copy triage/nuttx_runs back
 #
-# Needs key-based SSH to Scholar (see docs/spark_triage_setup.md, "Driving it
-# from your laptop") and the one-time setup there done on a Spark node.
+# Needs key-based SSH to Scholar (see docs/nuttx_pr_workflow.md, "Running NuttX
+# triage on Scholar") and the one-time setup there done on a Spark node.
 #
 # Two things here are not obvious:
 #   * sbatch and srun copy the submitting shell's environment. A login-node

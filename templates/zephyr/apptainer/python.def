@@ -1,0 +1,45 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+# Shared layer 1 of a Zephyr twister instance: the OS and one Python.
+#
+#   apptainer build --fakeroot --build-arg PYTHON=3.10 python-3.10.sif python.def
+#
+# Ubuntu 24.04 rather than each era's own Ubuntu: rootless builds on the Scholar
+# nodes need glibc >= 2.38 inside the image (the host's fakeroot library is
+# injected into it), which rules out older releases. The era is matched where it
+# matters -- the Python version, the SDK, and the commit's own requirements.
+#
+# Python comes from python-build-standalone via uv, so any version can be had on
+# any Ubuntu. The commit's requirements are installed later, per instance.
+
+%arguments
+    PYTHON=3.12
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    # Bounded retries and timeouts: an unbounded apt-get once hung a build for
+    # 21 minutes on a stalled mirror.
+    APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60"
+    apt-get $APT update -qq
+    apt-get $APT install -y -qq --no-install-recommends \
+        ca-certificates curl git cmake ninja-build gperf ccache dfu-util \
+        device-tree-compiler wget xz-utils file make gcc g++ libsdl2-dev \
+        libmagic1t64 universal-ctags > /dev/null
+    rm -rf /var/lib/apt/lists/*
+
+    curl -LsSf --retry 5 https://github.com/astral-sh/uv/releases/download/0.8.17/uv-$(uname -m)-unknown-linux-gnu.tar.gz \
+        | tar -xz -C /usr/local/bin --strip-components=1
+    export UV_PYTHON_INSTALL_DIR=/opt/uv-python
+    uv python install {{ PYTHON }}
+    ln -sf "$(uv python find {{ PYTHON }})" /usr/local/bin/python{{ PYTHON }}
+    chmod -R a+rX /opt
+
+%environment
+    export UV_PYTHON_INSTALL_DIR=/opt/uv-python
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.layer python
+    embedeval.python {{ PYTHON }}

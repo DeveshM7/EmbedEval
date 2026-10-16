@@ -275,6 +275,51 @@ rejected with a `qemu_lead` (board, confidence, why);
 `triage/nuttx_qemu_leads.jsonl`, to revisit once a QEMU template and runner
 exist.
 
+## Running NuttX triage on Scholar
+
+Triage runs on Scholar's Spark nodes against a vLLM model server; validation
+does not (there is no Docker there; NuttX instances are validated locally).
+The one-time setup -- `gh`, the Python venv, the vLLM image and the model
+weights -- is the same as for the Zephyr pipeline:
+[running_on_scholar.md](running_on_scholar.md), sections 3.1 and 3.2. That
+guide clones into `~/code/EmbedEval`; `scripts/scholar_triage_remote.sh`
+expects `~/EmbedEval` unless `SCHOLAR_REPO` says otherwise.
+
+`scripts/scholar_triage_remote.sh` drives the NuttX triage from your own
+machine over SSH (`serve`, `status`, `sync`, `run <job>`, `wait`, `pull`).
+
+1. **Key-based SSH, once.** From your laptop's own terminal (it prompts for
+   BoilerKey and Duo, so not from an agent's shell):
+   `ssh-copy-id -i ~/.ssh/id_ed25519.pub scholar.rcac.purdue.edu`. After that
+   `ssh -o BatchMode=yes scholar.rcac.purdue.edu hostname` works without a
+   prompt; the key also replaces BoilerKey for later logins.
+2. **Run the one-time setup on a Spark node**, not the x86 login node:
+   `srun -A scholar -p spark-interactive …` or `srun --jobid=<job> --overlap`
+   into a job you already have. `gh auth login` still needs you once (it shows
+   a device code; approve it in any browser).
+3. **The two repositories the NuttX triage tools read** are full bare clones,
+   linked where the script looks for them:
+   ```bash
+   git clone --bare https://github.com/apache/nuttx.git      $SCRATCH/repos/nuttx.git
+   git clone --bare https://github.com/apache/nuttx-apps.git $SCRATCH/repos/nuttx-apps.git
+   ln -sfn $SCRATCH/repos/nuttx.git      ~/EmbedEval/candidates/nuttx/kernel.git
+   ln -sfn $SCRATCH/repos/nuttx-apps.git ~/EmbedEval/candidates/nuttx/apps.git
+   ```
+   Copy `candidates/nuttx/enriched/` up from the machine that enriched it
+   (it is gitignored) so triage and the generator read the same records.
+4. **Then:** `serve` (one or two server jobs; two use both job slots), `status`
+   until each says ready, `sync`, `run <job>` for each server, `wait`, `pull`.
+
+What bit us, so the script handles it:
+
+| Symptom | Cause |
+|---|---|
+| `Exec format error` in a job or `srun` step | `sbatch`/`srun` copy the login node's environment; an x86 `conda init` in `~/.bashrc` put `/apps/cent7/anaconda` first on `PATH`. The script drops those entries; guarding the `conda init` block with `if [ "$(uname -m)" = x86_64 ]` fixes interactive shells. |
+| `srun` runs the command 10 times | A job with 10 tasks; pass `-n 1` to `srun --overlap`. |
+| `ssh` does not return until the run ends | The `srun` step held the session; start it as `nohup setsid bash -c '…' & disown`. |
+| A "wait" loop never ends | `pgrep -f pattern` through `ssh` matches the ssh command itself; write the pattern as `[t]riage…`. |
+| A third job waits with `AssocMaxJobsLimit` | The account runs 2 jobs at once (`sacctmgr show assoc user=$USER`): MaxJobs 2, MaxSubmit 50, MaxWall 4 h. |
+
 ## Workflow coverage
 
 | Stage | NuttX status |

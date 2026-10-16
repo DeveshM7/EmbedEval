@@ -1,0 +1,47 @@
+Bootstrap: localimage
+From: {{ PYTHON_IMAGE }}
+
+# Shared layer 2: the Zephyr SDK of the era, on top of the Python layer.
+#
+#   apptainer build --fakeroot --build-arg PYTHON_IMAGE=/path/python-3.10.sif \
+#       --build-arg SDK=0.16.3 --build-arg SDK_ARCHIVE=tar.xz sdk.sif sdk.def
+#
+# The minimal bundle plus host tools (QEMU for every architecture, dtc) and the
+# cross-compilers of the QEMU boards we run (scripts/zephyr_env.py,
+# CANDIDATE_BOARDS): x86 (qemu_x86, qemu_x86_64), ARM (qemu_cortex_m3,
+# mps2/an385), AArch64 (qemu_cortex_a53) and RISC-V (qemu_riscv32/64).
+# Native boards are compiled by the image's own gcc and need nothing more.
+# setup.sh is run without -c: nothing is registered in a home directory, the
+# location is given by ZEPHYR_SDK_INSTALL_DIR instead.
+#
+# SDK_ARCHIVE is tar.gz for 0.14.x-0.15.x and tar.xz from 0.16.0; the SDK
+# version and its format come from templates/zephyr/lookup/sdk_releases.json.
+
+%arguments
+    PYTHON_IMAGE=python.sif
+    SDK=0.16.8
+    SDK_ARCHIVE=tar.xz
+
+%post
+    set -e
+    cd /opt
+    U=https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v{{ SDK }}
+    A=zephyr-sdk-{{ SDK }}_linux-$(uname -m)_minimal.{{ SDK_ARCHIVE }}
+    wget -q --tries=5 --timeout=60 "$U/$A"
+    tar -xf "$A"
+    rm -f "$A"
+    cd /opt/zephyr-sdk-{{ SDK }}
+    ./setup.sh -h -t x86_64-zephyr-elf -t arm-zephyr-eabi -t aarch64-zephyr-elf \
+        -t riscv64-zephyr-elf
+    chmod -R a+rX /opt/zephyr-sdk-{{ SDK }}
+
+%environment
+    # A layer's %environment replaces its base's, so repeat the Python layer's.
+    export UV_PYTHON_INSTALL_DIR=/opt/uv-python
+    export LANG=C.UTF-8
+    export ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk-{{ SDK }}
+    export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
+
+%labels
+    embedeval.layer sdk
+    embedeval.sdk {{ SDK }}

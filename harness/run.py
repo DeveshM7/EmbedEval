@@ -5,6 +5,12 @@ Run an agent on EmbedEval instances.
     python harness/run.py --repo nuttx --model gpt-5.4
     python harness/run.py --all --model gpt-5.4 gemini-2.5-pro
 
+Twister-pipeline Zephyr instances (generated/, built as Apptainer images) run in
+an Apptainer environment instead of Docker, e.g. with the local Qwen server:
+
+    EMBEDEVAL_INSTANCES_DIR=generated python harness/run.py \
+        --instance zephyr__zephyr-65697 --model qwen38-nvfp4
+
 Replaces run_instance.py, run_nuttx_instance.py, run_riot_instance.py and
 run_all.py, which were ~50% duplicated and disagreed on prompt format, .env
 handling and the API-key check.
@@ -16,7 +22,7 @@ import argparse
 import json
 import os
 import re
-import subprocess
+import signal
 import sys
 import time
 from pathlib import Path
@@ -116,7 +122,35 @@ PROVIDER_KEYS = {
 }
 
 
+# Models served locally by scripts/serve_triage_model.sh: vLLM's
+# OpenAI-compatible API, so LiteLLM's openai/ route with an api_base. The
+# sampling settings come from the same profile triage uses (triage/models.json).
+# EMBEDEVAL_LOCAL_API_BASE overrides the address; the server listens on
+# 127.0.0.1, so the harness must run on the server's node.
+LOCAL_MODELS = {"openai/qwen38-nvfp4": "qwen38-nvfp4"}
+REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
+
+
+def model_config(full_model: str) -> dict:
+    """mini-swe-agent model config for a local model; {} for hosted ones."""
+    profile = LOCAL_MODELS.get(full_model)
+    if not profile:
+        return {}
+    prof = json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile]
+    sampling = dict(prof.get("sampling", {}))
+    extra = {k: sampling.pop(k) for k in ("top_k", "min_p") if k in sampling}
+    kwargs = dict(api_base=os.environ.get("EMBEDEVAL_LOCAL_API_BASE", "http://127.0.0.1:8000/v1"),
+                  api_key="local", timeout=REQUEST_TIMEOUT, num_retries=0,
+                  max_tokens=prof.get("max_tokens", 32768), **sampling)
+    if extra:
+        kwargs["extra_body"] = extra
+    # A local model has no price; without this LiteLLM's cost lookup fails.
+    return {"model_kwargs": kwargs, "cost_tracking": "ignore_errors"}
+
+
 def check_api_key(model_name: str) -> None:
+    if paths.resolve_model(model_name) in LOCAL_MODELS:
+        return
     provider = paths.resolve_model(model_name).split("/")[0]
     names = PROVIDER_KEYS.get(provider)
     if not names:
@@ -132,7 +166,7 @@ def check_api_key(model_name: str) -> None:
 
 
 def build_prompts(meta: dict) -> tuple[str, str]:
-    cfg = projects.config(meta["project"])
+    cfg = projects.config_for(meta)
     protected = " or ".join(f"`{p}`" for p in cfg["protected_paths"])
     warn = cfg["extra_warnings"]
     system = SYSTEM_TEMPLATE.format(
@@ -164,7 +198,7 @@ def _build_and_test(meta: dict) -> str:
     the evaluator after wiping the build directory. Re-specifying -b and a test
     path is what produced invented board names in the existing trajectories.
     """
-    rebuild = projects.config(meta["project"])["rebuild_command"]
+    rebuild = projects.config_for(meta)["rebuild_command"]
     return f"cd /testbed && {rebuild} && run_tests" if rebuild else "cd /testbed && run_tests"
 
 
@@ -197,66 +231,33 @@ def build_task(meta: dict) -> str:
 # --------------------------------------------------------------------------
 
 
-class QemuCleanupEnvironment:
-    """
-    DockerEnvironment plus orphaned-QEMU cleanup, for projects that run tests
-    under QEMU (Zephyr).
-
-    A per-command timeout kills the `docker exec` client on the host, but the
-    container-side QEMU keeps running and holds an exclusive lock on qemu.pid.
-    Every later `run_tests` then fails with "Cannot lock pid file". This kills
-    the orphan by PID file -- not by process name, which would match the calling
-    shell and kill the session.
-    """
-
-    _CLEANUP = (
-        "if [ -f /testbed/build/qemu.pid ]; then "
-        "  kill -9 $(cat /testbed/build/qemu.pid) 2>/dev/null || true; "
-        "fi; "
-        "rm -f /testbed/build/qemu.pid /testbed/build/zephyr/qemu.pid"
-    )
-
-    def __init__(self, **kwargs):
-        from minisweagent.environments.docker import DockerEnvironment
-
-        self._env = DockerEnvironment(**kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._env, name)
-
-    def execute(self, action: dict, **kwargs) -> dict:
-        result = self._env.execute(action, **kwargs)
-        if (
-            result.get("returncode") == -1
-            and "timed out" in (result.get("exception_info") or "").lower()
-        ):
-            try:
-                subprocess.run(
-                    [
-                        self._env.config.executable,
-                        "exec",
-                        self._env.container_id,
-                        "bash",
-                        "-c",
-                        self._CLEANUP,
-                    ],
-                    timeout=10,
-                    capture_output=True,
-                )
-            except Exception:
-                pass  # best effort; the agent will see the lock error otherwise
-        return result
-
-
 def make_environment(meta: dict):
-    cfg = projects.config(meta["project"])
+    cfg = projects.config_for(meta)
+    if cfg.get("runtime") == "apptainer":
+        # Zephyr: an Apptainer image built by scripts/build_instances.py.
+        sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
+        import apptainer_util
+        from apptainer_env import ApptainerEnvironment
+
+        # The image carries the PR's test changes as uncommitted edits.
+        # Committing them in this run's overlay before the agent starts makes
+        # `git diff` show the agent's changes alone, so capture_patch's check
+        # for edits to protected paths means what it says. Graded patches still
+        # apply to the image as built: the same files, the same content.
+        commit_tests = ("cd /testbed && git add -A -- tests/ && git -c user.name=EmbedEval "
+                        "-c user.email=embedeval@localhost commit -q -m "
+                        "'The PR test changes, without its fix'")
+        return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
+                                    name=meta["instance_id"], cwd="/testbed",
+                                    timeout=cfg.get("command_timeout", 900),
+                                    setup_commands=[commit_tests])
+
+    # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed",
                   timeout=projects.setting(meta, "command_timeout", 180))
     platform = projects.setting(meta, "docker_platform")
     if platform:
         kwargs["run_args"] = ["--rm", "--platform", platform]
-    if cfg["needs_qemu_cleanup"]:
-        return QemuCleanupEnvironment(**kwargs)
     from minisweagent.environments.docker import DockerEnvironment
 
     return DockerEnvironment(**kwargs)
@@ -298,9 +299,24 @@ def make_verbose_agent_class(base_class):
 # --------------------------------------------------------------------------
 
 
-def capture_patch(env, meta: dict) -> tuple[str, list[str]]:
+def start_commit(env) -> str:
+    """The commit the agent starts from (after any setup commit), so the patch
+    is everything since -- whatever the agent did with git along the way."""
+    out = env.execute({"command": "cd /testbed && git rev-parse HEAD"})
+    sha = out.get("output", "").strip()
+    return sha if out.get("returncode") == 0 and len(sha) == 40 else "HEAD"
+
+
+def capture_patch(env, meta: dict, start: str = "HEAD") -> tuple[str, list[str]]:
     """
     Return (patch, protected_files_touched).
+
+    Everything the agent changed since `start`: edits to tracked files, new
+    files, and changes it staged or committed itself (`git add -A`, then a diff
+    of the index against `start`; ignored paths such as build directories stay
+    out). A plain `git diff` saw only unstaged edits to tracked files and lost
+    the rest -- a new source file, or files the agent staged with `git
+    checkout <rev> -- <path>`.
 
     The full diff is captured, minus the project's protected paths, so a correct
     fix outside the gold patch's file set is preserved -- the old behaviour
@@ -308,13 +324,41 @@ def capture_patch(env, meta: dict) -> tuple[str, list[str]]:
     Protected paths are excluded from the patch but reported, so test tampering
     is visible rather than quietly dropped.
     """
-    protected = projects.config(meta["project"])["protected_paths"]
+    protected = projects.config_for(meta)["protected_paths"]
     excludes = " ".join(f"':(exclude){p}'" for p in protected)
-    patch = env.execute({"command": f"cd /testbed && git diff -- . {excludes}"}).get("output", "")
+    patch = env.execute({"command": f"cd /testbed && git add -A && "
+                                    f"git diff --cached --binary {start} -- . {excludes}"}
+                        ).get("output", "")
     touched = env.execute(
-        {"command": "cd /testbed && git diff --name-only -- " + " ".join(f"'{p}'" for p in protected)}
+        {"command": f"cd /testbed && git diff --cached --name-only {start} -- "
+                    + " ".join(f"'{p}'" for p in protected)}
     ).get("output", "")
     return patch, [t for t in touched.splitlines() if t.strip()]
+
+
+# The run in progress, for the SIGTERM handler: {"save": callable, "env": env}.
+_CURRENT: dict = {}
+
+
+def _stop_on_sigterm(signum, frame):
+    """`timeout`, scancel and Slurm stop a run with SIGTERM, then SIGKILL a
+    little later. Save what the agent did and remove the overlay right here,
+    then exit. Raising an exception instead is not enough: SIGTERM usually
+    lands while the agent waits for the model, and the model client's retry
+    wrapper catches the exception and retries the call."""
+    print(f"\n  stopped by signal {signum}: saving the patch", flush=True)
+    try:
+        if _CURRENT.get("save"):
+            _CURRENT["save"]()
+            print("  patch saved", flush=True)
+    except BaseException as e:
+        print(f"  could not save the patch: {type(e).__name__}: {e}", flush=True)
+    try:
+        if _CURRENT.get("env") is not None:
+            _CURRENT["env"].cleanup()
+    except BaseException:
+        pass
+    os._exit(128 + signum)
 
 
 def run_one(instance_id: str, model_name: str, args) -> dict:
@@ -331,8 +375,8 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
 
     print(f"  instance : {instance_id}")
     print(f"  model    : {full_model}")
-    print(f"  image    : {meta['docker_image']}")
-    print(f"  output   : {out_dir.relative_to(paths.REPO_ROOT)}")
+    print(f"  image    : {meta.get('docker_image') or meta.get('apptainer_image')}")
+    print(f"  output   : {paths.show(out_dir)}")
 
     result = {
         "instance_id": instance_id,
@@ -347,10 +391,19 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
         "error": None,
     }
     start = time.time()
-    env = None
+    env, captured, base = None, False, "HEAD"
+
+    def save_patch() -> None:
+        patch, touched = capture_patch(env, meta, base)
+        paths.patch_path(instance_id, full_model).write_text(patch)
+        result["patch_empty"] = not patch.strip()
+        result["protected_touched"] = touched
+
     try:
         env = make_environment(meta)
-        model = get_model(input_model_name=full_model)
+        base = start_commit(env)
+        _CURRENT.update(save=save_patch, env=env)
+        model = get_model(input_model_name=full_model, config=model_config(full_model))
         model.config.format_error_template = FORMAT_ERROR_TEMPLATE
 
         agent_class = make_verbose_agent_class(DefaultAgent) if args.verbose else DefaultAgent
@@ -361,15 +414,15 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
             instance_template=instance_template,
             step_limit=args.step_limit,
             cost_limit=args.cost_limit,
+            wall_time_limit_seconds=int(args.time_limit * 60),
             output_path=paths.trajectory_path(instance_id, full_model),
         )
         run_info = agent.run(task)
         result["exit_status"] = run_info.get("exit_status")
 
-        patch, touched = capture_patch(env, meta)
-        paths.patch_path(instance_id, full_model).write_text(patch)
-        result["patch_empty"] = not patch.strip()
-        result["protected_touched"] = touched
+        save_patch()
+        captured = True
+        touched = result["protected_touched"]
         result["status"] = "success"
         if touched:
             print(f"  WARNING: agent modified protected paths: {', '.join(touched)}")
@@ -381,6 +434,15 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
         result["error"] = f"{type(e).__name__}: {e}"
         print(f"  ERROR: {result['error']}")
     finally:
+        _CURRENT.clear()
+        if env is not None and not captured:
+            # Stopped early by an error:
+            # keep whatever the agent had done, so it can still be graded.
+            try:
+                save_patch()
+                result["patch_captured"] = "after interruption"
+            except BaseException as e:
+                print(f"  could not save the patch: {type(e).__name__}: {e}")
         result["elapsed_seconds"] = round(time.time() - start, 1)
         traj = paths.trajectory_path(instance_id, full_model)
         if traj.exists():
@@ -419,6 +481,7 @@ def select_instances(args) -> list[str]:
 
 
 def main() -> None:
+    signal.signal(signal.SIGTERM, _stop_on_sigterm)
     p = argparse.ArgumentParser(description="Run an agent on EmbedEval instances.")
     sel = p.add_mutually_exclusive_group(required=True)
     sel.add_argument("--instance", nargs="+", help="one or more instance ids")
@@ -428,6 +491,9 @@ def main() -> None:
                    help="one or more models (full LiteLLM name or shorthand)")
     p.add_argument("--step-limit", type=int, default=50)
     p.add_argument("--cost-limit", type=float, default=3.0)
+    p.add_argument("--time-limit", type=float, default=0,
+                   help="minutes of wall-clock time per run, checked before each model "
+                        "call; the patch is captured as usual (default 0: no limit)")
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="print the planned runs and exit without starting containers")
@@ -447,7 +513,7 @@ def main() -> None:
     if args.dry_run:
         for m in models:
             for i in instances:
-                print(f"  {m:46s} {i:24s} -> {paths.run_dir(i, m).relative_to(paths.REPO_ROOT)}")
+                print(f"  {m:46s} {i:24s} -> {paths.show(paths.run_dir(i, m))}")
         return
 
     for m in models:

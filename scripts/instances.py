@@ -13,18 +13,27 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASES_DIR = REPO_ROOT / "docker" / "bases"
 
-# Where instance directories are read from. EMBEDEVAL_INSTANCES_DIR redirects
-# it so a freshly generated instance can be built and validated without being
-# copied in beside the hand-written ones -- and, more importantly, without any
-# chance of overwriting them.
-INSTANCES_DIR = Path(
-    os.environ.get("EMBEDEVAL_INSTANCES_DIR", REPO_ROOT / "docker" / "instances")
-)
+# Where instance directories are read from: the validated twister-pipeline
+# Zephyr instances in apptainer/instances/ (written there only by
+# scripts/promote_instance.py), then the Docker instances in docker/instances/.
+# EMBEDEVAL_INSTANCES_DIR replaces both -- e.g. generated/, so a freshly
+# generated instance can be built and validated before it is promoted, and
+# without any chance of overwriting a committed one. With --run-dir the run's
+# own instances/ is the default.
+APPTAINER_INSTANCES = REPO_ROOT / "apptainer" / "instances"
+_override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
+INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
+                  if _override else [layout.generated()] if layout.run_dir()
+                  else [APPTAINER_INSTANCES, REPO_ROOT / "docker" / "instances"])
 
 PROJECTS = ("zephyr", "nuttx", "riot")
 
@@ -42,7 +51,10 @@ def split_instance(instance_id: str) -> tuple[str, str]:
 
 
 def instance_dir(instance_id: str) -> Path:
-    return INSTANCES_DIR / instance_id
+    for root in INSTANCE_ROOTS:
+        if (root / instance_id / "metadata.json").exists():
+            return root / instance_id
+    return INSTANCE_ROOTS[0] / instance_id
 
 
 def load_metadata(instance_id: str) -> dict:
@@ -55,10 +67,15 @@ def load_metadata(instance_id: str) -> dict:
 
 def discover_instances(project: str | None = None) -> list[str]:
     found = []
-    for d in sorted(INSTANCES_DIR.iterdir()):
-        if not (d.is_dir() and (d / "metadata.json").exists()):
-            continue
-        if project and split_instance(d.name)[0] != project:
-            continue
-        found.append(d.name)
-    return found
+    for root in INSTANCE_ROOTS:
+        for d in sorted(root.iterdir()) if root.is_dir() else []:
+            if d.name in found or not (d.is_dir() and (d / "metadata.json").exists()):
+                continue
+            if project and split_instance(d.name)[0] != project:
+                continue
+            # Zephyr instances come from the twister pipeline (an instance.def).
+            # The hand-built Zephyr Docker folders are reference metadata only.
+            if split_instance(d.name)[0] == "zephyr" and not (d / "instance.def").exists():
+                continue
+            found.append(d.name)
+    return sorted(found)
