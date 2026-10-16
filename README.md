@@ -16,7 +16,9 @@ and the tests actually run.
   [docs/pipeline_internals.md](docs/pipeline_internals.md) (how it works).
 - **NuttX and RIOT** instances are **Docker** images in `docker/instances/`.
   The NuttX ones are generated from reviewed PR pairs — see
-  [docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md).
+  [docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md). A NuttX instance
+  can also be rendered as an Apptainer recipe, for hosts without Docker such
+  as Scholar's ARM64 nodes — see [NuttX in Apptainer](#nuttx-in-apptainer).
 
 **Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 7 NuttX, 3 RIOT.
 
@@ -237,6 +239,57 @@ python scripts/twister_pipeline.py --pr <pr>... --verdicts <dir>       # generat
 Builds and runs need a node where Apptainer can build; on Scholar, inside a
 `spark-batch` job. How the stages, the model server and the cluster job fit
 together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
+
+---
+
+## NuttX in Apptainer
+
+The same NuttX instance can be an Apptainer recipe instead of a Dockerfile,
+for hosts with no Docker -- on Scholar, the ARM64 Spark nodes, where sim:nsh
+builds natively. Render it with `--runtime apptainer`; the recipe goes to
+`generated/` and its metadata says `"runtime": "apptainer"`, which is what
+every tool below checks:
+
+```bash
+python scripts/render_nuttx_instance.py --runtime apptainer \
+    --metadata docker/instances/nuttx__nuttx-11889/metadata.json \
+    --test-patch docker/instances/nuttx__nuttx-11889/test_patch.diff
+
+# inside a spark-batch job; local clones instead of GitHub, if you have them
+export EMBEDEVAL_INSTANCES_DIR=generated
+export EMBEDEVAL_NUTTX_CLONE=/scratch/scholar/$USER/repos/nuttx.git
+export EMBEDEVAL_NUTTX_APPS_CLONE=/scratch/scholar/$USER/repos/nuttx-apps.git
+python scripts/build_instances.py --instance nuttx__nuttx-11889
+python scripts/validate_instance.py nuttx__nuttx-11889
+python harness/run.py --instance nuttx__nuttx-11889 --model <model>
+python harness/evaluate_patches.py --instance nuttx__nuttx-11889 --model <model>
+```
+
+- **Images** (`templates/nuttx/apptainer/`): `base.def` is the shared layer
+  (Ubuntu 24.04 and sim:nsh's tools, built once, named by a hash of its
+  recipe); `instance.def` adds the kernel and apps at their base commits,
+  configured exactly as the Dockerfile does, with the test patch. Both go
+  under the work root (`scripts/apptainer_util.py`), as Zephyr's do.
+- **Validation** runs the Docker validator's NuttX steps in one overlay and
+  writes `validation.json`. Grading builds, then runs `run_tests`, in a fresh
+  overlay.
+- **apps/** is kept out of the kernel's git in the image, so the agent's patch
+  holds kernel changes only. (Under Docker, `git add -A` picks up the nested
+  apps repository as a submodule entry.)
+- **Old kernels on ARM64.** sim on an ARM64 host needs a kernel from
+  2022-02-02 on. Kernels from 2023-07-17 to 2023-11-17 lack the ARM64 table in
+  `sim_tcbinfo.c` and do not build; the image backports it from upstream
+  (`sim_tcbinfo_arm64.patch`) and commits it before the agent starts, so it is
+  never part of a patch.
+- **Not every instance carries over to ARM64**; validate each one there.
+  Of the seven, 11889, 11898, 12802 and 9923 are valid on Scholar's nodes.
+  14152's fix is in the x86 setjmp code, so on ARM64 its test passes before
+  the fix. 8832 and 8885 fail correctly at their base, but with the fix ostest
+  still dies (SIGBUS) later, in its vfork() test: the sim's ARM64 vfork crashes
+  on kernels from before the 2023-07 fork rework (c33d1c9c97).
+- **Speed.** Builds in an overlay on `/scratch` are slower than in a plain
+  directory: a full sim:nsh build takes about two minutes, an ostest run
+  about two.
 
 ---
 
