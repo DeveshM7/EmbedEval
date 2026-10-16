@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Boot /testbed/nuttx (qemu-armv8a) in QEMU, run the whole ostest suite to
+# completion, then classify its log once, as templates/nuttx/run_tests.sh.tmpl
+# does for sim:nsh. Exit 0 when ostest finished cleanly and ran every changed
+# test, 1 for any other completed run, and 2 for timeout.
+#
+# The console is QEMU's stdio, fed from a FIFO: "ostest" is typed at the
+# first nsh prompt, and QEMU is quit (Ctrl-A x on the mux console) at the
+# second prompt, i.e. when ostest has returned to nsh. The board has no
+# poweroff (no board_power_off), so nsh's poweroff is not used. An assertion
+# halts NuttX instead of returning to nsh; the run then ends on its
+# "Assertion failed" line rather than waiting for the timeout.
+set -u
+
+TIMEOUT="${1:-600}"
+# The "user_main: ... test" lines ostest prints before each changed test.
+BANNERS=(@@BANNERS@@)
+OUTFILE="$(mktemp /tmp/nuttx_test_output.XXXXXX)"
+FIFO="$(mktemp -u /tmp/nuttx_console.XXXXXX)"
+mkfifo "$FIFO"
+trap '' PIPE   # a console write after QEMU exited fails instead of killing us
+trap 'exec 3>&-; kill "${QPID:-}" 2>/dev/null; rm -f "$OUTFILE" "$FIFO"' EXIT
+
+cd /testbed || exit 1
+# As many CPUs as the build expects: 1 for nsh, CONFIG_SMP_NCPUS for nsh_smp.
+NCPUS="$(sed -n 's/^CONFIG_SMP_NCPUS=//p' .config)"
+NCPUS="${NCPUS:-1}"
+# NuttX's documented command line for qemu-armv8a (GICv3).
+timeout -k 10 "$TIMEOUT" qemu-system-aarch64 -cpu cortex-a53 -smp "$NCPUS" \
+    -nographic -machine virt,virtualization=on,gic-version=3 -net none \
+    -chardev stdio,id=con,mux=on -serial chardev:con \
+    -mon chardev=con,mode=readline -kernel ./nuttx \
+    <"$FIFO" >"$OUTFILE" 2>&1 &
+QPID=$!
+exec 3>"$FIFO"
+
+# wait_for <n>: until the log shows n nsh prompts or an assertion, or QEMU
+# has exited. Returns 0 only for the prompts.
+wait_for() {
+    while kill -0 "$QPID" 2>/dev/null; do
+        grep -Fq 'Assertion failed' "$OUTFILE" && { sleep 2; return 1; }
+        (( $(grep -o 'nsh> ' "$OUTFILE" | wc -l) >= $1 )) && return 0
+        sleep 1
+    done
+    return 1
+}
+
+T0=$SECONDS
+TIMING="no nsh prompt"
+if wait_for 1; then
+    T1=$SECONDS
+    printf 'ostest\n' >&3
+    wait_for 2
+    TIMING="boot $((T1 - T0))s, ostest $((SECONDS - T1))s"
+fi
+printf '\001x' >&3 2>/dev/null   # quit QEMU; harmless if it already exited
+wait "$QPID"
+QEMU_RC=$?
+cat "$OUTFILE"
+echo
+echo "run_tests: $TIMING"
+
+# 124: timeout's TERM worked; 137: it needed KILL.
+if (( QEMU_RC == 124 || QEMU_RC == 137 )); then
+    echo "run_tests: result=2 (timed out after ${TIMEOUT}s)"
+    exit 2
+fi
+
+REASONS=()
+grep -Fq 'user_main: Exiting' "$OUTFILE" || REASONS+=("no 'user_main: Exiting'")
+grep -Fq 'ostest_main: Exiting with status 0' "$OUTFILE" ||
+    REASONS+=("no 'ostest_main: Exiting with status 0'")
+# Except cond_test's "thread_signaler: ERROR waiter state = N != COND_WAITING":
+# on SMP the signaler can run before the waiter (testing/ostest/cond.c says
+# so); it only counts signaler_state, not an error, and does not fail ostest.
+# Matched without its prefix: on SMP, output from several CPUs can interleave
+# within a line.
+grep -F 'ERROR' "$OUTFILE" | grep -Fvq 'ERROR waiter state' &&
+    REASONS+=("ERROR in output")
+for banner in "${BANNERS[@]}"; do
+    grep -Fq -- "$banner" "$OUTFILE" || REASONS+=("changed test did not run: '$banner'")
+done
+
+if (( ${#REASONS[@]} == 0 )); then
+    echo "run_tests: result=0"
+    exit 0
+fi
+printf 'run_tests: %s\n' "${REASONS[@]}"
+echo "run_tests: result=1"
+exit 1

@@ -1,0 +1,185 @@
+diff --git a/testing/ostest/CMakeLists.txt b/testing/ostest/CMakeLists.txt
+index 74f2f3f9bdd..84dddd799ba 100644
+--- a/testing/ostest/CMakeLists.txt
++++ b/testing/ostest/CMakeLists.txt
+@@ -132,6 +132,10 @@ if(CONFIG_TESTING_OSTEST)
+     list(APPEND SRCS setjmp.c)
+   endif()
+ 
++  if(CONFIG_SMP_CALL)
++    list(APPEND SRCS smp_call.c)
++  endif()
++
+   target_sources(apps PRIVATE ${SRCS})
+ 
+   nuttx_add_application(NAME ostest SRCS ostest_main.c)
+diff --git a/testing/ostest/Makefile b/testing/ostest/Makefile
+index fba321319b8..0dc4ac1a246 100644
+--- a/testing/ostest/Makefile
++++ b/testing/ostest/Makefile
+@@ -133,4 +133,8 @@ ifeq ($(CONFIG_ARCH_SETJMP_H),y)
+ CSRCS += setjmp.c
+ endif
+ 
++ifeq ($(CONFIG_SMP_CALL),y)
++CSRCS += smp_call.c
++endif
++
+ include $(APPDIR)/Application.mk
+diff --git a/testing/ostest/ostest.h b/testing/ostest/ostest.h
+index 33625f5e5b1..0b692909e4e 100644
+--- a/testing/ostest/ostest.h
++++ b/testing/ostest/ostest.h
+@@ -264,6 +264,12 @@ int vfork_test(void);
+ 
+ void setjmp_test(void);
+ 
++/* smp_call.c ***************************************************************/
++
++#ifdef CONFIG_SMP_CALL
++void smp_call_test(void);
++#endif
++
+ /* APIs exported (conditionally) by the OS specifically for testing of
+  * priority inheritance
+  */
+diff --git a/testing/ostest/ostest_main.c b/testing/ostest/ostest_main.c
+index 2de06fca2f4..6635e2b37dd 100644
+--- a/testing/ostest/ostest_main.c
++++ b/testing/ostest/ostest_main.c
+@@ -585,6 +585,11 @@ static int user_main(int argc, char *argv[])
+       vfork_test();
+ #endif
+ 
++#ifdef CONFIG_SMP_CALL
++      printf("\nuser_main: smp call test\n");
++      smp_call_test();
++#endif
++
+       /* Compare memory usage at time ostest_main started until
+        * user_main exits.  These should not be identical, but should
+        * be similar enough that we can detect any serious OS memory
+diff --git a/testing/ostest/smp_call.c b/testing/ostest/smp_call.c
+new file mode 100644
+index 00000000000..6a9c5f36d82
+--- /dev/null
++++ b/testing/ostest/smp_call.c
+@@ -0,0 +1,118 @@
++/****************************************************************************
++ * apps/testing/ostest/smp_call.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <assert.h>
++#include <semaphore.h>
++#include <stdbool.h>
++#include <stdio.h>
++
++#include <nuttx/sched.h>
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++static int smp_call_func(void *arg)
++{
++  FAR sem_t *psem = arg;
++  sem_post(psem);
++  return OK;
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++void smp_call_test(void)
++{
++  cpu_set_t cpuset;
++  sem_t sem;
++  int cpucnt;
++  int cpu;
++  int value;
++  int status;
++
++  printf("smp_call_test: Test start\n");
++
++  sem_init(&sem, 0, 0);
++
++  for (cpu = 0; cpu < CONFIG_SMP_NCPUS; cpu++)
++    {
++      printf("smp_call_test: Call cpu %d, nowait\n", cpu);
++
++      nxsched_smp_call_single(cpu, smp_call_func, &sem, false);
++
++      status = sem_wait(&sem);
++      if (status != 0)
++        {
++          printf("smp_call_test: Check smp call error\n");
++          ASSERT(false);
++        }
++
++      printf("smp_call_test: Call cpu %d, wait\n", cpu);
++
++      nxsched_smp_call_single(cpu, smp_call_func, &sem, true);
++
++      sem_getvalue(&sem, &value);
++      if (value != 1)
++        {
++          printf("smp_call_test: Check smp call wait error\n");
++          ASSERT(false);
++        }
++
++      nxsem_reset(&sem, 0);
++    }
++
++  printf("smp_call_test: Call multi cpu, nowait\n");
++
++  sched_getaffinity(0, sizeof(cpu_set_t), &cpuset);
++  cpucnt = CPU_COUNT(&cpuset);
++
++  nxsched_smp_call(cpuset, smp_call_func, &sem, false);
++
++  for (cpu = 0; cpu < cpucnt; cpu++)
++    {
++      status = sem_wait(&sem);
++      if (status != 0)
++        {
++          printf("smp_call_test: Check smp call error\n");
++          ASSERT(false);
++        }
++    }
++
++  printf("smp_call_test: Call multi cpu, wait\n");
++
++  nxsched_smp_call(cpuset, smp_call_func, &sem, true);
++
++  sem_getvalue(&sem, &value);
++  if (value != cpucnt)
++    {
++      printf("smp_call_test: Check smp call wait error\n");
++      ASSERT(false);
++    }
++
++  sem_destroy(&sem);
++
++  printf("smp_call_test: Test success\n");
++}

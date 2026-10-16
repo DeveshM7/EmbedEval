@@ -1,0 +1,57 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+# NuttX qemu-armv8a (nsh, nsh_smp) in Apptainer: the build tools of
+# docker/bases/nuttx.Dockerfile that a NuttX build needs, the bare-metal
+# aarch64-none-elf toolchain, and qemu-system-aarch64.
+#
+#   apptainer build --fakeroot nuttx-qemu.sif nuttx-qemu.def
+#
+# Ubuntu 24.04: rootless --fakeroot builds on Scholar inject the host's
+# fakeroot library, which needs glibc >= 2.38 (as templates/zephyr/apptainer/
+# python.def).
+#
+# The toolchain is Arm's prebuilt aarch64-none-elf 12.3.rel1, the version
+# NuttX CI used in 2023 (tools/ci/docker/linux/Dockerfile); Arm publishes it
+# for x86_64 and aarch64 hosts, so $(uname -m) picks the host's build.
+# arch/arm64/src/Toolchain.defs defaults to CROSSDEV=aarch64-none-elf-.
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    # ports.ubuntu.com resolves to several addresses and some never answer
+    # from Scholar; apt then waits forever despite its own timeouts. A hard
+    # timeout and a retry gets another address.
+    APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+    retry() {  # retry <seconds> <command...>
+        t=$1; shift
+        for i in 1 2 3 4 5 6; do
+            timeout "$t" "$@" && return 0
+            echo "attempt $i failed: $*"; sleep 3
+        done
+        return 1
+    }
+    retry 120 apt-get $APT update -qq
+    retry 600 apt-get $APT install -y -qq --no-install-recommends \
+        build-essential make git python3 python3-pip libncurses-dev bison \
+        flex xxd curl xz-utils unzip ca-certificates kconfig-frontends \
+        genromfs qemu-system-arm > /dev/null
+    pip3 install --break-system-packages -q kconfiglib pyelftools
+    rm -rf /var/lib/apt/lists/*
+
+    V=12.3.rel1
+    A=arm-gnu-toolchain-$V-$(uname -m)-aarch64-none-elf.tar.xz
+    retry 600 curl -fsSL -o /tmp/$A \
+        https://developer.arm.com/-/media/Files/downloads/gnu/$V/binrel/$A
+    mkdir -p /opt/gcc-aarch64-none-elf
+    tar -C /opt/gcc-aarch64-none-elf --strip-components 1 -xJf /tmp/$A
+    rm -f /tmp/$A
+    /opt/gcc-aarch64-none-elf/bin/aarch64-none-elf-gcc --version | head -1
+    qemu-system-aarch64 --version | head -1
+    command -v kconfig-tweak
+
+%environment
+    export PATH=/opt/gcc-aarch64-none-elf/bin:$PATH
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.layer nuttx-qemu-armv8a
