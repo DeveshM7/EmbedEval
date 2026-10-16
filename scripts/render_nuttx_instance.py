@@ -36,8 +36,10 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
     source's entry functions are looked up where ostest_main.c calls them,
     and the banner printed within a few lines before that call is kept. A
     preprocessor line between them (e.g. a skip under #ifdef) means the
-    banner does not prove the call ran, so that call is an error, as is any
-    call with no banner.
+    banner does not prove the call ran. A test called without a banner is
+    fine when another call of it has one (since apps #3759, `ostest wqueue`
+    calls wqueue_test() a second time, bannerless); a test whose every call
+    lacks a banner is an error.
     """
     main_lines = (ostest_dir / "ostest_main.c").read_text().splitlines()
     banners: list[str] = []
@@ -48,19 +50,21 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
             continue
         for func in ENTRY_DEF.findall((ostest_dir / name).read_text()):
             call = re.compile(rf"\b{re.escape(func)}\s*\(\s*\)\s*;")
+            called, found = False, []
             for i, line in enumerate(main_lines):
                 if not call.search(line):
                     continue
-                banner = None
+                called = True
                 for prev in reversed(main_lines[max(0, i - 8):i]):
                     if prev.lstrip().startswith("#"):
                         break
                     match = BANNER_PRINTF.search(prev)
                     if match:
-                        banner = f"user_main: {match[1]}"
+                        found.append(f"user_main: {match[1]}")
                         break
-                if banner is None:
-                    raise ValueError(f"no ostest banner directly precedes the call to {func}")
+            if called and not found:
+                raise ValueError(f"no ostest banner directly precedes the call to {func}")
+            for banner in found:
                 if banner not in banners:
                     banners.append(banner)
     if not banners:
