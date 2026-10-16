@@ -44,16 +44,34 @@ Search even when the PR names none. Useful evidence, strongest first:
 3. **Symbols**: functions, macros, return codes and Kconfig options the
    changed test calls or asserts. Use `git_log` with `symbol`/`regex`/`paths`
    on the kernel, `grep` the kernel as of a date, and compare the old and new
-   kernel code with `read_file`.
+   kernel code with `read_file`. `symbol` finds commits that change how many
+   times a string occurs, so it misses a fix that edits a line containing
+   the name without adding or removing it: also search the files that
+   implement what the test calls, with `paths`, and with `regex`.
 4. **Dates**: look at kernel history shortly before the apps PR was opened
-   and merged (`git_log` with `since`/`until`, usually a few weeks to a few
-   months before its merge, and a little after for a test merged first).
+   (`created_at`) and while it was open (`git_log` with `since`/`until`,
+   usually a few weeks to a few months before it was opened, until a little
+   after its merge for a test merged first).
 5. **Commit messages and paths**: `git_log` with `message` or `paths` for the
-   subsystem the test covers (`sched/wqueue`, `libs/libc/string`, ...).
+   subsystem the test covers.
+
+Judge "before" at the apps PR's base, not at its merge: read the kernel as of
+the apps PR's `created_at` date or earlier. A kernel PR merged while the apps
+PR was open is already in the kernel at the merge date, so the kernel at the
+merge date can hide the very change the test checks. When the test passes on
+the kernel you read, check whether a kernel PR merged shortly before made it
+pass.
 
 For each candidate kernel PR, open it and confirm from its diff that it
 changes what the changed test checks, and explain why the test fails before
 and passes after that PR. One apps PR can test several kernel PRs; list each.
+
+A fix can also span several kernel PRs applied together: a follow-up that
+repairs the primary PR, or a prerequisite it builds on. Check for them:
+kernel PRs merged between the primary PR and the apps PR that touch the same
+code, and PRs the apps PR or the kernel PR say they depend on or were tested
+with. List them in the pair's `also_needs`, each with evidence, not as
+separate alternative pairs.
 If you searched and found nothing that fits, say so with
 `"kernel_search": "nothing_found"`; do not invent a pair. List what you
 searched in `searched`.
@@ -86,6 +104,13 @@ each changed test and which `#ifdef` guards and Kconfig options it needs on
 needed options in `config_overrides`. If only a QEMU board can run the test,
 give that board as `platform`, e.g. `qemu-armv8a:nsh_smp`.
 
+Before answering, verify each high or medium pair's `config_overrides` with
+`check_config` (pass the QEMU `platform` for a QEMU pair). With the fixed
+kernel the changed tests must be built and called. An override reported as
+dropped has dependencies that are off: add them, or a setting that selects
+them, and check again. Settings the test needs that the board already
+enables need no override.
+
 The runner judges the whole `ostest` run: it passes only when the suite
 completes with status 0, prints no `ERROR` line, and prints the
 `user_main: ... test` banner of every changed test.
@@ -100,6 +125,8 @@ completes with status 0, prints no `ERROR` line, and prints the
   message and paths.
 - `open_ref` follows a PR, issue, commit URL or commit SHA in either
   repository.
+- `check_config` configures the board as the benchmark does, with your
+  overrides, and says whether the changed tests are built and called.
 
 The tool budget is limited (calls and time). Search deliberately: start from
 explicit references, then symbols and dates. Decide from the evidence you
@@ -132,7 +159,8 @@ Return exactly one JSON object:
       "config_overrides": {},
       "fail_to_pass": ["example_test"],
       "problem_statement": "Describe the observed symptom and required behavior without giving the implementation.",
-      "readiness": "ready_to_generate"
+      "readiness": "ready_to_generate",
+      "also_needs": []
     }
   ]
 }
@@ -154,9 +182,11 @@ Return exactly one JSON object:
   `compile_error` add `compile_test_source` (one selected test path) and
   `missing_api` (the exact interface token that source uses).
 - `config_overrides` maps NuttX config names to values; `{}` if none.
+- `also_needs` lists other kernel PRs that must be applied with this one,
+  as `{"kernel_pr": <number>, "evidence": ["..."]}`; `[]` if none.
 - `readiness`: for a `sim:nsh` ostest assertion or compile failure, use
-  `ready_to_generate` when `ostest_main.c` calls each changed test and
-  `config_overrides` holds every setting those calls need, or
+  `ready_to_generate` when `check_config` shows every changed test built
+  and called with your `config_overrides` on the fixed kernel, or
   `needs_reviewed_recipe` when you cannot tell. Use `needs_fixture` for a
   QEMU platform, another test program, or `runtime_other`.
 - Do not invent links, paths, target support, config settings or results.
