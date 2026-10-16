@@ -828,6 +828,8 @@ def git_log(args: dict, record: dict) -> str:
     if not isinstance(paths, list) or any(
             not isinstance(p, str) or p.startswith("/") or ".." in Path(p).parts for p in paths):
         return "error: paths must be repository-relative paths"
+    if paths:
+        command.append("--full-history")
     if command == base and not paths:
         return "error: give at least one of since, until, symbol, regex, message, paths"
     try:

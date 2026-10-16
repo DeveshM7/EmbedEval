@@ -73,6 +73,14 @@ code, and PRs the apps PR or the kernel PR say they depend on or were tested
 with. List them in the pair's `also_needs`, each with evidence, not as
 separate alternative pairs.
 
+For every high or medium pair, make this follow-up check before deciding that
+`also_needs` is empty: use `git_log` with the primary PR's production paths
+from its merge date through the apps PR's merge date (and shortly after if
+the test merged first). Open later commits that touch those paths or the
+test's symbols, and check whether the primary PR can pass the changed test
+without them. Do this even when the apps PR directly cites the primary PR.
+Only list a follow-up when its diff gives a reason it is needed.
+
 If you searched and found nothing that fits, say so with
 `"kernel_search": "nothing_found"`; do not invent a pair. List what you
 searched in `searched`.
@@ -111,6 +119,12 @@ kernel the changed tests must be built and called. An override reported as
 dropped has dependencies that are off: add them, or a setting that selects
 them, and check again. Settings the test needs that the board already
 enables need no override.
+
+`check_config` does not execute the test or prove it passes. Read the changed
+test's internal `#ifdef` branches to see which scenario the effective config
+selects. Check the effective values after `make olddefconfig` for every
+setting needed by that scenario, even when the entry function is built and
+called; adjust overrides and check again if a needed setting is off.
 
 The runner judges the whole `ostest` run: it passes only when the suite
 completes with status 0, prints no `ERROR` line, and prints the

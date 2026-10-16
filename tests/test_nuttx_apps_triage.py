@@ -276,6 +276,7 @@ class HistoryToolTests(unittest.TestCase):
                    "HOME": self.tmp.name, "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
             return subprocess.run(["git", "-C", str(repo), *args], check=True, env=env,
                                   capture_output=True, text=True).stdout.strip()
+        self.git = git
         repo.mkdir()
         git("init", "-q", "-b", "master")
         git("config", "user.email", "t@example.com")
@@ -314,6 +315,23 @@ class HistoryToolTests(unittest.TestCase):
         self.assertIn("at least one", self.tool("git_log"))
         self.assertIn("YYYY-MM-DD", self.tool("git_log", since="last week"))
         self.assertIn("relative", self.tool("git_log", paths=["../x"]))
+
+    def test_git_log_path_search_includes_merged_branch_changes(self):
+        repo = triage.CLONES["kernel"]
+        self.git("checkout", "-qb", "followup")
+        (repo / "sched" / "wq.c").write_text("int work_cancel(void) { return -EAGAIN; }\n")
+        self.git("add", "sched/wq.c")
+        self.git("commit", "-qm", "follow-up fix", date="2024-03-02T12:00:00+0000")
+        followup = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "master")
+        (repo / "sched" / "wq.c").write_text("int work_cancel(void) { return -EAGAIN; }\n")
+        self.git("add", "sched/wq.c")
+        self.git("commit", "-qm", "parallel fix", date="2024-03-03T12:00:00+0000")
+        self.git("merge", "--no-ff", "-q", "-m", "merge follow-up", "followup",
+                 date="2024-03-04T12:00:00+0000")
+        hits = self.tool("git_log", since="2024-03-02", until="2024-03-04",
+                         paths=["sched/wq.c"])
+        self.assertIn(followup[:7], hits)
 
     def test_reads_resolve_dates_and_shas(self):
         self.assertIn("return 0", self.tool("read_file", repo="kernel", path="sched/wq.c",
