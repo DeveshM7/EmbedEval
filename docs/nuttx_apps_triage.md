@@ -72,6 +72,7 @@ kernel PRs merged between the primary PR and the apps PR that touch the same
 code, and PRs the apps PR or the kernel PR say they depend on or were tested
 with. List them in the pair's `also_needs`, each with evidence, not as
 separate alternative pairs.
+
 If you searched and found nothing that fits, say so with
 `"kernel_search": "nothing_found"`; do not invent a pair. List what you
 searched in `searched`.
@@ -102,7 +103,7 @@ the fixed kernel for its implementations. Check that `ostest_main.c` calls
 each changed test and which `#ifdef` guards and Kconfig options it needs on
 `sim:nsh` (`grep` across the tree finds a Kconfig symbol in one call); put
 needed options in `config_overrides`. If only a QEMU board can run the test,
-give that board as `platform`, e.g. `qemu-armv8a:nsh_smp`.
+give that board as `platform`, as `qemu-<board>:<config>` (e.g. `qemu-armv7a:nsh`).
 
 Before answering, verify each high or medium pair's `config_overrides` with
 `check_config` (pass the QEMU `platform` for a QEMU pair). With the fixed
@@ -120,7 +121,7 @@ completes with status 0, prints no `ERROR` line, and prints the
 - `read_file`, `list_dir`, `grep` read either repository at `base` or
   `head` (the apps PR's commits; a kernel PR's with `kernel_pr`), at any
   commit SHA, or as of a date `YYYY-MM-DD` (the default branch at the end
-  of that day). Example: the kernel as of the apps PR's merge date.
+  of that day). Example: the kernel as of the apps PR's `created_at` date.
 - `git_log` searches history (kernel by default) by dates, symbol, regex,
   message and paths.
 - `open_ref` follows a PR, issue, commit URL or commit SHA in either
