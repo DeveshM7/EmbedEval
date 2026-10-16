@@ -80,9 +80,6 @@ Please solve this issue:
 ## Running Tests
 
 {test_help}
-
-If `run_tests` times out (exit code 2) with no test results, your change has
-introduced a hang or an infinite loop. Do NOT submit -- investigate further.
 {extra_warnings}
 Mandatory workflow:
 1. Explore the code and understand the bug
@@ -176,18 +173,35 @@ def build_prompts(meta: dict) -> tuple[str, str]:
         protected=protected,
         extra_warnings=f"\n{warn}\n" if warn else "",
         build_and_test=_build_and_test(meta),
-        test_help=(
-            "Use `run_tests` after building. It runs the configured ostest and "
-            "waits for results. Exit codes: 0 = target test and ostest passed, "
-            "1 = target test failed, 2 = timed out, 3 = missing target-test evidence."
-            if meta["project"] == "nuttx" else
-            "Use the `run_tests` command to build and run the tests. It handles "
-            "all setup and teardown, waits for results, and exits as soon as "
-            "pass/fail is known. Exit codes: 0 = all tests passed, "
-            "1 = tests failed, 2 = timed out."
-        ),
+        test_help=TEST_HELP.get(meta["project"], TEST_HELP["default"]),
     )
     return system, instance
+
+
+_HANG = ("If `run_tests` times out{code} with no test results, your change has\n"
+         "introduced a hang or an infinite loop. Do NOT submit -- investigate further.")
+
+# What run_tests' exit codes mean, per project; they must match the runner.
+# Zephyr's codes are in its extra warning (projects.py), and a Zephyr timeout
+# is the environment's command limit, not an exit code.
+TEST_HELP = {
+    "nuttx": (
+        "Use `run_tests` after building. It runs the whole ostest suite and "
+        "waits for results. Exit codes: 0 = ostest finished cleanly and every "
+        "changed test ran, 1 = any other completed run (a test failed, or a "
+        "changed test did not run), 2 = timed out.\n\n" + _HANG.format(code=" (exit code 2)")
+    ),
+    "zephyr": (
+        "Use the `run_tests` command to build and run the tests. It handles "
+        "all setup and teardown and waits for results.\n\n" + _HANG.format(code="")
+    ),
+    "default": (
+        "Use the `run_tests` command to build and run the tests. It handles "
+        "all setup and teardown, waits for results, and exits as soon as "
+        "pass/fail is known. Exit codes: 0 = all tests passed, "
+        "1 = tests failed, 2 = timed out.\n\n" + _HANG.format(code=" (exit code 2)")
+    ),
+}
 
 
 def _build_and_test(meta: dict) -> str:
