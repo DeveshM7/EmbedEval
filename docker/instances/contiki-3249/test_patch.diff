@@ -1,0 +1,253 @@
+diff --git a/tests/08-native-runs/embedeval-tsch-cs/build.sh b/tests/08-native-runs/embedeval-tsch-cs/build.sh
+new file mode 100644
+index 000000000..8fa3d6bed
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tsch-cs/build.sh
+@@ -0,0 +1,15 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd "$(git rev-parse --show-toplevel)"
++mkdir -p build
++fixture=tests/08-native-runs/embedeval-tsch-cs
++cc="${CC:-cc}"
++flags=(-std=c11 -O1 -g -ffunction-sections -fdata-sections
++       -fsanitize=undefined -fno-sanitize-recover=all
++       -I"$fixture" -Ios -Ios/net/mac/tsch -Ios/services/tsch-cs)
++"$cc" "${flags[@]}" "$fixture/main.c" os/services/tsch-cs/tsch-cs.c \
++    -Wl,--gc-sections -o build/tsch-cs
++"$cc" "${flags[@]}" "$fixture/upstream-controls.c" os/lib/list.c os/lib/random.c \
++    os/lib/sfc32-prng.c os/net/linkaddr.c os/lib/circular-list.c \
++    os/lib/dbl-list.c os/lib/dbl-circ-list.c os/services/unit-test/unit-test.c \
++    -Wl,--gc-sections -o build/upstream-controls
+diff --git a/tests/08-native-runs/embedeval-tsch-cs/contiki-conf.h b/tests/08-native-runs/embedeval-tsch-cs/contiki-conf.h
+new file mode 100644
+index 000000000..41da04dc0
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tsch-cs/contiki-conf.h
+@@ -0,0 +1,16 @@
++#ifndef CONTIKI_CONF_H_
++#define CONTIKI_CONF_H_
++#include <stdint.h>
++#include <assert.h>
++typedef unsigned int uip_stats_t;
++#define CLOCK_CONF_SECOND 1000
++#define UIP_CONF_BYTE_ORDER UIP_LITTLE_ENDIAN
++#define LOG_CONF_ENABLED 0
++#define NETSTACK_CONF_WITH_IPV6 1
++#define UIP_CONF_TCP 1
++#define TSCH_STATS_CONF_ON 1
++#define TSCH_STATS_CONF_SAMPLE_NOISE_RSSI 1
++#define TSCH_CONF_HOPPING_SEQUENCE_MAX_LEN 32
++#define MAC_CONF_WITH_NULLMAC 1
++#define ROUTING_CONF_NULLROUTING 1
++#endif
+diff --git a/tests/08-native-runs/embedeval-tsch-cs/main.c b/tests/08-native-runs/embedeval-tsch-cs/main.c
+new file mode 100644
+index 000000000..58b9cc238
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tsch-cs/main.c
+@@ -0,0 +1,127 @@
++/* Host component fixture. The complete upstream channel-selection module is
++ * linked separately; only clock and TSCH state inputs are supplied here. */
++#include "tsch.h"
++#include "tsch-stats.h"
++#include "tsch-cs.h"
++#include <stdio.h>
++#include <string.h>
++
++int tsch_is_coordinator = 1;
++uint8_t tsch_hopping_sequence[TSCH_HOPPING_SEQUENCE_MAX_LEN];
++struct tsch_asn_divisor_t tsch_hopping_sequence_length;
++struct tsch_global_stats tsch_stats;
++static unsigned long now = 1000;
++unsigned long clock_seconds(void) { return now; }
++#define CHECK(condition) do { if(!(condition)) { \
++  fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#condition);return 1; } } while(0)
++static void sequence(const uint8_t *channels, unsigned length)
++{
++  memset(tsch_hopping_sequence,0,sizeof(tsch_hopping_sequence));
++  memcpy(tsch_hopping_sequence,channels,length);
++  tsch_hopping_sequence_length.val=length;
++}
++static void setup(void)
++{
++  const uint8_t channels[]={11,12};
++  sequence(channels,2);
++  memset(&tsch_stats,0,sizeof(tsch_stats));
++  tsch_cs_adaptations_init();
++}
++static void qualities(unsigned busy)
++{
++  memset(tsch_stats.channel_free_ewma,0,sizeof(tsch_stats.channel_free_ewma));
++  tsch_stats.channel_free_ewma[0]=busy==11?0:3800;
++  tsch_stats.channel_free_ewma[1]=busy==12?0:3800;
++  tsch_stats.channel_free_ewma[2]=4096;
++}
++static void request(void)
++{
++  // A valid tracked channel changes busyness; this schedules reselection.
++  tsch_cs_channel_stats_updated(11,4096);
++}
++static int invalid_init_below_window(void)
++{
++  const uint8_t bad[]={10,12};setup();sequence(bad,2);
++  tsch_cs_adaptations_init();return 0; // UBSan must not detect an invalid shift.
++}
++static int invalid_init_preserves_state(unsigned kind)
++{
++  uint8_t channels[17];setup();
++  if(kind==0) { channels[0]=27;channels[1]=12;sequence(channels,2); }
++  else { memset(channels,11,sizeof(channels));sequence(channels,17); }
++  tsch_cs_adaptations_init();
++  const uint8_t good[]={11,12};sequence(good,2);
++  qualities(kind==0?12:11);tsch_cs_channel_stats_updated(kind==0?12:11,4096);
++  CHECK(tsch_cs_process());
++  CHECK(tsch_hopping_sequence[0]==(kind==0?11:13));
++  CHECK(tsch_hopping_sequence[1]==(kind==0?13:12));return 0;
++}
++static int invalid_init_above_window(void) { return invalid_init_preserves_state(0); }
++static int invalid_init_overlong(void) { return invalid_init_preserves_state(1); }
++static int invalid_process(unsigned kind)
++{
++  uint8_t channels[17], saved[TSCH_HOPPING_SEQUENCE_MAX_LEN];setup();
++  if(kind<2) { channels[0]=kind==0?10:27;channels[1]=12;sequence(channels,2); }
++  else { memset(channels,11,sizeof(channels));sequence(channels,17); }
++  memcpy(saved,tsch_hopping_sequence,sizeof(saved));qualities(11);request();
++  CHECK(!tsch_cs_process());
++  CHECK(memcmp(saved,tsch_hopping_sequence,sizeof(saved))==0);
++  CHECK(tsch_hopping_sequence_length.val==(kind<2?2:17));return 0;
++}
++static int invalid_process_below_window(void) { return invalid_process(0); }
++static int invalid_process_above_window(void) { return invalid_process(1); }
++static int invalid_process_overlong(void) { return invalid_process(2); }
++static int valid_reselection(void)
++{
++  setup();qualities(11);request();CHECK(tsch_cs_process());
++  CHECK(tsch_hopping_sequence[0]==13 && tsch_hopping_sequence[1]==12);
++  CHECK(tsch_hopping_sequence_length.val==2);return 0;
++}
++static int valid_nochange(void)
++{
++  setup();for(unsigned i=0;i<16;i++)tsch_stats.channel_free_ewma[i]=4096;
++  tsch_cs_channel_stats_updated(11,0);CHECK(!tsch_cs_process());
++  CHECK(tsch_hopping_sequence[0]==11 && tsch_hopping_sequence[1]==12);return 0;
++}
++static int no_request(void)
++{ setup();qualities(11);CHECK(!tsch_cs_process());return 0; }
++static int noncoordinator(void)
++{ setup();qualities(11);tsch_is_coordinator=0;request();CHECK(!tsch_cs_process());return 0; }
++static int learning_period(void)
++{ setup();qualities(11);now=10;request();CHECK(!tsch_cs_process());return 0; }
++static int valid_full_window(void)
++{
++  uint8_t channels[16];for(unsigned i=0;i<16;i++)channels[i]=11+i;
++  sequence(channels,16);tsch_cs_adaptations_init();
++  for(unsigned i=0;i<16;i++)tsch_stats.channel_free_ewma[i]=4096;
++  tsch_stats.channel_free_ewma[0]=0;request();CHECK(!tsch_cs_process());
++  CHECK(memcmp(channels,tsch_hopping_sequence,16)==0);return 0;
++}
++static int cooldown(void)
++{
++  CHECK(valid_reselection()==0);now=1001;
++  tsch_stats.channel_free_ewma[1]=0;tsch_cs_channel_stats_updated(12,4096);
++  CHECK(!tsch_cs_process());
++  CHECK(tsch_hopping_sequence[0]==13 && tsch_hopping_sequence[1]==12);return 0;
++}
++struct test {const char *name;int (*run)(void);};
++static const struct test tests[]={
++  {"invalid_init_below_window",invalid_init_below_window},
++  {"invalid_init_above_window",invalid_init_above_window},
++  {"invalid_init_overlong",invalid_init_overlong},
++  {"invalid_process_below_window",invalid_process_below_window},
++  {"invalid_process_above_window",invalid_process_above_window},
++  {"invalid_process_overlong",invalid_process_overlong},
++  {"valid_reselection",valid_reselection},{"valid_nochange",valid_nochange},
++  {"no_request",no_request},{"noncoordinator",noncoordinator},
++  {"learning_period",learning_period},{"valid_full_window",valid_full_window},
++  {"cooldown",cooldown}
++};
++int main(int argc,char **argv)
++{
++  if(argc!=2)return 1;
++  for(unsigned i=0;i<sizeof(tests)/sizeof(tests[0]);i++)if(strcmp(argv[1],tests[i].name)==0) {
++    int rc=tests[i].run();printf("%s %s\n",tests[i].name,rc?"FAIL":"PASS");return rc;
++  }
++  return 1;
++}
+diff --git a/tests/08-native-runs/embedeval-tsch-cs/rtimer-arch.h b/tests/08-native-runs/embedeval-tsch-cs/rtimer-arch.h
+new file mode 100644
+index 000000000..3e3b14ce9
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tsch-cs/rtimer-arch.h
+@@ -0,0 +1,5 @@
++#ifndef RTIMER_ARCH_H_
++#define RTIMER_ARCH_H_
++#define RTIMER_ARCH_SECOND 1000
++rtimer_clock_t rtimer_arch_now(void);
++#endif
+diff --git a/tests/08-native-runs/embedeval-tsch-cs/run.py b/tests/08-native-runs/embedeval-tsch-cs/run.py
+new file mode 100644
+index 000000000..885703972
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tsch-cs/run.py
+@@ -0,0 +1,40 @@
++import os,subprocess,sys
++from pathlib import Path
++regressions=['invalid_init_below_window','invalid_init_above_window','invalid_init_overlong','invalid_process_below_window','invalid_process_above_window','invalid_process_overlong']
++controls=['valid_reselection','valid_nochange','no_request','noncoordinator','learning_period','valid_full_window','cooldown']
++probes={
++    'reject_bitmap_too_wide':(['-DTSCH_STATS_CONF_NUM_CHANNELS=17'],False),
++    'reject_channel_window_overflow':(['-DTSCH_STATS_CONF_FIRST_CHANNEL=250'],False),
++    'compile_default_window':([],True),
++    'compile_narrow_window':(['-DTSCH_STATS_CONF_NUM_CHANNELS=4'],True),
++    'compile_top_channel_window':(['-DTSCH_STATS_CONF_FIRST_CHANNEL=240'],True)
++}
++mode=sys.argv[1] if len(sys.argv)>1 else 'all'
++if mode not in ['all','regression','control']:raise SystemExit(1)
++status=0
++for name in (regressions if mode=='regression' else controls if mode=='control' else regressions+controls):
++    try:
++        result=subprocess.run(['./build/tsch-cs',name],timeout=5)
++        if result.returncode and status!=2:status=1
++    except subprocess.TimeoutExpired:
++        print(name,'TIMEOUT',flush=True);status=2
++fixture='tests/08-native-runs/embedeval-tsch-cs'
++flags=['-std=c11','-O1','-g','-fsanitize=undefined','-fno-sanitize-recover=all','-I'+fixture,'-Ios','-Ios/net/mac/tsch','-Ios/services/tsch-cs']
++for name,(defines,should_compile) in probes.items():
++    if mode=='regression' and should_compile or mode=='control' and not should_compile:continue
++    try:
++        result=subprocess.run([os.environ.get('CC','cc'),*flags,*defines,'-c','os/services/tsch-cs/tsch-cs.c','-o','build/'+name+'.o'],capture_output=True,text=True,timeout=30)
++        passed=result.returncode==0 if should_compile else result.returncode!=0 and 'tsch-cs:' in result.stderr
++        print(name,'PASS' if passed else 'FAIL',flush=True)
++        if not passed:
++            print(result.stdout+result.stderr,flush=True)
++            if status!=2:status=1
++    except subprocess.TimeoutExpired:
++        print(name,'TIMEOUT',flush=True);status=2
++if mode!='regression':
++    try:
++        result=subprocess.run(['./build/upstream-controls'],timeout=30)
++        if result.returncode and status!=2:status=1
++    except subprocess.TimeoutExpired:
++        print('upstream-controls TIMEOUT',flush=True);status=2
++raise SystemExit(status)
+diff --git a/tests/08-native-runs/embedeval-tsch-cs/upstream-controls.c b/tests/08-native-runs/embedeval-tsch-cs/upstream-controls.c
+new file mode 100644
+index 000000000..8066167d1
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tsch-cs/upstream-controls.c
+@@ -0,0 +1,14 @@
++/* Run the unchanged upstream list test used by the native data-structure suite. */
++#include "../../07-simulation-base/code-data-structures/test-data-structures.c"
++rtimer_clock_t rtimer_arch_now(void) { return 0; }
++clock_time_t clock_time(void) { return 0; }
++int main(void) {
++  int failures=0;
++  memset(elements,0,sizeof(elements));
++#define RUN(name) do { unit_test_function_##name(&unit_test_##name); \
++  printf("upstream_%s %s\n",#name,unit_test_##name.passed?"PASS":"FAIL"); \
++  failures+=!unit_test_##name.passed; } while(0)
++  RUN(test_list); RUN(test_stack); RUN(test_queue);
++  RUN(test_csll); RUN(test_dll); RUN(test_cdll);
++  return failures?1:0;
++}
