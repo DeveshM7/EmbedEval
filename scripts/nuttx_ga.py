@@ -302,6 +302,34 @@ def breed(parents: list[dict], count: int, gen: int, rng: random.Random,
     return made
 
 
+def write_status(gen: int, results: dict, next_text: str) -> Path:
+    """Overwrite triage/PHASE1_STATUS.md for the end of a generation."""
+    ranked = [f for f in ranking(results) if f["normal"]]
+    pools = ssh("squeue -u zhan5136 -h -o '%i %P %D nodes, ends %e'").strip()
+    best = max((f["perfect"] for f in ranked), default=0)
+    lines = [
+        "# NuttX Phase 1 tuning status", "",
+        f"Generation {gen} complete (updated {__import__('datetime').datetime.now():%Y-%m-%d %H:%M}).",
+        "", "- Bar: one unchanged individual with 3 repeats at 13/13 on the normal gold; blind runs",
+        "  (9 cases with a must_find) are tracked only.",
+        f"- Best streak: {best} perfect normal repeats of one individual (need 3).",
+        f"- Individuals scored so far: {len(ranked)}; runs scored: {len(results['scores'])}.",
+        "- Fitness: mean normal score over repeats; ties by worst repeat, then mean blind.",
+        "", "Pool jobs (servers on every node; workers run as srun steps):", "", "```", pools, "```",
+        "", "## Top 5", "",
+        "| sha | rules | knobs changed | normal per repeat | blind per repeat | mean | worst |",
+        "|---|---|---|---|---|---|---|"]
+    for f in ranked[:5]:
+        spec = json.loads((INDIVIDUALS / f["sha"] / "spec.json").read_text())
+        changed = {k: v for k, v in spec["knobs"].items() if v != DEFAULT_KNOBS.get(k)}
+        lines.append(f"| `{f['sha']}` | {', '.join(spec['rules']) or '(base prompt)'} | "
+                     f"{changed or '-'} | {f['normal']} | {f['blind']} | {f['mean']:.2f} | {f['worst']} |")
+    lines += ["", "## Next experiments", "", next_text.strip(), ""]
+    path = ROOT / "triage" / "PHASE1_STATUS.md"
+    path.write_text("\n".join(lines))
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -317,6 +345,9 @@ def main() -> None:
     p.add_argument("shas", nargs="+")
     p.add_argument("--first-rep", type=int, default=1)
     sub.add_parser("collect")
+    p = sub.add_parser("status")
+    p.add_argument("gen", type=int)
+    p.add_argument("--next", default="")
     args = parser.parse_args()
     if args.cmd == "new":
         markers = gold_markers()
@@ -332,6 +363,8 @@ def main() -> None:
     elif args.cmd == "submit":
         print(submit(args.gen, args.reps, args.shas,
                      {sha: args.first_rep for sha in args.shas}), "tasks queued")
+    elif args.cmd == "status":
+        print(write_status(args.gen, collect(), args.next))
     else:
         for f in ranking(collect()):
             print(f["sha"], f"normal {f['normal']} blind {f['blind']} mean {f['mean']:.2f}")
