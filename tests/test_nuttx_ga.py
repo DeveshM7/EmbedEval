@@ -45,6 +45,11 @@ class RenderAndRankTests(unittest.TestCase):
         fit = {f["sha"]: f for f in ranked}
         self.assertEqual(fit["aaa"]["perfect"], 1)
 
+    def test_perfect_requires_all_thirteen_normal_cases(self):
+        scores = {"00/aaa/1/normal": {"correct": 12, "scored": 12},
+                  "00/aaa/2/normal": {"correct": 13, "scored": 13}}
+        self.assertEqual(ga.fitness({"scores": scores}, "aaa")["perfect"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -255,8 +255,8 @@ def fitness(results: dict, sha: str) -> dict:
             "mean": sum(normals) / len(normals) if normals else 0.0,
             "worst": min(normals) if normals else 0,
             "mean_blind": sum(blinds) / len(blinds) if blinds else 0.0,
-            "perfect": sum(n == v["normal"]["scored"] for v in complete.values()
-                           for n in [v["normal"]["correct"]])}
+            "perfect": sum(v["normal"]["correct"] == 13 and v["normal"]["scored"] == 13
+                           for v in complete.values())}
 
 
 def ranking(results: dict) -> list[dict]:
