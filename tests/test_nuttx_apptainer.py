@@ -120,6 +120,9 @@ class ValidatorTests(unittest.TestCase):
         self.assertIsNotNone(validate_instance.compile_diagnostic(
             linker, "ld: /testbed/apps/testing/ostest/nxevent.c:40: undefined reference to "
                     "`nxevent_init'\n"))
+        self.assertIsNotNone(validate_instance.compile_diagnostic(
+            linker, "/testbed/apps/testing/ostest/nxevent.c:40:(.text.nxevent_test+0xf10): "
+                    "undefined reference to `nxevent_init'\n"))
 
     def test_compile_diagnostic_accepts_header_added_by_fix(self):
         meta = {"compile_test_source": "testing/ostest/nxevent.c", "missing_api": "nxevent_init",

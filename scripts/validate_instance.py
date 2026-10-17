@@ -286,7 +286,8 @@ def compile_diagnostic(meta: dict, output: str):
     source, missing_api = meta.get("compile_test_source"), meta.get("missing_api")
     if not source or not missing_api:
         return None
-    prefix = rf"(?:^|[\s/]){re.escape(Path(source).name)}:\d+(?::\d+)?:\s*"
+    prefix = (rf"(?:^|[\s/]){re.escape(Path(source).name)}:\d+(?::\d+)?:\s*"
+              r"(?:\([^\n)]*\):\s*)?")
     diagnostic = re.search(
         prefix + rf"(?:(?:fatal )?error:|undefined reference to)[^\n]*{re.escape(missing_api)}",
         output,
