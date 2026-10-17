@@ -10,5 +10,3 @@ RUN git apply /tmp/test_patch.diff
 COPY run_tests.sh /usr/local/bin/run_tests
 RUN chmod +x /usr/local/bin/run_tests
 RUN bash tests/08-native-runs/embedeval-coap-block2/build.sh
-
-metadata.json
