@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import nuttx_candidates as candidates
+import nuttx_platforms as platforms
 from render_nuttx_instance import DEFAULT_OUT, ENTRY_DEF, ostest_banners, render, render_runner
 
 
@@ -59,16 +60,16 @@ def test_patch_paths(record: dict, selected: list[str]) -> list[str]:
     return paths
 
 
-def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
+def metadata(record: dict, kernel_number: int, verdict: dict, host_arch: str | None = None) -> dict:
     if verdict.get("verdict") != "accept":
         raise ValueError("triage verdict must accept the pair")
     platform = verdict.get("platform")
-    qemu = platform in ("qemu-armv8a:nsh", "qemu-armv8a:nsh_smp")
+    qemu = platforms.is_qemu(platform or "")
     if "readiness" in verdict and verdict["readiness"] != "ready_to_generate" and not (
             qemu and verdict["readiness"] == "needs_fixture"):
         raise ValueError("triage readiness must be ready_to_generate; review the recipe first")
     if platform != "sim:nsh" and not qemu:
-        raise ValueError("the generator supports sim:nsh and qemu-armv8a:nsh[_smp]")
+        raise ValueError(f"the generator supports sim:nsh and the QEMU boards of nuttx_platforms.py, not {platform}")
     apps = record["apps"]
     case = f"apps-{apps['number']}-kernel-{kernel_number}"
     if verdict.get("case", case) != case or verdict.get("kernel_pr", kernel_number) != kernel_number:
@@ -94,6 +95,8 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
         if not verdict.get(name):
             raise ValueError(f"triage verdict lacks {name}")
     fail_type = verdict.get("fail_type")
+    if fail_type == "runtime_other":     # a hang or wrong behaviour rather than an assert: run_tests fails all the same
+        fail_type = "runtime_assert"
     if fail_type not in ("runtime_assert", "compile_error"):
         raise ValueError("fail_type must be runtime_assert or compile_error")
     if fail_type == "compile_error":
@@ -123,15 +126,18 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
         "apps_merge_commit": apps["head_commit"],
         "files_changed_by_fix": [f["filename"] for f in kernel["files"]],
         "files_changed_by_test_patch": test_paths,
-        "sim_config": platform,
+        "sim_config": platforms.canonical(platform),
         "test_app": "ostest",
         "fail_type": fail_type,
         "problem_statement": verdict["problem_statement"],
         "fail_to_pass": verdict["fail_to_pass"],
         "pass_to_pass": verdict.get("pass_to_pass", []),
-        "config_overrides": verdict.get("config_overrides", {}),
+        "config_overrides": {**verdict.get("config_overrides", {}),
+                             **platforms.alias_overrides(platform)},
         "clean_after_patch": verdict.get("clean_after_patch", False),
     }
+    if host_arch:
+        meta["host_arch"] = host_arch   # the instance builds, validates and runs on this architecture only
     if fail_type == "compile_error":
         meta["compile_test_source"] = verdict["compile_test_source"]
         meta["missing_api"] = verdict["missing_api"]
@@ -225,12 +231,12 @@ def rerender_runner(inst: Path) -> Path:
 
 def generate(apps_number: int, kernel_number: int, verdict: dict,
              out_root: Path = DEFAULT_OUT, tag_suffix: str = "-gen",
-             runtime: str = "docker") -> Path:
+             runtime: str = "docker", host_arch: str | None = None) -> Path:
     pair_path = ENRICHED / f"apps-{apps_number}-kernel-{kernel_number}.json"
     record_path = pair_path if pair_path.exists() else ENRICHED / f"{apps_number}.json"
     record = (json.loads(record_path.read_text()) if record_path.exists()
               else candidates.apps_record(apps_number))
-    meta = metadata(record, kernel_number, verdict)
+    meta = metadata(record, kernel_number, verdict, host_arch)
     patch, meta["test_banners"] = build_test_patch(
         meta["apps_base_commit"], meta["apps_merge_commit"],
         meta["files_changed_by_test_patch"])
@@ -272,6 +278,9 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--tag-suffix", default="-gen")
     parser.add_argument("--runtime", choices=("docker", "apptainer"), default="docker")
+    parser.add_argument("--host-arch", choices=("x86_64", "aarch64"),
+                        help="record that the instance runs on this architecture only "
+                             "(metadata host_arch), e.g. x86_64 for eras with no ARM64 simulator")
     args = parser.parse_args()
     if args.rerender_runner:
         print(rerender_runner(args.rerender_runner))
@@ -285,7 +294,7 @@ def main() -> None:
         except ValueError as exc:
             parser.error(str(exc))
         print(generate(apps_number, kernel_number, verdict, args.out, args.tag_suffix,
-                       args.runtime))
+                       args.runtime, args.host_arch))
         return
     pair = re.fullmatch(r"apps-(\d+)-kernel-(\d+)", verdict.get("case") or "")
     apps_number = args.apps_pr if args.apps_pr is not None else int(pair[1]) if pair else None
@@ -293,7 +302,7 @@ def main() -> None:
     if apps_number is None or kernel_number is None:
         parser.error("supply --apps-pr and --kernel-pr, or a triage JSON with a pair case ID")
     print(generate(apps_number, kernel_number, verdict, args.out,
-                   args.tag_suffix, args.runtime))
+                   args.tag_suffix, args.runtime, args.host_arch))
 
 
 if __name__ == "__main__":

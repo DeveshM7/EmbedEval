@@ -29,6 +29,7 @@ import argparse
 import fcntl
 import json
 import os
+import platform as platform_module
 import shutil
 import signal
 import subprocess
@@ -44,6 +45,7 @@ CLUSTER = Path(__file__).resolve().parent
 REPO = CLUSTER.parent
 sys.path[:0] = [str(CLUSTER), str(REPO / "scripts")]
 import config as cluster_config  # noqa: E402
+import nuttx_platforms  # noqa: E402
 import status  # noqa: E402
 
 PY = sys.executable
@@ -408,6 +410,7 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
         list(pool.map(one, mine))
 
 
+ON_X86 = platform_module.machine() == "x86_64"
 ARM64_SIM_FROM = "2022-02-02"      # sim on an ARM64 host needs a kernel from this date on
 VFORK_FIXED = "2023-07-17"         # before the fork rework, ARM64 sim vfork can SIGBUS
 
@@ -439,12 +442,21 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
             results.append((kernel, "failed", f"kernel record: {str(e)[:80]}"))
             continue
         platform = pair.get("platform", "sim:nsh")
-        qemu = platform in ("qemu-armv8a:nsh", "qemu-armv8a:nsh_smp")
+        qemu = nuttx_platforms.is_qemu(platform)
         if str(platform).startswith("qemu") and not qemu:
-            results.append((kernel, "qemu_pending", f"{pair['platform']}: QEMU runner not wired in"))
+            results.append((kernel, "qemu_pending", f"{pair['platform']}: QEMU board not supported"))
             continue
-        if not qemu and merged and merged < ARM64_SIM_FROM:
-            results.append((kernel, "needs_x86", f"kernel #{kernel} merged {merged}: no ARM64 sim"))
+        # An ARM64 node cannot run a sim pair of an era the ARM64 simulator
+        # lacks or breaks in, or a board whose toolchain is x86-only; an x86
+        # node runs it, and the instance records that it needs x86 (metadata
+        # host_arch).
+        x86_node = ON_X86
+        x86_only = platform in nuttx_platforms.X86_ONLY or (
+            not qemu and bool(merged) and merged < VFORK_FIXED)
+        if not x86_node and (platform in nuttx_platforms.X86_ONLY
+                             or (not qemu and merged and merged < ARM64_SIM_FROM)):
+            results.append((kernel, "needs_x86", f"kernel #{kernel} merged {merged}: "
+                            + ("toolchain exists for x86 only" if qemu else "no ARM64 sim")))
             continue
         if left() < 8:
             return
@@ -453,7 +465,8 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
         step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
         try:
             if step([PY, "scripts/generate_nuttx_instance.py", "--triage", str(pv), "--kernel-pr",
-                     str(kernel), "--runtime", "apptainer", "--out", venv["EMBEDEVAL_INSTANCES_DIR"]],
+                     str(kernel), "--runtime", "apptainer", "--out", venv["EMBEDEVAL_INSTANCES_DIR"]]
+                    + (["--host-arch", "x86_64"] if x86_node and x86_only else []),
                     lg, min(8, left()), venv):
                 results.append((kernel, "failed", "generate failed: the pair is not runnable"))
                 continue
@@ -477,7 +490,7 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                 results.append((kernel, "VALID", ""))
             elif rc == 124:
                 results.append((kernel, "failed", "validation hit the cap"))
-            elif not qemu and merged and merged < VFORK_FIXED:
+            elif not qemu and not x86_node and merged and merged < VFORK_FIXED:
                 results.append((kernel, "arm64_env_failure",
                                 f"INVALID on ARM64 with a pre-{VFORK_FIXED} kernel (vfork SIGBUS "
                                 f"risk): {reason or rc}"))

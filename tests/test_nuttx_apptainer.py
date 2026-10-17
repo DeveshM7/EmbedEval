@@ -256,5 +256,25 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(made["image"], image)
 
 
+class HostArchTests(unittest.TestCase):
+    def test_x86_only_instance_is_refused_on_an_arm64_host(self):
+        meta = {"instance_id": "nuttx__nuttx-1", "host_arch": "x86_64"}
+        with patch("platform.machine", return_value="aarch64"):
+            with self.assertRaisesRegex(RuntimeError, "must run on x86_64"):
+                apptainer_util.require_host_arch(meta)
+        with patch("platform.machine", return_value="x86_64"):
+            apptainer_util.require_host_arch(meta)
+        apptainer_util.require_host_arch({"instance_id": "nuttx__nuttx-2"})   # any host
+
+    def test_shared_images_are_named_per_architecture(self):
+        with patch("platform.machine", return_value="aarch64"):
+            arm = apptainer_util.nuttx_base_image()
+        with patch("platform.machine", return_value="x86_64"):
+            x86 = apptainer_util.nuttx_base_image()
+        self.assertNotEqual(arm, x86)
+        self.assertTrue(x86.name.endswith("-x86_64.sif"))
+        self.assertFalse(arm.name.endswith("-x86_64.sif"))
+
+
 if __name__ == "__main__":
     unittest.main()

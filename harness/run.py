@@ -256,6 +256,8 @@ def make_environment(meta: dict):
         import apptainer_util
         from apptainer_env import ApptainerEnvironment
 
+        apptainer_util.require_host_arch(meta)
+
         # The image carries the PR's test changes as uncommitted edits.
         # Committing them in this run's overlay before the agent starts makes
         # `git diff` show the agent's changes alone, so capture_patch's check

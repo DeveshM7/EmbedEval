@@ -58,6 +58,11 @@ def build_nuttx_apptainer(instance_id: str, dry_run: bool = False) -> bool:
     if missing:
         print(f"  ERROR: {instance_id} missing {', '.join(missing)}")
         return False
+    try:
+        au.require_host_arch(meta)
+    except RuntimeError as e:
+        print(f"  ERROR: {e}")
+        return False
     image = au.instance_image(instance_id)
     logdir = au.path("logs", instance_id, "x").parent
     args, binds = {}, {}

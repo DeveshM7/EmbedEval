@@ -327,6 +327,7 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
         3. build, run_tests     -> must PASS (exit 0)
     """
     meta = instances.load_metadata(instance_id)
+    au.require_host_arch(meta)
     image = au.instance_image(instance_id)
     build_cmd = meta["build_command"]
     compile_case = meta.get("fail_type") == "compile_error"

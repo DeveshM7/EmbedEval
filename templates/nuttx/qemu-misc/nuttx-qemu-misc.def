@@ -1,0 +1,87 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+# NuttX on the other QEMU boards (rv-virt, qemu-armv7a) in Apptainer: the build
+# tools of templates/nuttx/qemu-armv8a/nuttx-qemu.def, qemu-system-arm and
+# qemu-system-riscv32/64, and the cross toolchains of the boards' eras.
+#
+#   apptainer build --fakeroot nuttx-qemu-misc.sif nuttx-qemu-misc.def
+#
+# ARM: Ubuntu's gcc-arm-none-eabi (13.2.rel1, what NuttX CI used in 2024-25),
+# prefix arm-none-eabi-, which arch/arm/src/*/Toolchain.defs default to.
+#
+# RISC-V: arch/risc-v/src/common/Toolchain.defs defaults to CROSSDEV
+# riscv64-unknown-elf-. xPack builds exist for x86_64 and aarch64 hosts, so
+# $(uname -m) picks the host's. Two, because GCC 12+/binutils 2.38+ reject
+# csr instructions unless -march names _zicsr, which NuttX only added to its
+# -march in 2022 (check the kernel's Toolchain.defs for "zicsr"):
+#   /opt/riscv-old   riscv-none-embed-gcc 10.2.0-1.2, for kernels before that
+#   /opt/riscv-new   riscv-none-elf-gcc 13.2.0-2, NuttX CI's choice in 2024
+#   /opt/riscv-ilp32 (x86_64 only) the Ruyi SDK's rv64ilp32 GCC
+# Each holds riscv64-unknown-elf-* links to its toolchain. /opt/riscv points
+# at one of them and is on PATH; the instance recipe repoints it by the
+# kernel's own Toolchain.defs.
+#
+# Ubuntu 24.04: rootless --fakeroot builds on Scholar inject the host's
+# fakeroot library, which needs glibc >= 2.38.
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+    retry() {  # retry <seconds> <command...>
+        t=$1; shift
+        for i in 1 2 3 4 5 6; do
+            timeout "$t" "$@" && return 0
+            echo "attempt $i failed: $*"; sleep 3
+        done
+        return 1
+    }
+    retry 120 apt-get $APT update -qq
+    retry 900 apt-get $APT install -y -qq --no-install-recommends \
+        build-essential make git python3 python3-pip libncurses-dev bison \
+        flex xxd curl xz-utils unzip ca-certificates kconfig-frontends \
+        genromfs qemu-system-arm qemu-system-misc \
+        gcc-arm-none-eabi libnewlib-arm-none-eabi binutils-arm-none-eabi > /dev/null
+    pip3 install --break-system-packages -q kconfiglib pyelftools
+    rm -rf /var/lib/apt/lists/*
+
+    case "$(uname -m)" in x86_64) X=x64 ;; aarch64) X=arm64 ;; esac
+    fetch() {  # fetch <dir> <prefix> <url>
+        mkdir -p "$1/xpack"
+        retry 900 curl -fsSL -o /tmp/tc.tgz "$3"
+        tar -C "$1/xpack" --strip-components 1 -xzf /tmp/tc.tgz
+        rm -f /tmp/tc.tgz
+        mkdir -p "$1/bin"
+        for f in "$1"/xpack/bin/$2*; do
+            ln -sf "$f" "$1/bin/riscv64-unknown-elf-${f##*/$2}"
+        done
+    }
+    fetch /opt/riscv-old riscv-none-embed- \
+        https://github.com/xpack-dev-tools/riscv-none-embed-gcc-xpack/releases/download/v10.2.0-1.2/xpack-riscv-none-embed-gcc-10.2.0-1.2-linux-$X.tar.gz
+    fetch /opt/riscv-new riscv-none-elf- \
+        https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v13.2.0-2/xpack-riscv-none-elf-gcc-13.2.0-2-linux-$X.tar.gz
+    ln -sfn /opt/riscv-new /opt/riscv
+    # rv64ilp32 (CONFIG_ARCH_RV64ILP32) needs the Ruyi SDK's GCC fork, built
+    # for x86_64 hosts only; its prefix is riscv64-unknown-elf- already.
+    if [ "$X" = x64 ]; then
+        mkdir -p /opt/riscv-ilp32
+        retry 900 curl -fsSL -o /tmp/tc.tgz \
+            https://github.com/ruyisdk/riscv-gnu-toolchain-rv64ilp32/releases/download/2024.06.24/riscv64ilp32-elf-ubuntu-22.04-gcc-nightly-2024.06.24-nightly.tar.gz
+        tar -C /opt/riscv-ilp32 --strip-components 1 -xzf /tmp/tc.tgz
+        rm -f /tmp/tc.tgz
+        /opt/riscv-ilp32/bin/riscv64-unknown-elf-gcc --version | head -1
+    fi
+    /opt/riscv-old/bin/riscv64-unknown-elf-gcc --version | head -1
+    /opt/riscv-new/bin/riscv64-unknown-elf-gcc --version | head -1
+    arm-none-eabi-gcc --version | head -1
+    qemu-system-riscv32 --version | head -1
+    qemu-system-arm --version | head -1
+    command -v kconfig-tweak
+    mkdir -p /embedeval-src/nuttx.git /embedeval-src/nuttx-apps.git
+
+%environment
+    export PATH=/opt/riscv/bin:$PATH
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.layer nuttx-qemu-misc

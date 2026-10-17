@@ -3,8 +3,7 @@
 #SBATCH -N {nodes}
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task={cpus}
-#SBATCH --gres={gres}
-#SBATCH --mem={mem}
+{gres_line}#SBATCH --mem={mem}
 #SBATCH -t {time_limit}
 #SBATCH -J embedeval-{name}
 #SBATCH -o {run}/jobs/job-%j.out

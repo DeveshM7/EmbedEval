@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "cluster"), str(ROOT / "scripts")]
 import config as cluster_config  # noqa: E402
 import node_worker  # noqa: E402
+import prepare  # noqa: E402
 
 
 class NuttxClusterTests(unittest.TestCase):
@@ -82,6 +83,23 @@ class NuttxClusterTests(unittest.TestCase):
             with self.assertRaises(cluster_config.ConfigError):
                 cluster_config.load(path)
         self.assertTrue(cluster_config.load()["derived"]["ledger"].endswith("/ledger.jsonl"))
+
+    def test_seeded_verdicts_skip_triage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, run = Path(tmp) / "old", Path(tmp) / "new"
+            (src / "triage").mkdir(parents=True)
+            run.mkdir()
+            (src / "triage" / "5.json").write_text('{"case": "apps-5"}')
+            (src / "triage" / "5.trace.json").write_text("[]")
+            node_worker.status.write_stage(src, 5, "triage", {"state": "done", "verdict": "accept"})
+            node_worker.status.write_stage(src, 6, "triage", {"state": "cap"})
+            stage = {5: "to triage", 6: "to triage", 7: "in ledger"}
+            self.assertEqual(prepare.seed_verdicts(src, run, [5, 6, 7], stage), 1)
+            self.assertEqual((run / "triage" / "5.json").read_text(), '{"case": "apps-5"}')
+            self.assertTrue((run / "triage" / "5.trace.json").exists())
+            got = node_worker.status.read(run, 5)["triage"]
+            self.assertEqual((got["verdict"], got["seeded_from"]), ("accept", "old"))
+            self.assertNotIn("triage", node_worker.status.read(run, 6))
 
 
 if __name__ == "__main__":

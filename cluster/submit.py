@@ -105,7 +105,7 @@ def main() -> None:
     script = jobs / f"pipeline-{stamp}.sbatch"
     script.write_text((CLUSTER / "templates" / "pipeline.sbatch").read_text().format(
         partition=s["partition"], nodes=f"{lowest}-{wanted}" if lowest < wanted else wanted,
-        cpus=s["cpus_per_node"], gres=s["gres"], mem=s["mem"], time_limit=s["time_limit"],
+        cpus=s["cpus_per_node"], gres_line=f"#SBATCH --gres={s['gres']}\n" if s["gres"] else "", mem=s["mem"], time_limit=s["time_limit"],
         name=run.name, run=run, repo=REPO, config=frozen, python=sys.executable,
         triage_phase=caps["triage_phase"], validate_phase=caps["validate_phase"], stamp=stamp))
 

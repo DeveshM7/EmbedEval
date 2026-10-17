@@ -24,6 +24,7 @@ import re
 import shlex
 from pathlib import Path
 
+import nuttx_platforms as platforms
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "nuttx"
@@ -83,8 +84,11 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
 
 
 def render_runner(banners: list[str], sim_config: str = "sim:nsh") -> str:
-    runner = (TEMPLATES / ("qemu-armv8a/run_tests.sh.tmpl" if sim_config.startswith(
-        "qemu-armv8a:") else "run_tests.sh.tmpl")).read_text()
+    qemu = platforms.is_qemu(sim_config)
+    runner = (TEMPLATES / ("qemu-armv8a/run_tests.sh.tmpl" if qemu
+                           else "run_tests.sh.tmpl")).read_text()
+    if qemu:
+        runner = runner.replace("@@QEMU_COMMAND@@", platforms.qemu_command(sim_config))
     return runner.replace("@@BANNERS@@", " ".join(shlex.quote(b) for b in banners))
 
 
@@ -103,10 +107,10 @@ def render(meta: dict, patch_file: Path, out_root: Path,
             meta["apps_repo"] != "https://github.com/apache/nuttx-apps":
         raise ValueError("expected the Apache NuttX kernel and apps repositories")
     sim_config = meta.get("sim_config", "sim:nsh")
-    if meta.get("test_app", "ostest") != "ostest" or sim_config not in (
-            "sim:nsh", "qemu-armv8a:nsh", "qemu-armv8a:nsh_smp") or (
+    if meta.get("test_app", "ostest") != "ostest" or not platforms.supported(sim_config) or (
             runtime == "docker" and sim_config != "sim:nsh"):
-        raise ValueError("this runtime supports sim:nsh or qemu-armv8a:nsh[_smp] with ostest")
+        raise ValueError("this runtime supports sim:nsh or a QEMU board "
+                         f"({', '.join(platforms.QEMU_BOARDS)}) with ostest")
     if meta["fail_type"] not in ("runtime_assert", "compile_error"):
         raise ValueError("expected runtime_assert or compile_error")
     for name in ("kernel_base_commit", "kernel_merge_commit", "apps_base_commit"):
@@ -123,8 +127,7 @@ def render(meta: dict, patch_file: Path, out_root: Path,
     if not isinstance(meta.get("clean_after_patch", False), bool):
         raise ValueError("clean_after_patch must be a boolean")
     overrides = dict(meta.get("config_overrides") or {})
-    if sim_config.startswith("qemu-armv8a:"):
-        overrides["CONFIG_DEBUG_SCHED_INFO"] = "n"  # prevent SMP console interleaving
+    overrides.update(platforms.board_overrides(sim_config))
     reserved = {"CONFIG_TESTING_OSTEST", "CONFIG_NSH_CONSOLE_LOGIN", "CONFIG_NDEBUG"}
     # y/n for bools; decimal or hex for int-valued symbols (e.g. CONFIG_SMP_NCPUS=4,
     # CONFIG_SMP_DEFAULT_CPUSET=0xffffffff); a quoted literal for string-valued ones.

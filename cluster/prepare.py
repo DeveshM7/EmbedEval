@@ -22,6 +22,9 @@ Creates <scratch_root>/runs/<name>/ and, in it:
     6. manifest.json  the plan: each PR and where preparation left it, the code
                       commit, a copy of the config
 
+    --verdicts-from RUN (project nuttx): the PRs' triage verdicts are taken from
+    an earlier run, so the job only validates them.
+
 Then `python cluster/submit.py pipeline --run <name>`. Run this from an
 interactive session on a Spark node: the SDK images are built here.
 """
@@ -93,6 +96,26 @@ def write_manifest(run: Path, name: str, cfg: dict, env: dict, source: dict, prs
     print(f"\nnext: python cluster/submit.py pipeline --run {name}")
 
 
+def seed_verdicts(src: Path, run: Path, prs: list[int], stage: dict) -> int:
+    """Take the triage verdicts of an earlier run for these PRs: the verdict
+    file and its trace are copied and the triage stage is marked done, so the
+    pipeline job validates them without triaging again. Returns how many."""
+    import status
+    n = 0
+    for pr in prs:
+        verdict = src / "triage" / f"{pr}.json"
+        old = status.read(src, pr).get("triage")
+        if stage.get(pr) != "to triage" or not verdict.exists() or not old or old.get("state") != "done":
+            continue
+        (run / "triage").mkdir(exist_ok=True)
+        for name in (f"{pr}.json", f"{pr}.trace.json"):
+            if (src / "triage" / name).exists():
+                (run / "triage" / name).write_bytes((src / "triage" / name).read_bytes())
+        status.write_stage(run, pr, "triage", old | {"seeded_from": src.name})
+        n += 1
+    return n
+
+
 def prepare_nuttx(args, cfg: dict, run: Path, env: dict, done: dict) -> None:
     """A NuttX run: the unit is a nuttx-apps PR that changes testing/ostest/.
     Each PR's record (the PR, its timeline, the changed tests) is fetched into
@@ -117,6 +140,9 @@ def prepare_nuttx(args, cfg: dict, run: Path, env: dict, done: dict) -> None:
     with ThreadPoolExecutor(cfg["parallel"]["enrich"]) as pool:
         list(pool.map(fetch, [pr for pr in prs if pr not in stage]))
     log(f"{len(prs)} apps PRs, {sum(v == 'to triage' for v in stage.values())} to triage")
+    if args.verdicts_from:
+        seeded = seed_verdicts(Path(cfg["derived"]["runs"]) / args.verdicts_from, run, prs, stage)
+        log(f"{seeded} triage verdicts taken from run {args.verdicts_from}")
     if cfg["nuttx"]["validate"]:            # the shared image, built once, not by every node
         import apptainer_util as au
         logdir = Path(cfg["derived"]["shared"]) / "logs"
@@ -140,16 +166,23 @@ def main() -> None:
     p.add_argument("--redo", action="store_true",
                    help="also take PRs the ledger has already settled in an earlier run")
     p.add_argument("--until", help="with --since: merged on or before this date")
+    p.add_argument("--verdicts-from", metavar="RUN",
+                   help="project nuttx: take these PRs' triage verdicts from an earlier run "
+                        "instead of triaging them again (with --pr)")
     p.add_argument("--config", help="default: cluster/config.yaml")
     args = p.parse_args()
     if args.since and not args.until:
         p.error("--since needs --until")
     if args.no_filter and not args.pr:
         p.error("--no-filter goes with --pr")
+    if args.verdicts_from and not args.pr:
+        p.error("--verdicts-from goes with --pr")
 
     cfg = cluster_config.load_or_exit(args.config)
     if args.all_ostest and cfg["project"] != "nuttx":
         p.error("--all-ostest needs project: nuttx in the config")
+    if args.verdicts_from and cfg["project"] != "nuttx":
+        p.error("--verdicts-from needs project: nuttx in the config")
     run = Path(cfg["derived"]["runs"]) / args.name
     if (run / "manifest.json").exists():
         sys.exit(f"{run} is already prepared; pick another --name "

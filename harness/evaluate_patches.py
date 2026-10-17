@@ -60,6 +60,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
     import apptainer_util as au
 
+    au.require_host_arch(meta)
     patch_path = paths.patch_path(instance_id, model_name)
     result = {"instance_id": instance_id, "model": paths.resolve_model(model_name),
               "patch_file": str(paths.show(patch_path)),
