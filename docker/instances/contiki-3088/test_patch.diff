@@ -1,0 +1,346 @@
+diff --git a/tests/07-simulation-base/code-ipv6/tcp-client/tcp-client.c b/tests/07-simulation-base/code-ipv6/tcp-client/tcp-client.c
+index 8cedc55b1..0f2ff5c50 100644
+--- a/tests/07-simulation-base/code-ipv6/tcp-client/tcp-client.c
++++ b/tests/07-simulation-base/code-ipv6/tcp-client/tcp-client.c
+@@ -143,8 +143,6 @@ PROCESS_THREAD(test_tcp_client, ev, data)
+     PROCESS_EXIT();
+   }
+
+-  memset(buf, 0xca, sizeof(buf));
+-
+   LOG_INFO("Sending %u bytes to the server...\n", TEST_STREAM_LENGTH);
+
+   for(;;) {
+@@ -158,6 +156,10 @@ PROCESS_THREAD(test_tcp_client, ev, data)
+     } else if(can_send) {
+       size_t bytes_to_send = TEST_STREAM_LENGTH < sizeof(buf) + bytes_sent ?
+ 	TEST_STREAM_LENGTH - bytes_sent : sizeof(buf);
++      /* Fill buffer with pattern: byte value = (global_index % 256) */
++      for(size_t i = 0; i < bytes_to_send; i++) {
++        buf[i] = (uint8_t)((bytes_sent + i) % 256);
++      }
+       int ret = tcp_socket_send(&client_sock, buf, bytes_to_send);
+       if(ret < 0) {
+         LOG_ERR("Failed to send %zu bytes\n", sizeof(buf));
+diff --git a/tests/07-simulation-base/code-ipv6/tcp-server/tcp-server.c b/tests/07-simulation-base/code-ipv6/tcp-server/tcp-server.c
+index d8078780c..cc00a82f2 100644
+--- a/tests/07-simulation-base/code-ipv6/tcp-server/tcp-server.c
++++ b/tests/07-simulation-base/code-ipv6/tcp-server/tcp-server.c
+@@ -54,14 +54,27 @@ static struct tcp_socket server_sock;
+ static uint8_t in_buf[SOCKET_BUF_SIZE];
+ static uint8_t out_buf[SOCKET_BUF_SIZE];
+ static size_t bytes_received;
++static bool validation_failed;
+ /*****************************************************************************/
+ static int
+ data_callback(struct tcp_socket *sock, void *ptr, const uint8_t *input, int len)
+ {
+   if(len >= 0) {
++    /* Validate each received byte matches expected pattern: (index % 256) */
++    for(int i = 0; i < len; i++) {
++      uint8_t expected = (uint8_t)((bytes_received + i) % 256);
++      if(input[i] != expected) {
++        LOG_ERR("Validation failed at byte %zu: expected 0x%02x, got 0x%02x\n",
++                bytes_received + i, expected, input[i]);
++        LOG_ERR("Test FAILED\n");
++        validation_failed = true;
++        tcp_socket_close(sock);
++        return 0;
++      }
++    }
+     bytes_received += len;
+   }
+-  LOG_INFO("RECV %d bytes (total %zu)\n", len, bytes_received);
++  LOG_INFO("RECV %d bytes (total %zu) - validation OK\n", len, bytes_received);
+
+   return 0;
+ }
+@@ -76,6 +89,11 @@ event_callback(struct tcp_socket *sock, void *ptr, tcp_socket_event_t event)
+     break;
+   case TCP_SOCKET_CLOSED:
+     LOG_INFO_("CLOSED\n");
++    if(validation_failed) {
++      LOG_ERR("Test FAILED - byte validation error\n");
++    } else {
++      LOG_INFO("All %zu bytes validated successfully\n", bytes_received);
++    }
+     break;
+   case TCP_SOCKET_TIMEDOUT:
+     LOG_INFO_("TIMED OUT\n");
+@@ -97,6 +115,8 @@ PROCESS_THREAD(test_tcp_server, ev, data)
+ {
+   PROCESS_BEGIN();
+
++  validation_failed = false;
++
+   LOG_INFO("Listening for TCP connections on port %d\n", TCP_TEST_PORT);
+
+   int ret = tcp_socket_register(&server_sock, NULL, in_buf, sizeof(in_buf),
+diff --git a/tests/08-native-runs/embedeval-tcp-retention/build.sh b/tests/08-native-runs/embedeval-tcp-retention/build.sh
+new file mode 100644
+index 000000000..ab77f94e7
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tcp-retention/build.sh
+@@ -0,0 +1,12 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd "$(git rev-parse --show-toplevel)"
++mkdir -p build
++fixture=tests/08-native-runs/embedeval-tcp-retention
++cc="${CC:-cc}"
++flags=(-std=c11 -O2 -g -ffunction-sections -fdata-sections -I"$fixture" -Ios -Ios/net/ipv6)
++"$cc" "${flags[@]}" "$fixture/main.c" os/net/ipv6/tcp-socket.c \
++    os/sys/process.c os/lib/list.c -Wl,--gc-sections -o build/tcp-retention
++"$cc" "${flags[@]}" "$fixture/upstream-controls.c" os/lib/list.c os/lib/random.c \
++    os/lib/circular-list.c os/lib/dbl-list.c os/lib/dbl-circ-list.c \
++    os/services/unit-test/unit-test.c -Wl,--gc-sections -o build/upstream-controls
+diff --git a/tests/08-native-runs/embedeval-tcp-retention/contiki-conf.h b/tests/08-native-runs/embedeval-tcp-retention/contiki-conf.h
+new file mode 100644
+index 000000000..9dd405c6e
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tcp-retention/contiki-conf.h
+@@ -0,0 +1,13 @@
++#ifndef CONTIKI_CONF_H_
++#define CONTIKI_CONF_H_
++#include <stdint.h>
++#include <assert.h>
++typedef unsigned int uip_stats_t;
++#define CLOCK_CONF_SECOND 1000
++#define UIP_CONF_BYTE_ORDER UIP_LITTLE_ENDIAN
++#define LOG_CONF_ENABLED 0
++#define NETSTACK_CONF_WITH_IPV6 1
++#define UIP_CONF_TCP 1
++#define MAC_CONF_WITH_NULLMAC 1
++#define ROUTING_CONF_NULLROUTING 1
++#endif
+diff --git a/tests/08-native-runs/embedeval-tcp-retention/main.c b/tests/08-native-runs/embedeval-tcp-retention/main.c
+new file mode 100644
+index 000000000..c507e69f0
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tcp-retention/main.c
+@@ -0,0 +1,168 @@
++/* Component fixture: uIP event/transport boundaries are scripted; the complete
++ * upstream TCP socket and process implementations are compiled separately. */
++#include "contiki.h"
++#include "contiki-net.h"
++#include "net/ipv6/tcp-socket.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++PROCESS_NAME(tcp_socket_process);
++process_event_t tcpip_event;
++void *uip_appdata;
++uint16_t uip_len;
++uint8_t uip_flags;
++struct uip_conn *uip_conn;
++static struct uip_conn connection;
++static unsigned polls, sent_len;
++void tcp_attach(struct uip_conn *c, void *state) { (void)c; (void)state; }
++void tcp_listen(uint16_t port) { (void)port; }
++void tcp_unlisten(uint16_t port) { (void)port; }
++struct uip_conn *tcp_connect(const uip_ipaddr_t *ip, uint16_t port, void *state)
++{ (void)ip; (void)port; (void)state; return &connection; }
++void tcpip_poll_tcp(struct uip_conn *c) { (void)c; polls++; }
++void uip_send(const void *data, int len) { (void)data; sent_len = len; }
++uint16_t uip_htons(uint16_t value) { return UIP_HTONS(value); }
++
++#define CHECK(condition) do { if(!(condition)) { \
++  fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#condition); return 1; } } while(0)
++struct capture {
++  unsigned calls;
++  unsigned lens[32];
++  uint8_t data[32][16];
++  int retain[32];
++};
++static struct tcp_socket socket;
++static struct capture capture;
++static uint8_t guarded[10], output[16];
++static int callback(struct tcp_socket *s, void *ptr, const uint8_t *data, int len)
++{
++  struct capture *c = ptr;
++  if(s != &socket || len < 0 || len > 8 || c->calls >= 32) abort();
++  unsigned n = c->calls++;
++  c->lens[n] = len;
++  memcpy(c->data[n], data, len);
++  return c->retain[n];
++}
++static int setup(void)
++{
++  process_init();
++  tcpip_event = process_alloc_event();
++  memset(&socket,0,sizeof(socket)); memset(&capture,0,sizeof(capture));
++  memset(guarded,0xa5,sizeof(guarded));
++  connection.mss = 8; uip_conn = &connection;
++  socket.c = &connection;
++  return tcp_socket_register(&socket,&capture,guarded+1,8,output,sizeof(output),callback,NULL);
++}
++static void receive(const uint8_t *data, unsigned len)
++{
++  uip_appdata = (void *)data; uip_len = len; uip_flags = UIP_NEWDATA;
++  process_post_synch(&tcp_socket_process,tcpip_event,&socket);
++}
++static int canaries(void) { return guarded[0]==0xa5 && guarded[9]==0xa5; }
++static int registration_resets_retention(void)
++{
++  CHECK(setup()==1);
++  socket.input_data_len=7;
++  CHECK(tcp_socket_register(&socket,&capture,guarded+1,8,output,sizeof(output),callback,NULL)==1);
++  CHECK(socket.input_data_len==0); return 0;
++}
++static int suffix_compaction(void)
++{
++  CHECK(setup()==1); capture.retain[0]=2;
++  receive((const uint8_t *)"abcdef",6);
++  CHECK(capture.calls==1 && capture.lens[0]==6);
++  CHECK(memcmp(guarded+1,"ef",2)==0);
++  CHECK(socket.input_data_len==2 && canaries()); return 0;
++}
++static int retain_across_events(void)
++{
++  CHECK(setup()==1); capture.retain[0]=2;
++  receive((const uint8_t *)"abcd",4); receive((const uint8_t *)"efgh",4);
++  CHECK(capture.calls==2 && capture.lens[1]==6);
++  CHECK(memcmp(capture.data[1],"cdefgh",6)==0);
++  CHECK(socket.input_data_len==0 && canaries()); return 0;
++}
++static int retain_within_large_event(void)
++{
++  CHECK(setup()==1); capture.retain[0]=2;
++  receive((const uint8_t *)"abcdefghijkl",12);
++  CHECK(capture.calls==2 && capture.lens[1]==6);
++  CHECK(memcmp(capture.data[1],"ghijkl",6)==0);
++  CHECK(socket.input_data_len==0 && canaries()); return 0;
++}
++static int overretain_clamped(void)
++{
++  CHECK(setup()==1); capture.retain[0]=9;
++  receive((const uint8_t *)"abc",3);
++  CHECK(socket.input_data_len==3 && memcmp(guarded+1,"abc",3)==0);
++  receive((const uint8_t *)"de",2);
++  CHECK(capture.calls==2 && capture.lens[1]==5);
++  CHECK(memcmp(capture.data[1],"abcde",5)==0 && canaries()); return 0;
++}
++static int full_retained_buffer_bounded(void)
++{
++  CHECK(setup()==1); memcpy(guarded+1,"abcdefgh",8); socket.input_data_len=8;
++  receive((const uint8_t *)"xyz",3);
++  CHECK(capture.calls==0 && socket.input_data_len==8);
++  CHECK(memcmp(guarded+1,"abcdefgh",8)==0 && canaries()); return 0;
++}
++static int ordinary_receive(void)
++{
++  CHECK(setup()==1); receive((const uint8_t *)"abcd",4);
++  CHECK(capture.calls==1 && capture.lens[0]==4);
++  CHECK(memcmp(capture.data[0],"abcd",4)==0 && canaries()); return 0;
++}
++static int large_stream(void)
++{
++  CHECK(setup()==1); receive((const uint8_t *)"abcdefghijklmnopqrst",20);
++  CHECK(capture.calls==3 && capture.lens[0]==8 && capture.lens[1]==8 && capture.lens[2]==4);
++  CHECK(memcmp(capture.data[0],"abcdefgh",8)==0);
++  CHECK(memcmp(capture.data[1],"ijklmnop",8)==0);
++  CHECK(memcmp(capture.data[2],"qrst",4)==0 && canaries()); return 0;
++}
++static int binary_payload(void)
++{
++  const uint8_t data[]={0,255,0,7,128,0};
++  CHECK(setup()==1); receive(data,sizeof(data));
++  CHECK(capture.calls==1 && capture.lens[0]==sizeof(data));
++  CHECK(memcmp(capture.data[0],data,sizeof(data))==0 && canaries()); return 0;
++}
++static int absent_callback(void)
++{
++  CHECK(setup()==1); socket.input_callback=NULL;
++  receive((const uint8_t *)"abcdefghijkl",12);
++  CHECK(capture.calls==0 && socket.input_data_len==0 && canaries()); return 0;
++}
++static int send_queue(void)
++{
++  CHECK(setup()==1);
++  CHECK(tcp_socket_send(&socket,(const uint8_t *)"abc",3)==3);
++  CHECK(tcp_socket_queuelen(&socket)==3 && tcp_socket_max_sendlen(&socket)==13);
++  CHECK(polls==1 && memcmp(output,"abc",3)==0); return 0;
++}
++static int invalid_registration(void)
++{
++  CHECK(setup()==1);
++  CHECK(tcp_socket_register(NULL,NULL,NULL,0,NULL,0,NULL,NULL)==-1); return 0;
++}
++struct test { const char *name; int (*run)(void); };
++static const struct test tests[]={
++  {"registration_resets_retention",registration_resets_retention},
++  {"suffix_compaction",suffix_compaction},
++  {"retain_across_events",retain_across_events},
++  {"retain_within_large_event",retain_within_large_event},
++  {"overretain_clamped",overretain_clamped},
++  {"full_retained_buffer_bounded",full_retained_buffer_bounded},
++  {"ordinary_receive",ordinary_receive},{"large_stream",large_stream},
++  {"binary_payload",binary_payload},{"absent_callback",absent_callback},
++  {"send_queue",send_queue},{"invalid_registration",invalid_registration}
++};
++int main(int argc,char **argv)
++{
++  if(argc!=2) return 1;
++  for(unsigned i=0;i<sizeof(tests)/sizeof(tests[0]);i++) if(strcmp(argv[1],tests[i].name)==0) {
++    int result=tests[i].run(); printf("%s %s\n",tests[i].name,result?"FAIL":"PASS"); return result;
++  }
++  return 1;
++}
+diff --git a/tests/08-native-runs/embedeval-tcp-retention/rtimer-arch.h b/tests/08-native-runs/embedeval-tcp-retention/rtimer-arch.h
+new file mode 100644
+index 000000000..3e3b14ce9
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tcp-retention/rtimer-arch.h
+@@ -0,0 +1,5 @@
++#ifndef RTIMER_ARCH_H_
++#define RTIMER_ARCH_H_
++#define RTIMER_ARCH_SECOND 1000
++rtimer_clock_t rtimer_arch_now(void);
++#endif
+diff --git a/tests/08-native-runs/embedeval-tcp-retention/run.py b/tests/08-native-runs/embedeval-tcp-retention/run.py
+new file mode 100644
+index 000000000..98f2cbef8
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tcp-retention/run.py
+@@ -0,0 +1,20 @@
++import subprocess,sys
++from pathlib import Path
++regressions = ['registration_resets_retention', 'suffix_compaction', 'retain_across_events', 'retain_within_large_event', 'overretain_clamped', 'full_retained_buffer_bounded']
++controls = ['ordinary_receive', 'large_stream', 'binary_payload', 'absent_callback', 'send_queue', 'invalid_registration']
++mode=sys.argv[1] if len(sys.argv)>1 else "all"
++if mode not in ["all","regression","control"]: raise SystemExit(1)
++status=0
++for name in (regressions if mode=="regression" else controls if mode=="control" else regressions+controls):
++    try:
++        p=subprocess.run(["./build/tcp-retention",name],timeout=5)
++        if p.returncode and status!=2: status=1
++    except subprocess.TimeoutExpired:
++        print(name,"TIMEOUT after 5s",flush=True);status=2
++if mode!="regression":
++    try:
++        p=subprocess.run(["./build/upstream-controls"],timeout=30)
++        if p.returncode and status!=2: status=1
++    except subprocess.TimeoutExpired:
++        print("upstream-controls TIMEOUT after 30s",flush=True);status=2
++raise SystemExit(status)
+diff --git a/tests/08-native-runs/embedeval-tcp-retention/upstream-controls.c b/tests/08-native-runs/embedeval-tcp-retention/upstream-controls.c
+new file mode 100644
+index 000000000..8066167d1
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-tcp-retention/upstream-controls.c
+@@ -0,0 +1,14 @@
++/* Run the unchanged upstream list test used by the native data-structure suite. */
++#include "../../07-simulation-base/code-data-structures/test-data-structures.c"
++rtimer_clock_t rtimer_arch_now(void) { return 0; }
++clock_time_t clock_time(void) { return 0; }
++int main(void) {
++  int failures=0;
++  memset(elements,0,sizeof(elements));
++#define RUN(name) do { unit_test_function_##name(&unit_test_##name); \
++  printf("upstream_%s %s\n",#name,unit_test_##name.passed?"PASS":"FAIL"); \
++  failures+=!unit_test_##name.passed; } while(0)
++  RUN(test_list); RUN(test_stack); RUN(test_queue);
++  RUN(test_csll); RUN(test_dll); RUN(test_cdll);
++  return failures?1:0;
++}
