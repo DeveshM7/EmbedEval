@@ -49,6 +49,7 @@ PY = sys.executable
 WARM = ".warm"                       # in the compile cache once a server filled it
 _children: set[int] = set()          # process groups of running steps
 _lock = threading.Lock()
+_nuttx_data_lock = threading.Lock()
 _stopping = threading.Event()
 
 
@@ -195,11 +196,12 @@ def nuttx_data(cfg: dict, node_dir: Path) -> Path:
     """This node's copy of the NuttX data (PR records, bare clones): fetches
     and caches are written here, never into the shared, pre-warmed copy."""
     own = node_dir / "work" / "nuttx-data"
-    if not (own / ".complete").exists():
-        shutil.rmtree(own, ignore_errors=True)
-        own.mkdir(parents=True)
-        subprocess.run(["cp", "-a", f"{cfg['nuttx']['data']}/.", str(own)], check=True)
-        (own / ".complete").touch()
+    with _nuttx_data_lock:
+        if not (own / ".complete").exists():
+            shutil.rmtree(own, ignore_errors=True)
+            own.mkdir(parents=True)
+            subprocess.run(["cp", "-a", f"{cfg['nuttx']['data']}/.", str(own)], check=True)
+            (own / ".complete").touch()
     return own
 
 

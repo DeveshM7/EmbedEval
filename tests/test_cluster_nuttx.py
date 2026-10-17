@@ -2,6 +2,10 @@ import sys
 import tempfile
 import unittest
 import json
+import shutil
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +32,33 @@ class NuttxClusterTests(unittest.TestCase):
                 node_worker.status.write_stage(run, 1, "validate",
                                                {"state": "done", "outcome": "VALID"})
                 self.assertEqual(node_worker.assigned_work(run, "validate"), [2, 5])
+
+    def test_parallel_triage_copies_node_data_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "shared"
+            shared.mkdir()
+            (shared / "record.json").write_text("data")
+            node = root / "node"
+            cfg = {"nuttx": {"data": str(shared)}}
+            start = threading.Barrier(2)
+            copies = []
+
+            def copy(_cmd, check):
+                copies.append(1)
+                time.sleep(0.05)
+                shutil.copy(shared / "record.json", node / "work" / "nuttx-data" / "record.json")
+
+            def read():
+                start.wait()
+                return node_worker.nuttx_data(cfg, node)
+
+            with patch.object(node_worker.subprocess, "run", side_effect=copy), \
+                 ThreadPoolExecutor(2) as pool:
+                results = list(pool.map(lambda _: read(), range(2)))
+            self.assertEqual(len(copies), 1)
+            self.assertEqual(results[0], results[1])
+            self.assertEqual((results[0] / "record.json").read_text(), "data")
 
     def test_verdict_info_accepts_on_a_high_or_medium_pair(self):
         accept = node_worker.nuttx_verdict_info({"kind": "qemu_only", "pairs": [
