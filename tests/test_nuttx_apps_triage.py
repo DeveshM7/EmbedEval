@@ -514,6 +514,14 @@ class AppsConversationTests(unittest.TestCase):
 
 
 class GeneratorTests(unittest.TestCase):
+    def test_generator_applies_the_full_kernel_pr(self):
+        record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
+        record["kernel_candidates"][0]["files"].append(
+            {"filename": "sched/helper.c", "status": "modified"})
+        reply = {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}
+        self.assertEqual(generator.metadata(record, 11, reply)["files_changed_by_fix"],
+                         ["sched/example.c", "sched/helper.c"])
+
     def test_generator_includes_changed_registration_for_selected_test(self):
         record = apps_record()
         record["apps"]["files"] += [

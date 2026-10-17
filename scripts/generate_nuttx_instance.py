@@ -121,7 +121,7 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
         "kernel_merge_commit": kernel["head_commit"],
         "apps_base_commit": apps["base_commit"],
         "apps_merge_commit": apps["head_commit"],
-        "files_changed_by_fix": fix_paths,
+        "files_changed_by_fix": [f["filename"] for f in kernel["files"]],
         "files_changed_by_test_patch": test_paths,
         "sim_config": platform,
         "test_app": "ostest",
