@@ -226,6 +226,40 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(source.read_text(), "followup\n")
             self.assertEqual(diagram.read_bytes(), b"\x89PNG\r\n\x1a\n\x00primary")
 
+    def test_reconfigure_restores_overrides_lost_before_the_fix(self):
+        # A stub `make olddefconfig` that, like Kconfig, drops a symbol the
+        # kernel lacks and writes `n` as "is not set".
+        script = validate_instance.nuttx_reconfigure(
+            {"CONFIG_HRTIMER": "y", "CONFIG_SMP_NCPUS": "4", "CONFIG_DEBUG_SCHED_INFO": "n"})
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            make = work / "bin" / "make"
+            make.parent.mkdir()
+            # The script targets GNU sed; `-i.orig` works with BSD sed too.
+            sed = work / "bin" / "sed"
+            sed.write_text('#!/bin/sh\n[ "$1" = -i ] && { shift; exec /usr/bin/sed -i.orig "$@"; }\n'
+                           'exec /usr/bin/sed "$@"\n')
+            sed.chmod(0o755)
+
+            def run_with(unknown: str):
+                make.write_text(f"#!/bin/sh\nsed -i -e '/^{unknown}=/d' "
+                               "-e 's/^\\(CONFIG_[A-Z0-9_]*\\)=n$/# \\1 is not set/' .config\n")
+                make.chmod(0o755)
+                (work / ".config").write_text("CONFIG_SIM=y\nCONFIG_DEBUG_SCHED_INFO=y\n")
+                return subprocess.run(["bash", "-c", script], cwd=work, capture_output=True,
+                                      text=True, env={"PATH": f"{make.parent}:/usr/bin:/bin"})
+
+            r = run_with("CONFIG_NONE")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            config = (work / ".config").read_text().splitlines()
+            self.assertIn("CONFIG_HRTIMER=y", config)
+            self.assertIn("CONFIG_SMP_NCPUS=4", config)
+            self.assertNotIn("CONFIG_DEBUG_SCHED_INFO=y", config)
+
+            r = run_with("CONFIG_HRTIMER")
+            self.assertEqual(r.returncode, 3)
+            self.assertIn("config override dropped: CONFIG_HRTIMER=y", r.stdout)
+
 
 class HarnessTests(unittest.TestCase):
     def test_nuttx_apptainer_instances_are_graded_in_apptainer(self):
