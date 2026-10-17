@@ -88,7 +88,10 @@ def gold_patch(meta: dict, workdir: Path) -> str:
         sh(["git", "-C", str(clone), "fetch", "origin", base, fix], timeout=900)
 
     files = meta.get("files_changed_by_fix", [])
-    cmd = ["git", "-C", str(clone), "diff", f"{base}..{fix}", "--"]
+    cmd = ["git", "-C", str(clone), "diff"]
+    if project == "nuttx":
+        cmd.append("--binary")
+    cmd += [f"{base}..{fix}", "--"]
     cmd += files if files else [".", ":(exclude)tests/"]
     r = sh(cmd, timeout=300)
     if r.returncode != 0 or not r.stdout.strip():
@@ -112,7 +115,7 @@ def nuttx_fix_patches(meta: dict, workdir: Path,
                 fetched = sh(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
                 if fetched.returncode:
                     raise RuntimeError(f"could not fetch follow-up commit {sha}: {fetched.stderr[:200]}")
-        r = sh(["git", "-C", str(clone), "diff", f"{base}..{head}", "--",
+        r = sh(["git", "-C", str(clone), "diff", "--binary", f"{base}..{head}", "--",
                 *extra["files_changed"]], timeout=300)
         if r.returncode or not r.stdout.strip():
             raise RuntimeError(f"could not produce follow-up patch for #{extra['kernel_pr']}: "

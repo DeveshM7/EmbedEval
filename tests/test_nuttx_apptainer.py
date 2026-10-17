@@ -149,10 +149,13 @@ class ValidatorTests(unittest.TestCase):
             git("config", "user.email", "test@example.invalid")
             source = repo / "sched.c"
             source.write_text("base\n")
-            git("add", "sched.c")
+            diagram = repo / "diagram.png"
+            diagram.write_bytes(b"\x89PNG\r\n\x1a\n\x00base")
+            git("add", "sched.c", "diagram.png")
             git("commit", "-m", "base")
             base = git("rev-parse", "HEAD")
             source.write_text("primary\n")
+            diagram.write_bytes(b"\x89PNG\r\n\x1a\n\x00primary")
             git("commit", "-am", "primary")
             primary = git("rev-parse", "HEAD")
             source.write_text("followup\n")
@@ -160,7 +163,7 @@ class ValidatorTests(unittest.TestCase):
             followup = git("rev-parse", "HEAD")
             meta = {"project": "nuttx", "kernel_repo": "https://github.com/apache/nuttx",
                     "kernel_base_commit": base, "kernel_merge_commit": primary,
-                    "files_changed_by_fix": ["sched.c"],
+                    "files_changed_by_fix": ["sched.c", "diagram.png"],
                     "extra_fix_prs": [{"kernel_pr": 9, "base_commit": primary,
                                        "head_commit": followup, "files_changed": ["sched.c"]}]}
             with patch.object(validate_instance.layout, "nuttx_clones", return_value=(repo, None)):
@@ -172,6 +175,7 @@ class ValidatorTests(unittest.TestCase):
                 diff.write_text(text)
                 git("apply", str(diff))
             self.assertEqual(source.read_text(), "followup\n")
+            self.assertEqual(diagram.read_bytes(), b"\x89PNG\r\n\x1a\n\x00primary")
 
 
 class HarnessTests(unittest.TestCase):
