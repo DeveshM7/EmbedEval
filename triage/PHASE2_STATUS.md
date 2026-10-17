@@ -92,3 +92,56 @@ post-fix build and `ostest` run exit 0. The report path is
   Phase 2 ARM64 result is `arm64_env_failure`.
 
 No instances were promoted and no branch was pushed.
+
+## Viability of the 22 blocked pairs (branch `nuttx-viability`)
+
+Verdicts were seeded from `nuttx-apps-all` (`prepare.py --verdicts-from`), not
+re-triaged. Runs on Scholar: `nuttx-viability-x86` (18 old-era sim pairs,
+`cpu` partition, x86_64), `-x86b` and `-x86c` (the 4 QEMU pairs, x86 nodes,
+plus apps #241 again). Apps #237 and #241 are not triage-capped: both have an
+accepted pair (#997, #1007), so they were validated.
+
+Platform decisions: group 1 and group 2 run on x86 (instance metadata
+`host_arch: x86_64`; build, validate and evaluate refuse other hosts). For
+group 2 no ARM64 backport was attempted: the broken vfork code
+(`sim_vfork_arm64.S`) is the 2022 implementation that the 2023-07 rework
+(c33d1c9c97, a repo-wide rename plus a new fork path) replaced, so a small
+fix is not available.
+
+| Apps PR | Kernel PR | Outcome | Platform |
+|---:|---:|---|---|
+| 170 | 766 | INVALID: changed test did not run before the fix | sim:nsh x86_64 |
+| 237 | 997 | INVALID: tests passed before the fix | sim:nsh x86_64 |
+| 241 | 1007 | INVALID: changed test did not run before the fix | sim:nsh x86_64 |
+| 293 | 1236 | VALID | sim:nsh x86_64 |
+| 546 | 2631 | INVALID: tests passed before the fix | sim:nsh x86_64 |
+| 649 | 3299 | VALID | sim:nsh x86_64 |
+| 651 | 3299 | VALID | sim:nsh x86_64 |
+| 652 | 3308 | VALID | sim:nsh x86_64 |
+| 912 | 4941 | VALID | sim:nsh x86_64 |
+| 955 | 5120 | VALID | sim:nsh x86_64 |
+| 1358 | 5070 | still blocked: pre-fix run hangs in priority_inheritance (timeout rc=2); the run predates the merged hang-as-failure rule, not re-run | sim:nsh x86_64 |
+| 1526 | 8397 | still blocked: ostest times out with the fix | sim:nsh x86_64 |
+| 1665 | 8832 | VALID | sim:nsh x86_64 |
+| 1682 | 8885 | VALID | sim:nsh x86_64 |
+| 1711 | 7464 (+9039) | INVALID: changed test did not run before the fix | sim:nsh x86_64 |
+| 1741 | 9203 | INVALID: tests passed before the fix | sim:nsh x86_64 |
+| 1813 | 9632 | INVALID: tests passed before the fix | sim:nsh x86_64 |
+| 1962 | 9755 | still blocked: apps base does not build on the kernel base (nshlib needs a newer kernel API) | sim:nsh x86_64 |
+| 1141 | 6080 | INVALID on rv-virt:nsh (rv32): pre-fix link error as expected, but FPU#1 takes an illegal-instruction fault after the fix. riscv_initialstate.c of that era never sets mstatus.FS, so no rv-virt FPU test can pass. Another FPU board (e.g. sabre-6quad under QEMU) untried | qemu rv32, x86 node |
+| 2420 | 12535 (+12475) | still blocked: the toolchain (Ruyi rv64ilp32 GCC) is x86 only; the follow-up patch of #12475 does not apply even with prerequisites ordered first (not diagnosed) | qemu rv64, x86 node |
+| 2457 | 12820 | still blocked: knsh64 (BUILD_KERNEL, export/import, hostfs) builds but run_tests times out; not debugged | qemu rv64 knsh64, x86 node |
+| 3067 | 16301 | VALID | qemu-armv7a:smp, x86 node |
+
+Counts: VALID 8 (293, 649, 651, 652, 912, 955, 1665, 1682, plus 3067 on QEMU,
+so 9 in all), INVALID 8 (170, 237, 241, 546, 1711, 1741, 1813, 1141), blocked
+5 (1358, 1526, 1962, 2420, 2457). None of the QEMU pairs ran on an ARM64 node:
+the `qemu-misc` image is only built and exercised on x86 so far.
+
+Changes: x86 platform option (`host_arch`, per-architecture image names),
+`prepare.py --verdicts-from`, optional `slurm.gres`, `scripts/nuttx_platforms.py`
+(board table), the `qemu-misc` image (RISC-V old/new, ilp32, armv7-a), an
+Apptainer sim runner that feeds nsh one command at a time (2020 kernels drop
+early input), NDEBUG check for old kernels, banners from guard changes and
+banner-less compile cases, prerequisite-first ordering of fix patches.
+Open decision for the user: x86-only instances in the benchmark.
