@@ -481,8 +481,11 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                 results.append((kernel, "arm64_env_failure",
                                 f"INVALID on ARM64 with a pre-{VFORK_FIXED} kernel (vfork SIGBUS "
                                 f"risk): {reason or rc}"))
+            elif reason in ("tests PASSED before the fix -- the instance does not isolate the bug",
+                            "tests still fail with the fix"):
+                results.append((kernel, "INVALID", reason))
             else:
-                results.append((kernel, "INVALID", f"{reason or f'rc={rc}'}"))
+                results.append((kernel, "failed", f"validation inconclusive: {reason or f'rc={rc}'}"))
         finally:
             step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
     order = ["VALID", "INVALID", "arm64_env_failure", "needs_x86", "qemu_pending", "failed"]
@@ -490,8 +493,11 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
     note = "; ".join(f"#{k} {o}{': ' + n if n else ''}" for k, o, n in results)
     if not results:
         done("done", "no high/medium pair", outcome="INVALID: no high/medium pair")
-    elif results[0][1] == "failed":
+    elif any(r[1] == "failed" for r in results):
         done("failed", note)
+    elif any(r[1] in ("arm64_env_failure", "needs_x86", "qemu_pending") for r in results):
+        done("done", note, outcome=next(r[1] for r in results if r[1] in
+                                   ("arm64_env_failure", "needs_x86", "qemu_pending")))
     else:
         done("done", note, outcome=results[0][1] if results[0][1] != "INVALID" else
              f"INVALID: {results[0][2]}")
