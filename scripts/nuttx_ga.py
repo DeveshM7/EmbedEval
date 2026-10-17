@@ -305,7 +305,7 @@ def breed(parents: list[dict], count: int, gen: int, rng: random.Random,
 def write_status(gen: int, results: dict, next_text: str) -> Path:
     """Overwrite triage/PHASE1_STATUS.md for the end of a generation."""
     ranked = [f for f in ranking(results) if f["normal"]]
-    pools = ssh("squeue -u zhan5136 -h -o '%i %P %D nodes, ends %e'").strip()
+    pools = ssh("squeue -u zhan5136 -n ga-pool -h -o '%i %P %D nodes, ends %e'").strip()
     best = max((f["perfect"] for f in ranked), default=0)
     lines = [
         "# NuttX Phase 1 tuning status", "",
