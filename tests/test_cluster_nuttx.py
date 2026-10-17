@@ -1,7 +1,9 @@
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "cluster"), str(ROOT / "scripts")]
@@ -10,6 +12,23 @@ import node_worker  # noqa: E402
 
 
 class NuttxClusterTests(unittest.TestCase):
+    def test_phase_assignment_stays_fixed_as_other_nodes_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "manifest.json").write_text(json.dumps({"prs": [
+                {"pr": pr, "stage": "to triage"} for pr in range(1, 7)]}))
+            node_worker.status.write_stage(run, 1, "triage",
+                                           {"state": "done", "verdict": "accept"})
+            with patch.object(node_worker, "N", 1, create=True), \
+                 patch.object(node_worker, "NN", 3, create=True):
+                self.assertEqual(node_worker.assigned_work(run, "triage"), [2, 5])
+                for pr in range(2, 7):
+                    node_worker.status.write_stage(run, pr, "triage",
+                                                   {"state": "done", "verdict": "accept"})
+                node_worker.status.write_stage(run, 1, "validate",
+                                               {"state": "done", "outcome": "VALID"})
+                self.assertEqual(node_worker.assigned_work(run, "validate"), [2, 5])
+
     def test_verdict_info_accepts_on_a_high_or_medium_pair(self):
         accept = node_worker.nuttx_verdict_info({"kind": "qemu_only", "pairs": [
             {"kernel_pr": 5, "confidence": "high", "also_needs": [{"kernel_pr": 6}]},

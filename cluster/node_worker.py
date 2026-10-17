@@ -111,6 +111,13 @@ def my_share(prs: list[int]) -> list[int]:
     return [pr for i, pr in enumerate(sorted(prs)) if i % NN == N]
 
 
+def assigned_work(run: Path, phase: str) -> list[int]:
+    """Keep node ownership fixed as other nodes write status during a phase."""
+    planned = [e["pr"] for e in status.manifest(run)["prs"] if e["stage"] == "to triage"]
+    todo = set(status.triage_todo(run) if phase == "triage" else status.validate_todo(run))
+    return [pr for pr in my_share(planned) if pr in todo]
+
+
 # ---------------------------------------------------------------- triage
 
 
@@ -238,7 +245,7 @@ def nuttx_verdict_info(v: dict) -> dict:
 
 
 def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
-    mine = my_share(status.triage_todo(run))
+    mine = assigned_work(run, "triage")
     log(f"triage: {len(mine)} PRs {mine}")
     if not mine:
         return
@@ -332,7 +339,7 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
     if cfg["project"] == "nuttx" and not cfg["nuttx"]["validate"]:
         log("validation: off for this run (nuttx.validate)")
         return
-    mine = my_share(status.validate_todo(run))
+    mine = assigned_work(run, "validate")
     log(f"validation: {len(mine)} PRs {mine}")
     if not mine:
         return
