@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -51,6 +52,7 @@ _children: set[int] = set()          # process groups of running steps
 _lock = threading.Lock()
 _nuttx_data_lock = threading.Lock()
 _stopping = threading.Event()
+_lock_data = threading.Lock()
 
 
 def log(msg: str) -> None:
