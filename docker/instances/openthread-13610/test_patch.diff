@@ -1,1 +1,105 @@
+diff --git a/tests/gtest/CMakeLists.txt b/tests/gtest/CMakeLists.txt
+index a651533..d4c7124 100644
+--- a/tests/gtest/CMakeLists.txt
++++ b/tests/gtest/CMakeLists.txt
+@@ -56,6 +56,7 @@ target_link_libraries(ot-fake-ftd INTERFACE
+ )
 
+ add_executable(ot-ftd-gtest
++    mle_csl_timeout_test.cpp
+     dataset_test.cpp
+     udp_test.cpp
+ )
+diff --git a/tests/gtest/mle_csl_timeout_test.cpp b/tests/gtest/mle_csl_timeout_test.cpp
+new file mode 100644
+index 0000000..918a8fa
+--- /dev/null
++++ b/tests/gtest/mle_csl_timeout_test.cpp
+@@ -0,0 +1,87 @@
++#include <gtest/gtest.h>
++#include <cstdarg>
++#include <cstdio>
++#include <string>
++#include <vector>
++#include "fake_platform.hpp"
++#include "instance/instance.hpp"
++#include "thread/mle.hpp"
++#include "thread/mle_tlvs.hpp"
++
++static std::vector<std::string> sWarnings;
++extern "C" void otPlatLog(otLogLevel level, otLogRegion, const char *format, ...)
++{
++    if (level != OT_LOG_LEVEL_WARN) return;
++    char text[1024];
++    va_list args;
++    va_start(args, format);
++    vsnprintf(text, sizeof(text), format, args);
++    va_end(args);
++    sWarnings.emplace_back(text);
++}
++
++namespace ot {
++// Use the upstream unit-test friend to enter the real decoded receive handler.
++// Message parsing, child state updates, and diagnostics remain production code.
++class UnitTester {
++public:
++    static bool Receive(Instance &instance, Message &message, const Ip6::MessageInfo &info)
++    {
++        Mle::Mle::RxInfo rx(message, info);
++        instance.Get<Mle::Mle>().HandleChildUpdateRequestOnParent(rx);
++        return rx.mClass == Mle::Mle::RxInfo::kPeerMessage;
++    }
++};
++}
++
++class MleCslTimeout : public ::testing::Test {
++protected:
++    ot::FakePlatform platform;
++    void Check(const std::vector<uint8_t> &tlvs, bool parseError, bool accepted, uint32_t expectedTimeout)
++    {
++        using namespace ot;
++        Instance &instance = AsCoreType(FakePlatform::CurrentInstance());
++        Ip6::MessageInfo info;
++        info.Clear();
++        ASSERT_EQ(kErrorNone, info.GetPeerAddr().FromString("fe80::1234:5678:9abc:def0"));
++        Mac::ExtAddress ext;
++        ext.SetFromIid(info.GetPeerAddr().GetIid());
++        Child *child = instance.Get<ChildTable>().GetNewChild();
++        ASSERT_NE(nullptr, child);
++        child->SetExtAddress(ext);
++        child->SetState(Child::kStateValid);
++        child->SetRloc16(0x0401);
++        child->SetDeviceMode(Mle::DeviceMode(0));
++        child->SetCslPeriod(100);
++        child->SetCslSynchronized(true);
++        ASSERT_TRUE(child->IsCslSynchronized());
++        child->SetCslTimeout(77);
++        Message *message = instance.Get<Ip6::Ip6>().NewMessage();
++        ASSERT_NE(nullptr, message);
++        const uint8_t mode[] = {Mle::Tlv::kMode, 1, 0};
++        ASSERT_EQ(kErrorNone, message->AppendBytes(mode, sizeof(mode)));
++        if (!tlvs.empty()) ASSERT_EQ(kErrorNone, message->AppendBytes(tlvs.data(), tlvs.size()));
++        sWarnings.clear();
++        bool result = UnitTester::Receive(instance, *message, info);
++        message->Free();
++        bool diagnosed = false;
++        for (const auto &warning : sWarnings)
++            if (warning.find("Child Update Request") != std::string::npos &&
++                warning.find("Parse") != std::string::npos) diagnosed = true;
++        EXPECT_EQ(parseError, diagnosed);
++        EXPECT_EQ(accepted, result);
++        EXPECT_EQ(expectedTimeout, child->GetCslTimeout());
++    }
++};
++TEST_F(MleCslTimeout, ShortValueReportsParseError)
++{ Check({ot::Mle::Tlv::kCslTimeout, 3, 0, 0, 1}, true, false, 77); }
++TEST_F(MleCslTimeout, TruncatedValueReportsParseError)
++{ Check({ot::Mle::Tlv::kCslTimeout, 4, 0, 0}, true, false, 77); }
++TEST_F(MleCslTimeout, EmptyValueReportsParseError)
++{ Check({ot::Mle::Tlv::kCslTimeout, 0}, true, false, 77); }
++TEST_F(MleCslTimeout, ValidTimeoutIsAccepted)
++{ Check({ot::Mle::Tlv::kCslTimeout, 4, 0, 0, 0, 42}, false, true, 42); }
++TEST_F(MleCslTimeout, AbsentTimeoutIsAccepted)
++{ Check({}, false, true, 77); }
++TEST_F(MleCslTimeout, MalformedOrdinaryTimeoutReportsParseError)
++{ Check({ot::Mle::Tlv::kTimeout, 3, 0, 0, 1}, true, false, 77); }
