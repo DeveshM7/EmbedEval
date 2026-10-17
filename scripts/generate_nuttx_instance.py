@@ -64,9 +64,8 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
         raise ValueError("triage verdict must accept the pair")
     platform = verdict.get("platform")
     qemu = platform in ("qemu-armv8a:nsh", "qemu-armv8a:nsh_smp")
-    if "readiness" in verdict and verdict["readiness"] != "ready_to_generate" and not (
-            qemu and verdict["readiness"] == "needs_fixture"):
-        raise ValueError("triage readiness must be ready_to_generate; review the recipe first")
+    # Readiness is the model's own doubt about the recipe (runtime_other is always
+    # needs_fixture); an accepted high/medium pair goes to validation, which decides.
     if platform != "sim:nsh" and not qemu:
         raise ValueError("the generator supports sim:nsh and qemu-armv8a:nsh[_smp]")
     apps = record["apps"]
@@ -94,8 +93,8 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
         if not verdict.get(name):
             raise ValueError(f"triage verdict lacks {name}")
     fail_type = verdict.get("fail_type")
-    if fail_type not in ("runtime_assert", "compile_error"):
-        raise ValueError("fail_type must be runtime_assert or compile_error")
+    if fail_type not in ("runtime_assert", "runtime_other", "compile_error"):
+        raise ValueError("fail_type must be runtime_assert, runtime_other or compile_error")
     if fail_type == "compile_error":
         source = verdict.get("compile_test_source")
         token = verdict.get("missing_api")

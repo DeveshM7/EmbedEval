@@ -425,7 +425,8 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
             if any("run_tests: changed test did not run:" in line
                    for line in report["before"]["summary"]):
                 return invalid("changed test did not run before the fix")
-            if rc != 1:
+            # A crash or ERROR line gives rc=1; a hang (runtime_other only) rc=2.
+            if rc != 1 and not (rc == 2 and meta.get("fail_type") == "runtime_other"):
                 return invalid({0: "tests PASSED before the fix -- the instance does not "
                                    "isolate the bug"}.get(rc, f"expected a test failure (rc=1), "
                                                               f"got rc={rc}"))

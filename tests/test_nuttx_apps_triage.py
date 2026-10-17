@@ -522,6 +522,12 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(generator.metadata(record, 11, reply)["files_changed_by_fix"],
                          ["sched/example.c", "sched/helper.c"])
 
+    def test_generator_leaves_runtime_other_pairs_to_validation(self):
+        record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
+        reply = {**full_pair(fail_type="runtime_other", readiness="needs_fixture"),
+                 "verdict": "accept", "case": "apps-7-kernel-11"}
+        self.assertEqual(generator.metadata(record, 11, reply)["fail_type"], "runtime_other")
+
     def test_generator_includes_changed_registration_for_selected_test(self):
         record = apps_record()
         record["apps"]["files"] += [
