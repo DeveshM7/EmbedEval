@@ -505,8 +505,9 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
                 if not found:
                     return invalid("changed test did not run before the fix")
                 overrides = report["config_overrides_used"] = found
-            # A crash or ERROR line gives rc=1, a hang rc=2.
-            if rc not in (1, 2):
+            # A crash or ERROR line gives rc=1, a hang rc=2 (or "timeout" when the
+            # runner outlasted this step).
+            if rc not in (1, 2, "timeout"):
                 return invalid({0: "tests PASSED before the fix -- the instance does not "
                                    "isolate the bug"}.get(rc, f"expected a test failure (rc=1), "
                                                               f"got rc={rc}"))

@@ -221,12 +221,14 @@ class ValidatorTests(unittest.TestCase):
 
     def validate_with(self, meta: dict, outputs: list) -> dict:
         """Run the Apptainer validator with each container step returning the
-        next (rc, output); the fix patch is a stub. Returns the report."""
+        next (rc, output), or raising it if it is an exception; the fix patch is
+        a stub. Returns the report."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             image = root / "image.sif"
             image.touch()
-            steps = [subprocess.CompletedProcess([], rc, out, "") for rc, out in outputs]
+            steps = [o if isinstance(o, BaseException) else subprocess.CompletedProcess([], *o, "")
+                     for o in outputs]
             with patch.object(validate_instance.instances, "load_metadata", return_value=meta), \
                     patch.object(validate_instance.instances, "instance_dir", return_value=root), \
                     patch.object(validate_instance, "nuttx_fix_patches",
@@ -248,6 +250,11 @@ class ValidatorTests(unittest.TestCase):
                 report = self.validate_with(meta, [(0, ""), (2, "run_tests: result=2 (timed out)\n"),
                                                    (1, "error: patch failed\n")])
                 self.assertEqual(report["reason"], "the primary fix does not apply")
+        # The runner can outlast the validator's own step timeout.
+        report = self.validate_with(meta, [(0, ""), subprocess.TimeoutExpired("run_tests", 30),
+                                           (1, "error: patch failed\n")])
+        self.assertEqual(report["before"]["rc"], "timeout")
+        self.assertEqual(report["reason"], "the primary fix does not apply")
 
     def test_config_fallbacks_follow_makefile_and_kconfig_depends(self):
         makefile = ("ifeq ($(CONFIG_TESTING_OSTEST_WQUEUE),y)\nCSRCS += wqueue.c\nendif\n"
