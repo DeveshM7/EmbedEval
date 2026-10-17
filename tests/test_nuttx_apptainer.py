@@ -329,6 +329,36 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(source.read_text(), "followup\n")
             self.assertEqual(diagram.read_bytes(), b"\x89PNG\r\n\x1a\n\x00primary")
 
+    def test_a_prerequisite_pr_that_merged_first_is_applied_before_the_primary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "kernel"
+            repo.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                      capture_output=True, text=True).stdout.strip()
+            git("init")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (repo / "t.h").write_text("a\n")
+            git("add", "t.h")
+            git("commit", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            (repo / "t.h").write_text("a\nprereq\n")
+            git("commit", "-am", "prerequisite")
+            prereq = git("rev-parse", "HEAD")
+            (repo / "t.h").write_text("a\nprereq\nprimary\n")
+            git("commit", "-am", "primary")
+            primary = git("rev-parse", "HEAD")
+            meta = {"project": "nuttx", "kernel_repo": "https://github.com/apache/nuttx",
+                    "kernel_base_commit": prereq, "kernel_merge_commit": primary,
+                    "files_changed_by_fix": ["t.h"], "kernel_merged_at": "2024-06-21T00:00:00Z",
+                    "extra_fix_prs": [{"kernel_pr": 5, "base_commit": base, "head_commit": prereq,
+                                       "merged_at": "2024-06-14T00:00:00Z",
+                                       "files_changed": ["t.h"]}]}
+            with patch.object(validate_instance.layout, "nuttx_clones", return_value=(repo, None)):
+                patches = validate_instance.nuttx_fix_patches(meta, Path(tmp))
+            self.assertEqual([label for label, _ in patches], ["follow-up-5", "primary"])
+
     def test_fix_patch_takes_whole_pr_when_github_truncated_its_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "kernel"

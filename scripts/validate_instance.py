@@ -129,6 +129,12 @@ def nuttx_fix_patches(meta: dict, workdir: Path,
             raise RuntimeError(f"could not produce follow-up patch for #{extra['kernel_pr']}: "
                                f"{r.stderr[:200]}")
         patches.append((f"follow-up-{extra['kernel_pr']}", r.stdout))
+    # In merge order: a needed PR that merged before the primary one (a
+    # prerequisite) goes first.
+    if meta.get("kernel_merged_at") and not primary_override:
+        merged = {"primary": meta["kernel_merged_at"],
+                  **{f"follow-up-{e['kernel_pr']}": e.get("merged_at", "") for e in extras}}
+        patches.sort(key=lambda p: merged[p[0]])
     return patches
 
 
