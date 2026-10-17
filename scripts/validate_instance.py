@@ -96,6 +96,31 @@ def gold_patch(meta: dict, workdir: Path) -> str:
     return r.stdout
 
 
+def nuttx_fix_patches(meta: dict, workdir: Path,
+                      primary_override: Path | None = None) -> list[tuple[str, str]]:
+    """Primary NuttX fix followed by the merged PRs it needs, in merge order."""
+    patches = [("primary", primary_override.read_text() if primary_override
+                else gold_patch(meta, workdir))]
+    extras = meta.get("extra_fix_prs") or []
+    if not extras:
+        return patches
+    clone = layout.nuttx_clones()[0] or workdir / "repo"
+    for extra in extras:
+        base, head = extra["base_commit"], extra["head_commit"]
+        for sha in (base, head):
+            if sh(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:
+                fetched = sh(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
+                if fetched.returncode:
+                    raise RuntimeError(f"could not fetch follow-up commit {sha}: {fetched.stderr[:200]}")
+        r = sh(["git", "-C", str(clone), "diff", f"{base}..{head}", "--",
+                *extra["files_changed"]], timeout=300)
+        if r.returncode or not r.stdout.strip():
+            raise RuntimeError(f"could not produce follow-up patch for #{extra['kernel_pr']}: "
+                               f"{r.stderr[:200]}")
+        patches.append((f"follow-up-{extra['kernel_pr']}", r.stdout))
+    return patches
+
+
 def local_fix_patch(meta: dict) -> str:
     """The upstream fix from the local Zephyr clone: every change of the PR
     outside tests/. The same range the test patch comes from, so the two
@@ -366,12 +391,13 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
                                                               f"got rc={rc}"))
 
         print("\n  Step 2: applying the upstream fix, expecting the tests to PASS")
-        patch_text = (Path(patch_override).read_text() if patch_override
-                      else gold_patch(meta, run_dir))
-        (run_dir / "fix.diff").write_text(patch_text)
-        rc, out, _ = step("git apply", "git apply /embedeval-run/fix.diff", "apply.log", 300)
-        if rc != 0:
-            return invalid("the fix does not apply", "  " + out.strip()[:300])
+        patches = nuttx_fix_patches(meta, run_dir, patch_override)
+        for label, patch_text in patches:
+            (run_dir / "fix.diff").write_text(patch_text)
+            rc, out, _ = step(f"git apply {label}", "git apply /embedeval-run/fix.diff",
+                              f"apply-{label}.log", 300)
+            if rc != 0:
+                return invalid(f"the {label} fix does not apply", "  " + out.strip()[:300])
         if meta.get("clean_after_patch"):
             rc, out, _ = step("make clean", "make clean", "clean.log", 300)
             if rc != 0:

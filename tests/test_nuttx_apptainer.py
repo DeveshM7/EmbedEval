@@ -2,6 +2,7 @@
 the Apptainer path. The images themselves are only built on a cluster node."""
 
 import json
+import subprocess
 import sys
 import tempfile
 import types
@@ -91,6 +92,42 @@ class ValidatorTests(unittest.TestCase):
                              return_value=True) as nuttx:
             self.assertTrue(validate_instance.validate("nuttx__nuttx-1"))
         nuttx.assert_called_once()
+
+    def test_kernel_fix_patches_apply_primary_then_followup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "kernel"
+            repo.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                      capture_output=True, text=True).stdout.strip()
+            git("init")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            source = repo / "sched.c"
+            source.write_text("base\n")
+            git("add", "sched.c")
+            git("commit", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            source.write_text("primary\n")
+            git("commit", "-am", "primary")
+            primary = git("rev-parse", "HEAD")
+            source.write_text("followup\n")
+            git("commit", "-am", "followup")
+            followup = git("rev-parse", "HEAD")
+            meta = {"project": "nuttx", "kernel_repo": "https://github.com/apache/nuttx",
+                    "kernel_base_commit": base, "kernel_merge_commit": primary,
+                    "files_changed_by_fix": ["sched.c"],
+                    "extra_fix_prs": [{"kernel_pr": 9, "base_commit": primary,
+                                       "head_commit": followup, "files_changed": ["sched.c"]}]}
+            with patch.object(validate_instance.layout, "nuttx_clones", return_value=(repo, None)):
+                patches = validate_instance.nuttx_fix_patches(meta, Path(tmp))
+            self.assertEqual(len(patches), 2)
+            git("checkout", "--detach", base)
+            for _, text in patches:
+                diff = Path(tmp) / "fix.diff"
+                diff.write_text(text)
+                git("apply", str(diff))
+            self.assertEqual(source.read_text(), "followup\n")
 
 
 class HarnessTests(unittest.TestCase):
