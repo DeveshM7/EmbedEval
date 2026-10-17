@@ -40,7 +40,7 @@ ENTRY_DEF = re.compile(r"^(?!static\b)[a-z][\w ]*?\b(\w+)\s*\(void\)\s*\{?\s*$",
                        re.MULTILINE)
 
 
-def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
+def ostest_banners(ostest_dir: Path, changed: list[str], required: bool = True) -> list[str]:
     """Banners ostest prints before the tests defined in the changed sources.
 
     ostest_dir is testing/ostest with the test patch applied. Each changed
@@ -50,7 +50,9 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
     banner does not prove the call ran. A test called without a banner is
     fine when another call of it has one (since apps #3759, `ostest wqueue`
     calls wqueue_test() a second time, bannerless); a test whose every call
-    lacks a banner is an error.
+    lacks a banner is an error. With required=False (compile_error cases,
+    where the test is that the changed source compiles) missing banners are
+    not: a test without one is skipped, and the list may be empty.
     """
     main_lines = (ostest_dir / "ostest_main.c").read_text().splitlines()
     banners: list[str] = []
@@ -73,12 +75,12 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
                     if match:
                         found.append(f"user_main: {match[1]}")
                         break
-            if called and not found:
+            if called and not found and required:
                 raise ValueError(f"no ostest banner directly precedes the call to {func}")
             for banner in found:
                 if banner not in banners:
                     banners.append(banner)
-    if not banners:
+    if not banners and required:
         raise ValueError("no ostest banner precedes a test defined in the changed sources")
     return banners
 
@@ -126,7 +128,8 @@ def render(meta: dict, patch_file: Path, out_root: Path,
             (not meta.get("compile_test_source") or not meta.get("missing_api")):
         raise ValueError("compile cases need compile_test_source and missing_api")
     banners = meta.get("test_banners")
-    if not banners or any(not BANNER_TEXT.fullmatch(b) for b in banners):
+    if (not banners and meta["fail_type"] != "compile_error") or \
+            any(not BANNER_TEXT.fullmatch(b) for b in banners or []):
         raise ValueError("test_banners must list ostest 'user_main: ...' lines")
     if not isinstance(meta.get("clean_after_patch", False), bool):
         raise ValueError("clean_after_patch must be a boolean")

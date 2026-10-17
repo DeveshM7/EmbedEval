@@ -33,6 +33,16 @@ class RepeatedCallTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "wqueue_test"):
                 render.ostest_banners(ostest, ["testing/ostest/wqueue.c"])
 
+    def test_a_compile_case_may_have_no_banner(self):
+        # apps #237: tls_test() has never had a banner; the test is that tls.c compiles.
+        with tempfile.TemporaryDirectory() as tmp:
+            ostest = Path(tmp)
+            (ostest / "ostest_main.c").write_text("  /* Test TLS */\n  tls_test();\n")
+            (ostest / "tls.c").write_text("void tls_test(void)\n{\n}\n")
+            self.assertEqual(render.ostest_banners(ostest, ["testing/ostest/tls.c"], False), [])
+            with self.assertRaises(ValueError):
+                render.ostest_banners(ostest, ["testing/ostest/tls.c"])
+
 
 if __name__ == "__main__":
     unittest.main()

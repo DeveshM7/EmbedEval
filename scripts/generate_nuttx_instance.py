@@ -183,7 +183,8 @@ def ensure_apps_commits(clone: Path, *commits: str) -> None:
             run("git", "-C", str(clone), "fetch", "-q", "origin", sha)
 
 
-def build_test_patch(base: str, head: str, paths: list[str]) -> tuple[str, list[str]]:
+def build_test_patch(base: str, head: str, paths: list[str],
+                     banners_required: bool = True) -> tuple[str, list[str]]:
     """The apps test patch, and the ostest banners of the tests it changes."""
     clone = apps_clone()
     ensure_apps_commits(clone, base, head)
@@ -195,7 +196,7 @@ def build_test_patch(base: str, head: str, paths: list[str]) -> tuple[str, list[
     if not patch.strip():
         raise ValueError("empty apps test patch")
     with patched_apps(base, patch) as work:
-        return patch, ostest_banners(work / "testing" / "ostest", paths)
+        return patch, ostest_banners(work / "testing" / "ostest", paths, banners_required)
 
 
 @contextmanager
@@ -236,7 +237,7 @@ def generate(apps_number: int, kernel_number: int, verdict: dict,
     meta = metadata(record, kernel_number, verdict, host_arch)
     patch, meta["test_banners"] = build_test_patch(
         meta["apps_base_commit"], meta["apps_merge_commit"],
-        meta["files_changed_by_test_patch"])
+        meta["files_changed_by_test_patch"], meta["fail_type"] != "compile_error")
     with tempfile.TemporaryDirectory(prefix="embedeval-nuttx-testpatch-") as tmp:
         patch_file = Path(tmp) / "test.diff"
         patch_file.write_text(patch)
