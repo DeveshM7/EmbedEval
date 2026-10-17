@@ -124,6 +124,28 @@ def nuttx_fix_patches(meta: dict, workdir: Path,
     return patches
 
 
+def nuttx_reconfigure(overrides: dict) -> str:
+    """Shell that re-applies the pair's config overrides after the kernel fix.
+
+    An override whose symbol only exists once the fix is applied does not survive
+    the pre-fix configure and build, so append each one again, let olddefconfig
+    resolve its dependencies, and fail if one was still dropped.
+    """
+    cmds = []
+    for name, value in sorted(overrides.items()):
+        cmds.append(f"sed -i '/^{name}=/d; /^# {name} is not set/d' .config")
+        cmds.append(f"printf '%s\\n' '{name}={value}' >> .config")
+    cmds.append("make olddefconfig")
+    for name, value in sorted(overrides.items()):
+        if value == "n":
+            cmds.append(f"{{ ! grep -q '^{name}=' .config || "
+                        f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
+        else:
+            cmds.append(f"{{ grep -qx '{name}={value}' .config || "
+                        f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
+    return " && ".join(cmds)
+
+
 def local_fix_patch(meta: dict) -> str:
     """The upstream fix from the local Zephyr clone: every change of the PR
     outside tests/. The same range the test patch comes from, so the two
@@ -416,8 +438,13 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
                               f"apply-{label}.log", 300)
             if rc != 0:
                 return invalid(f"the {label} fix does not apply", "  " + out.strip()[:300])
-        # The fix can introduce Kconfig defaults required by its new source files.
-        rc, out, _ = step("reconfigure", "make olddefconfig", "config-after.log", 300)
+        # The fix can introduce Kconfig defaults required by its new source files,
+        # and the overrides it introduces could not be set before it.
+        rc, out, _ = step("reconfigure", nuttx_reconfigure(meta.get("config_overrides") or {}),
+                          "config-after.log", 300)
+        dropped = re.search(r"config override dropped: \S+", out)
+        if dropped:
+            return invalid(f"{dropped.group(0)} after the fix (unmet dependency?)")
         if rc != 0:
             return invalid(f"reconfigure failed (rc={rc})", error_lines(out))
         if meta.get("clean_after_patch"):
@@ -564,7 +591,9 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             return False
 
         if meta["project"] == "nuttx":
-            configured = dexec("cd /testbed && make olddefconfig", 300, "reconfigure")
+            configured = dexec("cd /testbed && "
+                               + nuttx_reconfigure(meta.get("config_overrides") or {}),
+                               300, "reconfigure")
             if configured.returncode != 0:
                 print(f"  FAIL: reconfigure failed (rc={configured.returncode})")
                 print(build_errors(configured))
