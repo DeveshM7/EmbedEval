@@ -201,7 +201,10 @@ class ValidatorTests(unittest.TestCase):
             steps = [subprocess.CompletedProcess([], 0, "", ""),
                      subprocess.CompletedProcess([], 1,
                          "ostest_main: Exiting with status 0\n"
-                         "run_tests: changed test did not run: 'user_main: wqueue test'\n", "")]
+                         "run_tests: changed test did not run: 'user_main: wqueue test'\n", ""),
+                     # No Makefile condition to satisfy: no fallback config to try.
+                     subprocess.CompletedProcess([], 0, "CSRCS += wqueue.c\n", ""),
+                     subprocess.CompletedProcess([], 0, "", "")]
             with patch.object(validate_instance.instances, "load_metadata", return_value=meta), \
                     patch.object(validate_instance.instances, "instance_dir", return_value=root), \
                     patch.object(apptainer_util, "instance_image", return_value=image), \
@@ -216,31 +219,64 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(report["before"]["rc"], 1)
             self.assertEqual(report["reason"], "changed test did not run before the fix")
 
-    def test_hang_before_fix_counts_as_a_failure_only_for_runtime_other(self):
-        for fail_type, reason in (("runtime_other", "the primary fix does not apply"),
-                                  ("runtime_assert", "expected a test failure (rc=1), got rc=2")):
+    def validate_with(self, meta: dict, outputs: list) -> dict:
+        """Run the Apptainer validator with each container step returning the
+        next (rc, output); the fix patch is a stub. Returns the report."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "image.sif"
+            image.touch()
+            steps = [subprocess.CompletedProcess([], rc, out, "") for rc, out in outputs]
+            with patch.object(validate_instance.instances, "load_metadata", return_value=meta), \
+                    patch.object(validate_instance.instances, "instance_dir", return_value=root), \
+                    patch.object(validate_instance, "nuttx_fix_patches",
+                                 return_value=[("primary", "diff\n")]), \
+                    patch.object(apptainer_util, "instance_image", return_value=image), \
+                    patch.object(apptainer_util, "recipe_fingerprint", return_value="test"), \
+                    patch.object(apptainer_util, "path", side_effect=lambda *p: root.joinpath(*p)), \
+                    patch.object(apptainer_util, "exec_args", return_value=[]), \
+                    patch.object(apptainer_util, "remove"), \
+                    patch.object(validate_instance.subprocess, "run", side_effect=steps):
+                self.assertFalse(validate_instance.validate_nuttx_apptainer(
+                    "nuttx__nuttx-1", None, 30, False))
+            return json.loads((root / "validation.json").read_text())
+
+    def test_hang_before_fix_counts_as_a_failure(self):
+        for fail_type in ("runtime_assert", "runtime_other"):
             meta = {"project": "nuttx", "fail_type": fail_type, "build_command": "make"}
-            with self.subTest(fail_type), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                image = root / "image.sif"
-                image.touch()
-                steps = [subprocess.CompletedProcess([], 0, "", ""),
-                         subprocess.CompletedProcess([], 2, "run_tests: result=2 (timed out)\n", ""),
-                         subprocess.CompletedProcess([], 1, "error: patch failed\n", "")]
-                with patch.object(validate_instance.instances, "load_metadata", return_value=meta), \
-                        patch.object(validate_instance.instances, "instance_dir", return_value=root), \
-                        patch.object(validate_instance, "nuttx_fix_patches",
-                                     return_value=[("primary", "diff\n")]), \
-                        patch.object(apptainer_util, "instance_image", return_value=image), \
-                        patch.object(apptainer_util, "recipe_fingerprint", return_value="test"), \
-                        patch.object(apptainer_util, "path", side_effect=lambda *p: root.joinpath(*p)), \
-                        patch.object(apptainer_util, "exec_args", return_value=[]), \
-                        patch.object(apptainer_util, "remove"), \
-                        patch.object(validate_instance.subprocess, "run", side_effect=steps):
-                    self.assertFalse(validate_instance.validate_nuttx_apptainer(
-                        "nuttx__nuttx-1", None, 30, False))
-                report = json.loads((root / "validation.json").read_text())
-                self.assertEqual(report["reason"], reason)
+            with self.subTest(fail_type):
+                report = self.validate_with(meta, [(0, ""), (2, "run_tests: result=2 (timed out)\n"),
+                                                   (1, "error: patch failed\n")])
+                self.assertEqual(report["reason"], "the primary fix does not apply")
+
+    def test_config_fallbacks_follow_makefile_and_kconfig_depends(self):
+        makefile = ("ifeq ($(CONFIG_TESTING_OSTEST_WQUEUE),y)\nCSRCS += wqueue.c\nendif\n"
+                    "CSRCS += sighand.c\n")
+        kconfig = ("config TESTING_OSTEST_WQUEUE\n\tbool \"Work queue tests\"\n\tdefault y\n"
+                   "\tdepends on (BUILD_FLAT && !DISABLE_PTHREAD && SCHED_WORKQUEUE) || LIBC_USRWORK\n")
+        self.assertEqual(
+            validate_instance.config_fallbacks(makefile, kconfig, ["testing/ostest/wqueue.c",
+                                                                   "testing/ostest/Kconfig"]),
+            [{"CONFIG_TESTING_OSTEST_WQUEUE": "y", "CONFIG_BUILD_FLAT": "y",
+              "CONFIG_DISABLE_PTHREAD": "n", "CONFIG_SCHED_WORKQUEUE": "y"},
+             {"CONFIG_TESTING_OSTEST_WQUEUE": "y", "CONFIG_LIBC_USRWORK": "y"}])
+        self.assertEqual(validate_instance.config_fallbacks(makefile, kconfig,
+                                                            ["testing/ostest/sighand.c"]), [])
+
+    def test_changed_test_that_did_not_run_is_retried_with_fallback_config(self):
+        meta = {"project": "nuttx", "fail_type": "runtime_assert", "build_command": "make",
+                "config_overrides": {"CONFIG_BUILD_FLAT": "y"},
+                "files_changed_by_test_patch": ["testing/ostest/wqueue.c"]}
+        not_run = "run_tests: changed test did not run: 'user_main: wqueue test'\n"
+        report = self.validate_with(meta, [
+            (0, ""), (1, not_run),
+            (0, "ifeq ($(CONFIG_SCHED_WORKQUEUE),y)\nCSRCS += wqueue.c\nendif\n"), (0, ""),
+            (0, ""), (0, ""), (1, "user_main: wqueue test\nERROR: failed\n"),
+            (1, "error: patch failed\n")])
+        self.assertEqual(report["before"]["config_fallback"], [{"CONFIG_SCHED_WORKQUEUE": "y"}])
+        self.assertEqual(report["config_overrides_used"],
+                         {"CONFIG_BUILD_FLAT": "y", "CONFIG_SCHED_WORKQUEUE": "y"})
+        self.assertEqual(report["reason"], "the primary fix does not apply")
 
     def test_kernel_fix_patches_apply_primary_then_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
