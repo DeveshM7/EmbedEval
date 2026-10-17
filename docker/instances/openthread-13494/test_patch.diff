@@ -1,1 +1,166 @@
-
+diff --git a/tests/test_otci_pending_lines.py b/tests/test_otci_pending_lines.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_otci_pending_lines.py
+@@ -0,0 +1,161 @@
++#!/usr/bin/env python3
++"""Focused OTCI command-reader race tests; no firmware or hardware required."""
++import importlib
++import queue
++import sys
++import threading
++import time
++import unittest
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "otci"))
++from otci import command_handlers
++from otci.command_handlers import OtCliCommandRunner
++from otci.connectors import OtCliHandler
++from otci.errors import ExpectLineTimeoutError
++
++
++class ScriptedCli(OtCliHandler):
++    """Fake transport that pauses output delivery at a controlled boundary."""
++    def __init__(self, lines, delayed=False):
++        self.lines = lines
++        self.delayed = delayed
++        self.incoming = queue.Queue()
++        self.release = threading.Event()
++        self.parked = threading.Event()
++        self.settled = threading.Event()
++        self.closed = False
++        self.waits = 0
++
++    def writeline(self, command):
++        self.settled.clear()
++        self.incoming.put((command, False))
++        for index, line in enumerate(self.lines):
++            self.incoming.put((line, self.delayed and index == 0))
++
++    def readline(self):
++        if self.incoming.empty():
++            # The runner has enqueued the preceding returned line by now.
++            self.settled.set()
++        item = self.incoming.get()
++        if item is None:
++            return None
++        line, delayed = item
++        if delayed:
++            self.parked.set()
++            if not self.release.wait(5):
++                raise RuntimeError("test transport delivery gate timed out")
++        return line
++
++    def wait(self, duration, **kwargs):
++        self.waits += 1
++        event = self.parked if self.delayed else self.settled
++        if not event.wait(5):
++            raise RuntimeError("reader did not reach the transport boundary")
++
++    def close(self):
++        self.closed = True
++        self.release.set()
++        self.incoming.put(None)
++
++
++class ContinuousCli(ScriptedCli):
++    """Keep delivering unrelated output until the runner is closed."""
++    def readline(self):
++        if self.release.is_set() and not self.closed:
++            time.sleep(0.001)
++            return "still running"
++        return super().readline()
++
++
++class ScheduledRunner(OtCliCommandRunner):
++    """Return real wait results, then let the reader resume after the budget."""
++    def __init__(self, transport, budget=2):
++        self.transport = transport
++        self.budget = budget
++        super().__init__(transport)
++
++    def wait(self, duration, maybeoff=False):
++        output = super().wait(duration, maybeoff=maybeoff)
++        if self.transport.delayed and self.transport.waits >= self.budget:
++            self.transport.release.set()
++        return output
++
++
++class TestCommandRunner(unittest.TestCase):
++    def make_runner(self, lines, delayed=False, continuous=False):
++        transport_class = ContinuousCli if continuous else ScriptedCli
++        transport = transport_class(lines, delayed)
++        runner = ScheduledRunner(transport)
++        self.addCleanup(runner.close)
++        return runner, transport
++
++    def test_delayed_done(self):
++        runner, transport = self.make_runner(["Done"], delayed=True)
++        self.assertEqual(runner.execute_command("scan", timeout=2), ["Done"])
++        self.assertEqual(transport.waits, 2)
++
++    def test_delayed_error(self):
++        runner, transport = self.make_runner(["Error 5: Busy"], delayed=True)
++        self.assertEqual(runner.execute_command("discover", timeout=2), ["Error 5: Busy"])
++        self.assertEqual(transport.waits, 2)
++
++    def test_delayed_output_order(self):
++        lines = ["reply from fd00::1", "1 packets transmitted, 1 received", "Done"]
++        runner, _ = self.make_runner(lines, delayed=True)
++        self.assertEqual(runner.execute_command("ping fd00::1", timeout=2), lines)
++
++    def test_delayed_diagnostic(self):
++        lines = ["DIAG_GET.rsp/ans from fd00::1", "Done"]
++        runner, _ = self.make_runner(lines, delayed=True)
++        self.assertEqual(runner.execute_command("networkdiagnostic get fd00::1 0", timeout=2), lines)
++
++    def test_ready_async(self):
++        runner, transport = self.make_runner(["scan row", "Done"])
++        self.assertEqual(runner.execute_command("scan", timeout=2), ["scan row", "Done"])
++        self.assertEqual(transport.waits, 1)
++
++    def test_synchronous_command(self):
++        runner, transport = self.make_runner(["leader", "Done"])
++        self.assertEqual(runner.execute_command("state", timeout=2), ["leader", "Done"])
++        self.assertEqual(transport.waits, 0)
++
++    def test_log_filter_and_callback(self):
++        runner, transport = self.make_runner(["[I] Mac-----------: ignored", "row", "Done"])
++        seen = []
++        runner.set_line_read_callback(seen.append)
++        self.assertEqual(runner.execute_command("scan", timeout=2), ["row", "Done"])
++        self.assertTrue(transport.settled.wait(5))
++        self.assertEqual(seen, ["scan", "[I] Mac-----------: ignored", "row", "Done"])
++
++    def test_missing_completion(self):
++        runner, transport = self.make_runner(["not finished"])
++        started = time.monotonic()
++        with self.assertRaises(ExpectLineTimeoutError):
++            runner.execute_command("scan", timeout=2)
++        self.assertEqual(transport.waits, 2)
++        self.assertLess(time.monotonic() - started, 1.0)
++
++    def test_delayed_nonmatching_output(self):
++        runner, _ = self.make_runner(["still running"], delayed=True)
++        started = time.monotonic()
++        with self.assertRaises(ExpectLineTimeoutError):
++            runner.execute_command("scan", timeout=2)
++        self.assertLess(time.monotonic() - started, 1.0)
++
++    def test_continuous_output_timeout(self):
++        runner, _ = self.make_runner(["still running"], delayed=True, continuous=True)
++        started = time.monotonic()
++        with self.assertRaises(ExpectLineTimeoutError):
++            runner.execute_command("scan", timeout=2)
++        self.assertLess(time.monotonic() - started, 1.0)
++
++    def test_upstream_log_filter_assertions(self):
++        # Execute the seven existing upstream import-time filter assertions.
++        # No copies of those assertions or replacement source are used.
++        self.assertFalse(sys.flags.optimize)
++        importlib.reload(command_handlers)
++
++
++if __name__ == "__main__":
++    unittest.main()
