@@ -1,0 +1,504 @@
+diff --git a/tests/07-simulation-base/29-rpl-tsch-orchestra-time-source-change-ns.csc b/tests/07-simulation-base/29-rpl-tsch-orchestra-time-source-change-ns.csc
+new file mode 100644
+index 000000000..e6e9d99bd
+--- /dev/null
++++ b/tests/07-simulation-base/29-rpl-tsch-orchestra-time-source-change-ns.csc
+@@ -0,0 +1,116 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<simconf version="2023090101">
++  <simulation>
++    <title>RPL non-storing Orchestra TSCH forwarding after time-source change</title>
++    <randomseed>123456</randomseed>
++    <motedelay_us>1000000</motedelay_us>
++    <radiomedium>
++      org.contikios.cooja.radiomediums.UDGM
++      <transmitting_range>50.0</transmitting_range>
++      <interference_range>100.0</interference_range>
++      <success_ratio_tx>1.0</success_ratio_tx>
++      <success_ratio_rx>1.0</success_ratio_rx>
++    </radiomedium>
++    <events>
++      <logoutput>40000</logoutput>
++    </events>
++    <motetype>
++      org.contikios.cooja.contikimote.ContikiMoteType
++      <description>RPL+TSCH+Orchestra node</description>
++      <source>[CONFIG_DIR]/code-orchestra-txrx/node.c</source>
++      <commands>$(MAKE) TARGET=cooja clean
++    $(MAKE) -j$(CPUS) node.cooja TARGET=cooja DEFINES=TEST_CONF_TX_NODE_ID=1,TEST_CONF_RX_NODE_ID=3,TEST_CONF_TX_START_SECONDS=360,TEST_CONF_REQUIRED_RX_COUNT=10</commands>
++      <moteinterface>org.contikios.cooja.interfaces.Position</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.Battery</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiVib</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiMoteID</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiRS232</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiBeeper</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.IPAddress</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiRadio</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiButton</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiPIR</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiClock</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiLED</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiCFS</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiEEPROM</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.Mote2MoteRelations</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.MoteAttributes</moteinterface>
++      <mote>
++        <interface_config>
++          org.contikios.cooja.interfaces.Position
++          <pos x="50.000000" y="50.000000" />
++        </interface_config>
++        <interface_config>
++          org.contikios.cooja.contikimote.interfaces.ContikiMoteID
++          <id>1</id>
++        </interface_config>
++      </mote>
++      <mote>
++        <interface_config>
++          org.contikios.cooja.interfaces.Position
++          <pos x="50.000000" y="140.000000" />
++        </interface_config>
++        <interface_config>
++          org.contikios.cooja.contikimote.interfaces.ContikiMoteID
++          <id>2</id>
++        </interface_config>
++      </mote>
++      <mote>
++        <interface_config>
++          org.contikios.cooja.interfaces.Position
++          <pos x="50.000000" y="95.000000" />
++        </interface_config>
++        <interface_config>
++          org.contikios.cooja.contikimote.interfaces.ContikiMoteID
++          <id>3</id>
++        </interface_config>
++      </mote>
++    </motetype>
++  </simulation>
++  <plugin>
++    org.contikios.cooja.plugins.ScriptRunner
++    <plugin_config>
++      <script>/*
++ * Test for Orchestra/RPL non-storing forwarding after a time-source change.
++ *
++ * Phase 1: the root (node 1) is out of range of node 2. Node 3 joins the
++ * root directly and relays its EBs; node 2 associates through node 3 and
++ * selects it as its TSCH time source and RPL parent. Orchestra allocates a
++ * Tx cell at hash(node 3) on node 2. The topology is root -- node 3 -- node 2.
++ *
++ * Phase 2: the root moves into range of node 2 but out of range of node 3.
++ * Node 2 switches its TSCH time source and RPL parent to the root.
++ * Orchestra's new_time_source() removes the Tx cell at hash(node 3) and
++ * installs one at hash(root). Node 3 simultaneously loses its path to the
++ * root and reparents to node 2, becoming its RPL child.
++ *
++ * The test then verifies that the root can still reach node 3 by forwarding
++ * ten application packets through node 2. This exercises whether Orchestra
++ * correctly maintains or re-installs the Tx cell needed to reach node 3 after
++ * the time-source change.
++ *
++ * This showcases issue 3158, where the cell removed by new_time_source()
++ * is never reinstated, select_packet() pins frames to timeslot hash(node 3)
++ * where no Tx link exists, and the queue fills up.
++ */
++TIMEOUT(1200000, log.testFailed());
++
++/* Move the root into node 2's range once the network has settled. */
++GENERATE_MSG(300000, "move-root");
++
++while(true) {
++  YIELD();
++  if(msg.equals("move-root")) {
++    log.log("Moving root (node 1) into range of node 2\n");
++    sim.getMoteWithID(1).getInterfaces().getPosition().setCoordinates(95, 140, 0);
++  } else if(id == 3 &amp;&amp; msg.contains("Received all test packets")) {
++    log.log("Node 3 received ten test packets\n");
++    log.testOK();
++  }
++}</script>
++      <active>true</active>
++    </plugin_config>
++    <bounds x="400" y="0" height="400" width="600" />
++  </plugin>
++</simconf>
+diff --git a/tests/07-simulation-base/code-orchestra-txrx/Makefile b/tests/07-simulation-base/code-orchestra-txrx/Makefile
+new file mode 100644
+index 000000000..8a24ec622
+--- /dev/null
++++ b/tests/07-simulation-base/code-orchestra-txrx/Makefile
+@@ -0,0 +1,21 @@
++CONTIKI_PROJECT = node
++all: $(CONTIKI_PROJECT)
++
++CONTIKI = ../../..
++
++MAKE_WITH_STORING_ROUTING ?= 0
++
++MAKE_MAC = MAKE_MAC_TSCH
++MODULES += $(CONTIKI_NG_SERVICES_DIR)/orchestra
++
++ORCHESTRA_UNICAST_RULE = &unicast_per_neighbor_rpl_ns
++
++ifeq ($(MAKE_WITH_STORING_ROUTING),1)
++MAKE_ROUTING = MAKE_ROUTING_RPL_CLASSIC
++CFLAGS += -DRPL_CONF_MOP=RPL_MOP_STORING_NO_MULTICAST
++ORCHESTRA_UNICAST_RULE = &unicast_per_neighbor_rpl_storing
++endif
++
++CFLAGS += -DORCHESTRA_CONF_RULES="{&eb_per_time_source,$(ORCHESTRA_UNICAST_RULE),&default_common}"
++
++include $(CONTIKI)/Makefile.include
+diff --git a/tests/07-simulation-base/code-orchestra-txrx/node.c b/tests/07-simulation-base/code-orchestra-txrx/node.c
+new file mode 100644
+index 000000000..52bf662db
+--- /dev/null
++++ b/tests/07-simulation-base/code-orchestra-txrx/node.c
+@@ -0,0 +1,125 @@
++#include "contiki.h"
++#include "net/ipv6/simple-udp.h"
++#include "net/ipv6/uip-ds6.h"
++#include "net/netstack.h"
++#include "net/routing/routing.h"
++#include "sys/log.h"
++#include "sys/node-id.h"
++
++#include <inttypes.h>
++
++#define LOG_MODULE "Delivery"
++#define LOG_LEVEL LOG_LEVEL_INFO
++
++#define UDP_PORT 61618
++
++/* Which node sends the test packets */
++#ifndef TEST_CONF_TX_NODE_ID
++#define TEST_CONF_TX_NODE_ID 1
++#endif
++
++/* Which node receives and counts them */
++#ifndef TEST_CONF_RX_NODE_ID
++#define TEST_CONF_RX_NODE_ID 3
++#endif
++
++/* Send to the destination's link-local address instead of its global address.
++ * This produces a direct layer-2 unicast to the neighbor, bypassing RPL
++ * routing, so it exercises the scheduler's handling of a neighbor that is
++ * neither our RPL parent nor one of our children. */
++#ifndef TEST_CONF_USE_LINKLOCAL
++#define TEST_CONF_USE_LINKLOCAL 0
++#endif
++
++#ifndef TEST_CONF_TX_START_SECONDS
++#define TEST_CONF_TX_START_SECONDS 360
++#endif
++
++#ifndef TEST_CONF_TX_INTERVAL_SECONDS
++#define TEST_CONF_TX_INTERVAL_SECONDS 10
++#endif
++
++#ifndef TEST_CONF_REQUIRED_RX_COUNT
++#define TEST_CONF_REQUIRED_RX_COUNT 10
++#endif
++
++static struct simple_udp_connection udp_connection;
++
++PROCESS(node_process, "Orchestra delivery test");
++AUTOSTART_PROCESSES(&node_process);
++
++static void
++receiver(struct simple_udp_connection *connection,
++         const uip_ipaddr_t *sender_addr,
++         uint16_t sender_port,
++         const uip_ipaddr_t *receiver_addr,
++         uint16_t receiver_port,
++         const uint8_t *data,
++         uint16_t datalen)
++{
++  static uint32_t rx_count;
++
++  if(node_id != TEST_CONF_RX_NODE_ID) {
++    return;
++  }
++
++  rx_count++;
++  LOG_INFO("Received test packet %" PRIu32 " of %u\n",
++           rx_count, TEST_CONF_REQUIRED_RX_COUNT);
++  if(rx_count == TEST_CONF_REQUIRED_RX_COUNT) {
++    LOG_INFO("Received all test packets\n");
++  }
++}
++
++static void
++build_node_addr(uip_ipaddr_t *addr, unsigned int nid)
++{
++  /* A Cooja mote's link-layer address repeats its node id, so its interface
++   * identifier is 0200+id:id:id:id (the U/L bit is flipped in the first byte). */
++#if TEST_CONF_USE_LINKLOCAL
++  uip_ip6addr(addr, 0xfe80, 0, 0, 0, 0x0200 + nid, nid, nid, nid);
++#else
++  const uip_ipaddr_t *prefix = uip_ds6_default_prefix();
++  uip_ip6addr_copy(addr, prefix);
++  addr->u16[4] = UIP_HTONS(0x200 + nid);
++  addr->u16[5] = UIP_HTONS(nid);
++  addr->u16[6] = UIP_HTONS(nid);
++  addr->u16[7] = UIP_HTONS(nid);
++#endif
++}
++
++PROCESS_THREAD(node_process, event, data)
++{
++  static struct etimer timer;
++  static uint32_t sequence;
++
++  PROCESS_BEGIN();
++
++  if(node_id == 1) {
++    NETSTACK_ROUTING.root_start();
++  }
++  NETSTACK_MAC.on();
++
++  simple_udp_register(&udp_connection, UDP_PORT, NULL, UDP_PORT, receiver);
++
++  etimer_set(&timer, TEST_CONF_TX_START_SECONDS * CLOCK_SECOND);
++  PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&timer));
++
++  while(1) {
++    if(node_id == TEST_CONF_TX_NODE_ID) {
++      uip_ipaddr_t destination;
++
++      build_node_addr(&destination, TEST_CONF_RX_NODE_ID);
++      sequence++;
++      LOG_INFO("Sending test packet %" PRIu32 " to node %u\n", sequence,
++               (unsigned)TEST_CONF_RX_NODE_ID);
++      simple_udp_sendto(&udp_connection, &sequence, sizeof(sequence),
++                        &destination);
++    }
++
++    etimer_set(&timer, TEST_CONF_TX_INTERVAL_SECONDS * CLOCK_SECOND);
++    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&timer));
++  }
++
++  PROCESS_END();
++}
+diff --git a/tests/07-simulation-base/code-orchestra-txrx/project-conf.h b/tests/07-simulation-base/code-orchestra-txrx/project-conf.h
+new file mode 100644
+index 000000000..05cb359c3
+--- /dev/null
++++ b/tests/07-simulation-base/code-orchestra-txrx/project-conf.h
+@@ -0,0 +1,8 @@
++/* node.c starts the MAC explicitly via NETSTACK_MAC.on(). */
++#define TSCH_CONF_AUTOSTART 0
++
++/* Keep RPL parent changes and TSCH association visible, so that a failing
++ * run in CI carries enough context to diagnose it. Per-slot TSCH logging
++ * stays off: it is very verbose and is lossy under load. */
++#define LOG_CONF_LEVEL_RPL              LOG_LEVEL_WARN
++#define LOG_CONF_LEVEL_MAC              LOG_LEVEL_INFO
+diff --git a/tests/08-native-runs/embedeval-orchestra/build.sh b/tests/08-native-runs/embedeval-orchestra/build.sh
+new file mode 100644
+index 000000000..0958a5510
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-orchestra/build.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd "$(git rev-parse --show-toplevel)"
++mkdir -p build
++fixture=tests/08-native-runs/embedeval-orchestra
++cc="${CC:-cc}"
++flags=(-std=c11 -O2 -g -ffunction-sections -fdata-sections
++       -I"$fixture" -Ios -Ios/net/ipv6 -Ios/net/mac/tsch -Ios/services/orchestra)
++"$cc" "${flags[@]}" "$fixture/main.c" os/services/orchestra/orchestra.c os/services/orchestra/orchestra-rule-unicast-per-neighbor-rpl-ns.c os/net/mac/tsch/tsch-schedule.c os/net/packetbuf.c os/lib/list.c os/lib/memb.c os/net/linkaddr.c -Wl,--gc-sections -o build/orchestra
++"$cc" "${flags[@]}" "$fixture/upstream-controls.c" os/lib/list.c os/lib/random.c os/lib/sfc32-prng.c os/net/linkaddr.c os/lib/circular-list.c os/lib/dbl-list.c os/lib/dbl-circ-list.c os/services/unit-test/unit-test.c -Wl,--gc-sections -o build/upstream-controls
+diff --git a/tests/08-native-runs/embedeval-orchestra/contiki-conf.h b/tests/08-native-runs/embedeval-orchestra/contiki-conf.h
+new file mode 100644
+index 000000000..95b186742
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-orchestra/contiki-conf.h
+@@ -0,0 +1,18 @@
++#ifndef CONTIKI_CONF_H_
++#define CONTIKI_CONF_H_
++#include <stdint.h>
++#include <assert.h>
++typedef unsigned int uip_stats_t;
++#define CLOCK_CONF_SECOND 1000
++#define UIP_CONF_BYTE_ORDER UIP_LITTLE_ENDIAN
++#define LOG_CONF_ENABLED 0
++#define LOG_CONF_LEVEL_MAC 0
++#define LOG_CONF_LEVEL_RPL 0
++#define NETSTACK_CONF_WITH_IPV6 1
++#define UIP_CONF_TCP 1
++#define MAC_CONF_WITH_TSCH 1
++#define BUILD_WITH_ORCHESTRA 1
++#define ORCHESTRA_CONF_RULES { &unicast_per_neighbor_rpl_ns }
++#define TSCH_CONF_WITH_LINK_SELECTOR 1
++#define ROUTING_CONF_RPL_LITE 1
++#endif
+diff --git a/tests/08-native-runs/embedeval-orchestra/main.c b/tests/08-native-runs/embedeval-orchestra/main.c
+new file mode 100644
+index 000000000..b56599d12
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-orchestra/main.c
+@@ -0,0 +1,108 @@
++/* Real Orchestra dispatch, unicast rule, packetbuf and TSCH schedule are
++ * compiled separately. Only queue, locking, sniffer and root-rule boundaries
++ * are fixtures; this executable does not claim radio delivery. */
++#include "contiki.h"
++#include "orchestra.h"
++#include "net/packetbuf.h"
++#include "net/mac/framer/frame802154.h"
++#include "net/netstack.h"
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++
++const linkaddr_t tsch_broadcast_address={{0xff,0xff}};
++struct tsch_link *current_link;
++static struct tsch_neighbor neighbors[4];
++static linkaddr_t addresses[4];
++static unsigned freed[4];
++static int locked;
++int curr_log_level_mac;
++void log_lladdr(const linkaddr_t *a) { (void)a; }
++int tsch_get_lock(void) { if(locked)return 0;locked=1;return 1; }
++void tsch_release_lock(void) { locked=0; }
++int tsch_is_locked(void) { return locked; }
++void netstack_sniffer_add(struct netstack_sniffer *s) { (void)s; }
++uint8_t orchestra_is_root_schedule_active(const linkaddr_t *a) { (void)a;return 0; }
++struct tsch_neighbor *tsch_queue_get_nbr(const linkaddr_t *a)
++{ for(unsigned i=0;i<4;i++)if(linkaddr_cmp(a,&addresses[i]))return &neighbors[i];return NULL; }
++struct tsch_neighbor *tsch_queue_add_nbr(const linkaddr_t *a) { return tsch_queue_get_nbr(a); }
++linkaddr_t *tsch_queue_get_nbr_address(const struct tsch_neighbor *n)
++{ if(!n)return NULL;for(unsigned i=0;i<4;i++)if(n==&neighbors[i])return &addresses[i];abort(); }
++void tsch_queue_free_packets_to(const linkaddr_t *a)
++{ for(unsigned i=0;i<4;i++)if(linkaddr_cmp(a,&addresses[i]))freed[i]++; }
++#define CHECK(condition) do { if(!(condition)) { \
++  fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#condition);return 1; } } while(0)
++static struct tsch_slotframe *sf;
++static void setup(void)
++{
++  for(unsigned i=0;i<3;i++)addresses[i].u8[LINKADDR_SIZE-1]=3+i;
++  addresses[3]=tsch_broadcast_address;
++  linkaddr_node_addr.u8[LINKADDR_SIZE-1]=2;
++  tsch_schedule_init();orchestra_init();sf=tsch_schedule_get_slotframe_by_handle(0);
++  if(!sf)abort();
++}
++static struct tsch_link *cell(unsigned node)
++{
++  return tsch_schedule_get_link_by_offsets(sf,ORCHESTRA_LINKADDR_HASH(&addresses[node])%ORCHESTRA_UNICAST_PERIOD,0);
++}
++static void add(unsigned node) { orchestra_callback_neighbor_updated(&addresses[node],1); }
++static void change(unsigned old, int new)
++{ orchestra_callback_new_time_source(&neighbors[old],new<0?NULL:&neighbors[new]); }
++static int selected_cell(unsigned node)
++{
++  packetbuf_clear();packetbuf_set_addr(PACKETBUF_ADDR_RECEIVER,&addresses[node]);
++  packetbuf_set_attr(PACKETBUF_ATTR_FRAME_TYPE,FRAME802154_DATAFRAME);
++  CHECK(orchestra_callback_packet_ready()==0);
++  struct tsch_slotframe *selected=tsch_schedule_get_slotframe_by_handle(packetbuf_attr(PACKETBUF_ATTR_TSCH_SLOTFRAME));
++  struct tsch_link *link=tsch_schedule_get_link_by_offsets(selected,packetbuf_attr(PACKETBUF_ATTR_TSCH_TIMESLOT),0);
++  CHECK(link!=NULL && (link->link_options&LINK_OPTION_TX));return 0;
++}
++static int switch_preserves_neighbor_link(void)
++{
++  setup();add(0);add(1);change(0,1);
++  CHECK(cell(0)!=NULL && (cell(0)->link_options&LINK_OPTION_TX));
++  for(unsigned i=0;i<10;i++)CHECK(selected_cell(0)==0);return 0;
++}
++static int loss_preserves_neighbor_link(void)
++{ setup();add(0);change(0,-1);CHECK(cell(0)!=NULL);CHECK(selected_cell(0)==0);return 0; }
++static int queued_frames_not_discarded(void)
++{ setup();add(0);add(1);change(0,1);CHECK(freed[0]==0);return 0; }
++static int non_neighbor_not_scheduled(void)
++{ setup();add(0);change(0,1);CHECK(cell(1)==NULL);return 0; }
++static int neighbor_added_has_tx(void)
++{ setup();add(0);CHECK(cell(0)!=NULL && (cell(0)->link_options&LINK_OPTION_TX));return 0; }
++static int neighbor_removed_cleanup(void)
++{ setup();add(0);orchestra_callback_neighbor_updated(&addresses[0],0);CHECK(cell(0)==NULL && freed[0]==1);return 0; }
++static int unchanged_source_preserved(void)
++{ setup();add(0);change(0,0);CHECK(cell(0)!=NULL && freed[0]==0);return 0; }
++static int initial_receive_cell(void)
++{
++  setup();struct tsch_link *link=tsch_schedule_get_link_by_timeslot(sf,ORCHESTRA_LINKADDR_HASH(&linkaddr_node_addr)%ORCHESTRA_UNICAST_PERIOD);
++  CHECK(link!=NULL && (link->link_options&LINK_OPTION_RX));return 0;
++}
++static int data_packet_select(void) { setup();add(0);CHECK(selected_cell(0)==0);return 0; }
++static int broadcast_not_selected(void)
++{ setup();packetbuf_clear();packetbuf_set_attr(PACKETBUF_ATTR_FRAME_TYPE,FRAME802154_DATAFRAME);CHECK(orchestra_callback_packet_ready()==-1);return 0; }
++static int nondata_not_selected(void)
++{ setup();add(0);packetbuf_clear();packetbuf_set_addr(PACKETBUF_ADDR_RECEIVER,&addresses[0]);packetbuf_set_attr(PACKETBUF_ATTR_FRAME_TYPE,FRAME802154_BEACONFRAME);CHECK(orchestra_callback_packet_ready()==-1);return 0; }
++static int unrelated_neighbor_preserved(void)
++{ setup();add(0);add(1);add(2);change(0,1);CHECK(cell(2)!=NULL && freed[2]==0);return 0; }
++struct test {const char *name;int (*run)(void);};
++static const struct test tests[]={
++  {"switch_preserves_neighbor_link",switch_preserves_neighbor_link},
++  {"loss_preserves_neighbor_link",loss_preserves_neighbor_link},
++  {"queued_frames_not_discarded",queued_frames_not_discarded},
++  {"non_neighbor_not_scheduled",non_neighbor_not_scheduled},
++  {"neighbor_added_has_tx",neighbor_added_has_tx},{"neighbor_removed_cleanup",neighbor_removed_cleanup},
++  {"unchanged_source_preserved",unchanged_source_preserved},{"initial_receive_cell",initial_receive_cell},
++  {"data_packet_select",data_packet_select},{"broadcast_not_selected",broadcast_not_selected},
++  {"nondata_not_selected",nondata_not_selected},{"unrelated_neighbor_preserved",unrelated_neighbor_preserved}
++};
++int main(int argc,char **argv)
++{
++  if(argc!=2)return 1;
++  for(unsigned i=0;i<sizeof(tests)/sizeof(tests[0]);i++)if(strcmp(argv[1],tests[i].name)==0) {
++    int rc=tests[i].run();printf("%s %s\n",tests[i].name,rc?"FAIL":"PASS");return rc;
++  }
++  return 1;
++}
+diff --git a/tests/08-native-runs/embedeval-orchestra/rtimer-arch.h b/tests/08-native-runs/embedeval-orchestra/rtimer-arch.h
+new file mode 100644
+index 000000000..3e3b14ce9
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-orchestra/rtimer-arch.h
+@@ -0,0 +1,5 @@
++#ifndef RTIMER_ARCH_H_
++#define RTIMER_ARCH_H_
++#define RTIMER_ARCH_SECOND 1000
++rtimer_clock_t rtimer_arch_now(void);
++#endif
+diff --git a/tests/08-native-runs/embedeval-orchestra/run.py b/tests/08-native-runs/embedeval-orchestra/run.py
+new file mode 100644
+index 000000000..0b5dfe62d
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-orchestra/run.py
+@@ -0,0 +1,19 @@
++import subprocess,sys
++regressions=['switch_preserves_neighbor_link', 'loss_preserves_neighbor_link', 'queued_frames_not_discarded', 'non_neighbor_not_scheduled']
++controls=['neighbor_added_has_tx', 'neighbor_removed_cleanup', 'unchanged_source_preserved', 'initial_receive_cell', 'data_packet_select', 'broadcast_not_selected', 'nondata_not_selected', 'unrelated_neighbor_preserved']
++mode=sys.argv[1] if len(sys.argv)>1 else 'all'
++if mode not in ['all','regression','control']:raise SystemExit(1)
++status=0
++for name in (regressions if mode=='regression' else controls if mode=='control' else regressions+controls):
++    try:
++        result=subprocess.run(['./build/orchestra',name],timeout=5)
++        if result.returncode and status!=2:status=1
++    except subprocess.TimeoutExpired:
++        print(name,'TIMEOUT',flush=True);status=2
++if mode!='regression':
++    try:
++        result=subprocess.run(['./build/upstream-controls'],timeout=30)
++        if result.returncode and status!=2:status=1
++    except subprocess.TimeoutExpired:
++        print('upstream-controls TIMEOUT',flush=True);status=2
++raise SystemExit(status)
+diff --git a/tests/08-native-runs/embedeval-orchestra/upstream-controls.c b/tests/08-native-runs/embedeval-orchestra/upstream-controls.c
+new file mode 100644
+index 000000000..8066167d1
+--- /dev/null
++++ b/tests/08-native-runs/embedeval-orchestra/upstream-controls.c
+@@ -0,0 +1,14 @@
++/* Run the unchanged upstream list test used by the native data-structure suite. */
++#include "../../07-simulation-base/code-data-structures/test-data-structures.c"
++rtimer_clock_t rtimer_arch_now(void) { return 0; }
++clock_time_t clock_time(void) { return 0; }
++int main(void) {
++  int failures=0;
++  memset(elements,0,sizeof(elements));
++#define RUN(name) do { unit_test_function_##name(&unit_test_##name); \
++  printf("upstream_%s %s\n",#name,unit_test_##name.passed?"PASS":"FAIL"); \
++  failures+=!unit_test_##name.passed; } while(0)
++  RUN(test_list); RUN(test_stack); RUN(test_queue);
++  RUN(test_csll); RUN(test_dll); RUN(test_cdll);
++  return failures?1:0;
++}
