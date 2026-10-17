@@ -119,6 +119,14 @@ class ValidatorTests(unittest.TestCase):
             linker, "ld: /testbed/apps/testing/ostest/nxevent.c:40: undefined reference to "
                     "`nxevent_init'\n"))
 
+    def test_compile_diagnostic_accepts_header_added_by_fix(self):
+        meta = {"compile_test_source": "testing/ostest/nxevent.c", "missing_api": "nxevent_init",
+                "files_changed_by_fix": ["include/nuttx/event.h"]}
+        error = "nxevent.c:26:10: fatal error: nuttx/event.h: No such file or directory\n"
+        self.assertIsNotNone(validate_instance.compile_diagnostic(meta, error))
+        self.assertIsNone(validate_instance.compile_diagnostic(
+            {**meta, "files_changed_by_fix": ["include/nuttx/other.h"]}, error))
+
     def test_nuttx_apptainer_instances_take_the_apptainer_validator(self):
         meta = {"project": "nuttx", "runtime": "apptainer"}
         with patch.object(validate_instance.instances, "load_metadata", return_value=meta), \

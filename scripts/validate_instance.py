@@ -283,11 +283,19 @@ def compile_diagnostic(meta: dict, output: str):
     source, missing_api = meta.get("compile_test_source"), meta.get("missing_api")
     if not source or not missing_api:
         return None
-    return re.search(
-        rf"(?:^|[\s/]){re.escape(Path(source).name)}:\d+(?::\d+)?:\s*"
-        rf"(?:(?:fatal )?error:|undefined reference to)[^\n]*{re.escape(missing_api)}",
+    prefix = rf"(?:^|[\s/]){re.escape(Path(source).name)}:\d+(?::\d+)?:\s*"
+    diagnostic = re.search(
+        prefix + rf"(?:(?:fatal )?error:|undefined reference to)[^\n]*{re.escape(missing_api)}",
         output,
     )
+    if diagnostic:
+        return diagnostic
+    # A newly added header can be absent altogether before the fix, so the
+    # compiler names that header instead of any API it declares.
+    header = re.search(prefix + r"fatal error:\s*([^\s:]+): No such file or directory", output)
+    if header and f"include/{header.group(1)}" in meta.get("files_changed_by_fix", []):
+        return header
+    return None
 
 
 NUTTX_RUN_TESTS_MEANING = {0: "passed", 1: "failed", 2: "timed out"}
