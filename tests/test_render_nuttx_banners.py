@@ -43,6 +43,18 @@ class RepeatedCallTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 render.ostest_banners(ostest, ["testing/ostest/tls.c"])
 
+    def test_a_guard_change_in_ostest_main_names_the_banner_it_switches(self):
+        # apps #241: only the #if above the "pthread-specific data test" banner changes.
+        main = ["x", "#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_TLS_NELEM > 0",
+                "  /* Verify pthread-specific data */", "",
+                '  printf("\\nuser_main: pthread-specific data test\\n");', "  tls_test();"]
+        patch = ("diff --git a/testing/ostest/ostest_main.c b/testing/ostest/ostest_main.c\n"
+                 "--- a/testing/ostest/ostest_main.c\n+++ b/testing/ostest/ostest_main.c\n"
+                 "@@ -1,2 +1,2 @@\n x\n-#if old\n+#if !defined(CONFIG_DISABLE_PTHREAD) && "
+                 "CONFIG_TLS_NELEM > 0\n   /* Verify pthread-specific data */\n")
+        self.assertEqual(render.main_hunk_banners(main, patch),
+                         ["user_main: pthread-specific data test"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -196,7 +196,7 @@ def build_test_patch(base: str, head: str, paths: list[str],
     if not patch.strip():
         raise ValueError("empty apps test patch")
     with patched_apps(base, patch) as work:
-        return patch, ostest_banners(work / "testing" / "ostest", paths, banners_required)
+        return patch, ostest_banners(work / "testing" / "ostest", paths, banners_required, patch)
 
 
 @contextmanager
@@ -222,7 +222,7 @@ def rerender_runner(inst: Path) -> Path:
     patch = (inst / "test_patch.diff").read_text()
     changed = re.findall(r"^diff --git a/(\S+) b/\1$", patch, re.MULTILINE)
     with patched_apps(meta["apps_base_commit"], patch) as work:
-        banners = ostest_banners(work / "testing" / "ostest", changed)
+        banners = ostest_banners(work / "testing" / "ostest", changed, patch=patch)
     (inst / "run_tests.sh").write_text(render_runner(banners))
     return inst / "run_tests.sh"
 

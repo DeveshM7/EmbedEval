@@ -40,7 +40,36 @@ ENTRY_DEF = re.compile(r"^(?!static\b)[a-z][\w ]*?\b(\w+)\s*\(void\)\s*\{?\s*$",
                        re.MULTILINE)
 
 
-def ostest_banners(ostest_dir: Path, changed: list[str], required: bool = True) -> list[str]:
+def main_hunk_banners(main_lines: list[str], patch: str) -> list[str]:
+    """Banners of the tests ostest_main.c's own changed lines switch on or
+    off (a guard condition, say): the first banner printf within a few lines
+    after each added line of the patch, with no preprocessor line between."""
+    banners: list[str] = []
+    for block in re.split(r"^diff --git ", patch, flags=re.MULTILINE):
+        if not block.startswith("a/testing/ostest/ostest_main.c "):
+            continue
+        new = 0
+        for line in block.splitlines():
+            hunk = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
+            if hunk:
+                new = int(hunk[1])
+            elif new and line.startswith("+") and not line.startswith("+++"):
+                for after in main_lines[new:new + 8]:
+                    if after.lstrip().startswith("#"):
+                        break
+                    match = BANNER_PRINTF.search(after)
+                    if match:
+                        if f"user_main: {match[1]}" not in banners:
+                            banners.append(f"user_main: {match[1]}")
+                        break
+                new += 1
+            elif new and not line.startswith("-"):
+                new += 1
+    return banners
+
+
+def ostest_banners(ostest_dir: Path, changed: list[str], required: bool = True,
+                   patch: str = "") -> list[str]:
     """Banners ostest prints before the tests defined in the changed sources.
 
     ostest_dir is testing/ostest with the test patch applied. Each changed
@@ -55,7 +84,7 @@ def ostest_banners(ostest_dir: Path, changed: list[str], required: bool = True) 
     not: a test without one is skipped, and the list may be empty.
     """
     main_lines = (ostest_dir / "ostest_main.c").read_text().splitlines()
-    banners: list[str] = []
+    banners: list[str] = main_hunk_banners(main_lines, patch)
     for path in changed:
         name = Path(path).name
         if not path.startswith("testing/ostest/") or not name.endswith(".c") or \
