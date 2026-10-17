@@ -9,7 +9,7 @@ phase, with srun:
 Its share (fixed split): the PRs still to do in this phase, sorted, every
 NN-th one starting at its index N (SLURM_PROCID of SLURM_NTASKS).
 
-triage    start the node's own model server (caches in nodes/node<N>/),
+triage    start the node's own model server (caches in nodes/node<N>-job<ID>/),
           triage its PRs parallel.triage_per_node at a time, each capped at
           caps.triage_pr, then stop the server. If the server never comes
           up, its PRs are marked "server failed" and retried on a resubmit.
@@ -582,8 +582,9 @@ def main() -> None:
     NN = int(os.environ.get("SLURM_NTASKS", "1"))
     run = Path(args.run)
     cfg = json.loads(Path(args.config).read_text())
-    node_dir = run / "nodes" / f"node{N}"
-    LOGS = run / "logs" / f"node{N}"
+    name = f"node{N}-job{os.environ['SLURM_JOB_ID']}" if os.environ.get("SLURM_JOB_ID") else f"node{N}"
+    node_dir = run / "nodes" / name
+    LOGS = run / "logs" / name
     LOGS.mkdir(parents=True, exist_ok=True)
     sys.stdout = open(LOGS / f"worker-{args.phase}.log", "a", buffering=1)
     sys.stderr = sys.stdout
