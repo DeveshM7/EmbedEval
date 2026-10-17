@@ -1,1 +1,145 @@
+diff --git a/tests/gtest/CMakeLists.txt b/tests/gtest/CMakeLists.txt
+index a651533..7eb3bc0 100644
+--- a/tests/gtest/CMakeLists.txt
++++ b/tests/gtest/CMakeLists.txt
+@@ -56,6 +56,7 @@ target_link_libraries(ot-fake-ftd INTERFACE
+ )
 
+ add_executable(ot-ftd-gtest
++    mle_address_registration_test.cpp
+     dataset_test.cpp
+     udp_test.cpp
+ )
+diff --git a/tests/gtest/mle_address_registration_test.cpp b/tests/gtest/mle_address_registration_test.cpp
+new file mode 100644
+index 0000000..92bb8d9
+--- /dev/null
++++ b/tests/gtest/mle_address_registration_test.cpp
+@@ -0,0 +1,127 @@
++#include <gtest/gtest.h>
++#include <vector>
++#include "fake_platform.hpp"
++#include "instance/instance.hpp"
++#include "thread/mle.hpp"
++#include "thread/mle_tlvs.hpp"
++
++namespace ot {
++// The existing upstream friend grants access to the production receive path.
++class UnitTester {
++public:
++    static Error Parse(Instance &instance, Message &message, Child &child)
++    {
++        Ip6::MessageInfo info;
++        info.Clear();
++        Mle::Mle::RxInfo rx(message, info);
++        return instance.Get<Mle::Mle>().ProcessAddressRegistrationTlv(rx, child);
++    }
++    static bool Receive(Instance &instance, Message &message, const Ip6::MessageInfo &info)
++    {
++        Mle::Mle::RxInfo rx(message, info);
++        instance.Get<Mle::Mle>().HandleChildUpdateRequestOnParent(rx);
++        return rx.mClass == Mle::Mle::RxInfo::kPeerMessage;
++    }
++};
++}
++
++class AddressRegistration : public ::testing::Test {
++protected:
++    ot::FakePlatform platform;
++    ot::Instance &instance = ot::AsCoreType(ot::FakePlatform::CurrentInstance());
++    ot::Child *child = nullptr;
++    ot::Child *peer = nullptr;
++    ot::Ip6::Address peerAddress;
++    void SetUp() override
++    {
++        using namespace ot;
++        child = instance.Get<ChildTable>().GetNewChild();
++        ASSERT_NE(nullptr, child);
++        child->SetState(Child::kStateValid);
++        child->SetRloc16(0x0401);
++        child->SetDeviceMode(Mle::DeviceMode(0));
++        peer = instance.Get<ChildTable>().GetNewChild();
++        ASSERT_NE(nullptr, peer);
++        peer->SetState(Child::kStateValid);
++        peer->SetRloc16(0x0402);
++        ASSERT_EQ(kErrorNone, peerAddress.FromString("2001:db8::5678"));
++        ASSERT_EQ(kErrorNone, peer->AddIp6Address(peerAddress));
++    }
++    std::vector<uint8_t> Entry(bool compressed, unsigned length)
++    {
++        std::vector<uint8_t> entry(1 + length, 0);
++        entry[0] = compressed ? 0x80 : 0;
++        return entry;
++    }
++    void Parse(const std::vector<uint8_t> &entry, ot::Error expected)
++    {
++        using namespace ot;
++        Message *message = instance.Get<Ip6::Ip6>().NewMessage();
++        ASSERT_NE(nullptr, message);
++        // The TLV envelope is complete; only its address entry is truncated.
++        const uint8_t header[] = {Mle::Tlv::kAddressRegistration, static_cast<uint8_t>(entry.size())};
++        ASSERT_EQ(kErrorNone, message->AppendBytes(header, sizeof(header)));
++        if (!entry.empty()) ASSERT_EQ(kErrorNone, message->AppendBytes(entry.data(), entry.size()));
++        Error result = UnitTester::Parse(instance, *message, *child);
++        message->Free();
++        EXPECT_EQ(expected, result);
++        EXPECT_TRUE(peer->HasIp6Address(peerAddress));
++    }
++    void Receive(bool compressed)
++    {
++        using namespace ot;
++        Ip6::MessageInfo info;
++        info.Clear();
++        ASSERT_EQ(kErrorNone, info.GetPeerAddr().FromString("fe80::1234:5678:9abc:def0"));
++        Mac::ExtAddress ext;
++        ext.SetFromIid(info.GetPeerAddr().GetIid());
++        child->SetExtAddress(ext);
++        Message *message = instance.Get<Ip6::Ip6>().NewMessage();
++        ASSERT_NE(nullptr, message);
++        const uint8_t bytes[] = {Mle::Tlv::kMode, 1, 0, Mle::Tlv::kAddressRegistration, 1,
++                                static_cast<uint8_t>(compressed ? 0x80 : 0)};
++        ASSERT_EQ(kErrorNone, message->AppendBytes(bytes, sizeof(bytes)));
++        bool accepted = UnitTester::Receive(instance, *message, info);
++        message->Free();
++        EXPECT_FALSE(accepted);
++        EXPECT_TRUE(peer->HasIp6Address(peerAddress));
++    }
++};
++
++TEST_F(AddressRegistration, CompressedMissingIidReturnsParse) { Parse(Entry(true, 0), ot::kErrorParse); }
++TEST_F(AddressRegistration, CompressedShortIidReturnsParse) { Parse(Entry(true, 7), ot::kErrorParse); }
++TEST_F(AddressRegistration, UncompressedMissingAddressReturnsParse) { Parse(Entry(false, 0), ot::kErrorParse); }
++TEST_F(AddressRegistration, UncompressedShortAddressReturnsParse) { Parse(Entry(false, 15), ot::kErrorParse); }
++TEST_F(AddressRegistration, ParentRejectsCompressedTruncation) { Receive(true); }
++TEST_F(AddressRegistration, ParentRejectsUncompressedTruncation) { Receive(false); }
++
++TEST_F(AddressRegistration, EmptyRegistrationSucceeds) { Parse({}, ot::kErrorNone); }
++TEST_F(AddressRegistration, ValidCompressedAddressSucceeds)
++{
++    auto entry = Entry(true, 8);
++    entry.back() = 0x42;
++    Parse(entry, ot::kErrorNone);
++    ot::Ip6::Address address;
++    address.Clear();
++    address.SetPrefix(instance.Get<ot::Mle::Mle>().GetMeshLocalPrefix());
++    address.mFields.m8[15] = 0x42;
++    EXPECT_TRUE(child->HasIp6Address(address));
++}
++TEST_F(AddressRegistration, ValidUncompressedAddressSucceeds)
++{
++    ot::Ip6::Address address;
++    ASSERT_EQ(ot::kErrorNone, address.FromString("2001:db8::42"));
++    std::vector<uint8_t> entry(1, 0);
++    entry.insert(entry.end(), address.GetBytes(), address.GetBytes() + 16);
++    Parse(entry, ot::kErrorNone);
++    EXPECT_TRUE(child->HasIp6Address(address));
++}
++TEST_F(AddressRegistration, AbsentRegistrationReturnsNotFound)
++{
++    using namespace ot;
++    Message *message = instance.Get<Ip6::Ip6>().NewMessage();
++    ASSERT_NE(nullptr, message);
++    EXPECT_EQ(kErrorNotFound, UnitTester::Parse(instance, *message, *child));
++    message->Free();
++    EXPECT_TRUE(peer->HasIp6Address(peerAddress));
++}
