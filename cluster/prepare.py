@@ -147,7 +147,10 @@ def prepare_nuttx(args, cfg: dict, run: Path, env: dict, done: dict) -> None:
         import apptainer_util as au
         logdir = Path(cfg["derived"]["shared"]) / "logs"
         au.ensure_nuttx_base_image(logdir)
-        au.ensure_nuttx_base_image(logdir, "qemu-armv8a:nsh")
+        import nuttx_platforms
+        boards = {nuttx_platforms.image_recipe(t): t for t in nuttx_platforms.QEMU_BOARDS}
+        for target in boards.values():      # one image per QEMU recipe
+            au.ensure_nuttx_base_image(logdir, target)
     source = {"pr": args.pr} if args.pr else {"all_ostest": True}
     write_manifest(run, args.name, cfg, env, source | {"redo": args.redo}, prs, stage, notes,
                    {"records": time.time() - t0}, [], t0)

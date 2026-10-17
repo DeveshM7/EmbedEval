@@ -53,10 +53,15 @@ import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au
 import build_config
 import instances
+import nuttx_config_probe as probe
 
 
 def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
     return subprocess.run(cmd, capture_output=quiet, text=True, timeout=timeout)
+
+
+# GitHub lists at most this many files of a pull request.
+GITHUB_PR_FILES_CAP = 3000
 
 
 def gold_patch(meta: dict, workdir: Path) -> str:
@@ -88,6 +93,8 @@ def gold_patch(meta: dict, workdir: Path) -> str:
         sh(["git", "-C", str(clone), "fetch", "origin", base, fix], timeout=900)
 
     files = meta.get("files_changed_by_fix", [])
+    if len(files) >= GITHUB_PR_FILES_CAP:
+        files = []  # GitHub truncated the PR's file list: take the whole diff
     cmd = ["git", "-C", str(clone), "diff"]
     if project == "nuttx":
         cmd.append("--binary")
@@ -115,8 +122,9 @@ def nuttx_fix_patches(meta: dict, workdir: Path,
                 fetched = sh(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
                 if fetched.returncode:
                     raise RuntimeError(f"could not fetch follow-up commit {sha}: {fetched.stderr[:200]}")
+        files = extra["files_changed"]
         r = sh(["git", "-C", str(clone), "diff", "--binary", f"{base}..{head}", "--",
-                *extra["files_changed"]], timeout=300)
+                *(files if len(files) < GITHUB_PR_FILES_CAP else ["."])], timeout=300)
         if r.returncode or not r.stdout.strip():
             raise RuntimeError(f"could not produce follow-up patch for #{extra['kernel_pr']}: "
                                f"{r.stderr[:200]}")
@@ -144,6 +152,33 @@ def nuttx_reconfigure(overrides: dict) -> str:
             cmds.append(f"{{ grep -qx '{name}={value}' .config || "
                         f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
     return " && ".join(cmds)
+
+
+def config_fallbacks(makefile: str, kconfig: str, test_paths: list[str]) -> list[dict]:
+    """Config sets that should build the changed ostest sources: the options the
+    ostest Makefile tests before adding each source, plus one alternative of
+    each such option's Kconfig "depends on" (at most three sets)."""
+    required = {}
+    for path in test_paths:
+        if path.startswith("testing/ostest/") and path.endswith(".c"):
+            for condition in probe.makefile_conditions(makefile, Path(path).name):
+                if condition:
+                    required.update(probe.requirements(condition.split(" && "))["required"])
+    depends = probe.kconfig_depends(kconfig)
+    sets = [dict(required)]
+    for name, value in required.items():
+        dep = re.match(r"depends on ([^;]+)", depends.get(name, ""))
+        if value != "y" or not dep:
+            continue
+        alternatives = []
+        for alternative in probe.split_top(probe.strip_parens(dep[1]), "||"):
+            terms = [re.fullmatch(r"(!?)\s*(\w+)", probe.strip_parens(term))
+                     for term in probe.split_top(probe.strip_parens(alternative), "&&")]
+            if all(terms):
+                alternatives.append({f"CONFIG_{t[2]}": "n" if t[1] else "y" for t in terms})
+        if alternatives:
+            sets = [{**s, **a} for s in sets for a in alternatives]
+    return [s for s in sets if s][:3]
 
 
 def local_fix_patch(meta: dict) -> str:
@@ -356,7 +391,8 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
         1. build                -> fails with an error in a changed test source
                                    (compile_error: naming missing_api in
                                    compile_test_source, if it can), or builds and
-                                   run_tests must FAIL (exit 1; runtime_other: or hang)
+                                   run_tests must FAIL (exit 1) or hang (exit 2); if the
+                                   changed test did not run, retry with config_fallbacks()
         2. apply the kernel fix (kernel_base_commit..kernel_merge_commit,
            files_changed_by_fix only), re-apply config_overrides; make clean if
            clean_after_patch
@@ -423,6 +459,34 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
         print("\n  Step 1: expecting the tests to FAIL at the base commit")
         rc, out, secs = step("build", build_cmd, "build-before.log", 900)
         report["before"] = {"build_rc": rc, "build_seconds": round(secs)}
+        overrides = meta.get("config_overrides") or {}
+
+        def did_not_run() -> bool:
+            return any("run_tests: changed test did not run:" in line
+                       for line in report["before"].get("summary", []))
+
+        def config_fallback(rc: int):
+            """Retry the pre-fix run with config sets that build the changed tests;
+            the run's rc and the overrides that ran them, or None."""
+            _, makefile, _ = step("read Makefile", "cat apps/testing/ostest/Makefile",
+                                  "fallback-makefile.log", 60)
+            _, kconfig, _ = step("read Kconfig", "cat apps/testing/ostest/Kconfig",
+                                 "fallback-kconfig.log", 60)
+            tried = report["before"]["config_fallback"] = []
+            sets = config_fallbacks(makefile, kconfig, meta.get("files_changed_by_test_patch", []))
+            for n, extra in enumerate(sets, 1):
+                tried.append(extra)
+                trial = {**overrides, **extra}
+                if step(f"fallback config {n}", nuttx_reconfigure(trial),
+                        f"config-fallback{n}.log", 300)[0] != 0:
+                    continue
+                if step("build", build_cmd, f"build-fallback{n}.log", 900)[0] != 0:
+                    continue
+                rc = run_tests("before")
+                if not did_not_run():
+                    return rc, trial
+            return rc, None
+
         # The predicted fail_type only picks the expected diagnostic; what the
         # pre-fix build does decides: a build error in a changed test source is a
         # compile failure, and a clean build is judged by its ostest run.
@@ -437,11 +501,14 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
             print(f"  ok: expected test-side build error: {report['before']['diagnostic']}")
         else:
             rc = run_tests("before")
-            if any("run_tests: changed test did not run:" in line
-                   for line in report["before"]["summary"]):
-                return invalid("changed test did not run before the fix")
-            # A crash or ERROR line gives rc=1; a hang (runtime_other only) rc=2.
-            if rc != 1 and not (rc == 2 and meta.get("fail_type") == "runtime_other"):
+            if did_not_run():
+                rc, found = config_fallback(rc)
+                if not found:
+                    return invalid("changed test did not run before the fix")
+                overrides = report["config_overrides_used"] = found
+            # A crash or ERROR line gives rc=1, a hang rc=2 (or "timeout" when the
+            # runner outlasted this step).
+            if rc not in (1, 2, "timeout"):
                 return invalid({0: "tests PASSED before the fix -- the instance does not "
                                    "isolate the bug"}.get(rc, f"expected a test failure (rc=1), "
                                                               f"got rc={rc}"))
@@ -456,8 +523,7 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
                 return invalid(f"the {label} fix does not apply", "  " + out.strip()[:300])
         # The fix can introduce Kconfig defaults required by its new source files,
         # and the overrides it introduces could not be set before it.
-        rc, out, _ = step("reconfigure", nuttx_reconfigure(meta.get("config_overrides") or {}),
-                          "config-after.log", 300)
+        rc, out, _ = step("reconfigure", nuttx_reconfigure(overrides), "config-after.log", 300)
         dropped = re.search(r"config override dropped: \S+", out)
         if dropped:
             return invalid(f"{dropped.group(0)} after the fix (unmet dependency?)")

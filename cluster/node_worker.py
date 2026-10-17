@@ -39,6 +39,7 @@ import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 
 CLUSTER = Path(__file__).resolve().parent
@@ -415,6 +416,42 @@ ARM64_SIM_FROM = "2022-02-02"      # sim on an ARM64 host needs a kernel from th
 VFORK_FIXED = "2023-07-17"         # before the fork rework, ARM64 sim vfork can SIGBUS
 
 
+FOLLOWUP_DAYS = 42                 # how long after a fix a needed follow-up may merge
+
+
+def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[int]:
+    """Up to three merged kernel PRs whose commits touch kernel PR #kernel's source
+    files (not Documentation/ or boards/) within FOLLOWUP_DAYS after it merged;
+    the ones touching most of those files first, then the earliest."""
+    record = nc.kernel_record(kernel)
+    files = {f["filename"] for f in record.get("files", [])
+             if not f["filename"].startswith(("Documentation/", "boards/"))}
+    if not files or not record.get("merged_at"):
+        return []
+    since = datetime.fromisoformat(record["merged_at"].replace("Z", "+00:00"))
+    log_cmd = ["git", "-C", clone, "log", "--reverse", "--format=%H",
+               f"--since={since.isoformat()}",
+               f"--until={(since + timedelta(days=FOLLOWUP_DAYS)).isoformat()}", "HEAD", "--",
+               *sorted(files)]
+    shas = subprocess.run(log_cmd, capture_output=True, text=True, timeout=300).stdout.split()
+    touched, merged_at = {}, {}
+    for sha in shas:
+        try:
+            commit = nc.commit_record(nc.KERNEL, sha)
+        except Exception:
+            continue
+        for p in commit["prs"]:
+            if p.get("merged_at") and p["number"] != kernel and p["number"] not in skip:
+                touched.setdefault(p["number"], set()).update(
+                    f["filename"] for f in commit["files"] if f["filename"] in files)
+                merged_at[p["number"]] = p["merged_at"]
+    ranked = sorted(touched, key=lambda n: (-len(touched[n]), merged_at[n]))[:3]
+    with open(lg, "a") as fh:
+        fh.write(f"\nlater follow-ups of #{kernel}: "
+                 f"{[(n, len(touched[n])) for n in ranked]}\n")
+    return ranked
+
+
 def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, left, done) -> None:
     """Generate, build and validate each high/medium pair of an apps PR's
     verdict (its also_needs applied with the primary PR), on sim:nsh in
@@ -432,10 +469,56 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
     clones = Path(venv["EMBEDEVAL_NUTTX_DATA"])
     venv.update(EMBEDEVAL_NUTTX_CLONE=str(clones / "kernel.git"),
                 EMBEDEVAL_NUTTX_APPS_CLONE=str(clones / "apps.git"))
+    def attempt(v: dict, pair: dict, kernel: int, lg: Path, merged: str, qemu: bool):
+        """Generate, build and validate one pair of verdict v: (outcome, note,
+        validator reason), or None if the worker is stopping."""
+        iid = f"nuttx__nuttx-{kernel}"
+        # An x86 node runs the pairs an ARM64 node cannot (see below); the
+        # instance records that it needs x86 (metadata host_arch).
+        x86_only = pair.get("platform") in nuttx_platforms.X86_ONLY or (
+            not qemu and bool(merged) and merged < VFORK_FIXED)
+        pv = run / "triage" / f"{pr}-kernel-{kernel}.json"
+        pv.write_text(json.dumps(v))
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+        try:
+            if step([PY, "scripts/generate_nuttx_instance.py", "--triage", str(pv), "--kernel-pr",
+                     str(kernel), "--runtime", "apptainer", "--out", venv["EMBEDEVAL_INSTANCES_DIR"]]
+                    + (["--host-arch", "x86_64"] if ON_X86 and x86_only else []),
+                    lg, min(8, left()), venv):
+                return ("failed", "generate failed: the pair is not runnable", None)
+            rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
+                      min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
+            if rc == 143:
+                return None
+            if rc:
+                return ("failed", "build failed" if rc != 124 else "build hit the cap", None)
+            rc = step([PY, "scripts/validate_instance.py", iid], lg, max(5, left()), venv)
+            if rc == 143:
+                return None
+            rep = Path(venv["EMBEDEVAL_INSTANCES_DIR"]) / iid / "validation.json"
+            reason = json.loads(rep.read_text()).get("reason") if rep.exists() else None
+            if rep.exists():
+                pair_report = run / "instances" / f"apps-{pr}-kernel-{kernel}"
+                pair_report.mkdir(parents=True, exist_ok=True)
+                shutil.copy(rep, pair_report / "validation.json")
+            if rc == 0:
+                return "VALID", "", None
+            if rc == 124:
+                return "failed", "validation hit the cap", None
+            if not qemu and not ON_X86 and merged and merged < VFORK_FIXED:
+                return ("arm64_env_failure", f"INVALID on ARM64 with a pre-{VFORK_FIXED} kernel "
+                        f"(vfork SIGBUS risk): {reason or rc}", None)
+            if reason in ("tests PASSED before the fix -- the instance does not isolate the bug",
+                          "changed test did not run before the fix",
+                          "tests still fail with the fix"):
+                return "INVALID", reason, reason
+            return "failed", f"validation inconclusive: {reason or f'rc={rc}'}", reason
+        finally:
+            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+
     results = []
     for pair in pairs:
         kernel, lg = pair["kernel_pr"], LOGS / f"validate-{pr}-{pair['kernel_pr']}.log"
-        iid = f"nuttx__nuttx-{kernel}"
         try:
             merged = (nc.kernel_record(kernel).get("merged_at") or "")[:10]
         except Exception as e:
@@ -447,61 +530,45 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
             results.append((kernel, "qemu_pending", f"{pair['platform']}: QEMU board not supported"))
             continue
         # An ARM64 node cannot run a sim pair of an era the ARM64 simulator
-        # lacks or breaks in, or a board whose toolchain is x86-only; an x86
-        # node runs it, and the instance records that it needs x86 (metadata
-        # host_arch).
-        x86_node = ON_X86
-        x86_only = platform in nuttx_platforms.X86_ONLY or (
-            not qemu and bool(merged) and merged < VFORK_FIXED)
-        if not x86_node and (platform in nuttx_platforms.X86_ONLY
-                             or (not qemu and merged and merged < ARM64_SIM_FROM)):
+        # lacks or breaks in, or a board whose toolchain is x86-only.
+        if not ON_X86 and (platform in nuttx_platforms.X86_ONLY
+                           or (not qemu and merged and merged < ARM64_SIM_FROM)):
             results.append((kernel, "needs_x86", f"kernel #{kernel} merged {merged}: "
                             + ("toolchain exists for x86 only" if qemu else "no ARM64 sim")))
             continue
         if left() < 8:
             return
-        pv = run / "triage" / f"{pr}-kernel-{kernel}.json"
-        pv.write_text(json.dumps(verdict))
-        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
-        try:
-            if step([PY, "scripts/generate_nuttx_instance.py", "--triage", str(pv), "--kernel-pr",
-                     str(kernel), "--runtime", "apptainer", "--out", venv["EMBEDEVAL_INSTANCES_DIR"]]
-                    + (["--host-arch", "x86_64"] if x86_node and x86_only else []),
-                    lg, min(8, left()), venv):
-                results.append((kernel, "failed", "generate failed: the pair is not runnable"))
-                continue
-            rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
-                      min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
-            if rc == 143:
-                return
-            if rc:
-                results.append((kernel, "failed", "build failed" if rc != 124 else "build hit the cap"))
-                continue
-            rc = step([PY, "scripts/validate_instance.py", iid], lg, max(5, left()), venv)
-            if rc == 143:
-                return
-            rep = Path(venv["EMBEDEVAL_INSTANCES_DIR"]) / iid / "validation.json"
-            reason = json.loads(rep.read_text()).get("reason") if rep.exists() else None
-            if rep.exists():
-                pair_report = run / "instances" / f"apps-{pr}-kernel-{kernel}"
-                pair_report.mkdir(parents=True, exist_ok=True)
-                shutil.copy(rep, pair_report / "validation.json")
-            if rc == 0:
-                results.append((kernel, "VALID", ""))
-            elif rc == 124:
-                results.append((kernel, "failed", "validation hit the cap"))
-            elif not qemu and not x86_node and merged and merged < VFORK_FIXED:
-                results.append((kernel, "arm64_env_failure",
-                                f"INVALID on ARM64 with a pre-{VFORK_FIXED} kernel (vfork SIGBUS "
-                                f"risk): {reason or rc}"))
-            elif reason in ("tests PASSED before the fix -- the instance does not isolate the bug",
-                            "changed test did not run before the fix",
-                            "tests still fail with the fix"):
-                results.append((kernel, "INVALID", reason))
+        result = attempt(verdict, pair, kernel, lg, merged, qemu)
+        if result is None:
+            return
+        # A fix that does not build or still fails may need a later kernel PR on its
+        # files (e.g. one that wires a new module into the build): retry with each of
+        # the three later PRs that touch most of them, one at a time.
+        if result[2] and (result[2].startswith("the build failed with the fix")
+                          or result[2] == "tests still fail with the fix"):
+            tried = []
+            for later in later_followups(nc, kernel, venv["EMBEDEVAL_NUTTX_CLONE"],
+                                         {e.get("kernel_pr") for e in pair.get("also_needs") or []},
+                                         lg):
+                if left() < 8:
+                    break
+                tried.append(later)
+                trial = {**pair, "also_needs": [*(pair.get("also_needs") or []), {
+                    "kernel_pr": later,
+                    "evidence": ["added by validation: a later kernel PR on the fix's files"]}]}
+                retried = attempt({**verdict, "pairs": [trial]}, trial, kernel, lg, merged, qemu)
+                if retried is None:
+                    return
+                if retried[0] == "VALID":
+                    apps_merged = (nc.apps_record(pr)["apps"].get("merged_at") or "")[:10]
+                    later_merged = (nc.kernel_record(later).get("merged_at") or "")[:10]
+                    tag = "later_followup" if later_merged > apps_merged else "followup"
+                    result = ("VALID", f"{tag}: +#{later}", "")
+                    break
             else:
-                results.append((kernel, "failed", f"validation inconclusive: {reason or f'rc={rc}'}"))
-        finally:
-            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+                if tried:
+                    result = (result[0], f"{result[1]} (later follow-ups tried: {tried})", result[2])
+        results.append((kernel, *result[:2]))
     order = ["VALID", "INVALID", "arm64_env_failure", "needs_x86", "qemu_pending", "failed"]
     results.sort(key=lambda r: order.index(r[1]))
     note = "; ".join(f"#{k} {o}{': ' + n if n else ''}" for k, o, n in results)
