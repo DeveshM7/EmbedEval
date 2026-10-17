@@ -133,9 +133,9 @@ fix is not available.
 | 2457 | 12820 | still blocked: knsh64 (BUILD_KERNEL, export/import, hostfs) builds but run_tests times out; not debugged | qemu rv64 knsh64, x86 node |
 | 3067 | 16301 | VALID | qemu-armv7a:smp, x86 node |
 
-Counts: VALID 8 (293, 649, 651, 652, 912, 955, 1665, 1682, plus 3067 on QEMU,
-so 9 in all), INVALID 8 (170, 237, 241, 546, 1711, 1741, 1813, 1141), blocked
-5 (1358, 1526, 1962, 2420, 2457). None of the QEMU pairs ran on an ARM64 node:
+Counts: VALID 9 (293, 649, 651, 652, 912, 955, 1665, 1682 on sim; 3067 on QEMU),
+INVALID 8 (170, 237, 241, 546, 1711, 1741, 1813, 1141), blocked 5 (1358, 1526,
+1962, 2420, 2457). None of the QEMU pairs ran on an ARM64 node:
 the `qemu-misc` image is only built and exercised on x86 so far.
 
 Changes: x86 platform option (`host_arch`, per-architecture image names),
