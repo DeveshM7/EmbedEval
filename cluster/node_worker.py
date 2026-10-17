@@ -469,8 +469,9 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
             rep = Path(venv["EMBEDEVAL_INSTANCES_DIR"]) / iid / "validation.json"
             reason = json.loads(rep.read_text()).get("reason") if rep.exists() else None
             if rep.exists():
-                (run / "instances" / iid).mkdir(parents=True, exist_ok=True)
-                shutil.copy(rep, run / "instances" / iid / "validation.json")
+                pair_report = run / "instances" / f"apps-{pr}-kernel-{kernel}"
+                pair_report.mkdir(parents=True, exist_ok=True)
+                shutil.copy(rep, pair_report / "validation.json")
             if rc == 0:
                 results.append((kernel, "VALID", ""))
             elif rc == 124:
