@@ -137,6 +137,28 @@ class ValidatorTests(unittest.TestCase):
             self.assertTrue(validate_instance.validate("nuttx__nuttx-1"))
         nuttx.assert_called_once()
 
+    def test_compile_error_instance_that_builds_before_fix_is_nonisolating(self):
+        meta = {"fail_type": "compile_error", "build_command": "make"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "image.sif"
+            image.touch()
+            with patch.object(validate_instance.instances, "load_metadata", return_value=meta), \
+                    patch.object(validate_instance.instances, "instance_dir", return_value=root), \
+                    patch.object(apptainer_util, "instance_image", return_value=image), \
+                    patch.object(apptainer_util, "recipe_fingerprint", return_value="test"), \
+                    patch.object(apptainer_util, "path", side_effect=lambda *p: root.joinpath(*p)), \
+                    patch.object(apptainer_util, "exec_args", return_value=[]), \
+                    patch.object(apptainer_util, "remove"), \
+                    patch.object(validate_instance.subprocess, "run",
+                                 return_value=subprocess.CompletedProcess([], 0, "", "")):
+                self.assertFalse(validate_instance.validate_nuttx_apptainer(
+                    "nuttx__nuttx-1", None, 30, False))
+            report = json.loads((root / "validation.json").read_text())
+            self.assertEqual(report["before"]["build_rc"], 0)
+            self.assertEqual(report["reason"],
+                             "compile test built before the fix -- the instance does not isolate the bug")
+
     def test_kernel_fix_patches_apply_primary_then_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "kernel"

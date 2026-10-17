@@ -386,10 +386,13 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
         rc, out, secs = step("build", build_cmd, "build-before.log", 900)
         report["before"] = {"build_rc": rc, "build_seconds": round(secs)}
         if compile_case:
+            if rc == 0:
+                return invalid("compile test built before the fix -- the instance does not "
+                               "isolate the bug")
             diagnostic = compile_diagnostic(meta, out)
-            if rc == 0 or not diagnostic:
+            if not diagnostic:
                 return invalid("expected a compile or link error in the changed test source "
-                               "naming the missing API", error_lines(out) if rc != 0 else "")
+                               "naming the missing API", error_lines(out))
             report["before"]["diagnostic"] = diagnostic.group(0).strip()
             print(f"  ok: expected test-side build error: {report['before']['diagnostic']}")
         else:
