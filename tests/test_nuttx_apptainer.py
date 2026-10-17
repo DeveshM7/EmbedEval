@@ -58,8 +58,12 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(recipe.count("make olddefconfig"), 2)
             self.assertEqual(recipe.count("CONFIG_SCHED_LPWORK=y' >> .config"), 2)
             self.assertIn("echo /apps/ >> .git/info/exclude", recipe)
-            self.assertEqual((out / "run_tests.sh").read_text(),
-                             (src / "run_tests.sh").read_text())
+            # The sim runner of Apptainer instances feeds nsh one command at a
+            # time; its classification of the log is Docker's.
+            runner, docker_runner = (out / "run_tests.sh").read_text(), (src / "run_tests.sh").read_text()
+            self.assertIn("mkfifo", runner)
+            self.assertEqual(runner[runner.index("REASONS=()"):],
+                             docker_runner[docker_runner.index("REASONS=()"):])
             meta = json.loads((out / "metadata.json").read_text())
             self.assertEqual(meta["runtime"], "apptainer")
             self.assertEqual(meta["apptainer_image"], "nuttx__nuttx-8832.sif")
@@ -344,6 +348,31 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(made["setup_commands"], [])
         self.assertEqual(made["cwd"], "/testbed")
         self.assertEqual(made["image"], image)
+
+
+class PlatformTests(unittest.TestCase):
+    def test_triage_board_names_map_to_configure_targets(self):
+        platforms = render.platforms
+        self.assertEqual(platforms.canonical("qemu-rv:nsh"), "rv-virt:nsh")
+        self.assertEqual(platforms.canonical("qemu-rv-virt:knsh64"), "rv-virt:knsh64")
+        self.assertEqual(platforms.canonical("qemu-rv64ilp32:nsh"), "rv-virt:nsh64")
+        self.assertEqual(platforms.alias_overrides("qemu-rv64ilp32:nsh")["CONFIG_RISCV_TOOLCHAIN_GNU_RV64ILP32"], "y")
+        self.assertTrue(all(platforms.supported(p) for p in (
+            "sim:nsh", "qemu-armv8a:nsh_smp", "qemu-armv7a:smp", "qemu-rv:nsh")))
+        self.assertFalse(platforms.supported("qemu-m68k:nsh"))
+
+    def test_qemu_runner_carries_the_boards_command_line(self):
+        runner = render.render_runner(["user_main: x test"], "qemu-armv7a:smp")
+        self.assertIn("qemu-system-arm -cpu cortex-a7", runner)
+        self.assertNotIn("@@", runner)
+        self.assertIn("qemu-system-riscv32", render.render_runner(["user_main: x test"], "rv-virt:nsh"))
+        self.assertIn("qemu-system-aarch64", render.render_runner(["user_main: x test"], "qemu-armv8a:nsh"))
+
+    def test_kernel_build_boards_export_and_import_the_apps(self):
+        platforms = render.platforms
+        self.assertEqual(platforms.build_command("sim:nsh", {}), "make -j$(nproc)")
+        self.assertIn("make import", platforms.build_command("rv-virt:knsh64", {"CONFIG_BUILD_KERNEL": "y"}))
+        self.assertEqual(platforms.board_overrides("rv-virt:knsh64")["CONFIG_INIT_MOUNT_DATA"], '"fs=./apps"')
 
 
 class HostArchTests(unittest.TestCase):

@@ -47,6 +47,10 @@ _RV32 = ("qemu-misc/nuttx-qemu-misc.def",
 _RV64 = ("qemu-misc/nuttx-qemu-misc.def",
          'qemu-system-riscv64 -semihosting -M virt -cpu rv64 -smp "$NCPUS" '
          "-bios none -kernel ./nuttx -nographic")
+# S-mode builds (knsh64) run on QEMU's own OpenSBI, so no "-bios none".
+_RV64K = ("qemu-misc/nuttx-qemu-misc.def",
+          'qemu-system-riscv64 -semihosting -M virt -cpu rv64 -smp "$NCPUS" '
+          "-kernel ./nuttx -nographic")
 
 # target -> (image recipe under templates/nuttx, QEMU command line)
 QEMU_BOARDS = {
@@ -58,12 +62,15 @@ QEMU_BOARDS = {
     "rv-virt:smp": _RV32,
     "rv-virt:nsh64": _RV64,
     "rv-virt:smp64": _RV64,
-    "rv-virt:knsh64": _RV64,
+    "rv-virt:knsh64": _RV64K,
 }
 # Config every run on the board needs, set after the PR's own overrides: the
 # scheduler's info logging interleaves between CPUs on SMP boards and floods
 # the log.
-BOARD_OVERRIDES = {"qemu-armv8a:": {"CONFIG_DEBUG_SCHED_INFO": "n"}}
+BOARD_OVERRIDES = {"qemu-armv8a:": {"CONFIG_DEBUG_SCHED_INFO": "n"},
+                   # the semihosting hostfs the apps are loaded from: relative to
+                   # QEMU's working directory, /testbed
+                   "rv-virt:knsh": {"CONFIG_INIT_MOUNT_DATA": '"fs=./apps"'}}
 
 
 # Triage names whose toolchain exists for x86 hosts only.
@@ -88,6 +95,17 @@ def alias_overrides(platform: str) -> dict:
 
 def board_overrides(target: str) -> dict:
     return next((dict(v) for k, v in BOARD_OVERRIDES.items() if target.startswith(k)), {})
+
+
+# BUILD_KERNEL boards build the kernel, export it, and import it into the apps,
+# which are then loaded as ELF files over semihosting (hostfs, "fs=./apps").
+KERNEL_BUILD = ('make -j$(nproc) && make export -j$(nproc) && '
+                '(cd apps && ./tools/mkimport.sh -z -x ../nuttx-export-*.tar.gz && '
+                'make import -j$(nproc))')
+
+
+def build_command(target: str, overrides: dict) -> str:
+    return KERNEL_BUILD if overrides.get("CONFIG_BUILD_KERNEL") == "y" else "make -j$(nproc)"
 
 
 def image_recipe(target: str) -> Path:

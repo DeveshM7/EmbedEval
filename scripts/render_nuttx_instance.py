@@ -83,9 +83,13 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
     return banners
 
 
-def render_runner(banners: list[str], sim_config: str = "sim:nsh") -> str:
+def render_runner(banners: list[str], sim_config: str = "sim:nsh",
+                  runtime: str = "docker") -> str:
     qemu = platforms.is_qemu(sim_config)
+    # Apptainer's sim runner types its commands one at a time (2020 kernels
+    # drop console input that arrives early); Docker's is frozen with its images.
     runner = (TEMPLATES / ("qemu-armv8a/run_tests.sh.tmpl" if qemu
+                           else "apptainer/run_tests.sh.tmpl" if runtime == "apptainer"
                            else "run_tests.sh.tmpl")).read_text()
     if qemu:
         runner = runner.replace("@@QEMU_COMMAND@@", platforms.qemu_command(sim_config))
@@ -161,14 +165,14 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         # New symbols may not exist until the kernel fix is applied, so
         # append after olddefconfig and verify this exact input is present.
         steps.append(f"grep -q '^{re.escape(expected)}$' .config")
-    runner = render_runner(banners, sim_config)
+    runner = render_runner(banners, sim_config, runtime)
 
     generated_meta = dict(meta)
     generated_meta.update({
         "sim_config": sim_config,
         "config_overrides": overrides,
         "test_app": "ostest",
-        "build_command": "make -j$(nproc)",
+        "build_command": platforms.build_command(sim_config, overrides),
         "docker_image": f"embedeval:nuttx-{instance_id.rsplit('-', 1)[1]}{tag_suffix}",
         "generated": True,
     })
