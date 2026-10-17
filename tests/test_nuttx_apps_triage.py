@@ -2,6 +2,7 @@
 scoring, gold promotion, the conversation budget and the generator."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,30 @@ def verdict(*pairs, kind="kernel_test", search=None):
 
 
 class AppsRecordTests(unittest.TestCase):
+    def test_generator_uses_node_local_apps_clone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "apps.git").mkdir()
+            with patch.dict(os.environ, {"EMBEDEVAL_NUTTX_DATA": str(root)}), \
+                 patch.object(generator, "APPS_CLONE", root / "unused"):
+                self.assertEqual(generator.apps_clone(), root / "apps.git")
+
+    def test_generator_uses_cached_apps_commits_without_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "apps"
+            repo.mkdir()
+            subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+                           check=True)
+            (repo / "a.c").write_text("a\n")
+            subprocess.run(["git", "-C", str(repo), "add", "a.c"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "a"], check=True,
+                           capture_output=True)
+            sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                                 capture_output=True, text=True).stdout.strip()
+            generator.ensure_apps_commits(repo, sha)
+
     def test_ostest_population_comes_from_changed_paths(self):
         scan = {"prs": {
             "5": {"files": {"nodes": [{"path": "testing/ostest/sem.c"}]}},

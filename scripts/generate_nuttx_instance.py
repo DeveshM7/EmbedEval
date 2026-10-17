@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -139,17 +140,26 @@ def run(*cmd: str, timeout: int = 900) -> str:
 
 
 def apps_clone() -> Path:
-    if not APPS_CLONE.exists():
-        APPS_CLONE.parent.mkdir(parents=True, exist_ok=True)
+    clone = Path(os.environ["EMBEDEVAL_NUTTX_DATA"]) / "apps.git" if os.environ.get(
+        "EMBEDEVAL_NUTTX_DATA") else APPS_CLONE
+    if not clone.exists():
+        clone.parent.mkdir(parents=True, exist_ok=True)
         run("git", "clone", "--bare", "--filter=blob:none",
-            "https://github.com/apache/nuttx-apps.git", str(APPS_CLONE), timeout=1800)
-    return APPS_CLONE
+            "https://github.com/apache/nuttx-apps.git", str(clone), timeout=1800)
+    return clone
+
+
+def ensure_apps_commits(clone: Path, *commits: str) -> None:
+    for sha in commits:
+        if subprocess.run(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"],
+                          capture_output=True).returncode:
+            run("git", "-C", str(clone), "fetch", "-q", "origin", sha)
 
 
 def build_test_patch(base: str, head: str, paths: list[str]) -> tuple[str, list[str]]:
     """The apps test patch, and the ostest banners of the tests it changes."""
     clone = apps_clone()
-    run("git", "-C", str(clone), "fetch", "-q", "origin", base, head)
+    ensure_apps_commits(clone, base, head)
     changed = run("git", "-C", str(clone), "diff", "--name-only",
                   f"{base}..{head}", "--", *paths).splitlines()
     if set(changed) != set(paths):
@@ -165,7 +175,7 @@ def build_test_patch(base: str, head: str, paths: list[str]) -> tuple[str, list[
 def patched_apps(base: str, patch: str):
     """A temporary apps worktree at base with patch applied."""
     clone = apps_clone()
-    run("git", "-C", str(clone), "fetch", "-q", "origin", base)
+    ensure_apps_commits(clone, base)
     with tempfile.TemporaryDirectory(prefix="embedeval-nuttx-apply-") as tmp:
         work = Path(tmp) / "apps"
         patch_file = Path(tmp) / "test.diff"
