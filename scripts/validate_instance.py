@@ -59,6 +59,10 @@ def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
     return subprocess.run(cmd, capture_output=quiet, text=True, timeout=timeout)
 
 
+# GitHub lists at most this many files of a pull request.
+GITHUB_PR_FILES_CAP = 3000
+
+
 def gold_patch(meta: dict, workdir: Path) -> str:
     """
     Fetch the upstream fix as a diff, restricted to the files the fix should
@@ -88,6 +92,8 @@ def gold_patch(meta: dict, workdir: Path) -> str:
         sh(["git", "-C", str(clone), "fetch", "origin", base, fix], timeout=900)
 
     files = meta.get("files_changed_by_fix", [])
+    if len(files) >= GITHUB_PR_FILES_CAP:
+        files = []  # GitHub truncated the PR's file list: take the whole diff
     cmd = ["git", "-C", str(clone), "diff"]
     if project == "nuttx":
         cmd.append("--binary")
@@ -115,8 +121,9 @@ def nuttx_fix_patches(meta: dict, workdir: Path,
                 fetched = sh(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
                 if fetched.returncode:
                     raise RuntimeError(f"could not fetch follow-up commit {sha}: {fetched.stderr[:200]}")
+        files = extra["files_changed"]
         r = sh(["git", "-C", str(clone), "diff", "--binary", f"{base}..{head}", "--",
-                *extra["files_changed"]], timeout=300)
+                *(files if len(files) < GITHUB_PR_FILES_CAP else ["."])], timeout=300)
         if r.returncode or not r.stdout.strip():
             raise RuntimeError(f"could not produce follow-up patch for #{extra['kernel_pr']}: "
                                f"{r.stderr[:200]}")

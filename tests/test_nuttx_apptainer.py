@@ -282,6 +282,32 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(source.read_text(), "followup\n")
             self.assertEqual(diagram.read_bytes(), b"\x89PNG\r\n\x1a\n\x00primary")
 
+    def test_fix_patch_takes_whole_pr_when_github_truncated_its_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "kernel"
+            repo.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                      capture_output=True, text=True).stdout.strip()
+            git("init")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (repo / "a.c").write_text("base\n")
+            git("add", "a.c")
+            git("commit", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            (repo / "a.c").write_text("fix\n")
+            (repo / "moved.h").write_text("new header\n")
+            git("add", "a.c", "moved.h")
+            git("commit", "-m", "fix")
+            meta = {"project": "nuttx", "kernel_repo": "https://github.com/apache/nuttx",
+                    "kernel_base_commit": base, "kernel_merge_commit": git("rev-parse", "HEAD")}
+            with patch.object(validate_instance.layout, "nuttx_clones", return_value=(repo, None)):
+                meta["files_changed_by_fix"] = ["a.c"]
+                self.assertNotIn("moved.h", validate_instance.gold_patch(meta, Path(tmp)))
+                meta["files_changed_by_fix"] = ["a.c"] * validate_instance.GITHUB_PR_FILES_CAP
+                self.assertIn("moved.h", validate_instance.gold_patch(meta, Path(tmp)))
+
     def test_reconfigure_restores_overrides_lost_before_the_fix(self):
         # A stub `make olddefconfig` that, like Kconfig, drops a symbol the
         # kernel lacks and writes `n` as "is not set".
