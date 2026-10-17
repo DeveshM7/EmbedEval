@@ -424,7 +424,8 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
     pairs = [p for p in verdict.get("pairs", []) if isinstance(p, dict)
              and p.get("confidence") in ("high", "medium")]
     venv = {**env, "EMBEDEVAL_NUTTX_DATA": str(nuttx_data(cfg, node_dir)),
-            "EMBEDEVAL_INSTANCES_DIR": str(node_dir / "work" / "instances")}
+            "EMBEDEVAL_INSTANCES_DIR": str(node_dir / "work" /
+                                          f"instances-{env.get('SLURM_JOB_ID', os.getpid())}-{pr}")}
     clones = Path(venv["EMBEDEVAL_NUTTX_DATA"])
     venv.update(EMBEDEVAL_NUTTX_CLONE=str(clones / "kernel.git"),
                 EMBEDEVAL_NUTTX_APPS_CLONE=str(clones / "apps.git"))
