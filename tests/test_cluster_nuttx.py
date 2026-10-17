@@ -1,0 +1,38 @@
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path[:0] = [str(ROOT / "cluster"), str(ROOT / "scripts")]
+import config as cluster_config  # noqa: E402
+import node_worker  # noqa: E402
+
+
+class NuttxClusterTests(unittest.TestCase):
+    def test_verdict_info_accepts_on_a_high_or_medium_pair(self):
+        accept = node_worker.nuttx_verdict_info({"kind": "qemu_only", "pairs": [
+            {"kernel_pr": 5, "confidence": "high", "also_needs": [{"kernel_pr": 6}]},
+            {"kernel_pr": 7, "confidence": "low"}]})
+        self.assertEqual(accept["verdict"], "accept")
+        self.assertEqual(accept["pair"], "qemu_only: #5 high +[6]")
+        reject = node_worker.nuttx_verdict_info({"kind": "test_only", "pairs": [
+            {"kernel_pr": 7, "confidence": "low"}]})
+        self.assertEqual((reject["verdict"], reject["pair"]), ("reject", "test_only"))
+        self.assertEqual(node_worker.nuttx_verdict_info({"kind": "error", "pairs": []})["verdict"], "error")
+
+    def test_project_selects_ledger_and_data_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.yaml"
+            path.write_text("project: nuttx\nnuttx:\n  data: /d\nscratch_root: /s\n")
+            cfg = cluster_config.load(path)
+            self.assertTrue(cfg["derived"]["ledger"].endswith("ledger-nuttx.jsonl"))
+            self.assertEqual(cluster_config.env_for(cfg)["EMBEDEVAL_NUTTX_DATA"], "/d")
+            path.write_text("project: other\n")
+            with self.assertRaises(cluster_config.ConfigError):
+                cluster_config.load(path)
+        self.assertTrue(cluster_config.load()["derived"]["ledger"].endswith("/ledger.jsonl"))
+
+
+if __name__ == "__main__":
+    unittest.main()

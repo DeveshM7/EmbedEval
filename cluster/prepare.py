@@ -66,6 +66,62 @@ def script(name: str, *args: str, env: dict, logfile: Path, timeout: int = 7200)
             return 124
 
 
+def write_manifest(run: Path, name: str, cfg: dict, env: dict, source: dict, prs: list,
+                   stage: dict, notes: dict, timings: dict, missing_sdk: list, t0: float) -> None:
+    git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
+                                    text=True).stdout.strip()
+    manifest = {
+        "name": name, "prepared": datetime.now().isoformat(timespec="seconds"),
+        "project": cfg["project"], "source": source,
+        "code": {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))},
+        "config": {k: v for k, v in cfg.items() if k != "derived"},
+        "environment": env, "ledger": cfg["derived"]["ledger"],
+        "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
+                for pr in prs],
+        "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
+        "missing_sdk_images": missing_sdk,
+        "seconds": {k: round(v) for k, v in timings.items()},
+    }
+    tmp = run / "manifest.json.tmp"
+    tmp.write_text(json.dumps(manifest, indent=2) + "\n")
+    tmp.replace(run / "manifest.json")
+    log(f"done in {time.time() - t0:.0f} s -> {run / 'manifest.json'}")
+    for s, n in manifest["counts"].items():
+        print(f"    {n:>5}  {s}")
+    if manifest["missing_sdk_images"]:
+        print(f"  WARNING: SDK images could not be built: {manifest['missing_sdk_images']}")
+    print(f"\nnext: python cluster/submit.py pipeline --run {name}")
+
+
+def prepare_nuttx(args, cfg: dict, run: Path, env: dict, done: dict) -> None:
+    """A NuttX run: the unit is a nuttx-apps PR that changes testing/ostest/.
+    Each PR's record (the PR, its timeline, the changed tests) is fetched into
+    the node-local data copy, or read from the pre-warmed shared one; there is
+    no dry run, SDK image or Zephyr clone."""
+    t0 = time.time()
+    sys.path.insert(0, str(REPO / "scripts"))
+    import nuttx_candidates as nc
+    prs = list(dict.fromkeys(args.pr or nc.ostest_apps_prs()))
+    stage, notes = {}, {}
+    for pr in prs:
+        if pr in done:
+            e = done[pr]
+            stage[pr], notes[pr] = "in ledger", f"{e['outcome']} in run {e['run']} ({e['date'][:10]})"
+
+    def fetch(pr: int) -> None:
+        try:
+            nc.apps_record(pr)
+            stage[pr] = "to triage"
+        except Exception as e:              # a PR GitHub cannot serve right now
+            stage[pr], notes[pr] = "enrich failed", str(e)[:200]
+    with ThreadPoolExecutor(cfg["parallel"]["enrich"]) as pool:
+        list(pool.map(fetch, [pr for pr in prs if pr not in stage]))
+    log(f"{len(prs)} apps PRs, {sum(v == 'to triage' for v in stage.values())} to triage")
+    source = {"pr": args.pr} if args.pr else {"all_ostest": True}
+    write_manifest(run, args.name, cfg, env, source | {"redo": args.redo}, prs, stage, notes,
+                   {"records": time.time() - t0}, [], t0)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -73,6 +129,8 @@ def main() -> None:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--since", help="fetch PRs merged on or after this date (YYYY-MM-DD)")
     src.add_argument("--pr", type=int, nargs="+", help="these PRs, hard filters applied")
+    src.add_argument("--all-ostest", action="store_true",
+                     help="project nuttx: every merged apps PR that changes testing/ostest/")
     p.add_argument("--no-filter", action="store_true", help="with --pr: skip the hard filters")
     p.add_argument("--redo", action="store_true",
                    help="also take PRs the ledger has already settled in an earlier run")
@@ -85,6 +143,8 @@ def main() -> None:
         p.error("--no-filter goes with --pr")
 
     cfg = cluster_config.load_or_exit(args.config)
+    if args.all_ostest and cfg["project"] != "nuttx":
+        p.error("--all-ostest needs project: nuttx in the config")
     run = Path(cfg["derived"]["runs"]) / args.name
     if (run / "manifest.json").exists():
         sys.exit(f"{run} is already prepared; pick another --name "
@@ -92,6 +152,10 @@ def main() -> None:
     run.mkdir(parents=True, exist_ok=True)
     env = cluster_config.env_for(cfg, run)
     os.environ.update(env)              # for the modules imported below
+    if cfg["project"] == "nuttx":
+        prepare_nuttx(args, cfg, run, env,
+                      {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"])))
+        return
     logs = run / "logs" / "prepare"
     par = cfg["parallel"]
     t0 = time.time()
@@ -206,31 +270,9 @@ def main() -> None:
     timings["commits"] = time.time() - t
     log(f"commits: {len(shas)} present ({fetched})")
 
-    # 6. the manifest
-    git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
-                                    text=True).stdout.strip()
-    manifest = {
-        "name": args.name, "prepared": datetime.now().isoformat(timespec="seconds"),
-        "source": source,
-        "code": {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))},
-        "config": {k: v for k, v in cfg.items() if k != "derived"},
-        "environment": env,
-        "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
-                for pr in prs],
-        "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
-        "missing_sdk_images": [f"{sdk} (Python {py})" for py, sdk, _ in missing
-                               if not au.sdk_image(sdk, py).exists()],
-        "seconds": {k: round(v) for k, v in timings.items()},
-    }
-    tmp = run / "manifest.json.tmp"
-    tmp.write_text(json.dumps(manifest, indent=2) + "\n")
-    tmp.replace(run / "manifest.json")
-    log(f"done in {time.time() - t0:.0f} s -> {run / 'manifest.json'}")
-    for s, n in manifest["counts"].items():
-        print(f"    {n:>5}  {s}")
-    if manifest["missing_sdk_images"]:
-        print(f"  WARNING: SDK images could not be built: {manifest['missing_sdk_images']}")
-    print(f"\nnext: python cluster/submit.py pipeline --run {args.name}")
+    write_manifest(run, args.name, cfg, env, source, prs, stage, notes, timings,
+                   [f"{sdk} (Python {py})" for py, sdk, _ in missing
+                    if not au.sdk_image(sdk, py).exists()], t0)
 
 
 if __name__ == "__main__":

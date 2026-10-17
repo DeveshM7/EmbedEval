@@ -76,6 +76,8 @@ def load(path: str | Path | None = None) -> dict:
     elif path != DEFAULT:
         raise ConfigError(f"no config file {path}")
     cfg = _expand(_overlay(base, user))
+    if cfg["project"] not in ("zephyr", "nuttx"):
+        raise ConfigError(f"project must be zephyr or nuttx, not {cfg['project']!r}")
     root = Path(cfg["scratch_root"])
     p = cfg["paths"]
     shared = Path(p["shared"]) if p["shared"] else root / "shared"
@@ -86,7 +88,8 @@ def load(path: str | Path | None = None) -> dict:
         "runs": str(root / "runs"),
         "zephyr_clone": p["zephyr_clone"] or str(shared / "zephyr.git"),
         "vllm_cache": p["vllm_cache"] or str(shared / "vllm-cache"),
-        "ledger": str(shared / "ledger.jsonl"),
+        "ledger": str(shared / ("ledger.jsonl" if cfg["project"] == "zephyr"
+                                else f"ledger-{cfg['project']}.jsonl")),
     }
     return cfg
 
@@ -99,6 +102,8 @@ def env_for(cfg: dict, run_dir: Path | None = None) -> dict:
            "EMBEDEVAL_ZEPHYR_CLONE": d["zephyr_clone"],
            "EMBEDEVAL_MODELS": p["models"],
            "EMBEDEVAL_VLLM_IMAGE": p["vllm_image"]}
+    if cfg["project"] == "nuttx" and cfg["nuttx"]["data"]:
+        env["EMBEDEVAL_NUTTX_DATA"] = cfg["nuttx"]["data"]
     if run_dir is not None:
         env["EMBEDEVAL_RUN_DIR"] = str(run_dir)
     return env

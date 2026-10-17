@@ -86,6 +86,8 @@ def main() -> None:
                  f"slurm.time_limit {s['time_limit']}")
 
     triage_left, validate_left = status.triage_todo(run), status.validate_todo(run)
+    if cfg["project"] == "nuttx" and not cfg["nuttx"]["validate"]:
+        validate_left = []
     if not triage_left and not validate_left:
         print(f"nothing left to do in {run.name}: every PR has an outcome. "
               f"Report: python cluster/report.py --run {run.name}")

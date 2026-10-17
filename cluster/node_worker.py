@@ -72,7 +72,7 @@ def kill_group(pgid: int, grace: int = 20) -> None:
             time.sleep(1)
 
 
-def step(cmd: list[str], logfile: Path, minutes: float, env: dict) -> int:
+def step(cmd: list[str], logfile: Path, minutes: float, env: dict, cwd: Path = REPO) -> int:
     """Run one step in its own process group; 124 if it hit `minutes`."""
     if _stopping.is_set():
         return 143
@@ -80,7 +80,7 @@ def step(cmd: list[str], logfile: Path, minutes: float, env: dict) -> int:
     with open(logfile, "a") as fh:
         fh.write(f"\n$ {' '.join(cmd)}   (cap {minutes:.0f} min)\n")
         fh.flush()
-        p = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=fh, stderr=subprocess.STDOUT,
+        p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=fh, stderr=subprocess.STDOUT,
                              start_new_session=True)
         with _lock:
             _children.add(p.pid)
@@ -184,6 +184,59 @@ def server_ready(p: subprocess.Popen, minutes: float) -> bool:
     return False
 
 
+def nuttx_data(cfg: dict, node_dir: Path) -> Path:
+    """This node's copy of the NuttX data (PR records, bare clones): fetches
+    and caches are written here, never into the shared, pre-warmed copy."""
+    own = node_dir / "work" / "nuttx-data"
+    if not (own / ".complete").exists():
+        shutil.rmtree(own, ignore_errors=True)
+        own.mkdir(parents=True)
+        subprocess.run(["cp", "-a", f"{cfg['nuttx']['data']}/.", str(own)], check=True)
+        (own / ".complete").touch()
+    return own
+
+
+def nuttx_triage_step(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, cap: float) -> int:
+    """Triage one apps PR with the chosen version; its verdict is copied to
+    <run>/triage/<pr>.json."""
+    n = cfg["nuttx"]
+    code = Path(n["individual"] or REPO)
+    out = run / "triage_runs" / str(pr)
+    shutil.rmtree(out, ignore_errors=True)
+    nenv = {**env, "EMBEDEVAL_NUTTX_DATA": str(nuttx_data(cfg, node_dir)),
+            "EMBEDEVAL_NUTTX_DATA_RO": n["data"], "EMBEDEVAL_NUTTX_RUNS": str(out),
+            "EMBEDEVAL_CONFIG_WORK": str(node_dir / "work" / "config")}
+    (node_dir / "work" / "config").mkdir(parents=True, exist_ok=True)
+    cmd = [PY, "scripts/triage_nuttx_prs.py", "apps", "--profile", cfg["model"]["profile"],
+           "--apps-pr", str(pr), "--parallel", "1", "--max-tool-calls", str(n["max_tool_calls"]),
+           "--max-minutes", str(min(n["max_minutes"], cap))]
+    if n["followup_review"]:
+        cmd.append("--followup-review")
+    rc = step(cmd, LOGS / f"triage-{pr}.log", cap, nenv, cwd=code)
+    verdicts = list(out.glob(f"*/apps-{pr}.json"))
+    if verdicts:
+        (run / "triage").mkdir(exist_ok=True)
+        shutil.copy(verdicts[0], run / "triage" / f"{pr}.json")
+        trace = verdicts[0].with_name(f"apps-{pr}.trace.json")
+        if trace.exists():
+            shutil.copy(trace, run / "triage" / f"{pr}.trace.json")
+    return rc
+
+
+def nuttx_verdict_info(v: dict) -> dict:
+    """status.json fields of an apps-PR verdict: accept when a pair is high
+    or medium (it goes on to validation), reject otherwise."""
+    pairs = [p for p in v.get("pairs", []) if isinstance(p, dict)]
+    sent = [p for p in pairs if p.get("confidence") in ("high", "medium")]
+    verdict = ("error" if v.get("kind") in ("error", "budget_exhausted")
+               else "accept" if sent else "reject")
+    pair = "; ".join(f"#{p['kernel_pr']} {p['confidence']}"
+                     + (f" +{[e.get('kernel_pr') for e in p.get('also_needs') or []]}"
+                        if p.get("also_needs") else "") for p in sent) or None
+    return {"verdict": verdict, "pair": f"{v.get('kind')}: {pair}" if pair else v.get("kind"),
+            "confidence": sent[0]["confidence"] if sent else None}
+
+
 def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
     mine = my_share(status.triage_todo(run))
     log(f"triage: {len(mine)} PRs {mine}")
@@ -210,18 +263,24 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
                 return                                    # stays to do: a resubmit runs it
             cap = min(caps["triage_pr"], left)
             start = time.time()
-            rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "run", "--profile",
-                       profile, "--pr", str(pr), "--parallel", "1"],
-                      LOGS / f"triage-{pr}.log", cap, env)
+            if cfg["project"] == "nuttx":
+                rc = nuttx_triage_step(cfg, run, pr, env, node_dir, cap)
+            else:
+                rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "run", "--profile",
+                           profile, "--pr", str(pr), "--parallel", "1"],
+                          LOGS / f"triage-{pr}.log", cap, env)
             if rc == 143:
                 return
             minutes = round((time.time() - start) / 60, 1)
             f = run / "triage" / f"{pr}.json"
             if f.exists() and f.stat().st_mtime >= start:
                 v = json.loads(f.read_text())
-                pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
-                info = {"state": "done", "verdict": v.get("verdict"), "pair": pair,
-                        "confidence": v.get("confidence"), "minutes": minutes, "node": N}
+                if cfg["project"] == "nuttx":
+                    info = {"state": "done", **nuttx_verdict_info(v), "minutes": minutes, "node": N}
+                else:
+                    pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
+                    info = {"state": "done", "verdict": v.get("verdict"), "pair": pair,
+                            "confidence": v.get("confidence"), "minutes": minutes, "node": N}
             elif rc == 124:
                 info = {"state": "cap", "minutes": minutes, "node": N,
                         "note": f"stopped at the {cap:.0f}-min cap"}
@@ -270,6 +329,9 @@ def sweep(work: Path) -> None:
 
 
 def validate(cfg: dict, run: Path, env: dict) -> None:
+    if cfg["project"] == "nuttx" and not cfg["nuttx"]["validate"]:
+        log("validation: off for this run (nuttx.validate)")
+        return
     mine = my_share(status.validate_todo(run))
     log(f"validation: {len(mine)} PRs {mine}")
     if not mine:

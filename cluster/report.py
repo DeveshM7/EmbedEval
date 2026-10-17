@@ -111,7 +111,7 @@ def main() -> None:
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
     print(f"  -> {run / 'report.md'}")
     m = status.manifest(run)
-    book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
+    book = Path(m.get("ledger") or Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl")
     n = ledger.record(book, rep["run"], m["code"]["commit"], rep["generated"], rep["rows"])
     print(f"  ledger: {n} new settled outcomes -> {book}")
     if args.scorecard and (run / "triage").exists():
