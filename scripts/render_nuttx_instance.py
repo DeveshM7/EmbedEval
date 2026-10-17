@@ -53,6 +53,16 @@ def main_hunk_banners(main_lines: list[str], patch: str) -> list[str]:
             hunk = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
             if hunk:
                 new = int(hunk[1])
+            elif new and line.startswith("-") and not line.startswith("---"):
+                # a removed line (a guard dropped): look from the line that follows it
+                for after in main_lines[new - 1:new + 7]:
+                    if after.lstrip().startswith("#"):
+                        break
+                    match = BANNER_PRINTF.search(after)
+                    if match:
+                        if f"user_main: {match[1]}" not in banners:
+                            banners.append(f"user_main: {match[1]}")
+                        break
             elif new and line.startswith("+") and not line.startswith("+++"):
                 for after in main_lines[new:new + 8]:
                     if after.lstrip().startswith("#"):
@@ -63,7 +73,7 @@ def main_hunk_banners(main_lines: list[str], patch: str) -> list[str]:
                             banners.append(f"user_main: {match[1]}")
                         break
                 new += 1
-            elif new and not line.startswith("-"):
+            elif new:
                 new += 1
     return banners
 
