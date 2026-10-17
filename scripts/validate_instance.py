@@ -399,6 +399,9 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
             if rc != 0:
                 return invalid(f"the runtime test did not build (rc={rc})", error_lines(out))
             rc = run_tests("before")
+            if any("run_tests: changed test did not run:" in line
+                   for line in report["before"]["summary"]):
+                return invalid("changed test did not run before the fix")
             if rc != 1:
                 return invalid({0: "tests PASSED before the fix -- the instance does not "
                                    "isolate the bug"}.get(rc, f"expected a test failure (rc=1), "

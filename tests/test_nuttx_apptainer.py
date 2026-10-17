@@ -159,6 +159,30 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(report["reason"],
                              "compile test built before the fix -- the instance does not isolate the bug")
 
+    def test_runtime_test_absent_before_fix_is_nonisolating(self):
+        meta = {"project": "nuttx", "fail_type": "runtime_assert", "build_command": "make"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "image.sif"
+            image.touch()
+            steps = [subprocess.CompletedProcess([], 0, "", ""),
+                     subprocess.CompletedProcess([], 1,
+                         "ostest_main: Exiting with status 0\n"
+                         "run_tests: changed test did not run: 'user_main: wqueue test'\n", "")]
+            with patch.object(validate_instance.instances, "load_metadata", return_value=meta), \
+                    patch.object(validate_instance.instances, "instance_dir", return_value=root), \
+                    patch.object(apptainer_util, "instance_image", return_value=image), \
+                    patch.object(apptainer_util, "recipe_fingerprint", return_value="test"), \
+                    patch.object(apptainer_util, "path", side_effect=lambda *p: root.joinpath(*p)), \
+                    patch.object(apptainer_util, "exec_args", return_value=[]), \
+                    patch.object(apptainer_util, "remove"), \
+                    patch.object(validate_instance.subprocess, "run", side_effect=steps):
+                self.assertFalse(validate_instance.validate_nuttx_apptainer(
+                    "nuttx__nuttx-1", None, 30, False))
+            report = json.loads((root / "validation.json").read_text())
+            self.assertEqual(report["before"]["rc"], 1)
+            self.assertEqual(report["reason"], "changed test did not run before the fix")
+
     def test_kernel_fix_patches_apply_primary_then_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "kernel"
