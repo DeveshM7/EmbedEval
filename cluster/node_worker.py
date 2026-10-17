@@ -482,7 +482,6 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                                 f"INVALID on ARM64 with a pre-{VFORK_FIXED} kernel (vfork SIGBUS "
                                 f"risk): {reason or rc}"))
             elif reason in ("tests PASSED before the fix -- the instance does not isolate the bug",
-                            "compile test built before the fix -- the instance does not isolate the bug",
                             "changed test did not run before the fix",
                             "tests still fail with the fix"):
                 results.append((kernel, "INVALID", reason))

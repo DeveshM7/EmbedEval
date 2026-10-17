@@ -324,6 +324,18 @@ def compile_diagnostic(meta: dict, output: str):
     return None
 
 
+def test_build_error(meta: dict, output: str):
+    """A compile or link error located in one of the changed test sources, or None."""
+    for path in meta.get("files_changed_by_test_patch", []):
+        if path.endswith(".c"):
+            diagnostic = re.search(
+                rf"(?:^|[\s/]){re.escape(Path(path).name)}:\d+(?::\d+)?:\s*(?:\([^\n)]*\):\s*)?"
+                r"(?:(?:fatal )?error:|undefined reference to)[^\n]*", output)
+            if diagnostic:
+                return diagnostic
+    return None
+
+
 NUTTX_RUN_TESTS_MEANING = {0: "passed", 1: "failed", 2: "timed out"}
 
 
@@ -341,11 +353,13 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
     "apptainer"). The steps of the Docker validator below, in one writable
     overlay on the image, and a validation.json report as for Zephyr:
 
-        1. build                -> runtime_assert: must build, run_tests must FAIL (exit 1)
-                                   compile_error: must fail, naming missing_api in
-                                   compile_test_source
+        1. build                -> fails with an error in a changed test source
+                                   (compile_error: naming missing_api in
+                                   compile_test_source, if it can), or builds and
+                                   run_tests must FAIL (exit 1; runtime_other: or hang)
         2. apply the kernel fix (kernel_base_commit..kernel_merge_commit,
-           files_changed_by_fix only); make clean if clean_after_patch
+           files_changed_by_fix only), re-apply config_overrides; make clean if
+           clean_after_patch
         3. build, run_tests     -> must PASS (exit 0)
     """
     meta = instances.load_metadata(instance_id)
@@ -408,19 +422,19 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
         print("\n  Step 1: expecting the tests to FAIL at the base commit")
         rc, out, secs = step("build", build_cmd, "build-before.log", 900)
         report["before"] = {"build_rc": rc, "build_seconds": round(secs)}
-        if compile_case:
-            if rc == 0:
-                return invalid("compile test built before the fix -- the instance does not "
-                               "isolate the bug")
-            diagnostic = compile_diagnostic(meta, out)
+        # The predicted fail_type only picks the expected diagnostic; what the
+        # pre-fix build does decides: a build error in a changed test source is a
+        # compile failure, and a clean build is judged by its ostest run.
+        if rc != 0:
+            diagnostic = (compile_case and compile_diagnostic(meta, out)) or \
+                test_build_error(meta, out)
             if not diagnostic:
                 return invalid("expected a compile or link error in the changed test source "
-                               "naming the missing API", error_lines(out))
+                               "naming the missing API" if compile_case else
+                               f"the runtime test did not build (rc={rc})", error_lines(out))
             report["before"]["diagnostic"] = diagnostic.group(0).strip()
             print(f"  ok: expected test-side build error: {report['before']['diagnostic']}")
         else:
-            if rc != 0:
-                return invalid(f"the runtime test did not build (rc={rc})", error_lines(out))
             rc = run_tests("before")
             if any("run_tests: changed test did not run:" in line
                    for line in report["before"]["summary"]):
