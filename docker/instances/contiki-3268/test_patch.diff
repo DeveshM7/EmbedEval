@@ -1,1 +1,264 @@
+diff --git a/tests/08-native-runs/28-coap-parse/test-coap-parse.c b/tests/08-native-runs/28-coap-parse/test-coap-parse.c
+index 5445e63ae..5f897bff8 100644
+--- a/tests/08-native-runs/28-coap-parse/test-coap-parse.c
++++ b/tests/08-native-runs/28-coap-parse/test-coap-parse.c
+@@ -58,18 +58,18 @@ static uint8_t buffer[COAP_MAX_PACKET_SIZE + 64];
+ static uint16_t payload_start;
 
+ /*
+- * Builds a minimal CoAP POST request carrying payload_len payload bytes,
+- * and places a canary directly after the message. Returns the message
+- * length.
++ * Builds a minimal CoAP message with the given code, carrying payload_len
++ * payload bytes, and places a canary directly after it. Returns the
++ * message length.
+  */
+ static uint16_t
+-build_message(size_t payload_len)
++build_coded_message(uint8_t code, size_t payload_len)
+ {
+   uint16_t len = 0;
+   size_t i;
+
+   buffer[len++] = (1 << 6);          /* Version 1, type CON, token length 0. */
+-  buffer[len++] = COAP_POST;         /* Code. */
++  buffer[len++] = code;
+   buffer[len++] = 0x12;              /* Message ID, high byte. */
+   buffer[len++] = 0x34;              /* Message ID, low byte. */
+   buffer[len++] = 0xFF;              /* Payload marker. */
+@@ -84,6 +84,12 @@ build_message(size_t payload_len)
+   return len;
+ }
+ /*---------------------------------------------------------------------------*/
++static uint16_t
++build_message(size_t payload_len)
++{
++  return build_coded_message(COAP_POST, payload_len);
++}
++/*---------------------------------------------------------------------------*/
+ /* The parser must report the payload without writing past the message. */
+ UNIT_TEST_REGISTER(test_parse_payload_keeps_canary,
+                    "coap_parse_message() does not write past the message");
+@@ -104,26 +110,39 @@ UNIT_TEST(test_parse_payload_keeps_canary)
+   UNIT_TEST_END();
+ }
+ /*---------------------------------------------------------------------------*/
+-/* An oversized payload is truncated, and the message is left intact. */
+-UNIT_TEST_REGISTER(test_parse_oversized_payload_is_truncated,
+-                   "an oversized payload is truncated without being modified");
+-UNIT_TEST(test_parse_oversized_payload_is_truncated)
++/* An oversized payload is rejected rather than truncated. */
++UNIT_TEST_REGISTER(test_parse_oversized_payload_is_rejected,
++                   "an oversized payload is rejected rather than truncated");
++UNIT_TEST(test_parse_oversized_payload_is_rejected)
+ {
+   coap_message_t message;
+   uint16_t len;
+-  uint8_t after_truncation;
+
+   UNIT_TEST_BEGIN();
+
+   len = build_message(COAP_MAX_CHUNK_SIZE + 8);
+-  /* Kept before parsing, since the parser is given this very buffer. */
+-  after_truncation = buffer[payload_start + COAP_MAX_CHUNK_SIZE];
++
++  UNIT_TEST_ASSERT(coap_parse_message(&message, buffer, len) ==
++                   REQUEST_ENTITY_TOO_LARGE_4_13);
++  UNIT_TEST_ASSERT(buffer[len] == CANARY);
++
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* An oversized response is truncated rather than refused. */
++UNIT_TEST_REGISTER(test_parse_oversized_response_is_truncated,
++                   "an oversized response is truncated rather than refused");
++UNIT_TEST(test_parse_oversized_response_is_truncated)
++{
++  coap_message_t message;
++  uint16_t len;
++
++  UNIT_TEST_BEGIN();
++
++  len = build_coded_message(CONTENT_2_05, COAP_MAX_CHUNK_SIZE + 8);
+
+   UNIT_TEST_ASSERT(coap_parse_message(&message, buffer, len) == NO_ERROR);
+   UNIT_TEST_ASSERT(message.payload_len == COAP_MAX_CHUNK_SIZE);
+-  /* The byte after the truncation point belongs to the message, and used
+-     to be overwritten with a null terminator. */
+-  UNIT_TEST_ASSERT(message.payload[COAP_MAX_CHUNK_SIZE] == after_truncation);
+   UNIT_TEST_ASSERT(buffer[len] == CANARY);
+
+   UNIT_TEST_END();
+@@ -179,12 +198,14 @@ PROCESS_THREAD(run_tests, ev, data)
+   printf("\nRunning CoAP parser unit tests\n");
+
+   UNIT_TEST_RUN(test_parse_payload_keeps_canary);
+-  UNIT_TEST_RUN(test_parse_oversized_payload_is_truncated);
++  UNIT_TEST_RUN(test_parse_oversized_payload_is_rejected);
++  UNIT_TEST_RUN(test_parse_oversized_response_is_truncated);
+   UNIT_TEST_RUN(test_parse_payload_with_null_bytes);
+   UNIT_TEST_RUN(test_parse_rejects_empty_payload);
+
+   if(!UNIT_TEST_PASSED(test_parse_payload_keeps_canary) ||
+-     !UNIT_TEST_PASSED(test_parse_oversized_payload_is_truncated) ||
++     !UNIT_TEST_PASSED(test_parse_oversized_payload_is_rejected) ||
++     !UNIT_TEST_PASSED(test_parse_oversized_response_is_truncated) ||
+      !UNIT_TEST_PASSED(test_parse_payload_with_null_bytes) ||
+      !UNIT_TEST_PASSED(test_parse_rejects_empty_payload)) {
+     printf("=check-me= FAILED\n");
+diff --git a/tests/08-native-runs/28-coap-parse/embedeval/build.sh b/tests/08-native-runs/28-coap-parse/embedeval/build.sh
+new file mode 100644
+--- /dev/null
++++ b/tests/08-native-runs/28-coap-parse/embedeval/build.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++set -euo pipefail
++mkdir -p build
++cc -std=c99 -O2 -g -ffunction-sections -fdata-sections \
++  -Itests/08-native-runs/28-coap-parse/embedeval -Ios \
++  -Ios/services/unit-test -Ios/net/app-layer/coap \
++  tests/08-native-runs/28-coap-parse/embedeval/main.c \
++  os/net/app-layer/coap/coap.c os/net/app-layer/coap/coap-engine.c \
++  os/services/unit-test/unit-test.c os/lib/list.c os/lib/sfc32-prng.c \
++  -Wl,--gc-sections -o build/coap-regression
+diff --git a/tests/08-native-runs/28-coap-parse/embedeval/contiki-conf.h b/tests/08-native-runs/28-coap-parse/embedeval/contiki-conf.h
+new file mode 100644
+--- /dev/null
++++ b/tests/08-native-runs/28-coap-parse/embedeval/contiki-conf.h
+@@ -0,0 +1,11 @@
++#ifndef CONTIKI_CONF_H_
++#define CONTIKI_CONF_H_
++#include <stdint.h>
++typedef unsigned int uip_stats_t;
++#define CLOCK_CONF_SECOND 1000
++#define UIP_CONF_BYTE_ORDER UIP_LITTLE_ENDIAN
++#define LOG_CONF_ENABLED 0
++#define LOG_CONF_LEVEL_COAP 0
++#define COAP_CONF_WELL_KNOWN_RESOURCE_ENABLED 0
++#define NETSTACK_CONF_WITH_IPV6 1
++#endif
+diff --git a/tests/08-native-runs/28-coap-parse/embedeval/main.c b/tests/08-native-runs/28-coap-parse/embedeval/main.c
+new file mode 100644
+--- /dev/null
++++ b/tests/08-native-runs/28-coap-parse/embedeval/main.c
+@@ -0,0 +1,110 @@
++/* Host fixture: compile the upstream parser tests and real CoAP engine.
++ * Only time, transaction allocation, transport, and observation are fixtures.
++ * No parser, serializer, or receive-path logic is substituted. */
++#include "../test-coap-parse.c"
++#include "coap-engine.h"
++#include "coap-transactions.h"
++#include "coap-observe.h"
++#include <stdlib.h>
++
++static uint8_t sent[COAP_MAX_PACKET_SIZE + 64];
++static uint16_t sent_len;
++static unsigned handler_calls;
++static coap_transaction_t transaction;
++clock_time_t clock_time(void) { return 0; }
++void coap_transport_init(void) { }
++void coap_timer_set(coap_timer_t *timer, uint64_t time) { (void)timer; (void)time; abort(); }
++int coap_sendto(const coap_endpoint_t *ep, const uint8_t *data, uint16_t len) {
++  (void)ep;
++  if(len > sizeof(sent)) abort();
++  memcpy(sent, data, len); sent_len = len; return len;
++}
++coap_transaction_t *coap_new_transaction(uint16_t mid, const coap_endpoint_t *ep) {
++  memset(&transaction, 0, sizeof(transaction));
++  transaction.mid = mid; transaction.endpoint = *ep; return &transaction;
++}
++void coap_send_transaction(coap_transaction_t *t) {
++  coap_sendto(&t->endpoint, t->message, t->message_len);
++}
++void coap_clear_transaction(coap_transaction_t *t) { (void)t; }
++coap_transaction_t *coap_get_transaction_by_mid(uint16_t mid) { (void)mid; return NULL; }
++void coap_observe_handler(const coap_resource_t *r, coap_message_t *q, coap_message_t *s) {
++  (void)r; (void)q; (void)s; /* No Observe option is used by this suite. */
++}
++int coap_remove_observer_by_mid(const coap_endpoint_t *ep, uint16_t mid) {
++  (void)ep; (void)mid; abort();
++}
++static coap_handler_status_t handle(coap_message_t *q, coap_message_t *s,
++                                    uint8_t *b, uint16_t n, int32_t *o) {
++  (void)q; (void)b; (void)n; (void)o;
++  handler_calls++; coap_set_status_code(s, CHANGED_2_04);
++  return COAP_HANDLER_STATUS_PROCESSED;
++}
++COAP_HANDLER(handler, handle);
++
++static int exchange(unsigned code, unsigned type, unsigned len, int oversized) {
++  coap_endpoint_t ep = {0};
++  coap_message_t reply;
++  uint8_t wire[COAP_MAX_PACKET_SIZE + 64];
++  uint32_t size = 0;
++  unsigned i;
++  wire[0] = 0x42 | (type << 4); wire[1] = code;
++  wire[2] = 0x12; wire[3] = 0x34; wire[4] = 0xa5; wire[5] = 0x5a;
++  wire[6] = 0xff;
++  for(i = 0; i < len; i++) wire[7+i] = 'a';
++  sent_len = 0; handler_calls = 0;
++  coap_receive(&ep, wire, 7+len);
++  if(!sent_len || coap_parse_message(&reply, sent, sent_len) != NO_ERROR) return 0;
++  if(reply.token_len != 2 || reply.token[0] != 0xa5 || reply.token[1] != 0x5a) return 0;
++  if(type == COAP_TYPE_CON && (reply.type != COAP_TYPE_ACK || reply.mid != 0x1234)) return 0;
++  if(type == COAP_TYPE_NON && reply.type != COAP_TYPE_NON) return 0;
++  if(oversized) return handler_calls == 0 && reply.code == REQUEST_ENTITY_TOO_LARGE_4_13
++    && coap_get_header_size1(&reply, &size) && size == COAP_MAX_CHUNK_SIZE;
++  return handler_calls == 1 && reply.code == CHANGED_2_04 && !coap_get_header_size1(&reply, &size);
++}
++static int engine_oversized_requests(void) {
++  unsigned code, type;
++  for(code = COAP_GET; code <= COAP_DELETE; code++)
++    for(type = COAP_TYPE_CON; type <= COAP_TYPE_NON; type++)
++      if(!exchange(code, type, COAP_MAX_CHUNK_SIZE+8, 1)) return 0;
++  return 1;
++}
++static int engine_limit_requests(void) {
++  return exchange(COAP_POST, COAP_TYPE_CON, COAP_MAX_CHUNK_SIZE, 0)
++    && exchange(COAP_POST, COAP_TYPE_NON, COAP_MAX_CHUNK_SIZE, 0);
++}
++static int engine_bad_request(void) {
++  coap_endpoint_t ep = {0}; coap_message_t reply; uint32_t size;
++  uint8_t wire[COAP_MAX_PACKET_SIZE + 64] = {0x40, COAP_POST, 0x12, 0x34, 0xff};
++  sent_len = 0; handler_calls = 0;
++  coap_receive(&ep, wire, 5);
++  return sent_len && coap_parse_message(&reply, sent, sent_len) == NO_ERROR
++    && reply.code == BAD_REQUEST_4_00 && !handler_calls
++    && !coap_get_header_size1(&reply, &size);
++}
++#define UPSTREAM(name) do { PT_INIT(&unit_test_pt); \
++  unit_test_function_##name(&unit_test_##name); \
++  printf("%s %s\n", #name, unit_test_##name.passed ? "PASS" : "FAIL"); \
++  failures += !unit_test_##name.passed; } while(0)
++#define ENGINE(name) do { int ok = name(); \
++  printf("%s %s\n", #name, ok ? "PASS" : "FAIL"); failures += !ok; } while(0)
++int main(int argc, char **argv) {
++  int failures = 0;
++  int regression = argc == 1 || strcmp(argv[1], "regression") == 0;
++  int control = argc == 1 || strcmp(argv[1], "control") == 0;
++  if(!regression && !control) return 2;
++  coap_add_handler(&handler);
++  if(regression) {
++    UPSTREAM(test_parse_oversized_payload_is_rejected);
++    ENGINE(engine_oversized_requests);
++  }
++  if(control) {
++    UPSTREAM(test_parse_payload_keeps_canary);
++    UPSTREAM(test_parse_oversized_response_is_truncated);
++    UPSTREAM(test_parse_payload_with_null_bytes);
++    UPSTREAM(test_parse_rejects_empty_payload);
++    ENGINE(engine_limit_requests);
++    ENGINE(engine_bad_request);
++  }
++  return failures ? 1 : 0;
++}
+diff --git a/tests/08-native-runs/28-coap-parse/embedeval/rtimer-arch.h b/tests/08-native-runs/28-coap-parse/embedeval/rtimer-arch.h
+new file mode 100644
+--- /dev/null
++++ b/tests/08-native-runs/28-coap-parse/embedeval/rtimer-arch.h
+@@ -0,0 +1,5 @@
++#ifndef RTIMER_ARCH_H_
++#define RTIMER_ARCH_H_
++#define RTIMER_ARCH_SECOND 1000000
++rtimer_clock_t rtimer_arch_now(void);
++#endif
