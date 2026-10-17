@@ -252,6 +252,8 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
     if not mine:
         return
     caps, profile = cfg["caps"], cfg["model"]["profile"]
+    if cfg["project"] == "nuttx":
+        time.sleep(N * 6)   # about ten model starts per minute across Spark nodes
     t0 = time.time()
     server = start_server(cfg, env, node_dir)
     try:
