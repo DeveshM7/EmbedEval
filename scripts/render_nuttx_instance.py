@@ -59,7 +59,7 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
                 name == "ostest_main.c":
             continue
         for func in ENTRY_DEF.findall((ostest_dir / name).read_text()):
-            call = re.compile(rf"\b{re.escape(func)}\s*\(\s*\)\s*;")
+            call = re.compile(rf"\b{re.escape(func)}\s*\(\s*\)\s*(?:;|[!=<>]=?|&&|\|\||\))")
             called, found = False, []
             for i, line in enumerate(main_lines):
                 if not call.search(line):

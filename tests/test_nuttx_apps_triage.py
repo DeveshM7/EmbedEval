@@ -514,6 +514,26 @@ class AppsConversationTests(unittest.TestCase):
 
 
 class GeneratorTests(unittest.TestCase):
+    def test_generator_includes_changed_registration_for_selected_test(self):
+        record = apps_record()
+        record["apps"]["files"] += [
+            {"filename": f"testing/ostest/{name}", "status": "modified"}
+            for name in ("ostest_main.c", "ostest.h", "Makefile", "CMakeLists.txt", "other.c")]
+        record["test_contents"].update({
+            "testing/ostest/example.c": "void example_test(void)\n{\n}\n",
+            "testing/ostest/ostest_main.c": "example_test();\n",
+            "testing/ostest/ostest.h": "void example_test(void);\n",
+            "testing/ostest/Makefile": "CSRCS += example.c\n",
+            "testing/ostest/CMakeLists.txt": "list(APPEND SRCS example.c)\n",
+            "testing/ostest/other.c": "void other_test(void) {}\n",
+        })
+        reply = {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}
+        with patch.object(candidates, "kernel_record", return_value=kernel_pr()):
+            paths = generator.metadata(record, 11, reply)["files_changed_by_test_patch"]
+        self.assertEqual(paths, ["testing/ostest/example.c", "testing/ostest/ostest_main.c",
+                                 "testing/ostest/ostest.h", "testing/ostest/Makefile",
+                                 "testing/ostest/CMakeLists.txt"])
+
     def test_kernel_pr_found_by_search_is_enriched_on_demand(self):
         record = apps_record()   # an apps-only record has no kernel_candidates
         reply = {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}

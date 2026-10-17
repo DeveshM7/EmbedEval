@@ -196,6 +196,16 @@ class SuppliedPairTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cond_test"):
                 render.ostest_banners(ostest, ["testing/ostest/cond.c"])
 
+    def test_banner_before_test_called_in_condition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ostest = Path(tmp)
+            (ostest / "ostest_main.c").write_text(
+                '  printf("\\nuser_main: chroot test\\n");\n'
+                '  if (chroot_test() != 0)\n    return -1;\n')
+            (ostest / "chroot.c").write_text("int chroot_test(void)\n{\n  return 0;\n}\n")
+            self.assertEqual(render.ostest_banners(ostest, ["testing/ostest/chroot.c"]),
+                             ["user_main: chroot test"])
+
     def test_empty_tag_suffix_gives_the_standard_image_tag(self):
         meta = {
             "instance_id": "nuttx__nuttx-11", "project": "nuttx",

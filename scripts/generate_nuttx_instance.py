@@ -28,12 +28,35 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import nuttx_candidates as candidates
-from render_nuttx_instance import DEFAULT_OUT, ostest_banners, render, render_runner
+from render_nuttx_instance import DEFAULT_OUT, ENTRY_DEF, ostest_banners, render, render_runner
 
 
 ROOT = Path(__file__).resolve().parent.parent
 ENRICHED = ROOT / "candidates" / "nuttx" / "enriched"
 APPS_CLONE = ROOT / "candidates" / "nuttx" / "apps.git"
+
+
+def test_patch_paths(record: dict, selected: list[str]) -> list[str]:
+    """Include changed build and call sites for the selected test sources."""
+    contents = record.get("test_contents") or {}
+    sources = [p for p in selected if p.endswith(".c") and not p.endswith("/ostest_main.c")]
+    functions = {name for p in sources for name in ENTRY_DEF.findall(contents.get(p, ""))}
+    names = {Path(p).name for p in sources}
+    paths = list(selected)
+    for entry in record["apps"]["files"]:
+        path = entry["filename"]
+        if path in paths:
+            continue
+        text = contents.get(path, "")
+        if path in ("testing/ostest/ostest_main.c", "testing/ostest/ostest.h"):
+            relevant = any(re.search(rf"\b{re.escape(name)}\s*\(", text) for name in functions)
+        elif path in ("testing/ostest/Makefile", "testing/ostest/CMakeLists.txt"):
+            relevant = any(name in text for name in names)
+        else:
+            relevant = False
+        if relevant:
+            paths.append(path)
+    return paths
 
 
 def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
@@ -64,6 +87,7 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
     if not test_paths or not set(test_paths) <= apps_changed or \
             any(not p.startswith("testing/ostest/") for p in test_paths):
         raise ValueError("test_paths must be changed ostest files in the apps PR")
+    test_paths = test_patch_paths(record, test_paths)
     if not fix_paths or not set(fix_paths) <= kernel_changed:
         raise ValueError("fix_paths must be changed files in the kernel PR")
     for name in ("problem_statement", "fail_to_pass"):
