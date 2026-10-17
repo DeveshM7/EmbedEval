@@ -162,9 +162,10 @@ class SuppliedPairTests(unittest.TestCase):
         self.assertEqual(generator.metadata(record, 11, verdict)["fail_to_pass"],
                          ["example_test"])
 
+        # The model's doubt does not block generation: validation decides.
         verdict["readiness"] = "needs_reviewed_recipe"
-        with self.assertRaisesRegex(ValueError, "readiness"):
-            generator.metadata(record, 11, verdict)
+        self.assertEqual(generator.metadata(record, 11, verdict)["fail_to_pass"],
+                         ["example_test"])
 
     def test_banners_come_from_ostest_main_calls_of_changed_tests(self):
         with tempfile.TemporaryDirectory() as tmp:

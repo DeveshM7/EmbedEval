@@ -186,6 +186,32 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(report["before"]["rc"], 1)
             self.assertEqual(report["reason"], "changed test did not run before the fix")
 
+    def test_hang_before_fix_counts_as_a_failure_only_for_runtime_other(self):
+        for fail_type, reason in (("runtime_other", "the primary fix does not apply"),
+                                  ("runtime_assert", "expected a test failure (rc=1), got rc=2")):
+            meta = {"project": "nuttx", "fail_type": fail_type, "build_command": "make"}
+            with self.subTest(fail_type), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                image = root / "image.sif"
+                image.touch()
+                steps = [subprocess.CompletedProcess([], 0, "", ""),
+                         subprocess.CompletedProcess([], 2, "run_tests: result=2 (timed out)\n", ""),
+                         subprocess.CompletedProcess([], 1, "error: patch failed\n", "")]
+                with patch.object(validate_instance.instances, "load_metadata", return_value=meta), \
+                        patch.object(validate_instance.instances, "instance_dir", return_value=root), \
+                        patch.object(validate_instance, "nuttx_fix_patches",
+                                     return_value=[("primary", "diff\n")]), \
+                        patch.object(apptainer_util, "instance_image", return_value=image), \
+                        patch.object(apptainer_util, "recipe_fingerprint", return_value="test"), \
+                        patch.object(apptainer_util, "path", side_effect=lambda *p: root.joinpath(*p)), \
+                        patch.object(apptainer_util, "exec_args", return_value=[]), \
+                        patch.object(apptainer_util, "remove"), \
+                        patch.object(validate_instance.subprocess, "run", side_effect=steps):
+                    self.assertFalse(validate_instance.validate_nuttx_apptainer(
+                        "nuttx__nuttx-1", None, 30, False))
+                report = json.loads((root / "validation.json").read_text())
+                self.assertEqual(report["reason"], reason)
+
     def test_kernel_fix_patches_apply_primary_then_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "kernel"

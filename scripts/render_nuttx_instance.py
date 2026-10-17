@@ -111,8 +111,8 @@ def render(meta: dict, patch_file: Path, out_root: Path,
             runtime == "docker" and sim_config != "sim:nsh"):
         raise ValueError("this runtime supports sim:nsh or a QEMU board "
                          f"({', '.join(platforms.QEMU_BOARDS)}) with ostest")
-    if meta["fail_type"] not in ("runtime_assert", "compile_error"):
-        raise ValueError("expected runtime_assert or compile_error")
+    if meta["fail_type"] not in ("runtime_assert", "runtime_other", "compile_error"):
+        raise ValueError("expected runtime_assert, runtime_other or compile_error")
     for name in ("kernel_base_commit", "kernel_merge_commit", "apps_base_commit"):
         if not re.fullmatch(r"[0-9a-f]{40}", meta[name]):
             raise ValueError(f"{name} must be a full commit SHA")
