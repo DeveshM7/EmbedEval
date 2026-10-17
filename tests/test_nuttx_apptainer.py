@@ -55,6 +55,8 @@ class RenderTests(unittest.TestCase):
             # Each override is its own %post line (set -e), verified after it is set.
             self.assertIn("\n    printf '%s\\n' 'CONFIG_SCHED_LPWORK=y' >> .config\n"
                           "    grep -q '^CONFIG_SCHED_LPWORK=y$' .config\n", recipe)
+            self.assertEqual(recipe.count("make olddefconfig"), 2)
+            self.assertEqual(recipe.count("CONFIG_SCHED_LPWORK=y' >> .config"), 2)
             self.assertIn("echo /apps/ >> .git/info/exclude", recipe)
             self.assertEqual((out / "run_tests.sh").read_text(),
                              (src / "run_tests.sh").read_text())

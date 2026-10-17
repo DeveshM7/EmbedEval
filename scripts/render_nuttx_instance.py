@@ -178,11 +178,14 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         (inst / "Dockerfile").write_text(dockerfile)
     else:
         recipe = (TEMPLATES / "apptainer" / "instance.def.tmpl").read_text()
+        # Derive defaults for enabled base-kernel symbols, then restore any
+        # override whose symbol only appears after the kernel fix.
+        apptainer_steps = steps + (["make olddefconfig", *steps] if steps else [])
         for key, value in (("INSTANCE_ID", instance_id),
                            ("KERNEL_BASE_COMMIT", meta["kernel_base_commit"]),
                            ("APPS_BASE_COMMIT", meta["apps_base_commit"]),
                            ("SIM_CONFIG", sim_config),
-                           ("EXTRA_CONFIG", "\n".join(f"    {s}" for s in steps))):
+                           ("EXTRA_CONFIG", "\n".join(f"    {s}" for s in apptainer_steps))):
             recipe = recipe.replace(f"@@{key}@@", value)
         # No Docker image: scripts/build_instances.py builds a .sif from the
         # recipe, and the harness takes "runtime" over the project default.
