@@ -72,7 +72,8 @@ PROJECTS: dict[str, dict] = {
         # were touched.
         "protected_paths": ["tests/"],
         # Zephyr instances are Apptainer images from the twister pipeline
-        # (harness/apptainer_env.py). NuttX and RIOT still run in Docker.
+        # (harness/apptainer_env.py). NuttX and RIOT still run in Docker,
+        # except NuttX instances whose metadata sets "runtime": "apptainer".
         "runtime": "apptainer",
         # run_tests rebuilds as well as running, so there is no separate
         # rebuild step to show the agent.

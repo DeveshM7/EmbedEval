@@ -4,6 +4,16 @@
 This step deliberately consumes a selected test patch. PR discovery, commit
 selection, and separation of test changes from production code happen before it.
 Output defaults to generated/, leaving hand-written instances untouched.
+
+An instance is a Docker image by default (Dockerfile). With --runtime apptainer
+it is an Apptainer recipe instead (instance.def, FROM the shared image of
+templates/nuttx/apptainer/base.def), for hosts without Docker such as
+Scholar's ARM64 nodes; its metadata says "runtime": "apptainer". An existing
+instance is re-rendered that way from its own files:
+
+    python scripts/render_nuttx_instance.py --runtime apptainer \
+        --metadata docker/instances/nuttx__nuttx-11889/metadata.json \
+        --test-patch docker/instances/nuttx__nuttx-11889/test_patch.diff
 """
 
 from __future__ import annotations
@@ -36,8 +46,10 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
     source's entry functions are looked up where ostest_main.c calls them,
     and the banner printed within a few lines before that call is kept. A
     preprocessor line between them (e.g. a skip under #ifdef) means the
-    banner does not prove the call ran, so that call is an error, as is any
-    call with no banner.
+    banner does not prove the call ran. A test called without a banner is
+    fine when another call of it has one (since apps #3759, `ostest wqueue`
+    calls wqueue_test() a second time, bannerless); a test whose every call
+    lacks a banner is an error.
     """
     main_lines = (ostest_dir / "ostest_main.c").read_text().splitlines()
     banners: list[str] = []
@@ -48,19 +60,21 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
             continue
         for func in ENTRY_DEF.findall((ostest_dir / name).read_text()):
             call = re.compile(rf"\b{re.escape(func)}\s*\(\s*\)\s*;")
+            called, found = False, []
             for i, line in enumerate(main_lines):
                 if not call.search(line):
                     continue
-                banner = None
+                called = True
                 for prev in reversed(main_lines[max(0, i - 8):i]):
                     if prev.lstrip().startswith("#"):
                         break
                     match = BANNER_PRINTF.search(prev)
                     if match:
-                        banner = f"user_main: {match[1]}"
+                        found.append(f"user_main: {match[1]}")
                         break
-                if banner is None:
-                    raise ValueError(f"no ostest banner directly precedes the call to {func}")
+            if called and not found:
+                raise ValueError(f"no ostest banner directly precedes the call to {func}")
+            for banner in found:
                 if banner not in banners:
                     banners.append(banner)
     if not banners:
@@ -74,10 +88,12 @@ def render_runner(banners: list[str]) -> str:
 
 
 def render(meta: dict, patch_file: Path, out_root: Path,
-           tag_suffix: str = "-gen") -> Path:
+           tag_suffix: str = "-gen", runtime: str = "docker") -> Path:
     instance_id = meta["instance_id"]
     if meta["project"] != "nuttx" or not re.fullmatch(r"nuttx__nuttx-\d+", instance_id):
         raise ValueError("expected a NuttX instance ID")
+    if runtime not in ("docker", "apptainer"):
+        raise ValueError("runtime must be docker or apptainer")
     # Empty gives the standard embedeval:nuttx-<PR> tag of a checked-in instance.
     if not re.fullmatch(r"(-[a-z0-9-]+)?", tag_suffix):
         raise ValueError("tag_suffix must be empty, or start with - and contain "
@@ -126,23 +142,16 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         raise FileExistsError(f"output already exists: {inst}")
     inst.mkdir(parents=True)
 
-    dockerfile = (TEMPLATES / "Dockerfile.tmpl").read_text()
-    dockerfile = dockerfile.replace("@@KERNEL_BASE_COMMIT@@", meta["kernel_base_commit"])
-    dockerfile = dockerfile.replace("@@APPS_BASE_COMMIT@@", meta["apps_base_commit"])
-    extra_config_run = ""
-    if overrides:
-        steps = []
-        for name, value in sorted(overrides.items()):
-            steps.append(
-                f"sed -i '/^{name}=/d; /^# {name} is not set/d' .config"
-            )
-            steps.append(f"printf '%s\\n' '{name}={value}' >> .config")
-            expected = f"{name}={value}"
-            # New symbols may not exist until the kernel fix is applied, so
-            # append after olddefconfig and verify this exact input is present.
-            steps.append(f"grep -q '^{re.escape(expected)}$' .config")
-        extra_config_run = "RUN " + " \\\n    && ".join(steps)
-    dockerfile = dockerfile.replace("@@EXTRA_CONFIG_RUN@@", extra_config_run)
+    steps = []
+    for name, value in sorted(overrides.items()):
+        steps.append(
+            f"sed -i '/^{name}=/d; /^# {name} is not set/d' .config"
+        )
+        steps.append(f"printf '%s\\n' '{name}={value}' >> .config")
+        expected = f"{name}={value}"
+        # New symbols may not exist until the kernel fix is applied, so
+        # append after olddefconfig and verify this exact input is present.
+        steps.append(f"grep -q '^{re.escape(expected)}$' .config")
     runner = render_runner(banners)
 
     generated_meta = dict(meta)
@@ -153,7 +162,25 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         "docker_image": f"embedeval:nuttx-{instance_id.rsplit('-', 1)[1]}{tag_suffix}",
         "generated": True,
     })
-    (inst / "Dockerfile").write_text(dockerfile)
+    if runtime == "docker":
+        dockerfile = (TEMPLATES / "Dockerfile.tmpl").read_text()
+        dockerfile = dockerfile.replace("@@KERNEL_BASE_COMMIT@@", meta["kernel_base_commit"])
+        dockerfile = dockerfile.replace("@@APPS_BASE_COMMIT@@", meta["apps_base_commit"])
+        extra_config_run = "RUN " + " \\\n    && ".join(steps) if steps else ""
+        dockerfile = dockerfile.replace("@@EXTRA_CONFIG_RUN@@", extra_config_run)
+        (inst / "Dockerfile").write_text(dockerfile)
+    else:
+        recipe = (TEMPLATES / "apptainer" / "instance.def.tmpl").read_text()
+        for key, value in (("INSTANCE_ID", instance_id),
+                           ("KERNEL_BASE_COMMIT", meta["kernel_base_commit"]),
+                           ("APPS_BASE_COMMIT", meta["apps_base_commit"]),
+                           ("EXTRA_CONFIG", "\n".join(f"    {s}" for s in steps))):
+            recipe = recipe.replace(f"@@{key}@@", value)
+        # No Docker image: scripts/build_instances.py builds a .sif from the
+        # recipe, and the harness takes "runtime" over the project default.
+        del generated_meta["docker_image"]
+        generated_meta.update(runtime="apptainer", apptainer_image=f"{instance_id}.sif")
+        (inst / "instance.def").write_text(recipe)
     (inst / "run_tests.sh").write_text(runner)
     (inst / "test_patch.diff").write_text(patch)
     (inst / "metadata.json").write_text(json.dumps(generated_meta, indent=4) + "\n")
@@ -166,9 +193,10 @@ def main() -> None:
     parser.add_argument("--test-patch", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--tag-suffix", default="-gen")
+    parser.add_argument("--runtime", choices=("docker", "apptainer"), default="docker")
     args = parser.parse_args()
     inst = render(json.loads(args.metadata.read_text()), args.test_patch,
-                  args.out, args.tag_suffix)
+                  args.out, args.tag_suffix, args.runtime)
     print(inst)
 
 
