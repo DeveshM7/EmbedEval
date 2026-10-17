@@ -310,9 +310,9 @@ def write_status(gen: int, results: dict, next_text: str) -> Path:
     lines = [
         "# NuttX Phase 1 tuning status", "",
         f"Generation {gen} complete (updated {__import__('datetime').datetime.now():%Y-%m-%d %H:%M}).",
-        "", "- Bar: one unchanged individual with 3 repeats at 13/13 on the normal gold; blind runs",
+        "", "- Bar: one unchanged individual with 2 repeats at 13/13 on the normal gold; blind runs",
         "  (9 cases with a must_find) are tracked only.",
-        f"- Best streak: {best} perfect normal repeats of one individual (need 3).",
+        f"- Best count: {best} perfect normal repeats of one individual (need 2).",
         f"- Individuals scored so far: {len(ranked)}; runs scored: {len(results['scores'])}.",
         "- Fitness: mean normal score over repeats; ties by worst repeat, then mean blind.",
         "", "Pool jobs (servers on every node; workers run as srun steps):", "", "```", pools, "```",
