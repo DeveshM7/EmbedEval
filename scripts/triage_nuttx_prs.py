@@ -26,6 +26,7 @@ import contextlib
 import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 import threading
@@ -46,7 +47,7 @@ GOLD = ROOT / "triage" / "nuttx_gold.json"
 APPS_PROMPT = ROOT / "docs" / "nuttx_apps_triage.md"
 APPS_GOLD = ROOT / "triage" / "nuttx_apps_gold.json"
 MODELS = ROOT / "triage" / "models.json"
-RUNS = ROOT / "triage" / "nuttx_runs"
+RUNS = Path(os.environ.get("EMBEDEVAL_NUTTX_RUNS") or ROOT / "triage" / "nuttx_runs")
 # Pairs rejected only because their test needs a QEMU target, kept for when a
 # QEMU runner exists.
 QEMU_LEADS = ROOT / "triage" / "nuttx_qemu_leads.jsonl"
@@ -169,8 +170,9 @@ APPS_TOOLS = [
                        "config_overrides, run make olddefconfig, and report for the kernel PR's "
                        "head (fixed) and base (old), each with the apps PR's head: which "
                        "overrides stuck, which were dropped and the dependencies they lack, and "
-                       "whether each changed ostest source is built and its entry function "
-                       "called. Takes about a minute.",
+                       "whether each changed ostest source is built, its entry function "
+                       "called, and which #if branches inside the test are compiled. Takes about "
+                       "a minute.",
         "parameters": {"type": "object", "properties": {
             "kernel_pr": {"type": "integer"},
             "config_overrides": {"type": "object", "additionalProperties": {"type": "string"},
@@ -878,6 +880,28 @@ def git_log(args: dict, record: dict) -> str:
     return hide_links(text, record["blind"]) if "blind" in record and repo == "apps" else text
 
 
+def config_requirements(record: dict) -> str:
+    """The user-message section listing what the changed tests need to be
+    compiled and called, computed from the sources at the apps PR's head."""
+    sha = record["apps"]["head_commit"]
+
+    def read(path):
+        done = git("apps", "show", f"{sha}:{path}")
+        return done.stdout if done.returncode == 0 else ""
+
+    tests = nuttx_config.changed_tests(
+        [f["filename"] for f in record["apps"]["files"] if f["status"] != "removed"],
+        record.get("test_contents") or {})
+    try:
+        text = nuttx_config.describe_requirements(
+            [nuttx_config.test_requirements(t["path"], t["entries"], read) for t in tests])
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    return ("\n\nConfig the changed tests need, computed from the sources at the apps PR head "
+            "(the listed options are certain; read what it could not decide):\n" + text) \
+        if text else ""
+
+
 def check_config(args: dict, record: dict) -> str:
     number = args.get("kernel_pr")
     if type(number) is not int:
@@ -1166,7 +1190,8 @@ def triage_apps_one(case: str, record: dict, profile: str, settings: dict, api_b
     """Classify one apps PR and search for its kernel PRs."""
     options = model_options(profile, settings, api_base)
     messages = [{"role": "system", "content": APPS_PROMPT.read_text()},
-                {"role": "user", "content": "Apps PR record:\n" + render_apps_record(case, record)}]
+                {"role": "user", "content": "Apps PR record:\n" + render_apps_record(case, record)
+                 + config_requirements(record)}]
     record.setdefault("kernel_candidates", [])   # kernel PRs opened during the search
     record["followup_searches"] = []
     trace = {"case": case, "turns": [], "repairs": [], "error": None}
@@ -1320,7 +1345,8 @@ def score_apps(gold: dict, verdicts: dict[str, dict], config_problems=None) -> d
     PRs, and a config that gives the listed settings and runs the changed
     tests), and no must_not_propose pair at high or medium. Other high or
     medium pairs are unknown: listed for validation, never penalized.
-    config_problems(case, pair, required) lists a pair's config problems."""
+    config_problems(case, pair, required, one_of, platform) lists a pair's
+    config problems."""
     rows, extras = [], []
     for case, entry in gold.items():
         verdict = verdicts.get(case, {})
@@ -1340,8 +1366,9 @@ def score_apps(gold: dict, verdicts: dict[str, dict], config_problems=None) -> d
                       if isinstance(e, dict)}
             found += [f"also_needs lacks #{number}" for number in item.get("also_needs", [])
                       if number not in listed]
-            if "config" in item and config_problems:
-                found += config_problems(case, pair, item["config"],
+            if "config_required" in item and config_problems:
+                found += config_problems(case, pair, item["config_required"],
+                                         item.get("config_one_of", []),
                                          item.get("config_platform") or pair.get("platform"))
             if found:
                 config[item["kernel_pr"]] = found
@@ -1382,7 +1409,7 @@ def eval_apps_run(run_dir: Path, gold_path: Path | None = None) -> dict:
     checks_path = run_dir / "config_checks.json"
     checks = json.loads(checks_path.read_text()) if checks_path.exists() else {}
 
-    def config_problems(case, pair, required, platform):
+    def config_problems(case, pair, required, one_of, platform):
         overrides = pair.get("config_overrides") or {}
         invalid = nuttx_config.check_overrides(overrides)
         if invalid:
@@ -1392,10 +1419,11 @@ def eval_apps_run(run_dir: Path, gold_path: Path | None = None) -> dict:
             record = candidates.apps_record(int(case.split("-")[1]))
             checks[key] = nuttx_config.check_pair(
                 record["apps"], candidates.kernel_record(pair["kernel_pr"]), overrides,
-                pair.get("test_paths") or [], record["test_contents"], report=list(required),
+                pair.get("test_paths") or [], record["test_contents"],
+                report=sorted({*required, *(n for group in one_of for n in group)}),
                 sides=("fixed",), platform=platform)["fixed"]
             checks_path.write_text(json.dumps(checks, indent=2) + "\n")
-        return nuttx_config.problems(checks[key], required)
+        return nuttx_config.problems(checks[key], required, one_of)
 
     result = score_apps(gold, verdicts, config_problems)
     blind = " (blind: explicit links hidden)" if manifest.get("blind") else ""

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import re
@@ -33,7 +34,12 @@ from urllib.parse import quote, urlencode
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "candidates" / "nuttx"
+# EMBEDEVAL_NUTTX_DATA moves the data directory, e.g. to one per parallel
+# run; EMBEDEVAL_NUTTX_DATA_RO names a shared, pre-warmed copy that cached()
+# reads from but never writes.
+DATA = Path(os.environ.get("EMBEDEVAL_NUTTX_DATA") or ROOT / "candidates" / "nuttx")
+DATA_RO = Path(os.environ["EMBEDEVAL_NUTTX_DATA_RO"]) if os.environ.get("EMBEDEVAL_NUTTX_DATA_RO") \
+    else None
 CACHE = DATA / "apps" / "cache"
 CANDIDATES = DATA / "candidates.jsonl"
 PAIRS = DATA / "pairs.jsonl"
@@ -463,9 +469,15 @@ def ostest_apps_prs(scan: Path = SCAN) -> list[int]:
 
 def cached(path: Path, fetch, refresh: bool = False):
     """JSON at path, or fetch() written there; the write is atomic so
-    parallel triage cases can share the cache."""
+    parallel triage cases can share the cache. A copy under DATA_RO is read
+    when path is missing."""
     if path.exists() and not refresh:
         return json.loads(path.read_text())
+    if DATA_RO and not refresh:
+        with contextlib.suppress(ValueError):
+            shared = DATA_RO / path.relative_to(DATA)
+            if shared.exists():
+                return json.loads(shared.read_text())
     value = fetch()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")

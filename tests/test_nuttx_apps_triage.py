@@ -542,19 +542,21 @@ class AlsoNeedsAndConfigTests(unittest.TestCase):
     def test_scoring_needs_also_needs_and_a_working_config(self):
         gold = {"apps-7": {"kind": "kernel_test", "must_find": [
             {"kernel_pr": 11, "platform": "qemu", "config_platform": "qemu-armv8a:nsh_smp",
-             "config": {"CONFIG_SMP_CALL": "y"}, "also_needs": [12]}]}}
+             "config_required": {"CONFIG_SMP_CALL": "y"},
+             "config_one_of": [{"CONFIG_A": "y", "CONFIG_B": "y"}], "also_needs": [12]}]}}
         pair = {"kernel_pr": 11, "confidence": "high", "platform": "qemu-armv8a:nsh_smp",
                 "also_needs": [{"kernel_pr": 12, "evidence": ["x"]},
                                {"kernel_pr": 14, "evidence": ["extra is fine"]}]}
         seen = []
 
-        def config_problems(case, got, required, platform):
-            seen.append((case, got["kernel_pr"], required, platform))
+        def config_problems(case, got, required, one_of, platform):
+            seen.append((case, got["kernel_pr"], required, one_of, platform))
             return []
         result = triage.score_apps(gold, {"apps-7": {"kind": "kernel_test", "pairs": [pair]}},
                                    config_problems)
         self.assertEqual(result["correct"], 1)
-        self.assertEqual(seen, [("apps-7", 11, {"CONFIG_SMP_CALL": "y"}, "qemu-armv8a:nsh_smp")])
+        self.assertEqual(seen, [("apps-7", 11, {"CONFIG_SMP_CALL": "y"},
+                                 [{"CONFIG_A": "y", "CONFIG_B": "y"}], "qemu-armv8a:nsh_smp")])
         pair["also_needs"] = []
         row = triage.score_apps(gold, {"apps-7": {"kind": "kernel_test", "pairs": [pair]}},
                                 config_problems)["rows"][0]
@@ -568,7 +570,8 @@ class AlsoNeedsAndConfigTests(unittest.TestCase):
 
     def test_eval_checks_the_fixed_side_once_and_keeps_it_with_the_run(self):
         gold = {"cases": {"apps-7": {"kind": "kernel_test", "must_find": [
-            {"kernel_pr": 11, "platform": "sim:nsh", "config": {"CONFIG_SCHED_WORKQUEUE": "y"}}]}}}
+            {"kernel_pr": 11, "platform": "sim:nsh",
+             "config_required": {"CONFIG_SCHED_WORKQUEUE": "y"}}]}}}
         reply = verdict(full_pair(config_overrides={"CONFIG_SCHED_HPWORK": "y"}))
         fixed = {"ostest": True, "settings": {"CONFIG_SCHED_WORKQUEUE": "y"},
                  "tests": [{"path": "testing/ostest/example.c", "built": True, "runs": True}]}

@@ -120,6 +120,13 @@ dropped has dependencies that are off: add them, or a setting that selects
 them, and check again. Settings the test needs that the board already
 enables need no override.
 
+Your input ends with the options the changed tests need, computed from the
+sources: put the listed required options (those not already on in the board's
+defaults) in `config_overrides`, and one option of each "one of" group. When
+the test has alternative `#if` branches, decide from the kernel diff which
+branch exercises the fixed code, say so in the evidence, and set the options
+that compile it; `check_config` reports which branches are compiled.
+
 `check_config` does not execute the test or prove it passes. Read the changed
 test's internal `#ifdef` branches to see which scenario the effective config
 selects. Check the effective values after `make olddefconfig` for every

@@ -28,6 +28,7 @@ import tempfile
 from pathlib import Path
 
 import nuttx_candidates as candidates
+import nuttx_config_probe as probe
 from render_nuttx_instance import ENTRY_DEF
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -101,7 +102,7 @@ def resolve(kernel_sha: str, apps_sha: str, overrides: dict, tests: list[dict],
         raise ValueError("; ".join(problems))
     request = {"overrides": dict(sorted(overrides.items())), "tests": tests,
                "report": sorted(set(report) | set(overrides))}
-    key = hashlib.sha256(json.dumps([kernel_sha, apps_sha, platform, request])
+    key = hashlib.sha256(json.dumps([2, kernel_sha, apps_sha, platform, request])
                          .encode()).hexdigest()[:24]
 
     def run():
@@ -150,9 +151,10 @@ def check_pair(apps: dict, kernel: dict, overrides: dict, test_paths: list[str],
             for side in sides}
 
 
-def problems(side: dict, required: dict) -> list[str]:
-    """Why a configuration does not give the required settings or does not
-    build and call every changed test; empty when it does."""
+def problems(side: dict, required: dict, one_of: list[dict] = ()) -> list[str]:
+    """Why a configuration does not give the required settings (and one
+    setting of each one-of group) or does not build and call every changed
+    test; empty when it does."""
     found = []
     if not side["ostest"]:
         found.append("CONFIG_TESTING_OSTEST is off")
@@ -160,11 +162,127 @@ def problems(side: dict, required: dict) -> list[str]:
         got = side["settings"].get(name, "n")
         if got != value:
             found.append(f"{name}={got}, needs {value}")
+    for group in one_of:
+        if not any(side["settings"].get(name, "n") == value for name, value in group.items()):
+            found.append("needs one of " + ", ".join(f"{n}={v}" for n, v in group.items()))
     for test in side["tests"]:
         if not test["runs"]:
             found.append(f"{test['path']} is not "
                          + ("called" if test["built"] else "built"))
     return found
+
+
+def cmake_conditions(text: str, name: str) -> list[str]:
+    """CMakeLists.txt's if(...) conditions around each line naming `name`, in
+    the form requirements() reads; a form it cannot read is kept as is."""
+    stack, found = [], []
+    for _, line in probe.logical_lines(text):
+        text_ = " ".join(line.split())
+        match = re.match(r"if\((NOT )?(CONFIG_\w+)\)$", text_)
+        if match:
+            stack.append(f"{'#ifndef' if match[1] else '#ifdef'} {match[2]}")
+        elif re.match(r"if\(", text_):
+            stack.append(text_)
+        elif re.match(r"(elseif|else)\(", text_) and stack:
+            stack[-1] = f"{stack[-1]} ... {text_}"
+        elif text_.startswith("endif(") and stack:
+            stack.pop()
+        elif re.search(rf"(?<![\w/.-]){re.escape(name)}(?![\w.-])", text_) and "SRCS" in text_:
+            found.append(" && ".join(stack))
+    return found
+
+
+def kconfig_requirements(kconfig: str, options: list[str]) -> dict:
+    """Options each given option's `depends on` line(s) require: plain
+    symbols or negated symbols joined with &&. Selects and other forms go
+    to "other"."""
+    depends, result = probe.kconfig_depends(kconfig), {"required": {}, "other": []}
+    for option in options:
+        for line in (depends.get(option) or "").split("; "):
+            if not line.startswith("depends on "):
+                if line:
+                    result["other"].append(f"{option}: {line}")
+                continue
+            for term in probe.split_top(line[len("depends on "):], "&&"):
+                match = re.fullmatch(r"(!?)\s*([A-Z0-9_]+)", probe.strip_parens(term))
+                if match:
+                    result["required"][f"CONFIG_{match[2]}"] = "n" if match[1] else "y"
+                else:
+                    result["other"].append(f"{option}: depends on {term}")
+    return result
+
+
+def test_requirements(path: str, entries: list[str], read) -> dict:
+    """What a changed ostest source needs to be compiled and called, from
+    the sources alone (read(path) returns an apps file's text, or ""). Only
+    what is certain goes into "required" and "one_of": the conditions on the
+    line that adds the source to the build, on the single call in
+    ostest_main.c, on the entry function's own #if branch, and the Kconfig
+    `depends on` of the options found. Anything else (several places
+    building or calling it, comparisons, #else branches) is in "other"; the
+    alternative #if branches inside the test are in "branches"."""
+    name, ostest = Path(path).name, "testing/ostest/"
+    required, one_of, other, notes = {}, [], [], []
+
+    def merge(found: dict, where: str) -> None:
+        required.update(found["required"])
+        one_of.extend(group for group in found["one_of"] if group not in one_of)
+        other.extend(f"{where}: {text}" for text in found["other"])
+
+    for label, conditions in (("Makefile", probe.makefile_conditions(read(ostest + "Makefile"), name)),
+                              ("CMakeLists.txt", cmake_conditions(read(ostest + "CMakeLists.txt"), name))):
+        if len(conditions) == 1:
+            merge(probe.requirements(conditions[0].split(" && ") if conditions[0] else []), label)
+            notes.append(f"built by {label}" + (f" under {conditions[0]}" if conditions[0] else ""))
+            break
+        if conditions:
+            other.append(f"{label} adds {name} under {len(conditions)} different conditions: "
+                         + " | ".join(c or "(always)" for c in conditions))
+    if entries:
+        calls = probe.conditionals(read(ostest + "ostest_main.c"), entries)["calls"]
+        if len(calls) == 1:
+            merge(probe.requirements(calls[0]["conditions"]), "ostest_main.c")
+            notes.append(f"called at ostest_main.c:{calls[0]['line']}"
+                         + (f" under {' && '.join(calls[0]['conditions'])}" if calls[0]["conditions"] else ""))
+        else:
+            other.append(f"ostest_main.c has {len(calls)} calls of {', '.join(entries)}: "
+                         + " | ".join(f"line {c['line']}: {' && '.join(c['conditions']) or '(always)'}"
+                                      for c in calls[:6]))
+    source, branches = read(path), []
+    lines = source.splitlines()
+    for group in probe.conditionals(source)["groups"]:
+        defined = any(re.search(rf"\b{re.escape(e)}\s*\(void\)", line)
+                      for e in entries for b in group["branches"][:1]
+                      for line in lines[b["start"] - 1:b["end"]])
+        if len(group["branches"]) == 1 and defined:
+            merge(probe.requirements(group["outer"] + [group["branches"][0]["directive"]]), path)
+        elif len(group["branches"]) > 1:
+            branches.append([{k: b[k] for k in ("directive", "start", "end")}
+                             for b in group["branches"]])
+    kconfig = kconfig_requirements(read(ostest + "Kconfig"),
+                                   [o for o in required if o not in RESERVED])
+    required.update(kconfig["required"])
+    other.extend(kconfig["other"])
+    for option in RESERVED:
+        required.pop(option, None)
+    return {"path": path, "required": required, "one_of": one_of, "branches": branches,
+            "other": other, "notes": notes}
+
+
+def describe_requirements(items: list[dict]) -> str:
+    lines = []
+    for item in items:
+        lines.append(f"{item['path']} ({'; '.join(item['notes']) or 'build condition not found'}):")
+        lines.append("  required (certain): " + (", ".join(f"{k}={v}" for k, v in item["required"].items())
+                                                  or "nothing beyond the board's defaults"))
+        for group in item["one_of"]:
+            lines.append("  one of: " + " | ".join(f"{k}={v}" for k, v in group.items()))
+        for group in item["branches"]:
+            lines.append("  alternative branches in the test: " + " | ".join(
+                f"{b['directive']} (lines {b['start']}-{b['end']})" for b in group))
+        for text in item["other"]:
+            lines.append(f"  not decided by the tool, read it: {text}")
+    return "\n".join(lines)[:6000]
 
 
 def describe(check: dict) -> str:
@@ -195,6 +313,11 @@ def describe(check: dict) -> str:
                 + (f" under {' && '.join(c['conditions'])}" if c["conditions"] else "")
                 for c in test["calls"][:6]) or "no call in ostest_main.c"
             lines.append(f"  {test['path']}: built {'yes' if test['built'] else 'no'}; {calls}")
+            for group in test.get("branches", []):
+                lines.append("    #if branches of the test (compiled under this config): "
+                             + "; ".join(f"{b['directive']} (lines {b['start']}-{b['end']}) "
+                                         f"{'COMPILED' if b['compiled'] else 'not compiled'}"
+                                         for b in group["branches"]))
         missing = problems(result, {})
         lines.append("  => the changed tests run" if not missing
                      else "  => NOT RUNNABLE: " + "; ".join(missing))
