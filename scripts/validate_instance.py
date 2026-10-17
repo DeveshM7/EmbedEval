@@ -398,6 +398,10 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
                               f"apply-{label}.log", 300)
             if rc != 0:
                 return invalid(f"the {label} fix does not apply", "  " + out.strip()[:300])
+        # The fix can introduce Kconfig defaults required by its new source files.
+        rc, out, _ = step("reconfigure", "make olddefconfig", "config-after.log", 300)
+        if rc != 0:
+            return invalid(f"reconfigure failed (rc={rc})", error_lines(out))
         if meta.get("clean_after_patch"):
             rc, out, _ = step("make clean", "make clean", "clean.log", 300)
             if rc != 0:
@@ -540,6 +544,13 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         if ra.returncode != 0:
             print(f"  FAIL: git apply failed: {step_output(ra).strip()[:300]}")
             return False
+
+        if meta["project"] == "nuttx":
+            configured = dexec("cd /testbed && make olddefconfig", 300, "reconfigure")
+            if configured.returncode != 0:
+                print(f"  FAIL: reconfigure failed (rc={configured.returncode})")
+                print(build_errors(configured))
+                return False
 
         if meta["project"] == "nuttx" and meta.get("clean_after_patch"):
             clean = dexec("cd /testbed && make clean", 300, "make clean")
