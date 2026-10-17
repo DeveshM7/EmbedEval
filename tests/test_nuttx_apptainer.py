@@ -48,6 +48,7 @@ class RenderTests(unittest.TestCase):
                              ["instance.def", "metadata.json", "run_tests.sh", "test_patch.diff"])
             recipe = (out / "instance.def").read_text()
             self.assertNotIn("@@", recipe)
+            self.assertIn('if [ "sim:nsh" = sim:nsh ] && [ "$(uname -m)" = aarch64 ]', recipe)
             self.assertIn("git checkout -q 9a28cd2000af50ef15b8ecd08d09a1df34db71da", recipe)
             self.assertIn("git -C apps checkout -q 922f9932a6361cb6b25328e3995a4b6886e47d51",
                           recipe)
@@ -74,8 +75,10 @@ class RenderTests(unittest.TestCase):
         meta = {**instance_meta("nuttx__nuttx-11889"), "sim_config": "qemu-armv8a:nsh_smp"}
         with tempfile.TemporaryDirectory() as tmp:
             out = render.render(meta, src / "test_patch.diff", Path(tmp), runtime="apptainer")
-            self.assertIn("./tools/configure.sh -a ./apps qemu-armv8a:nsh_smp",
-                          (out / "instance.def").read_text())
+            recipe = (out / "instance.def").read_text()
+            self.assertIn("./tools/configure.sh -a ./apps qemu-armv8a:nsh_smp", recipe)
+            self.assertIn('if [ "qemu-armv8a:nsh_smp" = sim:nsh ] && '
+                          '[ "$(uname -m)" = aarch64 ]', recipe)
             self.assertIn("qemu-system-aarch64", (out / "run_tests.sh").read_text())
             self.assertEqual(json.loads((out / "metadata.json").read_text())["sim_config"],
                              "qemu-armv8a:nsh_smp")
