@@ -463,6 +463,38 @@ def searched_followups(pair: dict, record: dict) -> bool:
     return False
 
 
+def followup_review_issues(verdict: dict, record: dict) -> list[str]:
+    """Kernel commits that touch a high/medium pair's production paths after
+    its PR merged and up to the apps PR's merge, which the verdict neither
+    lists in also_needs nor mentions by commit hash. The model must open
+    each and either list it or say why the changed test does not need it."""
+    issues, text = [], json.dumps(verdict)
+    for pair in proposed(verdict):
+        kernel = next((pr for pr in record.get("kernel_candidates", [])
+                       if pr["number"] == pair.get("kernel_pr")), None)
+        paths = [p.strip("/") for p in pair.get("fix_paths") or [] if isinstance(p, str)
+                 and p.strip("/") and ".." not in Path(p).parts and not p.startswith("/")]
+        if not kernel or not kernel.get("merged_at") or not paths:
+            continue
+        own = {c["sha"] for c in kernel.get("commits", [])} | {kernel.get("merge_commit_sha")}
+        listed = {e.get("kernel_pr") for e in pair.get("also_needs") or [] if isinstance(e, dict)}
+        done = git("kernel", "log", "--no-color", "--date=short", "--max-count=40",
+                   "--format=%H %h %cd | %s", f"--since={git_date(kernel['merged_at'][:10])}",
+                   f"--until={git_date(record['apps']['merged_at'][:10], True)}",
+                   "--full-history", "HEAD", "--", *paths, timeout=600)
+        if done.returncode:
+            continue
+        for line in done.stdout.splitlines():
+            full, short, rest = line.split(" ", 2)
+            if full in own or short[:7] in text or full[:7] in text:
+                continue
+            issues.append(f"kernel #{pair['kernel_pr']}: commit {short} {rest} touches its "
+                          "production paths after it merged and before the apps PR merged; "
+                          "open it, then list its PR in also_needs or name the commit in "
+                          "evidence with the reason the changed test does not need it")
+    return issues[:6]
+
+
 def check_apps_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
     """A per-apps-PR verdict: its kind, its search outcome and every pair.
     Low pairs are recorded only, so they need just a kernel PR and evidence;
@@ -1186,7 +1218,8 @@ def run(args) -> None:
 
 
 def triage_apps_one(case: str, record: dict, profile: str, settings: dict, api_base: str,
-                    run_dir: Path, max_calls: int, max_minutes: float) -> dict:
+                    run_dir: Path, max_calls: int, max_minutes: float,
+                    followup_review: bool = False) -> dict:
     """Classify one apps PR and search for its kernel PRs."""
     options = model_options(profile, settings, api_base)
     messages = [{"role": "system", "content": APPS_PROMPT.read_text()},
@@ -1213,7 +1246,10 @@ def triage_apps_one(case: str, record: dict, profile: str, settings: dict, api_b
                 if type(number) is int:
                     with contextlib.suppress(RuntimeError):
                         load_kernel(record, number)
-        return check_apps_verdict(reply, case, record)
+        issues = check_apps_verdict(reply, case, record)
+        if followup_review and not issues:
+            issues = followup_review_issues(reply, record)
+        return issues
 
     verdict, issues = None, ["no reply"]
     start = time.time()
@@ -1300,6 +1336,7 @@ def run_apps(args) -> None:
                 "max_tokens": profiles[args.profile].get("max_tokens"),
                 "budget": {"max_tool_calls": args.max_tool_calls,
                            "max_minutes": args.max_minutes},
+                "followup_review": args.followup_review,
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                 "git_commit": commit, "cases": cases,
                 "started": datetime.now().isoformat(timespec="seconds")}
@@ -1307,7 +1344,8 @@ def run_apps(args) -> None:
     with futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
         jobs = [pool.submit(triage_apps_one, case, records[case], args.profile,
                             profiles[args.profile], args.api_base, run_dir,
-                            args.max_tool_calls, args.max_minutes) for case in cases]
+                            args.max_tool_calls, args.max_minutes,
+                            args.followup_review) for case in cases]
         for job in futures.as_completed(jobs):
             result = job.result()
             print(f"{result['case']}: {result['kind']} {result['pairs']} "
@@ -1533,6 +1571,9 @@ def main() -> None:
                              help="hide explicit kernel links and commit hashes")
     apps_parser.add_argument("--max-tool-calls", type=int, default=40)
     apps_parser.add_argument("--max-minutes", type=float, default=30)
+    apps_parser.add_argument("--followup-review", action="store_true",
+                             help="ask for a reason for each later kernel commit that touches "
+                                  "a pair's production paths before the apps PR merged")
     apps_parser.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
     apps_parser.add_argument("--parallel", type=int, default=4)
     eval_parser = commands.add_parser("eval")

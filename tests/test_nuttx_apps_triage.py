@@ -330,6 +330,19 @@ class HistoryToolTests(unittest.TestCase):
         self.assertIn("YYYY-MM-DD", self.tool("git_log", since="last week"))
         self.assertIn("relative", self.tool("git_log", paths=["../x"]))
 
+    def test_followup_review_names_later_commits_on_the_fix_paths(self):
+        record = {**self.record, "kernel_candidates": [
+            {**kernel_pr(), "merged_at": "2024-01-01T13:00:00Z", "commits": [{"sha": self.first}],
+             "merge_commit_sha": None}]}
+        record["apps"] = {**record["apps"], "merged_at": "2024-04-01T00:00:00Z"}
+        reply = verdict(full_pair(fix_paths=["sched/wq.c"]))
+        issues = triage.followup_review_issues(reply, record)
+        self.assertEqual(len(issues), 1)
+        self.assertIn(self.second[:7], issues[0])
+        self.assertIn("restore -ENOENT", issues[0])
+        reply["pairs"][0]["evidence"].append(f"{self.second[:7]} only changes a return code")
+        self.assertEqual(triage.followup_review_issues(reply, record), [])
+
     def test_git_log_path_search_includes_merged_branch_changes(self):
         repo = triage.CLONES["kernel"]
         self.git("checkout", "-qb", "followup")
