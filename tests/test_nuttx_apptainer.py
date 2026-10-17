@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "harness"))
 import apptainer_util  # noqa: E402
+import build_instances  # noqa: E402
 import render_nuttx_instance as render  # noqa: E402
 import validate_instance  # noqa: E402
 import evaluate_patches  # noqa: E402
@@ -67,6 +68,36 @@ class RenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "runtime"):
             render.render(instance_meta("nuttx__nuttx-11889"), src / "test_patch.diff",
                           Path(tmp), runtime="podman")
+
+    def test_qemu_armv8a_instance_uses_board_recipe_and_console_runner(self):
+        src = ROOT / "docker" / "instances" / "nuttx__nuttx-11889"
+        meta = {**instance_meta("nuttx__nuttx-11889"), "sim_config": "qemu-armv8a:nsh_smp"}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render.render(meta, src / "test_patch.diff", Path(tmp), runtime="apptainer")
+            self.assertIn("./tools/configure.sh -a ./apps qemu-armv8a:nsh_smp",
+                          (out / "instance.def").read_text())
+            self.assertIn("qemu-system-aarch64", (out / "run_tests.sh").read_text())
+            self.assertEqual(json.loads((out / "metadata.json").read_text())["sim_config"],
+                             "qemu-armv8a:nsh_smp")
+
+    def test_qemu_armv8a_build_uses_cross_toolchain_base(self):
+        src = ROOT / "docker" / "instances" / "nuttx__nuttx-11889"
+        meta = {**instance_meta("nuttx__nuttx-11889"), "sim_config": "qemu-armv8a:nsh_smp"}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render.render(meta, src / "test_patch.diff", Path(tmp), runtime="apptainer")
+            image = Path(tmp) / "image.sif"
+            image.write_bytes(b"image")
+            base = Path(tmp) / "qemu-base.sif"
+            with patch.object(build_instances.instances, "instance_dir", return_value=out), \
+                 patch.object(build_instances.instances, "load_metadata", return_value=meta), \
+                 patch.object(build_instances.layout, "nuttx_clones", return_value=(None, None)), \
+                 patch.object(apptainer_util, "instance_image", return_value=image), \
+                 patch.object(apptainer_util, "path", side_effect=lambda *p: Path(tmp).joinpath(*p)), \
+                 patch.object(apptainer_util, "ensure_nuttx_base_image", return_value=base) as ensure, \
+                 patch.object(apptainer_util, "build", return_value=True) as build:
+                self.assertTrue(build_instances.build_nuttx_apptainer("nuttx__nuttx-11889"))
+            self.assertEqual(ensure.call_args.args[1], "qemu-armv8a:nsh_smp")
+            self.assertEqual(build.call_args.args[2]["BASE_IMAGE"], str(base))
 
 
 class ValidatorTests(unittest.TestCase):

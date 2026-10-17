@@ -53,6 +53,7 @@ NUTTX_APPTAINER_FILES = ("instance.def", "metadata.json", "test_patch.diff", "ru
 def build_nuttx_apptainer(instance_id: str, dry_run: bool = False) -> bool:
     """Build a NuttX instance as an Apptainer image."""
     d = instances.instance_dir(instance_id)
+    meta = instances.load_metadata(instance_id)
     missing = [f for f in NUTTX_APPTAINER_FILES if not (d / f).exists()]
     if missing:
         print(f"  ERROR: {instance_id} missing {', '.join(missing)}")
@@ -70,7 +71,8 @@ def build_nuttx_apptainer(instance_id: str, dry_run: bool = False) -> bool:
         return True
     start = time.time()
     try:
-        args["BASE_IMAGE"] = str(au.ensure_nuttx_base_image(au.path("logs", "bases", "x").parent))
+        args["BASE_IMAGE"] = str(au.ensure_nuttx_base_image(
+            au.path("logs", "bases", "x").parent, meta.get("sim_config", "sim:nsh")))
     except RuntimeError as e:
         print(f"  ERROR: {e}")
         return False

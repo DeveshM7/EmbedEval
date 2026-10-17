@@ -44,6 +44,7 @@ import layout
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
 NUTTX_TEMPLATES = REPO_ROOT / "templates" / "nuttx" / "apptainer"
+NUTTX_QEMU_TEMPLATES = REPO_ROOT / "templates" / "nuttx" / "qemu-armv8a"
 
 
 def _default_root() -> Path:
@@ -196,11 +197,16 @@ def sdk_image(sdk: str, py: str) -> Path:
                                  f"{recipe_tag('sdk.def')}.sif")
 
 
-def nuttx_base_image() -> Path:
+def nuttx_base_image(sim_config: str = "sim:nsh") -> Path:
     """The shared NuttX image. Named by a fingerprint of its recipe and of
     the patch it carries, for the same reason as recipe_tag."""
     import hashlib
     h = hashlib.sha256()
+    if sim_config in ("qemu-armv8a:nsh", "qemu-armv8a:nsh_smp"):
+        h.update((NUTTX_QEMU_TEMPLATES / "nuttx-qemu.def").read_bytes())
+        return shared_path("images", f"nuttx-qemu-armv8a-{h.hexdigest()[:8]}.sif")
+    if sim_config != "sim:nsh":
+        raise ValueError(f"unsupported NuttX config: {sim_config}")
     for name in ("base.def", "sim_tcbinfo_arm64.patch"):
         h.update((NUTTX_TEMPLATES / name).read_bytes())
     return shared_path("images", f"nuttx-sim-{h.hexdigest()[:8]}.sif")
@@ -278,12 +284,14 @@ def ensure_base_images(py: str, sdk: str, sdk_archive: str, logdir: Path) -> Pat
     return simg
 
 
-def ensure_nuttx_base_image(logdir: Path) -> Path:
+def ensure_nuttx_base_image(logdir: Path, sim_config: str = "sim:nsh") -> Path:
     """Build the shared NuttX image if it does not exist yet."""
-    img = nuttx_base_image()
+    img = nuttx_base_image(sim_config)
     if not img.exists():
         print(f"  building shared image {img.name} ...")
-        if not build(img, NUTTX_TEMPLATES / "base.def", {},
+        recipe = (NUTTX_QEMU_TEMPLATES / "nuttx-qemu.def" if sim_config.startswith(
+            "qemu-armv8a:") else NUTTX_TEMPLATES / "base.def")
+        if not build(img, recipe, {},
                      logdir / f"build-{img.stem}.log"):
             raise RuntimeError(f"could not build {img.name}")
     return img

@@ -623,6 +623,13 @@ class AlsoNeedsAndConfigTests(unittest.TestCase):
         self.assertNotIn("extra_fix_prs", generator.metadata(
             record, 11, {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}))
 
+    def test_generator_accepts_qemu_armv8a_pair_for_new_fixture(self):
+        record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
+        reply = {**full_pair(platform="qemu-armv8a:nsh_smp", readiness="needs_fixture"),
+                 "verdict": "accept", "case": "apps-7-kernel-11"}
+        self.assertEqual(generator.metadata(record, 11, reply)["sim_config"],
+                         "qemu-armv8a:nsh_smp")
+
 
 if __name__ == "__main__":
     unittest.main()

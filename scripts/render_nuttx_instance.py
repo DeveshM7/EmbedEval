@@ -82,8 +82,9 @@ def ostest_banners(ostest_dir: Path, changed: list[str]) -> list[str]:
     return banners
 
 
-def render_runner(banners: list[str]) -> str:
-    runner = (TEMPLATES / "run_tests.sh.tmpl").read_text()
+def render_runner(banners: list[str], sim_config: str = "sim:nsh") -> str:
+    runner = (TEMPLATES / ("qemu-armv8a/run_tests.sh.tmpl" if sim_config.startswith(
+        "qemu-armv8a:") else "run_tests.sh.tmpl")).read_text()
     return runner.replace("@@BANNERS@@", " ".join(shlex.quote(b) for b in banners))
 
 
@@ -101,8 +102,11 @@ def render(meta: dict, patch_file: Path, out_root: Path,
     if meta["kernel_repo"] != "https://github.com/apache/nuttx" or \
             meta["apps_repo"] != "https://github.com/apache/nuttx-apps":
         raise ValueError("expected the Apache NuttX kernel and apps repositories")
-    if meta.get("sim_config", "sim:nsh") != "sim:nsh" or meta.get("test_app", "ostest") != "ostest":
-        raise ValueError("this template supports only sim:nsh with ostest")
+    sim_config = meta.get("sim_config", "sim:nsh")
+    if meta.get("test_app", "ostest") != "ostest" or sim_config not in (
+            "sim:nsh", "qemu-armv8a:nsh", "qemu-armv8a:nsh_smp") or (
+            runtime == "docker" and sim_config != "sim:nsh"):
+        raise ValueError("this runtime supports sim:nsh or qemu-armv8a:nsh[_smp] with ostest")
     if meta["fail_type"] not in ("runtime_assert", "compile_error"):
         raise ValueError("expected runtime_assert or compile_error")
     for name in ("kernel_base_commit", "kernel_merge_commit", "apps_base_commit"):
@@ -118,7 +122,9 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         raise ValueError("test_banners must list ostest 'user_main: ...' lines")
     if not isinstance(meta.get("clean_after_patch", False), bool):
         raise ValueError("clean_after_patch must be a boolean")
-    overrides = meta.get("config_overrides") or {}
+    overrides = dict(meta.get("config_overrides") or {})
+    if sim_config.startswith("qemu-armv8a:"):
+        overrides["CONFIG_DEBUG_SCHED_INFO"] = "n"  # prevent SMP console interleaving
     reserved = {"CONFIG_TESTING_OSTEST", "CONFIG_NSH_CONSOLE_LOGIN", "CONFIG_NDEBUG"}
     # y/n for bools; decimal or hex for int-valued symbols (e.g. CONFIG_SMP_NCPUS=4,
     # CONFIG_SMP_DEFAULT_CPUSET=0xffffffff); a quoted literal for string-valued ones.
@@ -152,11 +158,12 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         # New symbols may not exist until the kernel fix is applied, so
         # append after olddefconfig and verify this exact input is present.
         steps.append(f"grep -q '^{re.escape(expected)}$' .config")
-    runner = render_runner(banners)
+    runner = render_runner(banners, sim_config)
 
     generated_meta = dict(meta)
     generated_meta.update({
-        "sim_config": "sim:nsh",
+        "sim_config": sim_config,
+        "config_overrides": overrides,
         "test_app": "ostest",
         "build_command": "make -j$(nproc)",
         "docker_image": f"embedeval:nuttx-{instance_id.rsplit('-', 1)[1]}{tag_suffix}",
@@ -174,6 +181,7 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         for key, value in (("INSTANCE_ID", instance_id),
                            ("KERNEL_BASE_COMMIT", meta["kernel_base_commit"]),
                            ("APPS_BASE_COMMIT", meta["apps_base_commit"]),
+                           ("SIM_CONFIG", sim_config),
                            ("EXTRA_CONFIG", "\n".join(f"    {s}" for s in steps))):
             recipe = recipe.replace(f"@@{key}@@", value)
         # No Docker image: scripts/build_instances.py builds a .sif from the

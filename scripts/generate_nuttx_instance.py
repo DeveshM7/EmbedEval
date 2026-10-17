@@ -38,10 +38,13 @@ APPS_CLONE = ROOT / "candidates" / "nuttx" / "apps.git"
 def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
     if verdict.get("verdict") != "accept":
         raise ValueError("triage verdict must accept the pair")
-    if "readiness" in verdict and verdict["readiness"] != "ready_to_generate":
+    platform = verdict.get("platform")
+    qemu = platform in ("qemu-armv8a:nsh", "qemu-armv8a:nsh_smp")
+    if "readiness" in verdict and verdict["readiness"] != "ready_to_generate" and not (
+            qemu and verdict["readiness"] == "needs_fixture"):
         raise ValueError("triage readiness must be ready_to_generate; review the recipe first")
-    if verdict.get("platform") != "sim:nsh":
-        raise ValueError("the current generator supports sim:nsh; retain QEMU leads for later")
+    if platform != "sim:nsh" and not qemu:
+        raise ValueError("the generator supports sim:nsh and qemu-armv8a:nsh[_smp]")
     apps = record["apps"]
     case = f"apps-{apps['number']}-kernel-{kernel_number}"
     if verdict.get("case", case) != case or verdict.get("kernel_pr", kernel_number) != kernel_number:
@@ -95,7 +98,7 @@ def metadata(record: dict, kernel_number: int, verdict: dict) -> dict:
         "apps_merge_commit": apps["head_commit"],
         "files_changed_by_fix": fix_paths,
         "files_changed_by_test_patch": test_paths,
-        "sim_config": "sim:nsh",
+        "sim_config": platform,
         "test_app": "ostest",
         "fail_type": fail_type,
         "problem_statement": verdict["problem_statement"],

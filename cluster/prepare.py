@@ -119,7 +119,9 @@ def prepare_nuttx(args, cfg: dict, run: Path, env: dict, done: dict) -> None:
     log(f"{len(prs)} apps PRs, {sum(v == 'to triage' for v in stage.values())} to triage")
     if cfg["nuttx"]["validate"]:            # the shared image, built once, not by every node
         import apptainer_util as au
-        au.ensure_nuttx_base_image(Path(cfg["derived"]["shared"]) / "logs")
+        logdir = Path(cfg["derived"]["shared"]) / "logs"
+        au.ensure_nuttx_base_image(logdir)
+        au.ensure_nuttx_base_image(logdir, "qemu-armv8a:nsh")
     source = {"pr": args.pr} if args.pr else {"all_ostest": True}
     write_manifest(run, args.name, cfg, env, source | {"redo": args.redo}, prs, stage, notes,
                    {"records": time.time() - t0}, [], t0)

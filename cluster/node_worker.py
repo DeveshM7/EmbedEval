@@ -402,9 +402,9 @@ VFORK_FIXED = "2023-07-17"         # before the fork rework, ARM64 sim vfork can
 def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, left, done) -> None:
     """Generate, build and validate each high/medium pair of an apps PR's
     verdict (its also_needs applied with the primary PR), on sim:nsh in
-    Apptainer. Era limits are recorded, not hidden: a pair merged before
-    ARM64 sim existed is needs_x86; a pre-fork-rework pair that fails is
-    arm64_env_failure; a QEMU pair waits for the QEMU runner."""
+    Apptainer. Era limits are recorded, not hidden: a sim pair merged before
+    ARM64 sim existed is needs_x86; a pre-fork-rework sim pair that fails is
+    arm64_env_failure. qemu-armv8a pairs use the QEMU runner."""
     os.environ["EMBEDEVAL_NUTTX_DATA"] = str(nuttx_data(cfg, node_dir))   # before the import
     import nuttx_candidates as nc
     verdict = json.loads((run / "triage" / f"{pr}.json").read_text())
@@ -424,10 +424,12 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
         except Exception as e:
             results.append((kernel, "failed", f"kernel record: {str(e)[:80]}"))
             continue
-        if str(pair.get("platform", "")).startswith("qemu"):
+        platform = pair.get("platform", "sim:nsh")
+        qemu = platform in ("qemu-armv8a:nsh", "qemu-armv8a:nsh_smp")
+        if str(platform).startswith("qemu") and not qemu:
             results.append((kernel, "qemu_pending", f"{pair['platform']}: QEMU runner not wired in"))
             continue
-        if merged and merged < ARM64_SIM_FROM:
+        if not qemu and merged and merged < ARM64_SIM_FROM:
             results.append((kernel, "needs_x86", f"kernel #{kernel} merged {merged}: no ARM64 sim"))
             continue
         if left() < 8:
@@ -460,7 +462,7 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                 results.append((kernel, "VALID", ""))
             elif rc == 124:
                 results.append((kernel, "failed", "validation hit the cap"))
-            elif merged and merged < VFORK_FIXED:
+            elif not qemu and merged and merged < VFORK_FIXED:
                 results.append((kernel, "arm64_env_failure",
                                 f"INVALID on ARM64 with a pre-{VFORK_FIXED} kernel (vfork SIGBUS "
                                 f"risk): {reason or rc}"))
