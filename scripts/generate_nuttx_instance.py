@@ -187,7 +187,8 @@ def rerender_runner(inst: Path) -> Path:
 
 
 def generate(apps_number: int, kernel_number: int, verdict: dict,
-             out_root: Path = DEFAULT_OUT, tag_suffix: str = "-gen") -> Path:
+             out_root: Path = DEFAULT_OUT, tag_suffix: str = "-gen",
+             runtime: str = "docker") -> Path:
     pair_path = ENRICHED / f"apps-{apps_number}-kernel-{kernel_number}.json"
     record_path = pair_path if pair_path.exists() else ENRICHED / f"{apps_number}.json"
     record = (json.loads(record_path.read_text()) if record_path.exists()
@@ -199,7 +200,7 @@ def generate(apps_number: int, kernel_number: int, verdict: dict,
     with tempfile.TemporaryDirectory(prefix="embedeval-nuttx-testpatch-") as tmp:
         patch_file = Path(tmp) / "test.diff"
         patch_file.write_text(patch)
-        return render(meta, patch_file, out_root, tag_suffix)
+        return render(meta, patch_file, out_root, tag_suffix, runtime)
 
 
 def pair_verdict(verdict: dict, kernel_number: int | None) -> tuple[int, int, dict]:
@@ -233,6 +234,7 @@ def main() -> None:
                         help="only rewrite this instance's run_tests.sh")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--tag-suffix", default="-gen")
+    parser.add_argument("--runtime", choices=("docker", "apptainer"), default="docker")
     args = parser.parse_args()
     if args.rerender_runner:
         print(rerender_runner(args.rerender_runner))
@@ -245,7 +247,8 @@ def main() -> None:
             apps_number, kernel_number, verdict = pair_verdict(verdict, args.kernel_pr)
         except ValueError as exc:
             parser.error(str(exc))
-        print(generate(apps_number, kernel_number, verdict, args.out, args.tag_suffix))
+        print(generate(apps_number, kernel_number, verdict, args.out, args.tag_suffix,
+                       args.runtime))
         return
     pair = re.fullmatch(r"apps-(\d+)-kernel-(\d+)", verdict.get("case") or "")
     apps_number = args.apps_pr if args.apps_pr is not None else int(pair[1]) if pair else None
@@ -253,7 +256,7 @@ def main() -> None:
     if apps_number is None or kernel_number is None:
         parser.error("supply --apps-pr and --kernel-pr, or a triage JSON with a pair case ID")
     print(generate(apps_number, kernel_number, verdict, args.out,
-                   args.tag_suffix))
+                   args.tag_suffix, args.runtime))
 
 
 if __name__ == "__main__":

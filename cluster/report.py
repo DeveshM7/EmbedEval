@@ -46,6 +46,8 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
         return "accepted, validation not yet", ""
     if v["state"] != "done":
         return f"validation: {v['state']}", v.get("note", "")
+    if v["outcome"] in ("needs_x86", "arm64_env_failure", "qemu_pending"):
+        return v["outcome"], v.get("note", "")        # not INVALID, not settled
     if v["outcome"] == "VALID":
         return "VALID", v.get("note", "")             # e.g. retried on another board
     return "INVALID", "; ".join(x for x in (v["outcome"], v.get("note")) if x)
@@ -54,7 +56,7 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
 ORDER = ["in ledger", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "triage: server failed",
          "triage: cap", "triage: failed", "triage: error", "triage: reject", "triage: not yet",
          "accepted, validation not yet", "validation: skipped", "validation: failed",
-         "INVALID", "VALID"]
+         "qemu_pending", "needs_x86", "arm64_env_failure", "INVALID", "VALID"]
 
 
 def build(run: Path) -> dict:

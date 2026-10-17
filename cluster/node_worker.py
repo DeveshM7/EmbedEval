@@ -366,6 +366,9 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
             done("skipped", f"disk guard: instance images at {used:.0f} GB "
                             f"(limit {cfg['disk_guard_gb']} GB)")
             return
+        if cfg["project"] == "nuttx":
+            validate_nuttx(cfg, run, pr, venv, Path(env["EMBEDEVAL_WORK"]).parent, left, done)
+            return
         lg = LOGS / f"validate-{pr}.log"
         verdict = run / "triage" / f"{pr}.json"
         tried = []
@@ -390,6 +393,91 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
 
     with ThreadPoolExecutor(cfg["parallel"]["validate_per_node"]) as pool:
         list(pool.map(one, mine))
+
+
+ARM64_SIM_FROM = "2022-02-02"      # sim on an ARM64 host needs a kernel from this date on
+VFORK_FIXED = "2023-07-17"         # before the fork rework, ARM64 sim vfork can SIGBUS
+
+
+def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, left, done) -> None:
+    """Generate, build and validate each high/medium pair of an apps PR's
+    verdict (its also_needs applied with the primary PR), on sim:nsh in
+    Apptainer. Era limits are recorded, not hidden: a pair merged before
+    ARM64 sim existed is needs_x86; a pre-fork-rework pair that fails is
+    arm64_env_failure; a QEMU pair waits for the QEMU runner."""
+    os.environ["EMBEDEVAL_NUTTX_DATA"] = str(nuttx_data(cfg, node_dir))   # before the import
+    import nuttx_candidates as nc
+    verdict = json.loads((run / "triage" / f"{pr}.json").read_text())
+    pairs = [p for p in verdict.get("pairs", []) if isinstance(p, dict)
+             and p.get("confidence") in ("high", "medium")]
+    venv = {**env, "EMBEDEVAL_NUTTX_DATA": str(nuttx_data(cfg, node_dir)),
+            "EMBEDEVAL_INSTANCES_DIR": str(node_dir / "work" / "instances")}
+    clones = Path(venv["EMBEDEVAL_NUTTX_DATA"])
+    venv.update(EMBEDEVAL_NUTTX_CLONE=str(clones / "kernel.git"),
+                EMBEDEVAL_NUTTX_APPS_CLONE=str(clones / "apps.git"))
+    results = []
+    for pair in pairs:
+        kernel, lg = pair["kernel_pr"], LOGS / f"validate-{pr}-{pair['kernel_pr']}.log"
+        iid = f"nuttx__nuttx-{kernel}"
+        try:
+            merged = (nc.kernel_record(kernel).get("merged_at") or "")[:10]
+        except Exception as e:
+            results.append((kernel, "failed", f"kernel record: {str(e)[:80]}"))
+            continue
+        if str(pair.get("platform", "")).startswith("qemu"):
+            results.append((kernel, "qemu_pending", f"{pair['platform']}: QEMU runner not wired in"))
+            continue
+        if merged and merged < ARM64_SIM_FROM:
+            results.append((kernel, "needs_x86", f"kernel #{kernel} merged {merged}: no ARM64 sim"))
+            continue
+        if left() < 8:
+            return
+        pv = run / "triage" / f"{pr}-kernel-{kernel}.json"
+        pv.write_text(json.dumps(verdict))
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+        try:
+            if step([PY, "scripts/generate_nuttx_instance.py", "--triage", str(pv), "--kernel-pr",
+                     str(kernel), "--runtime", "apptainer", "--out", venv["EMBEDEVAL_INSTANCES_DIR"]],
+                    lg, min(8, left()), venv):
+                results.append((kernel, "failed", "generate failed: the pair is not runnable"))
+                continue
+            rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
+                      min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
+            if rc == 143:
+                return
+            if rc:
+                results.append((kernel, "failed", "build failed" if rc != 124 else "build hit the cap"))
+                continue
+            rc = step([PY, "scripts/validate_instance.py", iid], lg, max(5, left()), venv)
+            if rc == 143:
+                return
+            rep = Path(venv["EMBEDEVAL_INSTANCES_DIR"]) / iid / "validation.json"
+            reason = json.loads(rep.read_text()).get("reason") if rep.exists() else None
+            if rep.exists():
+                (run / "instances" / iid).mkdir(parents=True, exist_ok=True)
+                shutil.copy(rep, run / "instances" / iid / "validation.json")
+            if rc == 0:
+                results.append((kernel, "VALID", ""))
+            elif rc == 124:
+                results.append((kernel, "failed", "validation hit the cap"))
+            elif merged and merged < VFORK_FIXED:
+                results.append((kernel, "arm64_env_failure",
+                                f"INVALID on ARM64 with a pre-{VFORK_FIXED} kernel (vfork SIGBUS "
+                                f"risk): {reason or rc}"))
+            else:
+                results.append((kernel, "INVALID", f"{reason or f'rc={rc}'}"))
+        finally:
+            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+    order = ["VALID", "INVALID", "arm64_env_failure", "needs_x86", "qemu_pending", "failed"]
+    results.sort(key=lambda r: order.index(r[1]))
+    note = "; ".join(f"#{k} {o}{': ' + n if n else ''}" for k, o, n in results)
+    if not results:
+        done("done", "no high/medium pair", outcome="INVALID: no high/medium pair")
+    elif results[0][1] == "failed":
+        done("failed", note)
+    else:
+        done("done", note, outcome=results[0][1] if results[0][1] != "INVALID" else
+             f"INVALID: {results[0][2]}")
 
 
 def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: dict):

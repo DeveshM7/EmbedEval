@@ -117,6 +117,9 @@ def prepare_nuttx(args, cfg: dict, run: Path, env: dict, done: dict) -> None:
     with ThreadPoolExecutor(cfg["parallel"]["enrich"]) as pool:
         list(pool.map(fetch, [pr for pr in prs if pr not in stage]))
     log(f"{len(prs)} apps PRs, {sum(v == 'to triage' for v in stage.values())} to triage")
+    if cfg["nuttx"]["validate"]:            # the shared image, built once, not by every node
+        import apptainer_util as au
+        au.ensure_nuttx_base_image(Path(cfg["derived"]["shared"]) / "logs")
     source = {"pr": args.pr} if args.pr else {"all_ostest": True}
     write_manifest(run, args.name, cfg, env, source | {"redo": args.redo}, prs, stage, notes,
                    {"records": time.time() - t0}, [], t0)
