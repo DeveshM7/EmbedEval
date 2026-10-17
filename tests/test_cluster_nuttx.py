@@ -16,6 +16,43 @@ import node_worker  # noqa: E402
 
 
 class NuttxClusterTests(unittest.TestCase):
+    def test_later_followups_rank_prs_by_how_many_fix_files_they_touch(self):
+        import os
+        import subprocess
+        import types
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            def commit(name: str, date: str, *paths: str) -> str:
+                for path in paths:
+                    (repo / path).parent.mkdir(parents=True, exist_ok=True)
+                    (repo / path).write_text(name)
+                env = {**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+                for args in (["add", *paths], ["commit", "-qm", name]):
+                    subprocess.run(["git", "-C", tmp, *args], check=True, env=env)
+                return subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"], check=True,
+                                      capture_output=True, text=True).stdout.strip()
+            subprocess.run(["git", "-C", tmp, "init", "-q"], check=True)
+            for key, value in (("user.name", "T"), ("user.email", "t@example.invalid")):
+                subprocess.run(["git", "-C", tmp, "config", key, value], check=True)
+            commit("fix", "2025-12-18T10:00:00Z", "sched/a.c", "sched/b.c", "include/x.h")
+            prs = {commit("one file", "2025-12-20T10:00:00Z", "include/x.h"): 2,
+                   commit("two files", "2026-01-08T10:00:00Z", "sched/a.c", "sched/b.c"): 3,
+                   commit("unrelated", "2026-01-09T10:00:00Z", "drivers/y.c"): 4,
+                   commit("too late", "2026-03-01T10:00:00Z", "sched/a.c"): 5}
+            files = {"sched/a.c", "sched/b.c", "include/x.h", "Documentation/z.rst"}
+            def commit_record(repo_name, sha):
+                n = prs[sha]
+                shown = subprocess.run(["git", "-C", tmp, "show", "--name-only", "--format=", sha],
+                                       capture_output=True, text=True).stdout.split()
+                return {"prs": [{"number": n, "merged_at": "2026"}],
+                        "files": [{"filename": f} for f in shown]}
+            nc = types.SimpleNamespace(
+                KERNEL="apache/nuttx", commit_record=commit_record,
+                kernel_record=lambda n: {"merged_at": "2025-12-18T10:00:00Z",
+                                         "files": [{"filename": f} for f in files]})
+            self.assertEqual(node_worker.later_followups(nc, 1, tmp, set(), repo / "log"), [3, 2])
+            self.assertEqual(node_worker.later_followups(nc, 1, tmp, {3}, repo / "log"), [2])
+
     def test_phase_assignment_stays_fixed_as_other_nodes_finish(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
