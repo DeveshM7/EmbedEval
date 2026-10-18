@@ -224,6 +224,8 @@ def nuttx_triage_step(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, 
     cmd = [PY, "scripts/triage_nuttx_prs.py", "apps", "--profile", cfg["model"]["profile"],
            "--apps-pr", str(pr), "--parallel", "1", "--max-tool-calls", str(n["max_tool_calls"]),
            "--max-minutes", str(min(n["max_minutes"], cap))]
+    if n["max_repairs"] != 2:   # a frozen triage version may predate the flag
+        cmd += ["--max-repairs", str(n["max_repairs"])]
     if n["followup_review"]:
         cmd.append("--followup-review")
     rc = step(cmd, LOGS / f"triage-{pr}.log", cap, nenv, cwd=code)

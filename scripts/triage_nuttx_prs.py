@@ -1069,15 +1069,16 @@ def model_options(profile: str, settings: dict, api_base: str) -> dict:
 
 def converse(messages: list, options: dict, tools: list, call_tool, check, trace: dict,
              max_rounds: int | None = None, max_calls: int | None = None,
-             deadline: float | None = None) -> tuple[dict | None, list[str]]:
-    """Let the model call tools, then check its JSON reply and ask for
-    repairs. Tools are withdrawn once a budget runs out: tool rounds, tool
+             deadline: float | None = None,
+             max_repairs: int = MAX_REPAIRS) -> tuple[dict | None, list[str]]:
+    """Let the model call tools, then check its JSON reply and ask for up to
+    max_repairs repairs. Tools are withdrawn once a budget runs out: tool rounds, tool
     calls, wall time (a time.time() deadline) or context."""
     import litellm
 
     verdict, issues, rounds, calls_made, repairs, tools_open = None, ["no reply"], 0, 0, 0, True
     trace["tool_calls"] = 0
-    for _ in range((max_rounds or max_calls) + MAX_REPAIRS + 2):
+    for _ in range((max_rounds or max_calls) + max_repairs + 2):
         t = time.time()
         if deadline:   # no single call may run far past the wall-time budget
             options = {**options, "timeout": max(60, deadline + FINAL_GRACE - t)}
@@ -1126,7 +1127,7 @@ def converse(messages: list, options: dict, tools: list, call_tool, check, trace
             continue
         verdict = parse_verdict(msg.content)
         issues = check(verdict)
-        if not issues or repairs >= MAX_REPAIRS:
+        if not issues or repairs >= max_repairs:
             break
         repairs += 1
         trace["repairs"].append(issues)
@@ -1219,7 +1220,7 @@ def run(args) -> None:
 
 def triage_apps_one(case: str, record: dict, profile: str, settings: dict, api_base: str,
                     run_dir: Path, max_calls: int, max_minutes: float,
-                    followup_review: bool = False) -> dict:
+                    followup_review: bool = False, max_repairs: int = MAX_REPAIRS) -> dict:
     """Classify one apps PR and search for its kernel PRs."""
     options = model_options(profile, settings, api_base)
     messages = [{"role": "system", "content": APPS_PROMPT.read_text()},
@@ -1257,7 +1258,8 @@ def triage_apps_one(case: str, record: dict, profile: str, settings: dict, api_b
         verdict, issues = converse(messages, options, APPS_TOOLS,
                                    checked_tool,
                                    check, trace, max_calls=max_calls,
-                                   deadline=start + max_minutes * 60)
+                                   deadline=start + max_minutes * 60,
+                                   max_repairs=max_repairs)
     except Exception as exc:
         trace["error"] = f"{type(exc).__name__}: {exc}"
         if time.time() >= start + max_minutes * 60:   # a call ran past the budget
@@ -1335,7 +1337,7 @@ def run_apps(args) -> None:
                 "sampling": profiles[args.profile].get("sampling"),
                 "max_tokens": profiles[args.profile].get("max_tokens"),
                 "budget": {"max_tool_calls": args.max_tool_calls,
-                           "max_minutes": args.max_minutes},
+                           "max_minutes": args.max_minutes, "max_repairs": args.max_repairs},
                 "followup_review": args.followup_review,
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                 "git_commit": commit, "cases": cases,
@@ -1345,7 +1347,7 @@ def run_apps(args) -> None:
         jobs = [pool.submit(triage_apps_one, case, records[case], args.profile,
                             profiles[args.profile], args.api_base, run_dir,
                             args.max_tool_calls, args.max_minutes,
-                            args.followup_review) for case in cases]
+                            args.followup_review, args.max_repairs) for case in cases]
         for job in futures.as_completed(jobs):
             result = job.result()
             print(f"{result['case']}: {result['kind']} {result['pairs']} "
@@ -1571,6 +1573,8 @@ def main() -> None:
                              help="hide explicit kernel links and commit hashes")
     apps_parser.add_argument("--max-tool-calls", type=int, default=40)
     apps_parser.add_argument("--max-minutes", type=float, default=30)
+    apps_parser.add_argument("--max-repairs", type=int, default=MAX_REPAIRS,
+                             help="times an invalid verdict is sent back with its issues")
     apps_parser.add_argument("--followup-review", action="store_true",
                              help="ask for a reason for each later kernel commit that touches "
                                   "a pair's production paths before the apps PR merged")

@@ -473,7 +473,8 @@ class AppsConversationTests(unittest.TestCase):
              patch.object(candidates, "kernel_record", return_value=kernel_pr()):
             result = triage.triage_apps_one("apps-7", record, "m", {}, "http://x", run_dir,
                                             budget.get("max_calls", 40),
-                                            budget.get("max_minutes", 30))
+                                            budget.get("max_minutes", 30),
+                                            max_repairs=budget.get("max_repairs", 2))
         output = json.loads((run_dir / "apps-7.json").read_text())
         return result, output, llm, tool, run_dir
 
@@ -503,6 +504,14 @@ class AppsConversationTests(unittest.TestCase):
         self.assertIn("Tool budget reached", llm.calls[1]["messages"][-1]["content"])
         self.assertEqual(output["budget"]["exhausted"], "tool")
         self.assertEqual(output["kernel_search"], "nothing_found")
+
+    def test_more_repairs_let_a_verdict_be_corrected_later(self):
+        bad = {"content": "no json"}
+        good = {"content": json.dumps(verdict())}
+        _, output, _, _, _ = self.run_case([bad] * 3 + [good])
+        self.assertEqual(output["kind"], "error")
+        _, output, _, _, _ = self.run_case([bad] * 3 + [good], max_repairs=3)
+        self.assertEqual(output["kind"], "kernel_test")
 
     def test_no_valid_answer_after_the_budget_is_budget_exhausted(self):
         _, output, _, _, _ = self.run_case(
