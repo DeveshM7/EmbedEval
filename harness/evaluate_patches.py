@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -94,7 +95,21 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
         result["patch_applied"] = True
         if meta["project"] == "nuttx":
             # NuttX's run_tests only runs the simulator: build first, as in
-            # Docker. Nothing to clean: the image is not prebuilt.
+            # Docker. Before that, as in validation: re-apply the config
+            # overrides (some exist only once the fix is in) and clean if the
+            # fix needs it.
+            prepare = au.nuttx_reconfigure(meta.get("config_overrides") or {})
+            if meta.get("clean_after_patch"):
+                prepare += " && make clean"
+            cp = subprocess.run(container + ["bash", "-c", f"cd /testbed && {prepare}"],
+                                capture_output=True, text=True, timeout=600)
+            if cp.returncode != 0:
+                out = (cp.stdout or "") + (cp.stderr or "")
+                dropped = re.search(r"config override dropped: \S+", out)
+                result["error"] = (f"{dropped.group(0)} with the patch" if dropped
+                                   else f"reconfigure failed (rc={cp.returncode})")
+                result["build_output_tail"] = out[-600:]
+                return result
             build_command = projects.setting(meta, "build_command")
             print(f"  building ({build_command}) ...")
             bp = subprocess.run(container + ["bash", "-c", f"cd /testbed && {build_command}"],

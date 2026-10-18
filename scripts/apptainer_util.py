@@ -315,6 +315,29 @@ def ensure_nuttx_base_image(logdir: Path, sim_config: str = "sim:nsh") -> Path:
     return img
 
 
+def nuttx_reconfigure(overrides: dict) -> str:
+    """Shell that re-applies a NuttX pair's config overrides after the kernel fix
+    (in validation) or a patch (in evaluation).
+
+    An override whose symbol only exists once the fix is applied does not survive
+    the pre-fix configure and build, so append each one again, let olddefconfig
+    resolve its dependencies, and fail if one was still dropped.
+    """
+    cmds = []
+    for name, value in sorted(overrides.items()):
+        cmds.append(f"sed -i '/^{name}=/d; /^# {name} is not set/d' .config")
+        cmds.append(f"printf '%s\\n' '{name}={value}' >> .config")
+    cmds.append("make olddefconfig")
+    for name, value in sorted(overrides.items()):
+        if value == "n":
+            cmds.append(f"{{ ! grep -q '^{name}=' .config || "
+                        f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
+        else:
+            cmds.append(f"{{ grep -qx '{name}={value}' .config || "
+                        f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
+    return " && ".join(cmds)
+
+
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
               overlay: Path | None = None, env: dict | None = None) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall

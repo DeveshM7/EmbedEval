@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au
+from apptainer_util import nuttx_reconfigure
 import build_config
 import instances
 import nuttx_config_probe as probe
@@ -136,28 +137,6 @@ def nuttx_fix_patches(meta: dict, workdir: Path,
                   **{f"follow-up-{e['kernel_pr']}": e.get("merged_at", "") for e in extras}}
         patches.sort(key=lambda p: merged[p[0]])
     return patches
-
-
-def nuttx_reconfigure(overrides: dict) -> str:
-    """Shell that re-applies the pair's config overrides after the kernel fix.
-
-    An override whose symbol only exists once the fix is applied does not survive
-    the pre-fix configure and build, so append each one again, let olddefconfig
-    resolve its dependencies, and fail if one was still dropped.
-    """
-    cmds = []
-    for name, value in sorted(overrides.items()):
-        cmds.append(f"sed -i '/^{name}=/d; /^# {name} is not set/d' .config")
-        cmds.append(f"printf '%s\\n' '{name}={value}' >> .config")
-    cmds.append("make olddefconfig")
-    for name, value in sorted(overrides.items()):
-        if value == "n":
-            cmds.append(f"{{ ! grep -q '^{name}=' .config || "
-                        f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
-        else:
-            cmds.append(f"{{ grep -qx '{name}={value}' .config || "
-                        f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
-    return " && ".join(cmds)
 
 
 def config_fallbacks(makefile: str, kconfig: str, test_paths: list[str]) -> list[dict]:

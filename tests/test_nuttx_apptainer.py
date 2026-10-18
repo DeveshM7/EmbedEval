@@ -429,6 +429,43 @@ class HarnessTests(unittest.TestCase):
             evaluate_patches.evaluate_patch("nuttx__nuttx-1", "claude-opus-4-6")
         graded.assert_called_once()
 
+    def test_nuttx_grading_reapplies_config_overrides_after_the_patch(self):
+        meta = {"project": "nuttx", "runtime": "apptainer", "build_command": "make",
+                "config_overrides": {"CONFIG_HRTIMER": "y"}, "clean_after_patch": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "model.patch").write_text("diff --git a/x b/x\n")
+            (work / "image.sif").write_text("")
+            ran = []
+
+            def fake_run(cmd, **kwargs):
+                ran.append(cmd[-1])
+                dropped = "dropped" in str(work.name) and "olddefconfig" in cmd[-1]
+                out = "config override dropped: CONFIG_HRTIMER=y\n" if dropped else ""
+                return subprocess.CompletedProcess(cmd, 3 if dropped else 0, out, "")
+
+            with patch.object(evaluate_patches.paths, "patch_path",
+                              return_value=work / "model.patch"), \
+                    patch.object(apptainer_util, "require_host_arch"), \
+                    patch.object(apptainer_util, "instance_image", return_value=work / "image.sif"), \
+                    patch.object(apptainer_util, "path", side_effect=lambda *p: work.joinpath(*p)), \
+                    patch.object(apptainer_util, "exec_args", return_value=["apptainer"]), \
+                    patch.object(apptainer_util, "remove"), \
+                    patch.object(evaluate_patches.subprocess, "run", side_effect=fake_run):
+                result = evaluate_patches.evaluate_apptainer("nuttx__nuttx-1", "claude-opus-4-6", meta, 300)
+                self.assertEqual(result["grade"], "pass", result)
+                prepare = next(c for c in ran if "olddefconfig" in c)
+                self.assertIn("CONFIG_HRTIMER=y", prepare)
+                self.assertTrue(prepare.endswith("&& make clean"))
+                self.assertLess(ran.index(prepare), ran.index("cd /testbed && make"))
+                work = work / "dropped"
+                work.mkdir()
+                (work / "model.patch").write_text("diff --git a/x b/x\n")
+                (work / "image.sif").write_text("")
+                result = evaluate_patches.evaluate_apptainer("nuttx__nuttx-1", "claude-opus-4-6", meta, 300)
+                self.assertEqual(result["error"],
+                                 "config override dropped: CONFIG_HRTIMER=y with the patch")
+
     def test_agent_environment_for_a_nuttx_apptainer_instance(self):
         made = {}
 
