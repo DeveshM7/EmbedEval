@@ -405,6 +405,10 @@ class ValidatorTests(unittest.TestCase):
                                "-e 's/^\\(CONFIG_[A-Z0-9_]*\\)=n$/# \\1 is not set/' .config\n")
                 make.chmod(0o755)
                 (work / ".config").write_text("CONFIG_SIM=y\nCONFIG_DEBUG_SCHED_INFO=y\n")
+                (work / "sched").mkdir(exist_ok=True)
+                (work / "sched" / "Kconfig").write_text(
+                    "config HRTIMER\n\tbool\nconfig SMP_NCPUS\n\tint\n"
+                    "menuconfig DEBUG_SCHED_INFO\n\tbool\n")
                 return subprocess.run(["bash", "-c", script], cwd=work, capture_output=True,
                                       text=True, env={"PATH": f"{make.parent}:/usr/bin:/bin"})
 
@@ -418,6 +422,14 @@ class ValidatorTests(unittest.TestCase):
             r = run_with("CONFIG_HRTIMER")
             self.assertEqual(r.returncode, 3)
             self.assertIn("config override dropped: CONFIG_HRTIMER=y", r.stdout)
+
+            # An option no Kconfig defines any more (kernel 608b59e401 removed
+            # CONFIG_SMP_CALL when SMP calls became unconditional) is ignored.
+            script = validate_instance.nuttx_reconfigure({"CONFIG_SMP_CALL": "y"})
+            r = run_with("CONFIG_SMP_CALL")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("config override ignored: CONFIG_SMP_CALL (no Kconfig defines it)",
+                          r.stdout)
 
 
 class HarnessTests(unittest.TestCase):

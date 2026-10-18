@@ -321,7 +321,9 @@ def nuttx_reconfigure(overrides: dict) -> str:
 
     An override whose symbol only exists once the fix is applied does not survive
     the pre-fix configure and build, so append each one again, let olddefconfig
-    resolve its dependencies, and fail if one was still dropped.
+    resolve its dependencies, and fail if one was still dropped. An option that
+    no Kconfig file in the tree defines (one the kernel has since removed, e.g.
+    when the feature became unconditional) is ignored with a note.
     """
     cmds = []
     for name, value in sorted(overrides.items()):
@@ -329,12 +331,11 @@ def nuttx_reconfigure(overrides: dict) -> str:
         cmds.append(f"printf '%s\\n' '{name}={value}' >> .config")
     cmds.append("make olddefconfig")
     for name, value in sorted(overrides.items()):
-        if value == "n":
-            cmds.append(f"{{ ! grep -q '^{name}=' .config || "
-                        f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
-        else:
-            cmds.append(f"{{ grep -qx '{name}={value}' .config || "
-                        f"{{ echo 'config override dropped: {name}={value}'; exit 3; }}; }}")
+        kept = f"! grep -q '^{name}=' .config" if value == "n" else f"grep -qx '{name}={value}' .config"
+        defined = (f"grep -rqsE --include='Kconfig*' "
+                   f"'^[[:space:]]*(menu)?config[[:space:]]+{name[len('CONFIG_'):]}[[:space:]]*$' .")
+        cmds.append(f"{{ {kept} || {{ {defined} && {{ echo 'config override dropped: {name}={value}'; "
+                    f"exit 3; }}; }} || echo 'config override ignored: {name} (no Kconfig defines it)'; }}")
     return " && ".join(cmds)
 
 
