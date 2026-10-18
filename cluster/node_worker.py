@@ -466,6 +466,12 @@ def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[tu
     return [(n, sorted(wires.get(n, ()))) for n in ranked]
 
 
+def broken_apps_tree(reason: str | None) -> bool:
+    """The validator's reasons for a pre-fix build that broke outside the changed test."""
+    return bool(reason) and reason.startswith(("the runtime test did not build",
+                                               "expected a compile or link error"))
+
+
 def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, left, done) -> None:
     """Generate, build and validate each high/medium pair of an apps PR's
     verdict (its also_needs applied with the primary PR), on sim:nsh in
@@ -558,6 +564,21 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
         result = attempt(verdict, pair, kernel, lg, merged, qemu)
         if result is None:
             return
+        # An apps PR that branched far from the kernel PR can leave an apps tree
+        # that does not build on the kernel base outside the test: retry with the
+        # test on the apps master of the kernel base's date, kept if it gets further.
+        moved = ""
+        if broken_apps_tree(result[2]):
+            trial = {**pair, "apps_at_kernel_date": True}
+            retried = attempt({**verdict, "pairs": [trial]}, trial, kernel, lg, merged, qemu)
+            if retried is None:
+                return
+            if retried[0] == "VALID" or (retried[2] and not broken_apps_tree(retried[2])):
+                pair, moved = trial, "apps at the kernel base's date"
+                result = (retried[0], "; ".join(filter(None, [moved, retried[1]])), retried[2])
+            else:
+                result = (result[0], f"{result[1]} (with apps at the kernel base's date: "
+                                     f"{retried[1]})", result[2])
         # A fix that does not build or still fails may need a later kernel PR on its
         # files (e.g. one that wires a new module into the build): retry with each of
         # the three later_followups, one at a time.
@@ -581,8 +602,8 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                     apps_merged = (nc.apps_record(pr)["apps"].get("merged_at") or "")[:10]
                     later_merged = (nc.kernel_record(later).get("merged_at") or "")[:10]
                     tag = "later_followup" if later_merged > apps_merged else "followup"
-                    result = ("VALID", f"{tag}: +#{later}"
-                              + (f" ({', '.join(build_files)} only)" if build_files else ""), "")
+                    result = ("VALID", "; ".join(filter(None, [moved, f"{tag}: +#{later}"
+                              + (f" ({', '.join(build_files)} only)" if build_files else "")])), "")
                     break
             else:
                 if tried:

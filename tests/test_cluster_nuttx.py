@@ -140,6 +140,49 @@ class NuttxClusterTests(unittest.TestCase):
             self.assertEqual(outcome.get("outcome"), "VALID", outcome)
             self.assertIn("+#3 (sched/Makefile only)", outcome["note"])
 
+    def test_a_pre_fix_build_break_outside_the_test_retries_with_apps_of_the_kernel_date(self):
+        # The apps PR's base does not build on the kernel base; on the apps of
+        # the kernel's date it builds, still fails with the fix, and passes with
+        # follow-up #3, which keeps the apps date.
+        import types
+        with tempfile.TemporaryDirectory() as tmp:
+            run, node_dir = Path(tmp) / "run", Path(tmp) / "node"
+            (run / "triage").mkdir(parents=True)
+            (run / "triage" / "7.json").write_text(json.dumps({"case": "apps-7", "pairs": [
+                {"kernel_pr": 1, "confidence": "high"}]}))
+
+            def step(cmd, logfile, minutes, env, cwd=None):
+                if "generate_nuttx_instance.py" in cmd[1]:
+                    out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1"
+                    out.mkdir(parents=True)
+                    (out / "triage.json").write_text(Path(cmd[cmd.index("--triage") + 1]).read_text())
+                if "validate_instance.py" in cmd[1]:
+                    inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1"
+                    pair = json.loads((inst / "triage.json").read_text())["pairs"][0]
+                    reason = ("the runtime test did not build (rc=2)"
+                              if not pair.get("apps_at_kernel_date") else
+                              None if pair.get("also_needs") else "tests still fail with the fix")
+                    (inst / "validation.json").write_text(json.dumps({"reason": reason}))
+                    return 1 if reason else 0
+                return 0
+
+            nc = types.SimpleNamespace(
+                kernel_record=lambda n: {"merged_at": "2025-12-18T10:00:00Z"},
+                apps_record=lambda n: {"apps": {"merged_at": "2025-12-24T10:00:00Z"}})
+            outcome = {}
+            with patch.dict(sys.modules, {"nuttx_candidates": nc}), \
+                    patch.object(node_worker, "nuttx_data", return_value=node_dir / "data"), \
+                    patch.object(node_worker, "later_followups", return_value=[(3, [])]), \
+                    patch.object(node_worker, "step", side_effect=step), \
+                    patch.object(node_worker, "LOGS", Path(tmp), create=True):
+                node_worker.validate_nuttx({}, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
+                                           node_dir, lambda: 100,
+                                           lambda state, note, **kw: outcome.update(
+                                               state=state, note=note, **kw))
+            self.assertEqual(outcome.get("outcome"), "VALID", outcome)
+            self.assertIn("apps at the kernel base's date", outcome["note"])
+            self.assertIn("+#3", outcome["note"])
+
     def test_phase_assignment_stays_fixed_as_other_nodes_finish(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

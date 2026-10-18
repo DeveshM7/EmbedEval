@@ -187,9 +187,19 @@ def ensure_apps_commits(clone: Path, *commits: str) -> None:
             run("git", "-C", str(clone), "fetch", "-q", "origin", sha)
 
 
+def apps_master_at(date: str) -> str:
+    """The apps master commit current at date."""
+    sha = run("git", "-C", str(apps_clone()), "rev-list", "-1", "--first-parent",
+              f"--before={date}", "refs/heads/master").strip()
+    if not sha:
+        raise ValueError(f"no apps master commit before {date}")
+    return sha
+
+
 def build_test_patch(base: str, head: str, paths: list[str],
-                     banners_required: bool = True) -> tuple[str, list[str]]:
-    """The apps test patch, and the ostest banners of the tests it changes."""
+                     banners_required: bool = True, onto: str | None = None) -> tuple[str, list[str]]:
+    """The apps test patch, and the ostest banners of the tests it changes.
+    With onto, the patch is moved (3-way) from base onto that apps commit."""
     clone = apps_clone()
     ensure_apps_commits(clone, base, head)
     changed = run("git", "-C", str(clone), "diff", "--name-only",
@@ -199,8 +209,28 @@ def build_test_patch(base: str, head: str, paths: list[str],
     patch = run("git", "-C", str(clone), "diff", f"{base}..{head}", "--", *paths)
     if not patch.strip():
         raise ValueError("empty apps test patch")
-    with patched_apps(base, patch) as work:
+    if onto and onto != base:
+        patch = moved_patch(onto, patch, paths)
+    with patched_apps(onto or base, patch) as work:
         return patch, ostest_banners(work / "testing" / "ostest", paths, banners_required, patch)
+
+
+def moved_patch(onto: str, patch: str, paths: list[str]) -> str:
+    """patch applied 3-way at apps commit onto, as a diff from onto."""
+    clone = apps_clone()
+    ensure_apps_commits(clone, onto)
+    with tempfile.TemporaryDirectory(prefix="embedeval-nuttx-move-") as tmp:
+        work = Path(tmp) / "apps"
+        patch_file = Path(tmp) / "test.diff"
+        patch_file.write_text(patch)
+        run("git", "-C", str(clone), "worktree", "add", "--detach", str(work), onto)
+        try:
+            if subprocess.run(["git", "-C", str(work), "apply", "--3way", str(patch_file)],
+                              capture_output=True, text=True).returncode:
+                raise ValueError(f"the apps test patch does not apply on apps {onto[:10]}")
+            return run("git", "-C", str(work), "diff", "HEAD", "--", *paths)
+        finally:
+            run("git", "-C", str(clone), "worktree", "remove", "--force", str(work))
 
 
 @contextmanager
@@ -239,9 +269,18 @@ def generate(apps_number: int, kernel_number: int, verdict: dict,
     record = (json.loads(record_path.read_text()) if record_path.exists()
               else candidates.apps_record(apps_number))
     meta = metadata(record, kernel_number, verdict, host_arch)
+    base = meta["apps_base_commit"]
+    if verdict.get("apps_at_kernel_date"):
+        # Validation's retry when the apps PR's own base does not build against
+        # the kernel base outside the test (the two PRs branched far apart): the
+        # test patch goes on the apps master of the kernel base's date instead.
+        meta["apps_pr_base_commit"] = base
+        meta["apps_base_commit"] = apps_master_at(
+            candidates.commit_record(candidates.KERNEL, meta["kernel_base_commit"])["date"])
     patch, meta["test_banners"] = build_test_patch(
-        meta["apps_base_commit"], meta["apps_merge_commit"],
-        meta["files_changed_by_test_patch"], meta["fail_type"] != "compile_error")
+        base, meta["apps_merge_commit"],
+        meta["files_changed_by_test_patch"], meta["fail_type"] != "compile_error",
+        onto=meta["apps_base_commit"])
     with tempfile.TemporaryDirectory(prefix="embedeval-nuttx-testpatch-") as tmp:
         patch_file = Path(tmp) / "test.diff"
         patch_file.write_text(patch)

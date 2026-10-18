@@ -79,6 +79,46 @@ class AppsRecordTests(unittest.TestCase):
                                  capture_output=True, text=True).stdout.strip()
             generator.ensure_apps_commits(repo, sha)
 
+    def test_test_patch_moves_onto_the_apps_master_of_a_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "apps"
+            repo.mkdir()
+
+            def git(*args, date="2024-01-01T00:00:00Z"):
+                env = {**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, env=env,
+                                      capture_output=True, text=True).stdout.strip()
+
+            def commit(files, date):
+                for name, text in files.items():
+                    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                    (repo / name).write_text(text)
+                git("add", "-A")
+                git("commit", "-m", date, date=date)
+                return git("rev-parse", "HEAD")
+
+            git("init", "-b", "master")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            base = commit({"testing/ostest/t.c": "int a;\n", "testing/ostest/robust.c": "old\n"},
+                          "2024-01-01T00:00:00Z")
+            git("checkout", "-q", "-b", "pr")
+            head = commit({"testing/ostest/t.c": "int a;\nint b;\n"}, "2024-01-05T00:00:00Z")
+            git("checkout", "-q", "master")
+            mid = commit({"testing/ostest/robust.c": "new\n"}, "2024-03-01T00:00:00Z")
+            commit({"other.c": "x\n"}, "2024-06-01T00:00:00Z")
+            with patch.object(generator, "apps_clone", return_value=repo), \
+                 patch.object(generator, "ostest_banners", return_value=[]):
+                self.assertEqual(generator.apps_master_at("2024-04-01T00:00:00Z"), mid)
+                test_patch, _ = generator.build_test_patch(
+                    base, head, ["testing/ostest/t.c"], False, onto=mid)
+                self.assertIn("+int b;", test_patch)
+                self.assertNotIn("robust.c", test_patch)
+                commit({"testing/ostest/t.c": "int c;\n"}, "2024-07-01T00:00:00Z")
+                with self.assertRaisesRegex(ValueError, "does not apply"):
+                    generator.build_test_patch(base, head, ["testing/ostest/t.c"], False,
+                                               onto=git("rev-parse", "HEAD"))
+
     def test_ostest_population_comes_from_changed_paths(self):
         scan = {"prs": {
             "5": {"files": {"nodes": [{"path": "testing/ostest/sem.c"}]}},
@@ -701,6 +741,24 @@ class AlsoNeedsAndConfigTests(unittest.TestCase):
         with patch.object(candidates, "kernel_record", return_value=wiring):
             meta = generator.metadata(record, 11, reply)
         self.assertEqual(meta["extra_fix_prs"][0]["files_changed"], ["sched/Makefile"])
+
+    def test_generator_can_put_the_test_on_apps_of_the_kernel_base_date(self):
+        record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
+        reply = {**full_pair(apps_at_kernel_date=True), "verdict": "accept",
+                 "case": "apps-7-kernel-11"}
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(generator, "ENRICHED", Path(tmp)), \
+             patch.object(candidates, "apps_record", return_value=record), \
+             patch.object(candidates, "commit_record", return_value={"date": "2024-05-01"}) as cr, \
+             patch.object(generator, "apps_master_at", return_value="a5") as at, \
+             patch.object(generator, "build_test_patch", return_value=("diff", [])) as build, \
+             patch.object(generator, "render", side_effect=lambda meta, *a: meta):
+            meta = generator.generate(7, 11, reply)
+        cr.assert_called_once_with(candidates.KERNEL, "k0")
+        at.assert_called_once_with("2024-05-01")
+        self.assertEqual(build.call_args.args[:2], ("a0", "a1"))
+        self.assertEqual(build.call_args.kwargs["onto"], "a5")
+        self.assertEqual((meta["apps_base_commit"], meta["apps_pr_base_commit"]), ("a5", "a0"))
 
     def test_generator_accepts_qemu_armv8a_pair_for_new_fixture(self):
         record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
