@@ -140,7 +140,7 @@ def render_runner(banners: list[str], sim_config: str = "sim:nsh",
 def render(meta: dict, patch_file: Path, out_root: Path,
            tag_suffix: str = "-gen", runtime: str = "docker") -> Path:
     instance_id = meta["instance_id"]
-    if meta["project"] != "nuttx" or not re.fullmatch(r"nuttx__nuttx-\d+", instance_id):
+    if meta["project"] != "nuttx" or not re.fullmatch(r"nuttx__nuttx-\d+(-a\d+)?", instance_id):
         raise ValueError("expected a NuttX instance ID")
     if runtime not in ("docker", "apptainer"):
         raise ValueError("runtime must be docker or apptainer")
@@ -215,7 +215,7 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         "config_overrides": overrides,
         "test_app": "ostest",
         "build_command": platforms.build_command(sim_config, overrides),
-        "docker_image": f"embedeval:nuttx-{instance_id.rsplit('-', 1)[1]}{tag_suffix}",
+        "docker_image": f"embedeval:nuttx-{instance_id.split('nuttx__nuttx-', 1)[1]}{tag_suffix}",
         "generated": True,
     })
     if runtime == "docker":

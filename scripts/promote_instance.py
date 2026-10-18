@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Promote validated Zephyr instances from generated/ to apptainer/instances/.
+Promote validated Zephyr and NuttX instances from generated/ to apptainer/instances/.
 
     python scripts/promote_instance.py zephyr__zephyr-65697
     python scripts/promote_instance.py --all            # every valid one in generated/
 
-apptainer/instances/ is the committed Zephyr benchmark: the instances the
+apptainer/instances/ is the committed Apptainer benchmark: the instances the
 harness runs agents on. Only an instance that passed validation gets there,
 and only as validated: its recipe files must still match the fingerprint
 validate_instance.py recorded in validation.json. A recipe regenerated or
 edited after validation is refused until it is validated again.
 
 Copies the recipe and its record -- instance.def, instance.json,
-run_tests.py, test_patch.diff, metadata.json, validation.json. Images are not
-in git; build_instances.py rebuilds them from the recipe.
+run_tests.py, test_patch.diff (NuttX: instance.def, run_tests.sh,
+test_patch.diff), metadata.json, validation.json. Images are not in git;
+build_instances.py rebuilds them from the recipe.
 """
 
 from __future__ import annotations
@@ -27,15 +28,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au  # noqa: E402
+import instances  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GENERATED = layout.generated()
 DEST = REPO_ROOT / "apptainer" / "instances"
-FILES = (*au.RECIPE_FILES, "metadata.json", "validation.json")
+RECORD_FILES = ("metadata.json", "validation.json")
 
 
 def promote(instance_id: str, source: Path = GENERATED) -> tuple[bool, str]:
     src = source / instance_id
+    recipe = (au.NUTTX_RECIPE_FILES if instances.split_instance(instance_id)[0] == "nuttx"
+              else au.RECIPE_FILES)
     report_path = src / "validation.json"
     if not report_path.exists():
         return False, "not validated (no validation.json)"
@@ -45,14 +49,15 @@ def promote(instance_id: str, source: Path = GENERATED) -> tuple[bool, str]:
     want = report.get("recipe_sha256")
     if not want:
         return False, "validation.json predates recipe fingerprints; validate it again"
-    if au.recipe_fingerprint(src) != want:
+    if au.recipe_fingerprint(src, recipe) != want:
         return False, "recipe changed since it was validated; validate it again"
-    missing = [f for f in FILES if not (src / f).exists()]
+    files = (*recipe, *RECORD_FILES)
+    missing = [f for f in files if not (src / f).exists()]
     if missing:
         return False, f"missing {', '.join(missing)}"
     dst = DEST / instance_id
     dst.mkdir(parents=True, exist_ok=True)
-    for f in FILES:
+    for f in files:
         shutil.copy2(src / f, dst / f)
     return True, f"promoted to {layout.show(dst)}"
 

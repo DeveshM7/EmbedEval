@@ -527,7 +527,7 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
     def attempt(v: dict, pair: dict, kernel: int, lg: Path, merged: str, qemu: bool):
         """Generate, build and validate one pair of verdict v: (outcome, note,
         validator reason), or None if the worker is stopping."""
-        iid = f"nuttx__nuttx-{kernel}"
+        iid = f"nuttx__nuttx-{kernel}-a{pr}"
         # An x86 node runs the pairs an ARM64 node cannot (see below); the
         # instance records that it needs x86 (metadata host_arch).
         x86_only = pair.get("platform") in nuttx_platforms.X86_ONLY or (

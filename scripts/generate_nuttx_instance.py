@@ -111,7 +111,9 @@ def metadata(record: dict, kernel_number: int, verdict: dict, host_arch: str | N
             raise ValueError(f"{name} PR lacks exact branch commit boundaries")
 
     meta = {
-        "instance_id": f"nuttx__nuttx-{kernel_number}",
+        # Several apps tests can pair with one kernel fix; the apps PR keeps
+        # their instances apart.
+        "instance_id": f"nuttx__nuttx-{kernel_number}-a{apps['number']}",
         "project": "nuttx",
         "kernel_repo": "https://github.com/apache/nuttx",
         "apps_repo": "https://github.com/apache/nuttx-apps",

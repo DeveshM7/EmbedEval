@@ -35,8 +35,8 @@ def targets(instance_id: str) -> list[Path]:
     _, pr = instances.split_instance(instance_id)
     root = au.work_root()
     found = [au.instance_image(instance_id), root / "dryrun" / pr]
-    found += sorted((root / "runs").glob(f"{instance_id}-*"))
-    found += sorted((root / "runs").glob(f"agent-{instance_id}-*"))   # agent overlays
+    found += sorted((root / "runs").glob(f"{instance_id}-[0-9]*"))
+    found += sorted((root / "runs").glob(f"agent-{instance_id}-[0-9]*"))   # agent overlays
     return [t for t in found if t.exists()]
 
 

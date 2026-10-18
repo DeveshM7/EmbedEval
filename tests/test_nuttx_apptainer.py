@@ -18,6 +18,7 @@ import build_instances  # noqa: E402
 import render_nuttx_instance as render  # noqa: E402
 import validate_instance  # noqa: E402
 import evaluate_patches  # noqa: E402
+import promote_instance  # noqa: E402
 import run  # noqa: E402
 
 DOCKER_INSTANCES = sorted((ROOT / "docker" / "instances").glob("nuttx__nuttx-*"))
@@ -541,6 +542,26 @@ class HostArchTests(unittest.TestCase):
         self.assertNotEqual(arm, x86)
         self.assertTrue(x86.name.endswith("-x86_64.sif"))
         self.assertFalse(arm.name.endswith("-x86_64.sif"))
+
+
+
+class PromoteTests(unittest.TestCase):
+    def test_a_validated_nuttx_instance_is_promoted_with_its_shell_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "generated" / "nuttx__nuttx-11-a7"
+            src.mkdir(parents=True)
+            for name in (*apptainer_util.NUTTX_RECIPE_FILES, "metadata.json"):
+                (src / name).write_text(name)
+            sha = apptainer_util.recipe_fingerprint(src, apptainer_util.NUTTX_RECIPE_FILES)
+            (src / "validation.json").write_text(json.dumps({"valid": True, "recipe_sha256": sha}))
+            with patch.object(promote_instance, "DEST", Path(tmp) / "dest"):
+                done, _ = promote_instance.promote(src.name, src.parent)
+                self.assertTrue(done)
+                self.assertTrue((Path(tmp) / "dest" / src.name / "run_tests.sh").exists())
+                (src / "run_tests.sh").write_text("edited")
+                done, msg = promote_instance.promote(src.name, src.parent)
+                self.assertFalse(done)
+                self.assertIn("recipe changed", msg)
 
 
 if __name__ == "__main__":

@@ -111,13 +111,13 @@ class NuttxClusterTests(unittest.TestCase):
 
             def step(cmd, logfile, minutes, env, cwd=None):
                 if "generate_nuttx_instance.py" in cmd[1]:
-                    out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1"
+                    out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1-a7"
                     if out.exists():
                         return 1
                     out.mkdir(parents=True)
                     (out / "triage.json").write_text(Path(cmd[cmd.index("--triage") + 1]).read_text())
                 if "validate_instance.py" in cmd[1]:
-                    inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1"
+                    inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1-a7"
                     needs = json.loads((inst / "triage.json").read_text())["pairs"][0]
                     ok = any(e["kernel_pr"] == 3 and e.get("files") == ["sched/Makefile"]
                              for e in needs.get("also_needs") or [])
@@ -156,11 +156,11 @@ class NuttxClusterTests(unittest.TestCase):
 
             def step(cmd, logfile, minutes, env, cwd=None):
                 if "generate_nuttx_instance.py" in cmd[1]:
-                    out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1"
+                    out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1-a7"
                     out.mkdir(parents=True)
                     (out / "triage.json").write_text(Path(cmd[cmd.index("--triage") + 1]).read_text())
                 if "validate_instance.py" in cmd[1]:
-                    inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1"
+                    inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1-a7"
                     pair = json.loads((inst / "triage.json").read_text())["pairs"][0]
                     reason = ("the runtime test did not build (rc=2)"
                               if not pair.get("apps_at_kernel_date") else
@@ -241,11 +241,11 @@ class NuttxClusterTests(unittest.TestCase):
 
         def step(cmd, logfile, minutes, env, cwd=None):
             if "generate_nuttx_instance.py" in cmd[1]:
-                out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1"
+                out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1-a7"
                 out.mkdir(parents=True)
                 (out / "triage.json").write_text(Path(cmd[cmd.index("--triage") + 1]).read_text())
             if "validate_instance.py" in cmd[1]:
-                inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1"
+                inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1-a7"
                 reason = reason_for(json.loads((inst / "triage.json").read_text())["pairs"][0])
                 (inst / "validation.json").write_text(json.dumps({"reason": reason,
                                                                   "logs": str(logs)}))

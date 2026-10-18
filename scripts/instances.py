@@ -37,15 +37,16 @@ INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_RO
 
 PROJECTS = ("zephyr", "nuttx", "riot")
 
-_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
+_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+(-a\d+)?)$")
 
 
 def split_instance(instance_id: str) -> tuple[str, str]:
-    """'nuttx__nuttx-11889' -> ('nuttx', '11889')."""
+    """'nuttx__nuttx-11889' -> ('nuttx', '11889');
+    'nuttx__nuttx-3299-a651' -> ('nuttx', '3299-a651')."""
     m = _INSTANCE_RE.match(instance_id)
     if not m:
         raise ValueError(
-            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR>"
+            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR>[-a<apps PR>]"
         )
     return m.group("project"), m.group("pr")
 

@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import nuttx_candidates as candidates
 import triage_nuttx_prs as triage
 import generate_nuttx_instance as generator
+import instances
 
 
 def apps_record():
@@ -779,6 +780,15 @@ class AlsoNeedsAndConfigTests(unittest.TestCase):
                  "verdict": "accept", "case": "apps-7-kernel-11"}
         self.assertEqual(generator.metadata(record, 11, reply)["sim_config"],
                          "qemu-armv8a:nsh_smp")
+
+    def test_an_instance_id_names_both_the_kernel_fix_and_the_apps_test(self):
+        # Two apps tests of one kernel fix get two instances.
+        record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
+        reply = {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}
+        iid = generator.metadata(record, 11, reply)["instance_id"]
+        self.assertEqual(iid, "nuttx__nuttx-11-a7")
+        self.assertEqual(instances.split_instance(iid), ("nuttx", "11-a7"))
+        self.assertEqual(instances.split_instance("nuttx__nuttx-8832"), ("nuttx", "8832"))
 
 
 if __name__ == "__main__":

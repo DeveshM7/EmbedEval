@@ -56,7 +56,7 @@ MODEL_DIRS: dict[str, str] = {
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.
 MODEL_ALIASES: dict[str, str] = {short: full for full, short in MODEL_DIRS.items()}
 
-_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
+_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+(-a\d+)?)$")
 
 
 class UnknownModelError(ValueError):
@@ -64,11 +64,12 @@ class UnknownModelError(ValueError):
 
 
 def split_instance(instance_id: str) -> tuple[str, str]:
-    """'zephyr__zephyr-65697' -> ('zephyr', '65697')."""
+    """'zephyr__zephyr-65697' -> ('zephyr', '65697');
+    'nuttx__nuttx-3299-a651' -> ('nuttx', '3299-a651')."""
     m = _INSTANCE_RE.match(instance_id)
     if not m:
         raise ValueError(
-            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR>"
+            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR>[-a<apps PR>]"
         )
     return m.group("project"), m.group("pr")
 
