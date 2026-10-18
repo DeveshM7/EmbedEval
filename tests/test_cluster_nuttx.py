@@ -231,7 +231,8 @@ class NuttxClusterTests(unittest.TestCase):
                                                        {16920}, log), [])
 
     def run_pair(self, tmp, reason_for, **patches):
-        """validate_nuttx on one pair whose validation reason is reason_for(pair)."""
+        """validate_nuttx on one pair whose validation reason (or report) is
+        reason_for(pair)."""
         import types
         run, node_dir = Path(tmp) / "run", Path(tmp) / "node"
         (run / "triage").mkdir(parents=True)
@@ -248,10 +249,10 @@ class NuttxClusterTests(unittest.TestCase):
                 (out / "triage.json").write_text(Path(cmd[cmd.index("--triage") + 1]).read_text())
             if "validate_instance.py" in cmd[1]:
                 inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1-a7"
-                reason = reason_for(json.loads((inst / "triage.json").read_text())["pairs"][0])
-                (inst / "validation.json").write_text(json.dumps({"reason": reason,
-                                                                  "logs": str(logs)}))
-                return 1 if reason else 0
+                report = reason_for(json.loads((inst / "triage.json").read_text())["pairs"][0])
+                report = report if isinstance(report, dict) else {"reason": report}
+                (inst / "validation.json").write_text(json.dumps({**report, "logs": str(logs)}))
+                return 1 if report["reason"] else 0
             return 0
 
         nc = types.SimpleNamespace(
@@ -288,6 +289,19 @@ class NuttxClusterTests(unittest.TestCase):
                 later_followups=lambda *a: [(3, [])])
         self.assertEqual(outcome.get("outcome"), "VALID", outcome)
         self.assertIn("+#3", outcome["note"])
+
+    def test_a_pair_valid_only_with_a_fallback_config_is_validated_again_with_it(self):
+        seen = []
+
+        def report(pair):
+            seen.append(pair.get("config_overrides"))
+            return {"reason": None, **({} if pair.get("config_overrides") else
+                                       {"config_overrides_used": {"CONFIG_X": "y"}})}
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = self.run_pair(tmp, report, later_followups=lambda *a: [])
+        self.assertEqual(outcome.get("outcome"), "VALID", outcome)
+        self.assertEqual(seen, [None, {"CONFIG_X": "y"}])
+        self.assertIn("fallback config in the recipe", outcome["note"])
 
     def test_phase_assignment_stays_fixed_as_other_nodes_finish(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -668,6 +668,7 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                 if retried is None:
                     return
                 if retried[0] == "VALID":
+                    pair = trial
                     apps_merged = (nc.apps_record(pr)["apps"].get("merged_at") or "")[:10]
                     later_merged = (nc.kernel_record(later).get("merged_at") or "")[:10]
                     tag = "later_followup" if later_merged > apps_merged else "followup"
@@ -677,6 +678,19 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
             else:
                 if tried:
                     result = (result[0], f"{result[1]} (later follow-ups tried: {tried})", result[2])
+        # A pair VALID only with the validator's fallback config must carry that
+        # config in its recipe: render and validate it again with it.
+        if result[0] == "VALID":
+            rep = run / "instances" / f"nuttx__nuttx-{kernel}-a{pr}" / "validation.json"
+            used = json.loads(rep.read_text()).get("config_overrides_used") if rep.exists() else None
+            if used and used != pair.get("config_overrides") and left() >= 8:
+                trial = {**pair, "config_overrides": used}
+                retried = attempt({**verdict, "pairs": [trial]}, trial, kernel, lg, merged, qemu)
+                if retried is None:
+                    return
+                result = (retried[0], "; ".join(filter(None, [
+                    result[1], "fallback config in the recipe" if retried[0] == "VALID"
+                    else f"with the fallback config in the recipe: {retried[1]}"])), retried[2])
         results.append((kernel, *result[:2]))
     order = ["VALID", "INVALID", "arm64_env_failure", "needs_x86", "qemu_pending", "failed"]
     results.sort(key=lambda r: order.index(r[1]))
