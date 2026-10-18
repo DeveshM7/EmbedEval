@@ -145,3 +145,62 @@ Apptainer sim runner that feeds nsh one command at a time (2020 kernels drop
 early input), NDEBUG check for old kernels, banners from guard changes and
 banner-less compile cases, prerequisite-first ordering of fix patches.
 Open decision for the user: x86-only instances in the benchmark.
+
+## Combined results after the retries (2026-10-18)
+
+The investigation of the failed and INVALID pairs (validation fixes on
+`feature/nuttx-pr-filtering`: config overrides re-applied after the fix, the
+pre-fix build deciding compile vs runtime, the GitHub 3000-file cap, config
+fallbacks, a pre-fix hang counted as a failure, later follow-up kernel PRs
+with build wiring first and a retry that really regenerates the pair) and the
+viability work above. Re-runs on Scholar are archived per batch under
+`runs/nuttx-apps-all/retry-*/` (each with a README naming the code snapshot).
+
+**25 VALID pairs, 24 distinct kernel PRs** (apps #649 and #651 share #3299).
+
+| Apps PR | Kernel PR | Platform | Note |
+|---:|---:|---|---|
+| 293 | 1236 | sim:nsh, x86_64 only | |
+| 649 | 3299 | sim:nsh, x86_64 only | same kernel PR as #651 |
+| 651 | 3299 | sim:nsh, x86_64 only | |
+| 652 | 3308 | sim:nsh, x86_64 only | |
+| 912 | 4941 | sim:nsh, x86_64 only | |
+| 955 | 5120 | sim:nsh, x86_64 only | |
+| 1665 | 8832 | sim:nsh, x86_64 only | |
+| 1682 | 8885 | sim:nsh, x86_64 only | |
+| 1857 | 9923 | sim:nsh | |
+| 2327 | 11889 | sim:nsh | |
+| 2329 | 11898 | sim:nsh | |
+| 2353 | 12106 | sim:nsh | |
+| 2458 | 12802 | sim:nsh | |
+| 2725 | 14152 | sim:nsh, x86_64 only | the bug is x86-only (passes before the fix on ARM64); metadata needs `host_arch: x86_64` at promotion |
+| 2822 | 14656 | sim:nsh | VALID once the sim runner fixes reached ARM64 |
+| 3067 | 16301 | qemu-armv7a:smp, x86 node | |
+| 3177 | 16993 | sim:nsh | |
+| 3380 | 18174 | sim:nsh | pre-fix hang counted as the failure |
+| 3443 | 18660 | sim:nsh | fix PR has >3000 files: whole diff |
+| 3559 | 19118 | sim:nsh | |
+| 3701 | 19678 | sim:nsh | |
+| 3714 | 19767 | sim:nsh | runtime, not compile_error as triaged |
+| 3733 | 19867 | sim:nsh | |
+| 3759 | 19982 | sim:nsh | config fallback: copy `config_overrides_used` into the metadata before promotion, or grading fails |
+| 3790 | 20112 | sim:nsh | |
+
+Not VALID on ARM64 (`nuttx-apps-all`):
+
+| Outcome | Apps PR (kernel PR) |
+|---|---|
+| INVALID: tests pass before the fix | 2636 (13283), 3070 (16334), 3076 (16394), 3209 (17293), 3538 (19116), 3548 (19116) |
+| INVALID: tests still fail with the fix, three later follow-ups tried | 2627 (13282), 2828 (14686), 3677 (19578) |
+| INVALID: changed test does not run before the fix (config fallbacks tried) | 3553 (19162, 19165) |
+| Apps tree newer than the kernel: the pre-fix build breaks outside the test | 2704 (14152), 2794 (13159), 3342 (17848), 3688 (19594), 3735 (19900) |
+| Build fails with the fix | 3174 (16990); 3382 (17569, three follow-ups tried) |
+| Needs a chain of later fixes | 3248 (17517): #17784's sched/Makefile line makes it build, then the hrtimer test hangs; the rest of #17784 needs #17642 |
+| Left by decision | 3297 (17642): before the fix the hrtimer module is not built at all, so a wiring line alone would "fix" it |
+| Other | 2137 (10934): run_tests times out (triage omitted also_needs #10970); 2628 (13737): CONFIG_SMP_CALL dropped after the fix; 3265 (17644): generation failed |
+
+The 22 ARM64-blocked pairs are in the viability table above. Of the 189 apps
+PRs, 124 are rejected by triage (3280 on its re-triage: test_only). Three have no
+verdict after a re-triage with a 45-minute agent limit (job 477961): 3347 and 3728
+reach the cap again, and 646 (kernel #3272, an x86-era pair) twice gives
+also_needs entries without evidence, which the verdict check rejects.
