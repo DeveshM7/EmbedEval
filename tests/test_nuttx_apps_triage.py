@@ -597,6 +597,19 @@ class GeneratorTests(unittest.TestCase):
                                  "testing/ostest/ostest.h", "testing/ostest/Makefile",
                                  "testing/ostest/CMakeLists.txt"])
 
+    def test_generator_includes_the_ostest_kconfig_defining_a_symbol_the_test_uses(self):
+        record = apps_record()
+        record["apps"]["files"].append({"filename": "testing/ostest/Kconfig", "status": "modified"})
+        reply = {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}
+        for kconfig, included in (("config TESTING_OSTEST_LOOPS\n", True),
+                                  ("config TESTING_OSTEST_OTHER\n", False)):
+            record["test_contents"].update({
+                "testing/ostest/example.c": "int n = CONFIG_TESTING_OSTEST_LOOPS;\n",
+                "testing/ostest/Kconfig": kconfig})
+            with patch.object(candidates, "kernel_record", return_value=kernel_pr()):
+                paths = generator.metadata(record, 11, reply)["files_changed_by_test_patch"]
+            self.assertEqual("testing/ostest/Kconfig" in paths, included)
+
     def test_kernel_pr_found_by_search_is_enriched_on_demand(self):
         record = apps_record()   # an apps-only record has no kernel_candidates
         reply = {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}

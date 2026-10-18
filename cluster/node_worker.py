@@ -30,6 +30,7 @@ import fcntl
 import json
 import os
 import platform as platform_module
+import re
 import shutil
 import signal
 import subprocess
@@ -466,6 +467,39 @@ def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[tu
     return [(n, sorted(wires.get(n, ()))) for n in ranked]
 
 
+def missing_symbols(build_log: str) -> set[str]:
+    """Names a build log says are undefined or undeclared."""
+    return set(re.findall(r"undefined reference to `(\w+)'", build_log)
+               + re.findall(r"\u2018(\w+)\u2019 undeclared", build_log)
+               + re.findall(r"implicit declaration of function \u2018(\w+)\u2019", build_log))
+
+
+def prerequisites(nc, kernel: int, clone: str, symbols: set, skip: set, lg: Path) -> list[int]:
+    """Merged kernel PRs with a commit adding or removing one of symbols (a
+    CONFIG_ name as its Kconfig entry) between kernel PR #kernel's base and its
+    merge: the fix branched before them, so its build lacks what they add."""
+    record = nc.kernel_record(kernel)
+    if not symbols or not record.get("base_commit") or not record.get("merged_at"):
+        return []
+    since = nc.commit_record(nc.KERNEL, record["base_commit"])["date"]
+    found = []
+    for name in sorted(symbols)[:8]:
+        text = f"config {name[7:]}" if name.startswith("CONFIG_") else name
+        shas = subprocess.run(["git", "-C", clone, "log", "--format=%H", "-S", text,
+                               f"--since={since}", f"--until={record['merged_at']}", "HEAD",
+                               "--", ".", ":!Documentation", ":!boards"],
+                              capture_output=True, text=True, timeout=600).stdout.split()
+        for sha in shas:
+            for p in nc.commit_record(nc.KERNEL, sha)["prs"]:
+                n = p["number"]
+                if p.get("merged_at") and p["merged_at"] <= record["merged_at"] and \
+                        n != kernel and n not in skip and n not in found:
+                    found.append(n)
+    with open(lg, "a") as fh:
+        fh.write(f"\nprerequisites of #{kernel} for {sorted(symbols)[:8]}: {found}\n")
+    return found[:3]
+
+
 def broken_apps_tree(reason: str | None) -> bool:
     """The validator's reasons for a pre-fix build that broke outside the changed test."""
     return bool(reason) and reason.startswith(("the runtime test did not build",
@@ -579,11 +613,40 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
             else:
                 result = (result[0], f"{result[1]} (with apps at the kernel base's date: "
                                      f"{retried[1]})", result[2])
-        # A fix that does not build or still fails may need a later kernel PR on its
-        # files (e.g. one that wires a new module into the build): retry with each of
-        # the three later_followups, one at a time.
+        # A fix that branched before a kernel PR its test needs (e.g. one adding an
+        # API the test calls) does not build: retry with the PRs that add what the
+        # build with the fix lacks, kept if that gets further.
+        prereq = ""
+        if result[2] and result[2].startswith("the build failed with the fix"):
+            rep = run / "instances" / f"apps-{pr}-kernel-{kernel}" / "validation.json"
+            log = Path(json.loads(rep.read_text()).get("logs") or "/nonexistent") / "build-after.log"
+            needed = prerequisites(nc, kernel, venv["EMBEDEVAL_NUTTX_CLONE"],
+                                   missing_symbols(log.read_text(errors="replace"))
+                                   if log.exists() else set(),
+                                   {e.get("kernel_pr") for e in pair.get("also_needs") or []}, lg)
+            if needed and left() >= 8:
+                trial = {**pair, "also_needs": [*(pair.get("also_needs") or []), *(
+                    {"kernel_pr": n, "evidence": ["added by validation: a kernel PR merged after "
+                                                  "the fix branched that adds a name the build "
+                                                  "with the fix lacks"]} for n in needed)]}
+                retried = attempt({**verdict, "pairs": [trial]}, trial, kernel, lg, merged, qemu)
+                if retried is None:
+                    return
+                if retried[0] == "VALID" or (retried[2] and not retried[2].startswith(
+                        "the build failed with the fix")):
+                    pair, prereq = trial, "prerequisite: " + ", ".join(f"+#{n}" for n in needed)
+                    result = (retried[0], "; ".join(filter(None, [moved, prereq, retried[1]])),
+                              retried[2])
+                else:
+                    result = (result[0], f"{result[1]} (with prerequisites {needed}: "
+                                         f"{retried[1]})", result[2])
+        # A fix that does not build, still fails or hangs may need a later kernel PR
+        # on its files (e.g. one that wires a new module into the build): retry with
+        # each of the three later_followups, one at a time.
         if result[2] and (result[2].startswith("the build failed with the fix")
-                          or result[2] == "tests still fail with the fix"):
+                          or result[2] in ("tests still fail with the fix",
+                                           "run_tests timed out with the fix",
+                                           "run_tests ended with timeout")):
             tried = []
             for later, build_files in later_followups(nc, kernel, venv["EMBEDEVAL_NUTTX_CLONE"],
                                          {e.get("kernel_pr") for e in pair.get("also_needs") or []},
@@ -602,7 +665,7 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                     apps_merged = (nc.apps_record(pr)["apps"].get("merged_at") or "")[:10]
                     later_merged = (nc.kernel_record(later).get("merged_at") or "")[:10]
                     tag = "later_followup" if later_merged > apps_merged else "followup"
-                    result = ("VALID", "; ".join(filter(None, [moved, f"{tag}: +#{later}"
+                    result = ("VALID", "; ".join(filter(None, [moved, prereq, f"{tag}: +#{later}"
                               + (f" ({', '.join(build_files)} only)" if build_files else "")])), "")
                     break
             else:

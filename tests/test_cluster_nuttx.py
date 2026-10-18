@@ -183,6 +183,107 @@ class NuttxClusterTests(unittest.TestCase):
             self.assertIn("apps at the kernel base's date", outcome["note"])
             self.assertIn("+#3", outcome["note"])
 
+    def test_missing_symbols_come_from_the_post_fix_build_errors(self):
+        log = ("x.c:3:(.text+0x1): undefined reference to `nxevent_clear'\n"
+               "y.c:4:7: error: \u2018CONFIG_LOOPS\u2019 undeclared (first use in this function)\n"
+               "z.c:5:3: error: implicit declaration of function \u2018fs_checkmode\u2019\n")
+        self.assertEqual(node_worker.missing_symbols(log),
+                         {"nxevent_clear", "CONFIG_LOOPS", "fs_checkmode"})
+
+    def test_prerequisites_are_prs_adding_a_missing_symbol_after_the_fix_branched(self):
+        import os
+        import subprocess
+        import types
+        with tempfile.TemporaryDirectory() as tmp:
+            def commit(name, date, path, text):
+                (Path(tmp) / path).parent.mkdir(parents=True, exist_ok=True)
+                (Path(tmp) / path).write_text(text)
+                env = {**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+                for args in (["add", path], ["commit", "-qm", name]):
+                    subprocess.run(["git", "-C", tmp, *args], check=True, env=env)
+                return subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"], check=True,
+                                      capture_output=True, text=True).stdout.strip()
+            subprocess.run(["git", "-C", tmp, "init", "-q"], check=True)
+            for key, value in (("user.name", "T"), ("user.email", "t@example.invalid")):
+                subprocess.run(["git", "-C", tmp, "config", key, value], check=True)
+            base = commit("base", "2025-09-07T10:00:00Z", "sched/a.c", "a\n")
+            prs = {base: [],
+                   commit("old api", "2025-08-01T10:00:00Z", "include/o.h", "void old(void);\n"):
+                       [{"number": 2, "merged_at": "2025-08-01T10:00:00Z"}],
+                   commit("add api", "2025-09-08T10:00:00Z", "include/e.h",
+                          "void nxevent_clear(void);\n"):
+                       [{"number": 16920, "merged_at": "2025-09-08T11:00:00Z"}],
+                   commit("fix", "2025-09-09T07:00:00Z", "sched/a.c", "b\n"):
+                       [{"number": 1, "merged_at": "2025-09-09T07:00:00Z"}]}
+            nc = types.SimpleNamespace(
+                KERNEL="apache/nuttx",
+                commit_record=lambda repo, sha: {"date": "2025-09-07T10:00:00Z", "prs": prs[sha]},
+                kernel_record=lambda n: {"base_commit": base, "merged_at": "2025-09-09T07:00:00Z"})
+            log = Path(tmp) / "log"
+            self.assertEqual(node_worker.prerequisites(nc, 1, tmp, {"nxevent_clear", "old"},
+                                                       set(), log), [16920])
+            self.assertEqual(node_worker.prerequisites(nc, 1, tmp, {"nxevent_clear"},
+                                                       {16920}, log), [])
+
+    def run_pair(self, tmp, reason_for, **patches):
+        """validate_nuttx on one pair whose validation reason is reason_for(pair)."""
+        import types
+        run, node_dir = Path(tmp) / "run", Path(tmp) / "node"
+        (run / "triage").mkdir(parents=True)
+        (run / "triage" / "7.json").write_text(json.dumps({"case": "apps-7", "pairs": [
+            {"kernel_pr": 1, "confidence": "high"}]}))
+        logs = Path(tmp) / "validate-logs"
+        logs.mkdir()
+        (logs / "build-after.log").write_text("undefined reference to `nxevent_clear'\n")
+
+        def step(cmd, logfile, minutes, env, cwd=None):
+            if "generate_nuttx_instance.py" in cmd[1]:
+                out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1"
+                out.mkdir(parents=True)
+                (out / "triage.json").write_text(Path(cmd[cmd.index("--triage") + 1]).read_text())
+            if "validate_instance.py" in cmd[1]:
+                inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1"
+                reason = reason_for(json.loads((inst / "triage.json").read_text())["pairs"][0])
+                (inst / "validation.json").write_text(json.dumps({"reason": reason,
+                                                                  "logs": str(logs)}))
+                return 1 if reason else 0
+            return 0
+
+        nc = types.SimpleNamespace(
+            kernel_record=lambda n: {"merged_at": "2025-12-18T10:00:00Z"},
+            apps_record=lambda n: {"apps": {"merged_at": "2025-12-24T10:00:00Z"}})
+        outcome = {}
+        with patch.dict(sys.modules, {"nuttx_candidates": nc}), \
+                patch.object(node_worker, "nuttx_data", return_value=node_dir / "data"), \
+                patch.object(node_worker, "step", side_effect=step), \
+                patch.object(node_worker, "LOGS", Path(tmp), create=True), \
+                patch.multiple(node_worker, **patches):
+            node_worker.validate_nuttx({}, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
+                                       node_dir, lambda: 100,
+                                       lambda state, note, **kw: outcome.update(
+                                           state=state, note=note, **kw))
+        return outcome
+
+    def test_a_fix_lacking_a_symbol_is_retried_with_the_pr_that_adds_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            found = []
+            outcome = self.run_pair(
+                tmp, lambda pair: None if any(e["kernel_pr"] == 5 for e in pair.get("also_needs") or [])
+                else "the build failed with the fix (rc=2)",
+                prerequisites=lambda nc, k, clone, symbols, skip, lg: found.append(symbols) or [5],
+                later_followups=lambda *a: [])
+        self.assertEqual(found, [{"nxevent_clear"}])
+        self.assertEqual(outcome.get("outcome"), "VALID", outcome)
+        self.assertIn("prerequisite: +#5", outcome["note"])
+
+    def test_a_hang_with_the_fix_tries_later_follow_ups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = self.run_pair(
+                tmp, lambda pair: None if pair.get("also_needs") else "run_tests timed out with the fix",
+                later_followups=lambda *a: [(3, [])])
+        self.assertEqual(outcome.get("outcome"), "VALID", outcome)
+        self.assertIn("+#3", outcome["note"])
+
     def test_phase_assignment_stays_fixed_as_other_nodes_finish(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

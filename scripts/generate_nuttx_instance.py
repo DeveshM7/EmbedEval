@@ -53,6 +53,10 @@ def test_patch_paths(record: dict, selected: list[str]) -> list[str]:
             relevant = any(re.search(rf"\b{re.escape(name)}\s*\(", text) for name in functions)
         elif path in ("testing/ostest/Makefile", "testing/ostest/CMakeLists.txt"):
             relevant = any(name in text for name in names)
+        elif path == "testing/ostest/Kconfig":   # options the selected tests read
+            relevant = any(re.search(rf"^\s*config\s+{re.escape(option)}\s*$", text, re.MULTILINE)
+                           for p in sources for option in re.findall(r"\bCONFIG_(\w+)",
+                                                                     contents.get(p, "")))
         else:
             relevant = False
         if relevant:
