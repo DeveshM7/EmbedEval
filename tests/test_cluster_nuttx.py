@@ -53,6 +53,46 @@ class NuttxClusterTests(unittest.TestCase):
             self.assertEqual(node_worker.later_followups(nc, 1, tmp, set(), repo / "log"), [3, 2])
             self.assertEqual(node_worker.later_followups(nc, 1, tmp, {3}, repo / "log"), [2])
 
+    def test_later_followups_put_build_wiring_of_new_code_first(self):
+        import os
+        import subprocess
+        import types
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            def commit(name: str, date: str, *paths: str) -> str:
+                for path in paths:
+                    (repo / path).parent.mkdir(parents=True, exist_ok=True)
+                    (repo / path).write_text(name)
+                env = {**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+                for args in (["add", *paths], ["commit", "-qm", name]):
+                    subprocess.run(["git", "-C", tmp, *args], check=True, env=env)
+                return subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"], check=True,
+                                      capture_output=True, text=True).stdout.strip()
+            subprocess.run(["git", "-C", tmp, "init", "-q"], check=True)
+            for key, value in (("user.name", "T"), ("user.email", "t@example.invalid")):
+                subprocess.run(["git", "-C", tmp, "config", key, value], check=True)
+            commit("base", "2025-12-01T10:00:00Z", "sched/Makefile", "sched/old.c")
+            commit("fix", "2025-12-18T10:00:00Z", "sched/new/a.c", "sched/new/b.c", "sched/old.c")
+            prs = {commit("two files", "2025-12-20T10:00:00Z", "sched/new/a.c", "sched/new/b.c"): 2,
+                   commit("wiring", "2026-01-08T10:00:00Z", "sched/Makefile", "sched/new/a.c"): 3,
+                   commit("build only", "2026-01-09T10:00:00Z", "sched/Makefile"): 4}
+            def commit_record(repo_name, sha):
+                shown = subprocess.run(["git", "-C", tmp, "show", "--name-only", "--format=", sha],
+                                       capture_output=True, text=True).stdout.split()
+                return {"prs": [{"number": prs[sha], "merged_at": "2026"}],
+                        "files": [{"filename": f} for f in shown]}
+            def nc(added: bool):
+                return types.SimpleNamespace(
+                    KERNEL="apache/nuttx", commit_record=commit_record,
+                    kernel_record=lambda n: {"merged_at": "2025-12-18T10:00:00Z", "files": [
+                        {"filename": f, "status": "added" if added and "/new/" in f else "modified"}
+                        for f in ("sched/new/a.c", "sched/new/b.c", "sched/old.c")]})
+            self.assertEqual(node_worker.later_followups(nc(True), 1, tmp, set(), repo / "log"),
+                             [3, 4, 2])
+            # A fix that only modifies files has no new code to wire in.
+            self.assertEqual(node_worker.later_followups(nc(False), 1, tmp, set(), repo / "log"),
+                             [2, 3])
+
     def test_phase_assignment_stays_fixed_as_other_nodes_finish(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
