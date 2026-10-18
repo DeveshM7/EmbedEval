@@ -421,20 +421,26 @@ FOLLOWUP_DAYS = 42                 # how long after a fix a needed follow-up may
 
 def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[int]:
     """Up to three merged kernel PRs whose commits touch kernel PR #kernel's source
-    files (not Documentation/ or boards/) within FOLLOWUP_DAYS after it merged;
-    the ones touching most of those files first, then the earliest."""
+    files (not Documentation/ or boards/) within FOLLOWUP_DAYS after it merged.
+    PRs that change a build file (Makefile, Make.defs, CMakeLists.txt) in or just
+    above a directory the fix adds files to come first, since they may wire the
+    fix's new code into the build; then the ones touching most files, then the earliest."""
     record = nc.kernel_record(kernel)
     files = {f["filename"] for f in record.get("files", [])
              if not f["filename"].startswith(("Documentation/", "boards/"))}
     if not files or not record.get("merged_at"):
         return []
+    new_dirs = {str(Path(f["filename"]).parent) for f in record.get("files", [])
+                if f["filename"] in files and f.get("status") == "added"}
+    build = {str(Path(d) / name) for nd in new_dirs for d in (nd, str(Path(nd).parent))
+             if d != "." for name in ("Makefile", "Make.defs", "CMakeLists.txt")} - files
     since = datetime.fromisoformat(record["merged_at"].replace("Z", "+00:00"))
     log_cmd = ["git", "-C", clone, "log", "--reverse", "--format=%H",
                f"--since={since.isoformat()}",
                f"--until={(since + timedelta(days=FOLLOWUP_DAYS)).isoformat()}", "HEAD", "--",
-               *sorted(files)]
+               *sorted(files | build)]
     shas = subprocess.run(log_cmd, capture_output=True, text=True, timeout=300).stdout.split()
-    touched, merged_at = {}, {}
+    touched, wires, merged_at = {}, set(), {}
     for sha in shas:
         try:
             commit = nc.commit_record(nc.KERNEL, sha)
@@ -444,11 +450,13 @@ def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[in
             if p.get("merged_at") and p["number"] != kernel and p["number"] not in skip:
                 touched.setdefault(p["number"], set()).update(
                     f["filename"] for f in commit["files"] if f["filename"] in files)
+                if any(f["filename"] in build for f in commit["files"]):
+                    wires.add(p["number"])
                 merged_at[p["number"]] = p["merged_at"]
-    ranked = sorted(touched, key=lambda n: (-len(touched[n]), merged_at[n]))[:3]
+    ranked = sorted(touched, key=lambda n: (n not in wires, -len(touched[n]), merged_at[n]))[:3]
     with open(lg, "a") as fh:
         fh.write(f"\nlater follow-ups of #{kernel}: "
-                 f"{[(n, len(touched[n])) for n in ranked]}\n")
+                 f"{[(n, len(touched[n]), 'build' if n in wires else '') for n in ranked]}\n")
     return ranked
 
 
@@ -543,7 +551,7 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
             return
         # A fix that does not build or still fails may need a later kernel PR on its
         # files (e.g. one that wires a new module into the build): retry with each of
-        # the three later PRs that touch most of them, one at a time.
+        # the three later_followups, one at a time.
         if result[2] and (result[2].startswith("the build failed with the fix")
                           or result[2] == "tests still fail with the fix"):
             tried = []
