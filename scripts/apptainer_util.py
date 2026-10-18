@@ -206,13 +206,13 @@ def host_tag() -> str:
 
 def require_host_arch(meta: dict) -> None:
     """An instance whose metadata names a host architecture (host_arch, set
-    for NuttX pairs of eras the ARM64 simulator cannot run) is built, validated
-    and evaluated on that architecture only."""
+    for NuttX pairs of eras the ARM64 simulator cannot run, or that validate
+    on one architecture only) is built, validated and evaluated there only."""
     import platform
     want = meta.get("host_arch")
     if want and want != platform.machine():
         raise RuntimeError(f"{meta.get('instance_id')} must run on {want} hosts "
-                           f"(this is {platform.machine()}): its era has no working ARM64 simulator")
+                           f"(this is {platform.machine()}): it validates there only")
 
 
 def nuttx_base_image(sim_config: str = "sim:nsh") -> Path:

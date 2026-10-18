@@ -551,13 +551,16 @@ class PromoteTests(unittest.TestCase):
             src = Path(tmp) / "generated" / "nuttx__nuttx-11-a7"
             src.mkdir(parents=True)
             for name in (*apptainer_util.NUTTX_RECIPE_FILES, "metadata.json"):
-                (src / name).write_text(name)
+                (src / name).write_text("{}" if name == "metadata.json" else name)
             sha = apptainer_util.recipe_fingerprint(src, apptainer_util.NUTTX_RECIPE_FILES)
             (src / "validation.json").write_text(json.dumps({"valid": True, "recipe_sha256": sha}))
             with patch.object(promote_instance, "DEST", Path(tmp) / "dest"):
                 done, _ = promote_instance.promote(src.name, src.parent)
                 self.assertTrue(done)
                 self.assertTrue((Path(tmp) / "dest" / src.name / "run_tests.sh").exists())
+                done, _ = promote_instance.promote(src.name, src.parent, host_arch="x86_64")
+                meta = json.loads((Path(tmp) / "dest" / src.name / "metadata.json").read_text())
+                self.assertEqual(meta["host_arch"], "x86_64")
                 (src / "run_tests.sh").write_text("edited")
                 done, msg = promote_instance.promote(src.name, src.parent)
                 self.assertFalse(done)
