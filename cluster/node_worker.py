@@ -488,6 +488,9 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
         pv = run / "triage" / f"{pr}-kernel-{kernel}.json"
         pv.write_text(json.dumps(v))
         step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+        # A retry of the pair renders its recipe again; the generator refuses
+        # to overwrite the previous attempt's.
+        shutil.rmtree(Path(venv["EMBEDEVAL_INSTANCES_DIR"]) / iid, ignore_errors=True)
         try:
             if step([PY, "scripts/generate_nuttx_instance.py", "--triage", str(pv), "--kernel-pr",
                      str(kernel), "--runtime", "apptainer", "--out", venv["EMBEDEVAL_INSTANCES_DIR"]]

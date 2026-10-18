@@ -94,6 +94,48 @@ class NuttxClusterTests(unittest.TestCase):
             self.assertEqual(node_worker.later_followups(nc(False), 1, tmp, set(), repo / "log"),
                              [2, 3])
 
+    def test_a_follow_up_retry_regenerates_the_pair(self):
+        # The generator refuses to overwrite a recipe, as render does; the
+        # first try fails to build with the fix, the retry with #3 passes.
+        import types
+        with tempfile.TemporaryDirectory() as tmp:
+            run, node_dir = Path(tmp) / "run", Path(tmp) / "node"
+            (run / "triage").mkdir(parents=True)
+            (run / "triage" / "7.json").write_text(json.dumps({"case": "apps-7", "pairs": [
+                {"kernel_pr": 1, "confidence": "high"}]}))
+
+            def step(cmd, logfile, minutes, env, cwd=None):
+                if "generate_nuttx_instance.py" in cmd[1]:
+                    out = Path(cmd[cmd.index("--out") + 1]) / "nuttx__nuttx-1"
+                    if out.exists():
+                        return 1
+                    out.mkdir(parents=True)
+                    (out / "triage.json").write_text(Path(cmd[cmd.index("--triage") + 1]).read_text())
+                if "validate_instance.py" in cmd[1]:
+                    inst = Path(env["EMBEDEVAL_INSTANCES_DIR"]) / "nuttx__nuttx-1"
+                    needs = json.loads((inst / "triage.json").read_text())["pairs"][0]
+                    ok = any(e["kernel_pr"] == 3 for e in needs.get("also_needs") or [])
+                    (inst / "validation.json").write_text(json.dumps(
+                        {"reason": None if ok else "the build failed with the fix (rc=2)"}))
+                    return 0 if ok else 1
+                return 0
+
+            nc = types.SimpleNamespace(
+                kernel_record=lambda n: {"merged_at": "2025-12-18T10:00:00Z"},
+                apps_record=lambda n: {"apps": {"merged_at": "2025-12-24T10:00:00Z"}})
+            outcome = {}
+            with patch.dict(sys.modules, {"nuttx_candidates": nc}), \
+                    patch.object(node_worker, "nuttx_data", return_value=node_dir / "data"), \
+                    patch.object(node_worker, "later_followups", return_value=[2, 3]), \
+                    patch.object(node_worker, "step", side_effect=step), \
+                    patch.object(node_worker, "LOGS", Path(tmp), create=True):
+                node_worker.validate_nuttx({}, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
+                                           node_dir, lambda: 100,
+                                           lambda state, note, **kw: outcome.update(
+                                               state=state, note=note, **kw))
+            self.assertEqual(outcome.get("outcome"), "VALID", outcome)
+            self.assertIn("+#3", outcome["note"])
+
     def test_phase_assignment_stays_fixed_as_other_nodes_finish(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
