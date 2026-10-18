@@ -419,12 +419,15 @@ VFORK_FIXED = "2023-07-17"         # before the fork rework, ARM64 sim vfork can
 FOLLOWUP_DAYS = 42                 # how long after a fix a needed follow-up may merge
 
 
-def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[int]:
+def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[tuple[int, list]]:
     """Up to three merged kernel PRs whose commits touch kernel PR #kernel's source
     files (not Documentation/ or boards/) within FOLLOWUP_DAYS after it merged.
     PRs that change a build file (Makefile, Make.defs, CMakeLists.txt) in or just
     above a directory the fix adds files to come first, since they may wire the
-    fix's new code into the build; then the ones touching most files, then the earliest."""
+    fix's new code into the build; then the ones touching most files, then the earliest.
+    Each comes with the build files it changed there (empty if none): a
+    wiring PR is applied with only those, since the rest of it can depend on
+    PRs between the fix and it."""
     record = nc.kernel_record(kernel)
     files = {f["filename"] for f in record.get("files", [])
              if not f["filename"].startswith(("Documentation/", "boards/"))}
@@ -440,7 +443,7 @@ def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[in
                f"--until={(since + timedelta(days=FOLLOWUP_DAYS)).isoformat()}", "HEAD", "--",
                *sorted(files | build)]
     shas = subprocess.run(log_cmd, capture_output=True, text=True, timeout=300).stdout.split()
-    touched, wires, merged_at = {}, set(), {}
+    touched, wires, merged_at = {}, {}, {}
     for sha in shas:
         try:
             commit = nc.commit_record(nc.KERNEL, sha)
@@ -450,14 +453,15 @@ def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[in
             if p.get("merged_at") and p["number"] != kernel and p["number"] not in skip:
                 touched.setdefault(p["number"], set()).update(
                     f["filename"] for f in commit["files"] if f["filename"] in files)
-                if any(f["filename"] in build for f in commit["files"]):
-                    wires.add(p["number"])
+                wired = {f["filename"] for f in commit["files"] if f["filename"] in build}
+                if wired:
+                    wires.setdefault(p["number"], set()).update(wired)
                 merged_at[p["number"]] = p["merged_at"]
     ranked = sorted(touched, key=lambda n: (n not in wires, -len(touched[n]), merged_at[n]))[:3]
     with open(lg, "a") as fh:
         fh.write(f"\nlater follow-ups of #{kernel}: "
                  f"{[(n, len(touched[n]), 'build' if n in wires else '') for n in ranked]}\n")
-    return ranked
+    return [(n, sorted(wires.get(n, ()))) for n in ranked]
 
 
 def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, left, done) -> None:
@@ -558,15 +562,16 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
         if result[2] and (result[2].startswith("the build failed with the fix")
                           or result[2] == "tests still fail with the fix"):
             tried = []
-            for later in later_followups(nc, kernel, venv["EMBEDEVAL_NUTTX_CLONE"],
+            for later, build_files in later_followups(nc, kernel, venv["EMBEDEVAL_NUTTX_CLONE"],
                                          {e.get("kernel_pr") for e in pair.get("also_needs") or []},
                                          lg):
                 if left() < 8:
                     break
                 tried.append(later)
                 trial = {**pair, "also_needs": [*(pair.get("also_needs") or []), {
-                    "kernel_pr": later,
-                    "evidence": ["added by validation: a later kernel PR on the fix's files"]}]}
+                    "kernel_pr": later, **({"files": build_files} if build_files else {}),
+                    "evidence": ["added by validation: a later kernel PR on the fix's files"
+                                 + (" (its build files only)" if build_files else "")]}]}
                 retried = attempt({**verdict, "pairs": [trial]}, trial, kernel, lg, merged, qemu)
                 if retried is None:
                     return
@@ -574,7 +579,8 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                     apps_merged = (nc.apps_record(pr)["apps"].get("merged_at") or "")[:10]
                     later_merged = (nc.kernel_record(later).get("merged_at") or "")[:10]
                     tag = "later_followup" if later_merged > apps_merged else "followup"
-                    result = ("VALID", f"{tag}: +#{later}", "")
+                    result = ("VALID", f"{tag}: +#{later}"
+                              + (f" ({', '.join(build_files)} only)" if build_files else ""), "")
                     break
             else:
                 if tried:

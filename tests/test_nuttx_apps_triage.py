@@ -682,6 +682,17 @@ class AlsoNeedsAndConfigTests(unittest.TestCase):
         self.assertNotIn("extra_fix_prs", generator.metadata(
             record, 11, {**full_pair(), "verdict": "accept", "case": "apps-7-kernel-11"}))
 
+    def test_generator_limits_a_needed_pr_to_the_files_named(self):
+        record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
+        wiring = {**kernel_pr(13), "merged_at": "2024-02-01",
+                  "files": [{"filename": "sched/Makefile"}, {"filename": "sched/x/a.c"}]}
+        reply = {**full_pair(also_needs=[{"kernel_pr": 13, "files": ["sched/Makefile"],
+                                          "evidence": ["x"]}]),
+                 "verdict": "accept", "case": "apps-7-kernel-11"}
+        with patch.object(candidates, "kernel_record", return_value=wiring):
+            meta = generator.metadata(record, 11, reply)
+        self.assertEqual(meta["extra_fix_prs"][0]["files_changed"], ["sched/Makefile"])
+
     def test_generator_accepts_qemu_armv8a_pair_for_new_fixture(self):
         record = {**apps_record(), "kernel_candidates": [kernel_pr()]}
         reply = {**full_pair(platform="qemu-armv8a:nsh_smp", readiness="needs_fixture"),

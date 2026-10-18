@@ -150,9 +150,13 @@ def metadata(record: dict, kernel_number: int, verdict: dict, host_arch: str | N
                   None) or candidates.kernel_record(number)
         if not pr.get("merged_at") or not pr.get("base_commit") or not pr.get("head_commit"):
             raise ValueError(f"also_needs kernel PR #{number} must be merged with branch commits")
+        # "files" limits a needed PR to some of its files (validation's
+        # build-wiring follow-ups take only their build files).
+        files = [f["filename"] for f in pr["files"]
+                 if not extra.get("files") or f["filename"] in extra["files"]]
         extras.append({"kernel_pr": number, "url": pr["url"], "merged_at": pr["merged_at"],
                        "base_commit": pr["base_commit"], "head_commit": pr["head_commit"],
-                       "files_changed": [f["filename"] for f in pr["files"]]})
+                       "files_changed": files})
     if extras:
         meta["kernel_merged_at"] = kernel["merged_at"]
         meta["extra_fix_prs"] = sorted(extras, key=lambda e: e["merged_at"])
