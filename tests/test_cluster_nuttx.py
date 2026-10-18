@@ -17,7 +17,7 @@ import prepare  # noqa: E402
 
 
 class NuttxClusterTests(unittest.TestCase):
-    def test_later_followups_rank_prs_by_how_many_fix_files_they_touch(self):
+    def test_later_followups_rank_prs_on_the_fix_files_earliest_first(self):
         import os
         import subprocess
         import types
@@ -45,14 +45,17 @@ class NuttxClusterTests(unittest.TestCase):
                 n = prs[sha]
                 shown = subprocess.run(["git", "-C", tmp, "show", "--name-only", "--format=", sha],
                                        capture_output=True, text=True).stdout.split()
-                return {"prs": [{"number": n, "merged_at": "2026"}],
+                merged = {2: "2025-12-20T11:00:00Z", 3: "2026-01-08T11:00:00Z"}.get(n, "2026")
+                return {"prs": [{"number": n, "merged_at": merged}],
                         "files": [{"filename": f} for f in shown]}
             nc = types.SimpleNamespace(
                 KERNEL="apache/nuttx", commit_record=commit_record,
                 kernel_record=lambda n: {"merged_at": "2025-12-18T10:00:00Z",
                                          "files": [{"filename": f} for f in files]})
+            # The one-file fix-up two days after the fix comes before the
+            # two-file change three weeks later.
             self.assertEqual(node_worker.later_followups(nc, 1, tmp, set(), repo / "log"),
-                             [(3, []), (2, [])])
+                             [(2, []), (3, [])])
             self.assertEqual(node_worker.later_followups(nc, 1, tmp, {3}, repo / "log"), [(2, [])])
 
     def test_later_followups_put_build_wiring_of_new_code_first(self):

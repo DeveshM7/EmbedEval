@@ -427,7 +427,8 @@ def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[tu
     files (not Documentation/ or boards/) within FOLLOWUP_DAYS after it merged.
     PRs that change a build file (Makefile, Make.defs, CMakeLists.txt) in or just
     above a directory the fix adds files to come first, since they may wire the
-    fix's new code into the build; then the ones touching most files, then the earliest.
+    fix's new code into the build; then the earliest, since a fix-up of the fix
+    tends to follow it soon (often the same day, on one file).
     Each comes with the build files it changed there (empty if none): a
     wiring PR is applied with only those, since the rest of it can depend on
     PRs between the fix and it."""
@@ -460,7 +461,7 @@ def later_followups(nc, kernel: int, clone: str, skip: set, lg: Path) -> list[tu
                 if wired:
                     wires.setdefault(p["number"], set()).update(wired)
                 merged_at[p["number"]] = p["merged_at"]
-    ranked = sorted(touched, key=lambda n: (n not in wires, -len(touched[n]), merged_at[n]))[:3]
+    ranked = sorted(touched, key=lambda n: (n not in wires, merged_at[n]))[:3]
     with open(lg, "a") as fh:
         fh.write(f"\nlater follow-ups of #{kernel}: "
                  f"{[(n, len(touched[n]), 'build' if n in wires else '') for n in ranked]}\n")
