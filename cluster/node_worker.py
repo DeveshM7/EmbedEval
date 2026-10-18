@@ -556,9 +556,14 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
             rep = Path(venv["EMBEDEVAL_INSTANCES_DIR"]) / iid / "validation.json"
             reason = json.loads(rep.read_text()).get("reason") if rep.exists() else None
             if rep.exists():
-                pair_report = run / "instances" / f"apps-{pr}-kernel-{kernel}"
-                pair_report.mkdir(parents=True, exist_ok=True)
-                shutil.copy(rep, pair_report / "validation.json")
+                # A VALID pair keeps its whole recipe, for promote_instance.py.
+                pair_report = run / "instances" / iid
+                shutil.rmtree(pair_report, ignore_errors=True)
+                if rc == 0:
+                    shutil.copytree(rep.parent, pair_report)
+                else:
+                    pair_report.mkdir(parents=True)
+                    shutil.copy(rep, pair_report / "validation.json")
             if rc == 0:
                 return "VALID", "", None
             if rc == 124:
@@ -619,7 +624,7 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
         # build with the fix lacks, kept if that gets further.
         prereq = ""
         if result[2] and result[2].startswith("the build failed with the fix"):
-            rep = run / "instances" / f"apps-{pr}-kernel-{kernel}" / "validation.json"
+            rep = run / "instances" / f"nuttx__nuttx-{kernel}-a{pr}" / "validation.json"
             log = Path(json.loads(rep.read_text()).get("logs") or "/nonexistent") / "build-after.log"
             needed = prerequisites(nc, kernel, venv["EMBEDEVAL_NUTTX_CLONE"],
                                    missing_symbols(log.read_text(errors="replace"))

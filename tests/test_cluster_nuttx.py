@@ -142,6 +142,8 @@ class NuttxClusterTests(unittest.TestCase):
                                                state=state, note=note, **kw))
             self.assertEqual(outcome.get("outcome"), "VALID", outcome)
             self.assertIn("+#3 (sched/Makefile only)", outcome["note"])
+            # The run keeps the VALID recipe, for promote_instance.py.
+            self.assertTrue((run / "instances" / "nuttx__nuttx-1-a7" / "triage.json").exists())
 
     def test_a_pre_fix_build_break_outside_the_test_retries_with_apps_of_the_kernel_date(self):
         # The apps PR's base does not build on the kernel base; on the apps of
