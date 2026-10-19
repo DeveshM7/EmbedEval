@@ -232,3 +232,9 @@ before the fix on x86), 1358 and 1526 (hang with the fix and three later
 follow-ups), 1962, 2627, 2828, 3677, 3248, 3342, 3347, 2794. Deferred: 3735
 (apps PR merged before the kernel base, so the moved test patch is empty),
 3728 (triage budget exhausted twice).
+
+The 50 PRs whose only pairs are low confidence were sent to validation
+(`nuttx-low-arm64`, `nuttx-low-x86`, `nuttx.validate_confidence` including
+low). None could be generated: a low pair has no generator fields, and its
+evidence records a kernel PR the triage ruled out (a rename or CI dependency,
+or a change the changed tests cannot observe). They are not candidates.
