@@ -541,7 +541,7 @@ R=$SCRATCH/embedeval/runs/2025-09
 ```
 
 Promotion copies the recipe files, `metadata.json` and `validation.json`
-into `apptainer/instances/<id>/`. It refuses an instance that is not VALID,
+into `apptainer/instances/<id>/` (NuttX: `apptainer/instances/nuttx/<id>/`). It refuses an instance that is not VALID,
 or whose recipe -- `instance.def`, `instance.json`, `run_tests.py`,
 `test_patch.diff` -- changed after it was validated; that needs validating
 again. The problem statement in `metadata.json` is not part of the recipe,

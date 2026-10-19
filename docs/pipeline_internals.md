@@ -80,7 +80,7 @@ Two layers, kept apart on purpose:
 | `build_instances.py` | build | the recipe; shared Python and SDK images | `work/images/instances/<id>.sif` |
 | `validate_instance.py` | validate | the image; the upstream fix from the clone | `instances/<id>/validation.json` |
 | `cleanup_instance.py` | clean up | the instance id | removes its image, dry-run tree, overlays |
-| `promote_instance.py` | promote | a VALID instance in the run | `apptainer/instances/<id>/` in the repository |
+| `promote_instance.py` | promote | a VALID instance in the run | `apptainer/instances/<id>/` (NuttX: `apptainer/instances/nuttx/<id>/`) in the repository |
 | `serve_triage_model.sh` | model server | a profile in `triage/models.json` | a vLLM server on `127.0.0.1:$PORT` |
 
 Helpers: `layout.py` (where everything is read and written, section 5.1),

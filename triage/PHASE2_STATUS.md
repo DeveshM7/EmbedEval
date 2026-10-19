@@ -207,7 +207,7 @@ also_needs entries without evidence, which the verdict check rejects.
 
 ## Promoted instances (2026-10-18 evening)
 
-30 pairs are in `apptainer/instances/`, ids `nuttx__nuttx-<kernel PR>-a<apps PR>`
+30 pairs are in `apptainer/instances/nuttx/`, ids `nuttx__nuttx-<kernel PR>-a<apps PR>`
 (one kernel fix can pair with several apps tests: #3299 with 649 and 651,
 #14152 with 2704 and 2725). Each was validated again with that id in the
 final runs `nuttx-final-arm64` (job 478151), `nuttx-final-x86` (478153) and

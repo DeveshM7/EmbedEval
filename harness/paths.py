@@ -22,7 +22,8 @@ import layout  # noqa: E402  (first: reads --run-dir; see scripts/layout.py)
 from layout import show  # noqa: E402,F401
 
 # Where instance directories are read from: the validated twister-pipeline
-# Zephyr instances in apptainer/instances/ (written there only by
+# Zephyr instances in apptainer/instances/ and NuttX ones in
+# apptainer/instances/nuttx/ (written there only by
 # scripts/promote_instance.py), then the Docker instances in docker/instances/.
 # EMBEDEVAL_INSTANCES_DIR replaces both -- e.g. generated/, so a freshly
 # generated instance can be built and validated before it is promoted, and
@@ -32,7 +33,8 @@ from layout import show  # noqa: E402,F401
 _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
                   if _override else [layout.generated()] if layout.run_dir()
-                  else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "docker" / "instances"])
+                  else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "apptainer" / "instances" / "nuttx",
+                        REPO_ROOT / "docker" / "instances"])
 OUTPUTS_DIR = layout.outputs()
 
 PATCH_NAME = "patch.diff"

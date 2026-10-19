@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Promote validated Zephyr and NuttX instances from generated/ to apptainer/instances/.
+Promote validated Zephyr and NuttX instances from generated/ to apptainer/instances/
+(NuttX: apptainer/instances/nuttx/).
 
     python scripts/promote_instance.py zephyr__zephyr-65697
     python scripts/promote_instance.py --all            # every valid one in generated/
@@ -43,8 +44,8 @@ RECORD_FILES = ("metadata.json", "validation.json")
 def promote(instance_id: str, source: Path = GENERATED,
             host_arch: str | None = None) -> tuple[bool, str]:
     src = source / instance_id
-    recipe = (au.NUTTX_RECIPE_FILES if instances.split_instance(instance_id)[0] == "nuttx"
-              else au.RECIPE_FILES)
+    nuttx = instances.split_instance(instance_id)[0] == "nuttx"
+    recipe = au.NUTTX_RECIPE_FILES if nuttx else au.RECIPE_FILES
     report_path = src / "validation.json"
     if not report_path.exists():
         return False, "not validated (no validation.json)"
@@ -60,7 +61,7 @@ def promote(instance_id: str, source: Path = GENERATED,
     missing = [f for f in files if not (src / f).exists()]
     if missing:
         return False, f"missing {', '.join(missing)}"
-    dst = DEST / instance_id
+    dst = (DEST / "nuttx" if nuttx else DEST) / instance_id
     dst.mkdir(parents=True, exist_ok=True)
     for f in files:
         shutil.copy2(src / f, dst / f)
