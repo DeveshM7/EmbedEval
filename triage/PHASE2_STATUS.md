@@ -204,3 +204,31 @@ PRs, 124 are rejected by triage (3280 on its re-triage: test_only). Three have n
 verdict after a re-triage with a 45-minute agent limit (job 477961): 3347 and 3728
 reach the cap again, and 646 (kernel #3272, an x86-era pair) twice gives
 also_needs entries without evidence, which the verdict check rejects.
+
+## Promoted instances (2026-10-18 evening)
+
+30 pairs are in `apptainer/instances/`, ids `nuttx__nuttx-<kernel PR>-a<apps PR>`
+(one kernel fix can pair with several apps tests: #3299 with 649 and 651,
+#14152 with 2704 and 2725). Each was validated again with that id in the
+final runs `nuttx-final-arm64` (job 478151), `nuttx-final-x86` (478153) and
+`nuttx-final-3759` (478177), and promoted from those runs' recipes. The 7
+older Docker instances in `docker/instances/` are kept as they are.
+
+| Host | Pairs (apps PR) |
+|---|---|
+| x86_64 only (`host_arch`) | 293, 646, 649, 651, 652, 912, 955, 1665, 1682, 2704, 2725, 3067 |
+| aarch64 only (`host_arch`) | 2822 (fails on x86), 2137 (QEMU, validated on ARM64 only) |
+| both (x86 cross-check `nuttx-crosscheck-x86`, job 478075) | 1857, 2327, 2329, 2353, 2458, 3174, 3177, 3380, 3382, 3443, 3688, 3701, 3714, 3733, 3759, 3790 |
+
+New since the morning table, each from a general worker retry: 3688 (apps
+tree of the kernel base's date), 3174 (prerequisite +#16920 adding
+`nxevent_clear`), 3382 (the ostest Kconfig defining a symbol the test reads
+is in the test patch), 2137 (follow-ups ranked earliest first: +#10970),
+646 and 2704 (x86). 3759 carries the validator's fallback config in its
+recipe. 3380 validated without its later follow-up in the final run.
+
+Dropped: 3559 (VALID in 1 of 3 runs), 2628 (hangs at boot on ARM64; passes
+before the fix on x86), 1358 and 1526 (hang with the fix and three later
+follow-ups), 1962, 2627, 2828, 3677, 3248, 3342, 3347, 2794. Deferred: 3735
+(apps PR merged before the kernel base, so the moved test patch is empty),
+3728 (triage budget exhausted twice).
