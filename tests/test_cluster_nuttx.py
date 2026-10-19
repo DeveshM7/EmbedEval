@@ -15,6 +15,8 @@ import config as cluster_config  # noqa: E402
 import node_worker  # noqa: E402
 import prepare  # noqa: E402
 
+CFG = {"nuttx": {"validate_confidence": ["high", "medium"]}}
+
 
 class NuttxClusterTests(unittest.TestCase):
     def test_later_followups_rank_prs_on_the_fix_files_earliest_first(self):
@@ -136,7 +138,7 @@ class NuttxClusterTests(unittest.TestCase):
                                  return_value=[(2, []), (3, ["sched/Makefile"])]), \
                     patch.object(node_worker, "step", side_effect=step), \
                     patch.object(node_worker, "LOGS", Path(tmp), create=True):
-                node_worker.validate_nuttx({}, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
+                node_worker.validate_nuttx(CFG, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
                                            node_dir, lambda: 100,
                                            lambda state, note, **kw: outcome.update(
                                                state=state, note=note, **kw))
@@ -180,7 +182,7 @@ class NuttxClusterTests(unittest.TestCase):
                     patch.object(node_worker, "later_followups", return_value=[(3, [])]), \
                     patch.object(node_worker, "step", side_effect=step), \
                     patch.object(node_worker, "LOGS", Path(tmp), create=True):
-                node_worker.validate_nuttx({}, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
+                node_worker.validate_nuttx(CFG, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
                                            node_dir, lambda: 100,
                                            lambda state, note, **kw: outcome.update(
                                                state=state, note=note, **kw))
@@ -264,7 +266,7 @@ class NuttxClusterTests(unittest.TestCase):
                 patch.object(node_worker, "step", side_effect=step), \
                 patch.object(node_worker, "LOGS", Path(tmp), create=True), \
                 patch.multiple(node_worker, **patches):
-            node_worker.validate_nuttx({}, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
+            node_worker.validate_nuttx(CFG, run, 7, {"EMBEDEVAL_BUILD_TIMEOUT_MIN": "5"},
                                        node_dir, lambda: 100,
                                        lambda state, note, **kw: outcome.update(
                                            state=state, note=note, **kw))
@@ -357,6 +359,10 @@ class NuttxClusterTests(unittest.TestCase):
             {"kernel_pr": 7, "confidence": "low"}]})
         self.assertEqual((reject["verdict"], reject["pair"]), ("reject", "test_only"))
         self.assertEqual(node_worker.nuttx_verdict_info({"kind": "error", "pairs": []})["verdict"], "error")
+        # A run that also validates low pairs accepts this one.
+        low = node_worker.nuttx_verdict_info({"kind": "test_only", "pairs": [
+            {"kernel_pr": 7, "confidence": "low"}]}, ["high", "medium", "low"])
+        self.assertEqual((low["verdict"], low["pair"]), ("accept", "test_only: #7 low"))
 
     def test_project_selects_ledger_and_data_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -375,13 +381,16 @@ class NuttxClusterTests(unittest.TestCase):
             src, run = Path(tmp) / "old", Path(tmp) / "new"
             (src / "triage").mkdir(parents=True)
             run.mkdir()
-            (src / "triage" / "5.json").write_text('{"case": "apps-5"}')
+            verdict = '{"case": "apps-5", "kind": "kernel_test", "pairs": [{"kernel_pr": 9, "confidence": "low"}]}'
+            (src / "triage" / "5.json").write_text(verdict)
             (src / "triage" / "5.trace.json").write_text("[]")
-            node_worker.status.write_stage(src, 5, "triage", {"state": "done", "verdict": "accept"})
+            node_worker.status.write_stage(src, 5, "triage", {"state": "done", "verdict": "reject"})
             node_worker.status.write_stage(src, 6, "triage", {"state": "cap"})
             stage = {5: "to triage", 6: "to triage", 7: "in ledger"}
-            self.assertEqual(prepare.seed_verdicts(src, run, [5, 6, 7], stage), 1)
-            self.assertEqual((run / "triage" / "5.json").read_text(), '{"case": "apps-5"}')
+            # This run also validates low pairs, so the seeded verdict is accepted.
+            self.assertEqual(prepare.seed_verdicts(src, run, [5, 6, 7], stage,
+                                                   ["high", "medium", "low"]), 1)
+            self.assertEqual((run / "triage" / "5.json").read_text(), verdict)
             self.assertTrue((run / "triage" / "5.trace.json").exists())
             got = node_worker.status.read(run, 5)["triage"]
             self.assertEqual((got["verdict"], got["seeded_from"]), ("accept", "old"))

@@ -96,11 +96,14 @@ def write_manifest(run: Path, name: str, cfg: dict, env: dict, source: dict, prs
     print(f"\nnext: python cluster/submit.py pipeline --run {name}")
 
 
-def seed_verdicts(src: Path, run: Path, prs: list[int], stage: dict) -> int:
+def seed_verdicts(src: Path, run: Path, prs: list[int], stage: dict,
+                  confidence=("high", "medium")) -> int:
     """Take the triage verdicts of an earlier run for these PRs: the verdict
     file and its trace are copied and the triage stage is marked done, so the
-    pipeline job validates them without triaging again. Returns how many."""
+    pipeline job validates them without triaging again; accept or reject is
+    decided again by this run's nuttx.validate_confidence. Returns how many."""
     import status
+    from node_worker import nuttx_verdict_info
     n = 0
     for pr in prs:
         verdict = src / "triage" / f"{pr}.json"
@@ -111,7 +114,8 @@ def seed_verdicts(src: Path, run: Path, prs: list[int], stage: dict) -> int:
         for name in (f"{pr}.json", f"{pr}.trace.json"):
             if (src / "triage" / name).exists():
                 (run / "triage" / name).write_bytes((src / "triage" / name).read_bytes())
-        status.write_stage(run, pr, "triage", old | {"seeded_from": src.name})
+        info = nuttx_verdict_info(json.loads(verdict.read_text()), confidence)
+        status.write_stage(run, pr, "triage", old | info | {"seeded_from": src.name})
         n += 1
     return n
 
@@ -141,7 +145,8 @@ def prepare_nuttx(args, cfg: dict, run: Path, env: dict, done: dict) -> None:
         list(pool.map(fetch, [pr for pr in prs if pr not in stage]))
     log(f"{len(prs)} apps PRs, {sum(v == 'to triage' for v in stage.values())} to triage")
     if args.verdicts_from:
-        seeded = seed_verdicts(Path(cfg["derived"]["runs"]) / args.verdicts_from, run, prs, stage)
+        seeded = seed_verdicts(Path(cfg["derived"]["runs"]) / args.verdicts_from, run, prs, stage,
+                               cfg["nuttx"]["validate_confidence"])
         log(f"{seeded} triage verdicts taken from run {args.verdicts_from}")
     if cfg["nuttx"]["validate"]:            # the shared image, built once, not by every node
         import apptainer_util as au

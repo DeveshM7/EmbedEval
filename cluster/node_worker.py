@@ -240,11 +240,11 @@ def nuttx_triage_step(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, 
     return rc
 
 
-def nuttx_verdict_info(v: dict) -> dict:
-    """status.json fields of an apps-PR verdict: accept when a pair is high
-    or medium (it goes on to validation), reject otherwise."""
+def nuttx_verdict_info(v: dict, confidence=("high", "medium")) -> dict:
+    """status.json fields of an apps-PR verdict: accept when a pair has one of
+    these confidences (it goes on to validation), reject otherwise."""
     pairs = [p for p in v.get("pairs", []) if isinstance(p, dict)]
-    sent = [p for p in pairs if p.get("confidence") in ("high", "medium")]
+    sent = [p for p in pairs if p.get("confidence") in confidence]
     verdict = ("error" if v.get("kind") in ("error", "budget_exhausted")
                else "accept" if sent else "reject")
     pair = "; ".join(f"#{p['kernel_pr']} {p['confidence']}"
@@ -295,7 +295,8 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
             if f.exists() and f.stat().st_mtime >= start:
                 v = json.loads(f.read_text())
                 if cfg["project"] == "nuttx":
-                    info = {"state": "done", **nuttx_verdict_info(v), "minutes": minutes, "node": N}
+                    info = {"state": "done", "minutes": minutes, "node": N,
+                            **nuttx_verdict_info(v, cfg["nuttx"]["validate_confidence"])}
                 else:
                     pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
                     info = {"state": "done", "verdict": v.get("verdict"), "pair": pair,
@@ -517,7 +518,7 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
     import nuttx_candidates as nc
     verdict = json.loads((run / "triage" / f"{pr}.json").read_text())
     pairs = [p for p in verdict.get("pairs", []) if isinstance(p, dict)
-             and p.get("confidence") in ("high", "medium")]
+             and p.get("confidence") in cfg["nuttx"]["validate_confidence"]]
     venv = {**env, "EMBEDEVAL_NUTTX_DATA": str(nuttx_data(cfg, node_dir)),
             "EMBEDEVAL_INSTANCES_DIR": str(node_dir / "work" /
                                           f"instances-{env.get('SLURM_JOB_ID', os.getpid())}-{pr}")}
