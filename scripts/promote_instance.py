@@ -45,7 +45,7 @@ def promote(instance_id: str, source: Path = GENERATED,
             host_arch: str | None = None) -> tuple[bool, str]:
     src = source / instance_id
     nuttx = instances.split_instance(instance_id)[0] == "nuttx"
-    recipe = au.NUTTX_RECIPE_FILES if nuttx else au.RECIPE_FILES
+    recipe = au.nuttx_recipe_files(src) if nuttx else au.RECIPE_FILES
     report_path = src / "validation.json"
     if not report_path.exists():
         return False, "not validated (no validation.json)"

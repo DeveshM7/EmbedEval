@@ -360,6 +360,13 @@ RECIPE_FILES = ("instance.def", "instance.json", "run_tests.py", "test_patch.dif
 NUTTX_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff")
 
 
+def nuttx_recipe_files(instance_dir: Path) -> tuple[str, ...]:
+    """A NuttX recipe's files, with base_patch.diff where its base carries
+    prerequisite kernel PRs."""
+    return NUTTX_RECIPE_FILES + (("base_patch.diff",)
+                                 if (Path(instance_dir) / "base_patch.diff").exists() else ())
+
+
 def recipe_fingerprint(instance_dir: Path, files: tuple[str, ...] = RECIPE_FILES) -> str:
     import hashlib
     h = hashlib.sha256()

@@ -391,8 +391,9 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
     print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
     report = {"instance_id": instance_id, "image": str(image), "host": platform.machine(),
               "fail_type": meta.get("fail_type"), "valid": False,
-              "recipe_sha256": au.recipe_fingerprint(instances.instance_dir(instance_id),
-                                                     au.NUTTX_RECIPE_FILES),
+              "recipe_sha256": au.recipe_fingerprint(
+                  instances.instance_dir(instance_id),
+                  au.nuttx_recipe_files(instances.instance_dir(instance_id))),
               "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     if not image.exists():
         print(f"  ERROR: image not built: {image}")

@@ -621,8 +621,8 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                 result = (result[0], f"{result[1]} (with apps at the kernel base's date: "
                                      f"{retried[1]})", result[2])
         # A fix that branched before a kernel PR its test needs (e.g. one adding an
-        # API the test calls) does not build: name the PRs that add what the build
-        # with the fix lacks.
+        # API the test calls) does not build: retry with the PRs that add what the
+        # build with the fix lacks in the base, kept if that gets further.
         prereq = ""
         if result[2] and result[2].startswith("the build failed with the fix"):
             rep = run / "instances" / f"nuttx__nuttx-{kernel}-a{pr}" / "validation.json"
@@ -631,12 +631,22 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
                                    missing_symbols(log.read_text(errors="replace"))
                                    if log.exists() else set(),
                                    {e.get("kernel_pr") for e in pair.get("also_needs") or []}, lg)
-            # A prerequisite belongs in the base: bundled with the fix, the pre-fix
-            # run would fail for its missing names, not for the bug. Instances
-            # cannot carry a patched base yet, so the pair is only annotated.
-            if needed:
-                result = (result[0], f"{result[1]} (needs prerequisites {needed} in the base)",
-                          result[2])
+            # In the base, not with the fix: bundled with the fix, the pre-fix run
+            # would fail for their missing names rather than for the bug.
+            if needed and left() >= 8:
+                trial = {**pair, "base_needs": [*(pair.get("base_needs") or []),
+                                                *({"kernel_pr": n} for n in needed)]}
+                retried = attempt({**verdict, "pairs": [trial]}, trial, kernel, lg, merged, qemu)
+                if retried is None:
+                    return
+                if retried[0] == "VALID" or (retried[2] and not retried[2].startswith(
+                        "the build failed with the fix")):
+                    pair, prereq = trial, "in the base: " + ", ".join(f"#{n}" for n in needed)
+                    result = (retried[0], "; ".join(filter(None, [moved, prereq, retried[1]])),
+                              retried[2])
+                else:
+                    result = (result[0], f"{result[1]} (with prerequisites {needed} in the "
+                                         f"base: {retried[1]})", result[2])
         # A fix that does not build, still fails or hangs may need a later kernel PR
         # on its files (e.g. one that wires a new module into the build): retry with
         # each of the three later_followups, one at a time.

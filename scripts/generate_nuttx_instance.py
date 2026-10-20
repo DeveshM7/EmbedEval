@@ -35,6 +35,7 @@ from render_nuttx_instance import DEFAULT_OUT, ENTRY_DEF, ostest_banners, render
 ROOT = Path(__file__).resolve().parent.parent
 ENRICHED = ROOT / "candidates" / "nuttx" / "enriched"
 APPS_CLONE = ROOT / "candidates" / "nuttx" / "apps.git"
+KERNEL_CLONE = ROOT / "candidates" / "nuttx" / "kernel.git"
 
 
 def test_patch_paths(record: dict, selected: list[str]) -> list[str]:
@@ -147,26 +148,38 @@ def metadata(record: dict, kernel_number: int, verdict: dict, host_arch: str | N
     issues = kernel.get("linked_issues") or []
     if issues:
         meta["issue_url"] = issues[0]["url"]
-    # Kernel PRs the fix needs as well (follow-ups, prerequisites); validation
-    # applies them with the primary PR in merge order.
-    extras = []
-    for extra in verdict.get("also_needs") or []:
-        number = extra["kernel_pr"]
+    # Kernel PRs the fix needs as well (follow-ups); validation applies them
+    # with the primary PR in merge order.
+    extras = needed_prs(record, verdict.get("also_needs") or [], "also_needs")
+    if extras:
+        meta["kernel_merged_at"] = kernel["merged_at"]
+        meta["extra_fix_prs"] = extras
+    # Prerequisites: merged before the fix but after it branched, and needed by
+    # the test (an API it calls). They go in the base, not in the fix, so the
+    # pre-fix run fails for the bug rather than for their missing names.
+    prereqs = needed_prs(record, verdict.get("base_needs") or [], "base_needs")
+    if prereqs:
+        meta["base_prs"] = prereqs
+    return meta
+
+
+def needed_prs(record: dict, entries: list[dict], field: str) -> list[dict]:
+    """The merged kernel PRs a verdict field names, in merge order."""
+    prs = []
+    for entry in entries:
+        number = entry["kernel_pr"]
         pr = next((k for k in record.get("kernel_candidates", []) if k["number"] == number),
                   None) or candidates.kernel_record(number)
         if not pr.get("merged_at") or not pr.get("base_commit") or not pr.get("head_commit"):
-            raise ValueError(f"also_needs kernel PR #{number} must be merged with branch commits")
+            raise ValueError(f"{field} kernel PR #{number} must be merged with branch commits")
         # "files" limits a needed PR to some of its files (validation's
         # build-wiring follow-ups take only their build files).
         files = [f["filename"] for f in pr["files"]
-                 if not extra.get("files") or f["filename"] in extra["files"]]
-        extras.append({"kernel_pr": number, "url": pr["url"], "merged_at": pr["merged_at"],
-                       "base_commit": pr["base_commit"], "head_commit": pr["head_commit"],
-                       "files_changed": files})
-    if extras:
-        meta["kernel_merged_at"] = kernel["merged_at"]
-        meta["extra_fix_prs"] = sorted(extras, key=lambda e: e["merged_at"])
-    return meta
+                 if not entry.get("files") or f["filename"] in entry["files"]]
+        prs.append({"kernel_pr": number, "url": pr["url"], "merged_at": pr["merged_at"],
+                    "base_commit": pr["base_commit"], "head_commit": pr["head_commit"],
+                    "files_changed": files})
+    return sorted(prs, key=lambda e: e["merged_at"])
 
 
 def run(*cmd: str, timeout: int = 900) -> str:
@@ -174,6 +187,27 @@ def run(*cmd: str, timeout: int = 900) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd[:4])}: {result.stderr.strip()[:400]}")
     return result.stdout
+
+
+def kernel_clone() -> Path:
+    if os.environ.get("EMBEDEVAL_NUTTX_CLONE"):
+        return Path(os.environ["EMBEDEVAL_NUTTX_CLONE"])
+    clone = Path(os.environ["EMBEDEVAL_NUTTX_DATA"]) / "kernel.git" if os.environ.get(
+        "EMBEDEVAL_NUTTX_DATA") else KERNEL_CLONE
+    if not clone.exists():
+        clone.parent.mkdir(parents=True, exist_ok=True)
+        run("git", "clone", "--bare", "--filter=blob:none",
+            "https://github.com/apache/nuttx.git", str(clone), timeout=1800)
+    return clone
+
+
+def base_patch(prs: list[dict]) -> str:
+    """The prerequisite PRs' changes, to commit onto the kernel base."""
+    clone = kernel_clone()
+    ensure_apps_commits(clone, *(sha for pr in prs for sha in (pr["base_commit"], pr["head_commit"])))
+    return "".join(run("git", "-C", str(clone), "diff", "--binary",
+                       f"{pr['base_commit']}..{pr['head_commit']}", "--", *pr["files_changed"])
+                   for pr in prs)
 
 
 def apps_clone() -> Path:
@@ -290,7 +324,8 @@ def generate(apps_number: int, kernel_number: int, verdict: dict,
     with tempfile.TemporaryDirectory(prefix="embedeval-nuttx-testpatch-") as tmp:
         patch_file = Path(tmp) / "test.diff"
         patch_file.write_text(patch)
-        return render(meta, patch_file, out_root, tag_suffix, runtime)
+        return render(meta, patch_file, out_root, tag_suffix, runtime,
+                      base_patch(meta["base_prs"]) if meta.get("base_prs") else "")
 
 
 def pair_verdict(verdict: dict, kernel_number: int | None) -> tuple[int, int, dict]:

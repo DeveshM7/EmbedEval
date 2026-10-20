@@ -138,12 +138,14 @@ def render_runner(banners: list[str], sim_config: str = "sim:nsh",
 
 
 def render(meta: dict, patch_file: Path, out_root: Path,
-           tag_suffix: str = "-gen", runtime: str = "docker") -> Path:
+           tag_suffix: str = "-gen", runtime: str = "docker", base_patch: str = "") -> Path:
     instance_id = meta["instance_id"]
     if meta["project"] != "nuttx" or not re.fullmatch(r"nuttx__nuttx-\d+(-a\d+)?", instance_id):
         raise ValueError("expected a NuttX instance ID")
     if runtime not in ("docker", "apptainer"):
         raise ValueError("runtime must be docker or apptainer")
+    if base_patch and runtime != "apptainer":
+        raise ValueError("a base patch (prerequisite kernel PRs) needs the apptainer runtime")
     # Empty gives the standard embedeval:nuttx-<PR> tag of a checked-in instance.
     if not re.fullmatch(r"(-[a-z0-9-]+)?", tag_suffix):
         raise ValueError("tag_suffix must be empty, or start with - and contain "
@@ -236,6 +238,16 @@ def render(meta: dict, patch_file: Path, out_root: Path,
                            ("SIM_CONFIG", sim_config),
                            ("EXTRA_CONFIG", "\n".join(f"    {s}" for s in apptainer_steps))):
             recipe = recipe.replace(f"@@{key}@@", value)
+        # Prerequisite kernel PRs (metadata base_prs) are committed onto the
+        # kernel base, so they are part of what the agent starts from.
+        recipe = recipe.replace("@@BASE_FILES@@\n", "    base_patch.diff /opt/embedeval/base_patch.diff\n"
+                                if base_patch else "")
+        recipe = recipe.replace("@@BASE_PATCH@@\n", (
+            "    git apply /opt/embedeval/base_patch.diff\n"
+            "    git add -A\n"
+            "    git -c user.name=EmbedEval -c user.email=embedeval@localhost commit -q \\\n"
+            f"        -m \"prerequisites: {', '.join(f'apache/nuttx#{p['kernel_pr']}' for p in meta['base_prs'])}\"\n")
+            if base_patch else "")
         # No Docker image: scripts/build_instances.py builds a .sif from the
         # recipe, and the harness takes "runtime" over the project default.
         del generated_meta["docker_image"]
@@ -243,6 +255,8 @@ def render(meta: dict, patch_file: Path, out_root: Path,
         (inst / "instance.def").write_text(recipe)
     (inst / "run_tests.sh").write_text(runner)
     (inst / "test_patch.diff").write_text(patch)
+    if base_patch:
+        (inst / "base_patch.diff").write_text(base_patch)
     (inst / "metadata.json").write_text(json.dumps(generated_meta, indent=4) + "\n")
     return inst
 
