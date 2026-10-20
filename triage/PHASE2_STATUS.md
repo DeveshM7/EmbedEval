@@ -207,7 +207,7 @@ also_needs entries without evidence, which the verdict check rejects.
 
 ## Promoted instances (2026-10-18 evening)
 
-30 pairs are in `apptainer/instances/nuttx/`, ids `nuttx__nuttx-<kernel PR>-a<apps PR>`
+29 pairs are in `apptainer/instances/nuttx/` (30 promoted, 3174 withdrawn by the audit below), ids `nuttx__nuttx-<kernel PR>-a<apps PR>`
 (one kernel fix can pair with several apps tests: #3299 with 649 and 651,
 #14152 with 2704 and 2725). Each was validated again with that id in the
 final runs `nuttx-final-arm64` (job 478151), `nuttx-final-x86` (478153) and
@@ -238,3 +238,31 @@ The 50 PRs whose only pairs are low confidence were sent to validation
 low). None could be generated: a low pair has no generator fields, and its
 evidence records a kernel PR the triage ruled out (a rename or CI dependency,
 or a change the changed tests cannot observe). They are not candidates.
+
+## Audit of the promoted instances (2026-10-19)
+
+Checked from the final runs' logs, for each instance: the host it validated on
+(`validation.json` `host`, from the node itself: x86 runs on the `cpu`
+partition's scholar-a/b nodes, ARM64 runs on the Spark scholar-k/l nodes),
+where the pre-fix run broke, and that the post-fix run printed every changed
+test's banner and `ostest_main: Exiting with status 0`.
+
+- 11 fail before the fix at build time, each with an error in a changed test
+  source naming an API the fix adds (`compile_error`).
+- 16 fail at run time inside the changed test itself (its `ERROR`, assertion
+  or hang follows that test's `user_main:` banner).
+- Weak, kept and flagged: 3380 (before the fix the system freezes at the nsh
+  prompt, so the changed hrtimer test never runs) and 3067 (the changed nested
+  signal test passes before the fix; a KASAN write error panics the later wdog
+  test, the same in both runs).
+- Withdrawn: 3174. Its prerequisite #16920 was applied with the fix, so the
+  pre-fix build failed only for #16920's `nxevent_clear`, not for the bug
+  #16990 fixes. The worker no longer bundles a prerequisite with the fix; it
+  names it instead. Redoing 3174 needs the prerequisite in the base recipe.
+- Every kept instance validated VALID in at least two separate runs.
+- Why some are one-architecture: the 9 pairs from 2020-2021 kernels predate
+  the simulator's ARM64 host support; 2704 and 2725's bug is in
+  `arch_setjmp_x86_64.S`, so it does not exist on an ARM64 host (they pass
+  before the fix there); 3067 (`qemu-armv7a:smp`) was only ever run on x86;
+  2822 fails with the fix on the x86 simulator and passes on ARM64; 2137
+  (`qemu-armv8a`) was only run on ARM64.
