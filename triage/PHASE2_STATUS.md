@@ -247,9 +247,9 @@ partition's scholar-a/b nodes, ARM64 runs on the Spark scholar-k/l nodes),
 where the pre-fix run broke, and that the post-fix run printed every changed
 test's banner and `ostest_main: Exiting with status 0`.
 
-- 11 fail before the fix at build time, each with an error in a changed test
+- 10 fail before the fix at build time, each with an error in a changed test
   source naming an API the fix adds (`compile_error`).
-- 16 fail at run time inside the changed test itself (its `ERROR`, assertion
+- 17 fail at run time inside the changed test itself (its `ERROR`, assertion
   or hang follows that test's `user_main:` banner).
 - Weak, kept and flagged: 3380 (before the fix the system freezes at the nsh
   prompt, so the changed hrtimer test never runs) and 3067 (the changed nested
