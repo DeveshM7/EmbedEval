@@ -207,7 +207,7 @@ also_needs entries without evidence, which the verdict check rejects.
 
 ## Promoted instances (2026-10-18 evening)
 
-29 pairs are in `apptainer/instances/nuttx/` (30 promoted, 3174 withdrawn by the audit below), ids `nuttx__nuttx-<kernel PR>-a<apps PR>`
+30 pairs are in `apptainer/instances/nuttx/` (3174 withdrawn by the audit below, then rebuilt with its prerequisite in the base and promoted again), ids `nuttx__nuttx-<kernel PR>-a<apps PR>`
 (one kernel fix can pair with several apps tests: #3299 with 649 and 651,
 #14152 with 2704 and 2725). Each was validated again with that id in the
 final runs `nuttx-final-arm64` (job 478151), `nuttx-final-x86` (478153) and
@@ -266,3 +266,16 @@ test's banner and `ostest_main: Exiting with status 0`.
   before the fix there); 3067 (`qemu-armv7a:smp`) was only ever run on x86;
   2822 fails with the fix on the x86 simulator and passes on ARM64; 2137
   (`qemu-armv8a`) was only run on ARM64.
+
+### Follow-up (2026-10-20)
+
+- 3174 rebuilt: the generator now commits prerequisite kernel PRs onto the
+  kernel base (`base_patch.diff`, metadata `base_prs`), and the worker's
+  prerequisite retry uses it. Run `nuttx-3174-base` (job 478774) found #16920
+  itself; before the fix ostest asserts in the changed nxevent test
+  (`event_wait.c:150`), after it passes. Promoted with `host_arch: aarch64`
+  (validated on ARM64 only).
+- 3067 control: the same recipe without the apps test change (old
+  `signest.c`, `kill()` instead of `pthread_kill()`) passes before the fix
+  (`control-3067`, job 478764, one run). The changed test is what triggers
+  the corruption that the later wdog test trips over.
