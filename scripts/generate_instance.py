@@ -322,9 +322,9 @@ def generate_mynewt(
     if not rec_path.exists():
         sys.exit(f"ERROR: no enriched record at {rec_path}. Run `enrich` first.")
     rec = json.loads(rec_path.read_text())
+    # A linked issue is evidence, not a requirement: without one, the triage
+    # writes the problem statement from the PR text and diff.
     linked = rec.get("linked_issues") or []
-    if not linked:
-        sys.exit(f"ERROR: enriched Mynewt record for {pr} has no linked issue")
 
     for field in ("platform", "problem_statement", "fail_to_pass"):
         if not triage.get(field):
@@ -431,7 +431,8 @@ def generate_mynewt(
         "generated": True,
     }
     meta.update({
-        "issue_url": f"https://github.com/apache/mynewt-core/issues/{linked[0]['number']}",
+        "issue_url": (f"https://github.com/apache/mynewt-core/issues/{linked[0]['number']}"
+                      if linked else None),
         "failure_mode": failure_mode,
         "compile_test_source": compile_test_source,
         "missing_api": missing_api,
