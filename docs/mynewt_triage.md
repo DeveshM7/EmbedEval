@@ -126,10 +126,14 @@ dependencies and the test's own source before deciding. Do not decide from a
   (the changed C source) and `missing_api` (the exact identifier or header as
   written in it). All other build failures are not a valid oracle.
 
-Determinism matters: a result that depends on host sockets or network
-interfaces, wall-clock timing, thread scheduling or races is not a reliable
-oracle. Give such a PR at most `low` confidence, and use `maintenance` when
-the PR itself is mainly about making that test synchronize or pass reliably.
+Determinism matters. A test that opens real host sockets or talks to a host
+network interface, or whose pass/fail depends on a wall-clock timeout, thread
+scheduling or a race (waiting on a semaphore or event with a tick timeout for
+another task or an external peer), is not a reliable oracle on a shared build
+host, even when the fix and the changed assertion look correct. For such a
+PR set `confidence` to `low` (a recorded lead), whatever the kind. If the PR
+is mainly about making that test synchronize or pass reliably, the kind is
+`maintenance`.
 
 ## 4. Test and fix must separate
 
