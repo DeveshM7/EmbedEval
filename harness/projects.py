@@ -51,10 +51,13 @@ _ORIENTATION = {
         "selects and builds the right suite; do not construct make invocations by hand."
     ),
     "mynewt": (
-        "The Apache Mynewt source tree is at /testbed. Tests use Newt with the "
-        "native BSP and simulator compiler through an external project at /project. "
-        "Use `run_tests` to perform a clean native build and execute the complete "
-        "pinned selftest suite; do not construct a separate newt target."
+        "The Apache Mynewt (mynewt-core) source is at /testbed; its tests are a "
+        "selftest (unit test) package built with `newt` for the native simulator "
+        "(a host executable, no board or emulator) through a newt project at "
+        "/project. `run_tests` does a clean `newt test` of that package and runs "
+        "every test case, printing [pass]/[FAIL] per case. Fix the library source, "
+        "never the selftest package. Do not edit /project or run newt "
+        "yourself with other targets or packages."
     ),
 }
 
