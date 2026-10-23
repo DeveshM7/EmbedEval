@@ -600,3 +600,69 @@ they break if moved. Delete them instead.
 `scripts/` still work on their own, but without `--run-dir` they write next
 to the code (`candidates/`, `generated/`, `triage/runs/`) and into
 `$SCRATCH/embedeval-twister`, as they did before run folders existed.
+
+---
+
+## 11. Mynewt
+
+Mynewt instances are Apptainer images too (no Docker on Scholar). The project
+is mynewt-core's native simulator: `hw/bsp/native` with `compiler/sim`, built
+and run by `newt test` as a host ELF, so there is no board and no QEMU. Run
+Mynewt on the **x86 `cpu` partition** (primary); ARM64 Spark nodes work as a
+cross-check.
+
+```
+ reviewed verdict (triage/mynewt_reviewed/<pr>.json)
+   ▼ generate_instance.py --repo mynewt --runtime apptainer
+   │    (or render_mynewt_instance.py for an existing Docker instance)
+   ▼ build_instances.py        shared image (newt, gcc) -> instance .sif
+   ▼ validate_instance.py      baseline passes; exactly fail_to_pass fails; fix -> all pass
+   ▼ promote_instance.py       -> apptainer/instances/mynewt/<id>/
+```
+
+Recipes are in `templates/mynewt/apptainer/` (`base.def`, `instance.def.tmpl`).
+Keep a full mynewt-core clone and point `EMBEDEVAL_MYNEWT_CLONE` at it
+(default `candidates/mynewt.git`); the renderer, the image build and the
+validator read commits from it. On Scholar: `/scratch/scholar/zhan5136/repos/mynewt-core.git`.
+
+**Validate one instance** (inside an allocation, e.g. `sbatch -p cpu -c 16`):
+
+```bash
+export EMBEDEVAL_MYNEWT_CLONE=/scratch/scholar/$USER/repos/mynewt-core.git
+export EMBEDEVAL_SHARED=$SCRATCH/mynewt-shared      # the shared image
+python scripts/render_mynewt_instance.py --metadata docker/instances/mynewt__mynewt-3299/metadata.json \
+    --test-patch docker/instances/mynewt__mynewt-3299/test_patch.diff --out RUN/instances
+python scripts/build_instances.py   --instance mynewt__mynewt-3299 --run-dir RUN
+python scripts/validate_instance.py mynewt__mynewt-3299 --run-dir RUN
+```
+
+**Validate many in one allocation** (generate, build, validate, clean up each,
+one result file per instance):
+
+```bash
+python scripts/mynewt_batch.py --run-dir RUN --reviewed triage/mynewt_reviewed --parallel 4
+python scripts/mynewt_batch.py --run-dir RUN --from-docker mynewt__mynewt-2809 mynewt__mynewt-3680
+srun --ntasks-per-node=1 python scripts/mynewt_batch.py --run-dir RUN --reviewed ...   # several nodes
+```
+
+`RUN/results/<id>.json` has `status` (`valid`, `invalid`, `generate_error`,
+`build_env`, `timeout`), `stage`, `reason`, the validator's before/after test
+lists, minutes and host. Instances with a result are skipped on a rerun;
+`--force` redoes them.
+
+**Architectures and eras.** Upstream's simulator is x86 only. Before
+2024-04-09 `compiler/sim` forced `-m32` (x86 images have gcc-multilib; a
+base from that era builds 32-bit), and the kernel assumed 32-bit pointers.
+For ARM64 the renderer writes `sim_arm64.patch`, applied on aarch64 hosts
+only and committed into the base: an aarch64 port of the simulator's context
+switch for every base, plus the upstream 64-bit series of 2024-04-09 for older
+bases. The era is read from the base commit's date and recorded as
+`arm64_sim_port` (`asm` or `asm+64bit`) in the metadata. Validated so far: the
+2022 (2809), 2024-08 (3299) and 2026-06 (3680) bases, on both architectures.
+Bases from after 2026-06-24 need the `mbedtls` repository (native BSP);
+not handled yet.
+
+**ARM64 speed.** Compiling inside a `.sif` on an ARM64 node took about 3
+minutes per `newt test` instead of 7 seconds. The validator therefore unpacks
+the image to a sandbox on node-local disk (`EMBEDEVAL_SANDBOX_DIR`, default
+`/tmp`) and runs in that; x86 uses the same path.
