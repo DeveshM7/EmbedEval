@@ -279,3 +279,22 @@ test's banner and `ostest_main: Exiting with status 0`.
   `signest.c`, `kill()` instead of `pthread_kill()`) passes before the fix
   (`control-3067`, job 478764, one run). The changed test is what triggers
   the corruption that the later wdog test trips over.
+
+## Agent runs on the 30 promoted instances (2026-10-19..22)
+
+qwen38-nvfp4 with mini-swe-agent (`harness/run.py --step-limit 50 --time-limit 40`,
+graded by `harness/evaluate_patches.py` in a fresh overlay), served on a Spark GPU
+node; x86 instances reach that server over an SSH tunnel. Outputs and grades:
+`/scratch/scholar/zhan5136/embedeval/agent-runs/qwen38-{arm,x86}-1/` (scripts
+`/scratch/scholar/zhan5136/agent_*.sbatch|sh`; code `ga/p2code-v16`, and `ga/p2code-v18`
+for the rebuilt 3174, job 479807). The problem statements were written by triage
+from the fix and often name it, so these scores are an upper bound.
+
+**19 of 30 pass** (ARM64 11/18, x86 8/12).
+
+| Result | Apps PR |
+|---|---|
+| Pass | 293, 649, 651, 652, 912, 955, 1857, 2327, 2329, 2353, 2704, 2725, 3174, 3177, 3382, 3443, 3688, 3701, 3790 |
+| No patch | 1665, 2137, 2822, 3067, 3759 |
+| Patch does not build | 646, 1682, 3733 |
+| Builds, tests fail | 2458, 3380, 3714 |
