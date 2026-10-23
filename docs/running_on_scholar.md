@@ -662,6 +662,21 @@ bases. The era is read from the base commit's date and recorded as
 Bases from after 2026-06-24 need the `mbedtls` repository (native BSP);
 not handled yet.
 
+**Old trees (2016 to April 2019).** Before the March 2019 rename the unit
+tests are `test/` packages (`pkg.type: unittest`), and a tree builds only with
+the newt of its time. The shared image therefore holds newt 1.0.0-b1, -b2,
+1.0.0, 1.2.0, 1.4.0 and 1.6.0 under `/opt/newt/<version>/` besides the pinned
+modern one, and the renderer links the right one from the newest core release
+committed before the base commit (recorded as `newt_version` and
+`core_release`; the table is `NEWT_FOR_LAST_RELEASE` in
+`scripts/render_mynewt_instance.py`). Such instances build `-m32` with
+`-Wno-error -fcommon`, are x86 only (`host_arch: x86_64`, no ARM64 patch), and
+are judged by their `[pass]`/`[FAIL]` lines: old test mains can return 0 after
+failures, and a failing `assert()` aborts the whole binary, which `run_tests`
+counts as failing every case that had not reported. Checked: #251
+(`encoding/cborattr/test`) and #176 (`fs/fcb/test`). Pre-2024 bases on x86
+use the same recipe; newt for 2019-2021 bases is untried.
+
 **ARM64 speed.** Compiling inside a `.sif` on an ARM64 node took about 3
 minutes per `newt test` instead of 7 seconds. The validator therefore unpacks
 the image to a sandbox on node-local disk (`EMBEDEVAL_SANDBOX_DIR`, default
