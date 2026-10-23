@@ -148,8 +148,114 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     return result
 
 
+def patch_files(patch: str) -> list[str]:
+    """Every path a unified diff touches (both sides, so renames count)."""
+    found = []
+    for line in patch.splitlines():
+        m = re.match(r"(?:diff --git a/(\S+) b/(\S+)|(?:---|\+\+\+) [ab]/(\S+))", line)
+        if m:
+            found += [g for g in dict.fromkeys(m.groups()) if g and g not in found]
+    return found
+
+
+def evaluate_mynewt(instance_id: str, model_name: str, meta: dict, timeout: int) -> dict:
+    """Grade a patch on a Mynewt instance, in its Apptainer image.
+
+    The image is unpacked to a node-local sandbox (a .sif is ~25x slower to
+    compile in on ARM64), the patch applied to /testbed, then `run_tests`
+    builds and runs the whole selftest package. Pass means exit 0 and a
+    structured result (/tmp/mynewt-result.json) whose passed set is exactly
+    fail_to_pass + pass_to_pass, with nothing missing or unexpected. A patch
+    that touches a protected test path is not run: it is reported as tampering.
+    """
+    sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
+    import apptainer_util as au
+    import validate_instance as vi
+
+    au.require_host_arch(meta)
+    patch_path = paths.patch_path(instance_id, model_name)
+    result = {"instance_id": instance_id, "model": paths.resolve_model(model_name),
+              "patch_file": str(paths.show(patch_path)),
+              "patch_empty": False, "patch_applied": False, "build_ok": False,
+              "tests_passed": False, "tampering": False, "protected_touched": [],
+              "grade": "fail", "error": None, "elapsed_seconds": 0}
+    if not patch_path.exists():
+        result.update(grade="missing", error="no patch file (run not found)")
+        return result
+    patch = patch_path.read_text()
+    if not patch.strip():
+        result.update(patch_empty=True, error="empty patch — agent made no changes")
+        return result
+    protected = projects.setting(meta, "protected_paths")
+    touched = [f for f in patch_files(patch) if any(f.startswith(p) for p in protected)]
+    if touched:
+        result.update(tampering=True, protected_touched=touched,
+                      error="tampering: patch modifies protected test files: " + ", ".join(touched))
+        print(f"  FAIL — {result['error']}")
+        return result
+    image = au.instance_image(instance_id)
+    if not image.exists():
+        result["error"] = f"instance image not built: {image}"
+        return result
+
+    start = time.time()
+    run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "agent.patch").write_text(patch)
+    sandbox = None
+    try:
+        sandbox = au.unpack_sandbox(image)
+        container = au.sandbox_exec_args(sandbox, binds={run_dir: "/embedeval-run"})
+        print("  applying patch ...")
+        ap = subprocess.run(container + ["git", "-C", "/testbed", "apply",
+                                         "/embedeval-run/agent.patch"],
+                            capture_output=True, text=True, timeout=120)
+        if ap.returncode != 0:
+            result["error"] = f"git apply failed: {(ap.stdout + ap.stderr).strip()[:300]}"
+            return result
+        result["patch_applied"] = True
+        print("  run_tests (newt test) ...")
+        full = ("cd /testbed && run_tests; rc=$?; echo ==MYNEWT-RESULT==; "
+                "cat /tmp/mynewt-result.json 2>/dev/null; exit $rc")
+        tp = subprocess.run(container + ["bash", "-c", full], capture_output=True, text=True,
+                            timeout=max(timeout, 600) + 300)
+        out = (tp.stdout or "") + (tp.stderr or "")
+        result["test_output_tail"] = out.split("==MYNEWT-RESULT==")[0][-2000:]
+        report = None
+        if "==MYNEWT-RESULT==" in out:
+            try:
+                report = json.loads(out.split("==MYNEWT-RESULT==", 1)[1])
+            except ValueError:
+                pass
+        if report is None:
+            result["error"] = f"no structured result (run_tests rc={tp.returncode})"
+            return result
+        result["build_ok"] = bool(report.get("build_ok"))
+        result["test_results"] = {k: report.get(k) for k in
+                                  ("passed", "failed", "missing", "unexpected", "error", "exit_code")}
+        ok, detail = vi.verify_structured_results(meta, report, "after")
+        if tp.returncode == 0 and ok:
+            result.update(tests_passed=True, grade="pass")
+            print("  PASS")
+        else:
+            result["error"] = (report.get("error") or detail
+                               or RUN_TESTS_ERRORS.get(tp.returncode, f"run_tests exited {tp.returncode}"))
+            print(f"  FAIL — {result['error']}")
+    except subprocess.TimeoutExpired:
+        result["error"] = "evaluation timed out"
+        print("  FAIL — overall timeout")
+    finally:
+        result["elapsed_seconds"] = round(time.time() - start, 1)
+        if sandbox:
+            au.remove_sandbox(sandbox)
+        au.remove(run_dir)
+    return result
+
+
 def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dict:
     meta = paths.load_metadata(instance_id)
+    if meta["project"] == "mynewt" and meta.get("runtime") == "apptainer":
+        return evaluate_mynewt(instance_id, model_name, meta, timeout)
     if meta.get("pipeline") == "twister" or meta.get("runtime") == "apptainer":
         return evaluate_apptainer(instance_id, model_name, meta, timeout)
     if meta["project"] == "zephyr":

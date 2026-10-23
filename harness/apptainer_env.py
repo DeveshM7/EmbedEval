@@ -42,18 +42,22 @@ SUBMIT = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 class ApptainerEnvironment:
     def __init__(self, *, image: str | Path, name: str, cwd: str = "/testbed",
                  timeout: int = 900, setup_commands: list[str] | None = None,
-                 logger: logging.Logger | None = None):
+                 sandbox: bool = False, logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
         if not self.image.exists():
             raise FileNotFoundError(f"instance image not built: {self.image}")
         self.cwd, self.timeout = cwd, timeout
+        # Mynewt: unpack the image to a node-local sandbox and run in that, as
+        # the validator and grader do (compiling in a .sif is ~25x slower on
+        # ARM64). The sandbox is the agent's writable state, instead of an overlay.
+        self.sandbox = au.unpack_sandbox(self.image) if sandbox else None
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = au.path("runs", f"agent-{name}-{stamp}", "x").parent
         self.overlay = self.run_dir / "overlay"
         self.overlay.mkdir(parents=True, exist_ok=True)
         self.config = {"image": str(self.image), "cwd": cwd, "timeout": timeout,
-                       "overlay": str(self.overlay)}
+                       "overlay": str(self.sandbox or self.overlay)}
         for c in setup_commands or []:
             r = self.execute({"command": c}, timeout=300)
             if r["returncode"] != 0:
@@ -71,7 +75,8 @@ class ApptainerEnvironment:
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         command = action.get("command", "")
-        cmd = au.exec_args(self.image, overlay=self.overlay)
+        cmd = (au.sandbox_exec_args(self.sandbox) if self.sandbox
+               else au.exec_args(self.image, overlay=self.overlay))
         cmd[2:2] = ["--pwd", cwd or self.cwd]
         cmd += ["bash", "-c", command]
         try:
@@ -96,6 +101,9 @@ class ApptainerEnvironment:
                              "extra": {"exit_status": "Submitted", "submission": submission}})
 
     def cleanup(self) -> None:
-        """Remove the overlay -- the only state the run created."""
+        """Remove the overlay (or sandbox) -- the only state the run created."""
+        if getattr(self, "sandbox", None):
+            au.remove_sandbox(self.sandbox)
+            self.sandbox = None
         if getattr(self, "run_dir", None) and self.run_dir.exists():
             au.remove(self.run_dir)

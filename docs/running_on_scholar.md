@@ -681,3 +681,42 @@ use the same recipe; newt for 2019-2021 bases is untried.
 minutes per `newt test` instead of 7 seconds. The validator therefore unpacks
 the image to a sandbox on node-local disk (`EMBEDEVAL_SANDBOX_DIR`, default
 `/tmp`) and runs in that; x86 uses the same path.
+
+### Agent runs and grading (Mynewt)
+
+`harness/run.py` and `harness/evaluate_patches.py` handle Mynewt instances
+(`"runtime": "apptainer"`) the way they handle NuttX ones, with one difference:
+both unpack the image to a node-local sandbox (`EMBEDEVAL_SANDBOX_DIR`, default
+`/tmp`) and work in that instead of an overlay on the `.sif` (about 25x faster
+to compile on ARM64). The image already holds the PR's selftest changes as a
+commit, so the patch the runner captures is the agent's edits alone.
+
+Grading applies `patch.diff` to a fresh sandbox, runs `run_tests` and judges
+`/tmp/mynewt-result.json`: exit 0 and a passed set that is exactly
+`fail_to_pass + pass_to_pass`, nothing missing or unexpected. A patch that touches
+a protected path (the instance's `protected_paths`, the selftest package) is not
+run: it is graded `fail` with `tampering: true` and `protected_touched`. An empty
+patch fails with `patch_empty`. The agent run itself records the same paths in
+`protected_touched`.
+
+```bash
+sbatch scripts/mynewt_agent_job.sbatch <spark node> <code dir> <out dir> mynewt__mynewt-2809 ...
+```
+
+The job (x86 `cpu` partition) tunnels to a `serve_triage_model.sh qwen38-nvfp4`
+job on a Spark node, builds each image once, runs the agent (50 steps, 40 min)
+and grades the patch; `<out dir>/logs`, `<out dir>/grades`.
+
+Checks of 2026-10-23, x86 (`cpu`), model `qwen38-nvfp4`, code snapshot of branch
+`mynewt-harness`. Scripts used for the grading check are on Scholar in
+`/scratch/scholar/zhan5136/mynewt-harness/` (`grade_check.sbatch`, `make_patches.py`);
+outputs in `grade-x86_64-480000/` and `agent-run-1/`.
+
+| Instance | gold fix | empty patch | edits the selftest | qwen38 agent (job 480001) |
+|---|---|---|---|---|
+| mynewt__mynewt-2809 (fcb2) | pass | fail, empty | fail, tampering | fail: time limit after 23 steps, empty patch (50 min) |
+| mynewt__mynewt-3299 (os) | pass | fail, empty | fail, tampering | pass: 16 steps, 18 min |
+| mynewt__mynewt-3680 (json) | pass | fail, empty | fail, tampering | pass: 24 steps, 21 min |
+
+Grading check is job 480000; each gold or agent grade takes 3 to 8 s (unpacking
+and `newt test` together). ARM64 grading and agent runs are not checked yet.

@@ -11,7 +11,8 @@ an Apptainer environment instead of Docker, e.g. with the local Qwen server:
     EMBEDEVAL_INSTANCES_DIR=generated python harness/run.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
 
-So do NuttX instances whose metadata says "runtime": "apptainer".
+So do NuttX instances whose metadata says "runtime": "apptainer", and Mynewt
+ones (run in an unpacked node-local sandbox of the image).
 
 Replaces run_instance.py, run_nuttx_instance.py, run_riot_instance.py and
 run_all.py, which were ~50% duplicated and disagreed on prompt format, .env
@@ -199,6 +200,12 @@ TEST_HELP = {
         "Use the `run_tests` command to build and run the tests. It handles "
         "all setup and teardown and waits for results.\n\n" + _HANG.format(code="")
     ),
+    "mynewt": (
+        "Use `run_tests` to build and run the selftest package; it takes a minute or "
+        "two. Exit codes: 0 = every test case passed, 1 = a test case failed, "
+        "2 = timed out, 3 = the build failed or the results were incomplete "
+        "(a test did not run or crashed).\n\n" + _HANG.format(code=" (exit code 2)")
+    ),
     "default": (
         "Use the `run_tests` command to build and run the tests. It handles "
         "all setup and teardown, waits for results, and exits as soon as "
@@ -274,7 +281,8 @@ def make_environment(meta: dict):
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
                                     setup_commands=[commit_tests] if meta["project"] == "zephyr"
-                                    else [])
+                                    else [],
+                                    sandbox=meta["project"] == "mynewt")
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed",
