@@ -23,6 +23,13 @@ NuttX has one shared layer, from templates/nuttx/apptainer/:
     instances/<id>.sif           + the kernel and apps at their base commits,
                                  configured, with the test patch.
 
+Mynewt has one shared layer, from templates/mynewt/apptainer/:
+
+    mynewt-sim-<hash>.sif        Ubuntu 24.04, newt and gcc (plus multilib on
+                                 x86_64, for kernels that build -m32).
+    instances/<id>.sif           + mynewt-core at the base commit with the
+                                 test patch, and the newt project.
+
 All of it lives under the work root -- $EMBEDEVAL_WORK, else <run dir>/work
 with --run-dir (scripts/layout.py), else $SCRATCH/embedeval-twister, else
 work/ in the repo -- never in the repo itself. What every run reuses (the
@@ -45,6 +52,7 @@ import nuttx_platforms
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
 NUTTX_TEMPLATES = REPO_ROOT / "templates" / "nuttx" / "apptainer"
+MYNEWT_TEMPLATES = REPO_ROOT / "templates" / "mynewt" / "apptainer"
 
 
 def _default_root() -> Path:
@@ -232,6 +240,62 @@ def nuttx_base_image(sim_config: str = "sim:nsh") -> Path:
     return shared_path("images", f"nuttx-sim-{h.hexdigest()[:8]}{host_tag()}.sif")
 
 
+def mynewt_clone() -> Path | None:
+    """A local mynewt-core clone (bare or not): EMBEDEVAL_MYNEWT_CLONE, else
+    candidates/mynewt.git. Instance builds check out from it instead of GitHub
+    and the renderer and validator read commit dates and the fix from it."""
+    value = os.environ.get("EMBEDEVAL_MYNEWT_CLONE")
+    clone = Path(value) if value else REPO_ROOT / "candidates" / "mynewt.git"
+    return clone if clone.is_dir() else None
+
+
+def mynewt_base_image() -> Path:
+    """The shared Mynewt image (newt, gcc, and gcc-multilib on x86_64), named
+    by a fingerprint of its recipe like the NuttX one."""
+    import hashlib
+    h = hashlib.sha256((MYNEWT_TEMPLATES / "base.def").read_bytes())
+    return shared_path("images", f"mynewt-sim-{h.hexdigest()[:8]}{host_tag()}.sif")
+
+
+def ensure_mynewt_base_image(logdir: Path) -> Path:
+    """Build the shared Mynewt image if it does not exist yet."""
+    img = mynewt_base_image()
+    if not img.exists():
+        print(f"  building shared image {img.name} ...")
+        if not build(img, MYNEWT_TEMPLATES / "base.def", {}, logdir / f"build-{img.stem}.log"):
+            raise RuntimeError(f"could not build {img.name}")
+    return img
+
+
+def unpack_sandbox(image: Path, parent: Path | None = None) -> Path:
+    """Unpack an image to a writable sandbox directory on node-local disk.
+    Mynewt's `newt test` compiles hundreds of files from /testbed; inside a
+    .sif on an ARM64 node that took about 3 minutes, from a sandbox 7 seconds.
+    The caller removes it with remove_sandbox. /embedeval-run is created for
+    the bind of the validator's run folder (--writable cannot make one)."""
+    import tempfile
+    base = Path(tempfile.mkdtemp(prefix="embedeval-sbx-",
+                                 dir=parent or os.environ.get("EMBEDEVAL_SANDBOX_DIR") or None))
+    root = base / "root"
+    r = subprocess.run(["apptainer", "build", "--sandbox", str(root), str(image)],
+                       capture_output=True, text=True, env=build_env(base))
+    if r.returncode:
+        remove_sandbox(root)
+        raise RuntimeError(f"could not unpack {image.name}: {r.stderr.strip()[-300:]}")
+    (root / "embedeval-run").mkdir(exist_ok=True)
+    return root
+
+
+def remove_sandbox(root: Path) -> None:
+    """Delete a sandbox from unpack_sandbox (its parent folder too). It lies
+    outside the work root, so remove() does not apply."""
+    base = Path(root).parent
+    if not base.name.startswith("embedeval-sbx-"):
+        raise ValueError(f"refusing to delete {base}: not a sandbox folder")
+    subprocess.run(["chmod", "-R", "u+rwX", str(base)], capture_output=True)
+    shutil.rmtree(base, ignore_errors=True)
+
+
 def instance_image(instance_id: str) -> Path:
     return path("images", "instances", f"{instance_id}.sif")
 
@@ -339,6 +403,17 @@ def nuttx_reconfigure(overrides: dict) -> str:
     return " && ".join(cmds)
 
 
+def sandbox_exec_args(sandbox: Path, binds: dict[Path, str] | None = None,
+                      env: dict | None = None) -> list[str]:
+    """exec_args for a sandbox from unpack_sandbox, which is itself writable."""
+    cmd = ["apptainer", "exec", "--containall", "--cleanenv", "--writable"]
+    for src, dst in (binds or {}).items():
+        cmd += ["--bind", f"{src}:{dst}"]
+    for k, v in (env or {}).items():
+        cmd += ["--env", f"{k}={v}"]
+    return cmd + [str(sandbox)]
+
+
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
               overlay: Path | None = None, env: dict | None = None) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
@@ -365,6 +440,15 @@ def nuttx_recipe_files(instance_dir: Path) -> tuple[str, ...]:
     prerequisite kernel PRs."""
     return NUTTX_RECIPE_FILES + (("base_patch.diff",)
                                  if (Path(instance_dir) / "base_patch.diff").exists() else ())
+
+
+MYNEWT_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff", "bench.json")
+
+
+def mynewt_recipe_files(instance_dir: Path) -> tuple[str, ...]:
+    """A Mynewt recipe's files, with sim_arm64.patch where it has one."""
+    return MYNEWT_RECIPE_FILES + (("sim_arm64.patch",)
+                                  if (Path(instance_dir) / "sim_arm64.patch").exists() else ())
 
 
 def recipe_fingerprint(instance_dir: Path, files: tuple[str, ...] = RECIPE_FILES) -> str:

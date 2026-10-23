@@ -32,6 +32,18 @@ NuttX instances rendered for Apptainer (metadata "runtime": "apptainer";
 scripts/render_nuttx_instance.py --runtime apptainer) are validated the same
 way in their image, with the NuttX steps of the Docker validator and the same
 validation.json report.
+
+So are Mynewt instances (scripts/render_mynewt_instance.py): the image is
+unpacked to a writable sandbox on node-local disk (a .sif is very slow to
+compile in on ARM64), and in it
+
+    0. baseline: the commit before the test patch, run_tests --baseline passes
+    1. run_tests -> exactly fail_to_pass fail, pass_to_pass pass (exit 1)
+    2. apply the upstream fix (gold_base_commit|base_commit..fix_commit)
+    3. run_tests -> everything passes (exit 0)
+
+each judged on the runner's structured result (/tmp/mynewt-result.json), as in
+Docker. A mynewt-core clone (EMBEDEVAL_MYNEWT_CLONE) supplies the fix.
 """
 
 from __future__ import annotations
@@ -150,7 +162,8 @@ def gold_patch(meta: dict, workdir: Path) -> str:
         base = meta.get("gold_base_commit", meta["base_commit"])
         fix = meta["fix_commit"]
 
-    local = layout.nuttx_clones()[0] if project == "nuttx" else None
+    local = (layout.nuttx_clones()[0] if project == "nuttx"
+             else au.mynewt_clone() if project == "mynewt" else None)
     if local:
         clone = local
         for sha in (base, fix):
@@ -610,6 +623,127 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
         au.remove(run_dir)
 
 
+def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
+                              verbose: bool) -> bool:
+    """A Mynewt instance in its Apptainer image (metadata "runtime": "apptainer")."""
+    meta = instances.load_metadata(instance_id)
+    au.require_host_arch(meta)
+    image = au.instance_image(instance_id)
+    print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
+    idir = instances.instance_dir(instance_id)
+    report = {"instance_id": instance_id, "image": str(image), "host": platform.machine(),
+              "failure_mode": meta.get("failure_mode", "runtime"), "valid": False,
+              "recipe_sha256": au.recipe_fingerprint(idir, au.mynewt_recipe_files(idir)),
+              "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if not image.exists():
+        print(f"  ERROR: image not built: {image}")
+        report["reason"] = "image not built"
+        return _finish(instance_id, report)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_dir = au.path("runs", f"{instance_id}-{stamp}", "x").parent
+    logdir = au.path("logs", instance_id, f"validate-{stamp}", "x").parent
+    logdir.mkdir(parents=True, exist_ok=True)
+    report["logs"] = str(logdir)
+    sandbox = None
+
+    def step(label: str, cmd: str, log: str, t: int):
+        """Run cmd in the sandbox; returns (rc, output, structured result)."""
+        print(f"    {label} ...", end="", flush=True)
+        t0 = time.time()
+        full = (f"cd /testbed && {cmd}; rc=$?; echo ==MYNEWT-RESULT==; "
+                "cat /tmp/mynewt-result.json 2>/dev/null; exit $rc")
+        try:
+            r = subprocess.run(au.sandbox_exec_args(sandbox, binds={run_dir: "/embedeval-run"})
+                               + ["bash", "-c", full], capture_output=True, text=True, timeout=t)
+            rc, out = r.returncode, (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            rc = "timeout"
+        (logdir / log).write_text(out)
+        result = None
+        if "==MYNEWT-RESULT==" in out:
+            try:
+                result = json.loads(out.split("==MYNEWT-RESULT==", 1)[1])
+            except ValueError:
+                pass
+        print(f" {time.time() - t0:.0f}s (rc={rc})")
+        if verbose:
+            print(out)
+        return rc, out, result
+
+    def invalid(why: str, detail: str = "") -> bool:
+        print(f"  INVALID: {why}")
+        if detail:
+            print(detail)
+        report["reason"] = why
+        return _finish(instance_id, report)
+
+    def judge(phase: str, rc, result, want_rc: int) -> str | None:
+        """None if the phase matches expectations, else why not."""
+        if rc == "timeout":
+            return f"{phase}: run_tests timed out"
+        if result is None:
+            return f"{phase}: no structured result (rc={rc})"
+        ok, detail = verify_structured_results(meta, result, phase)
+        report[phase] = {"rc": rc, "passed": result.get("passed", []),
+                         "failed": result.get("failed", []), "error": result.get("error"),
+                         "missing": result.get("missing", []),
+                         "unexpected": result.get("unexpected", [])}
+        if not ok or rc != want_rc:
+            return f"{phase}: {detail}"
+        return None
+
+    try:
+        t0 = time.time()
+        sandbox = au.unpack_sandbox(image)
+        print(f"    unpacked sandbox in {time.time() - t0:.0f}s")
+        if meta["project"] != "mynewt":
+            return invalid("not a Mynewt instance")
+
+        print("\n  Baseline: expecting the existing tests to PASS before the test patch")
+        rc, out, result = step(
+            "run_tests --baseline",
+            "ORIG=$(git rev-parse HEAD) && git checkout -q --detach HEAD^ && "
+            "{ run_tests --baseline; r=$?; git checkout -q --detach $ORIG; (exit $r); }",
+            "baseline.log", timeout + 300)
+        why = judge("baseline", rc, result, 0)
+        if why:
+            return invalid(why, error_lines(out))
+
+        print("\n  Step 1: expecting exactly fail_to_pass to FAIL at the base commit")
+        rc, out, result = step("run_tests", "run_tests", "before.log", timeout + 300)
+        why = judge("before", rc, result, 1)
+        if why:
+            return invalid(why, error_lines(out))
+
+        print("\n  Step 2: applying the upstream fix, expecting everything to PASS")
+        patch = patch_override.read_text() if patch_override else gold_patch(meta, run_dir)
+        (run_dir / "fix.diff").write_text(patch)
+        three_way = " --3way" if meta.get("gold_patch_three_way") else ""
+        rc, out, _ = step("git apply", f"git apply{three_way} /embedeval-run/fix.diff",
+                          "apply.log", 120)
+        if rc != 0:
+            return invalid("the fix does not apply", "  " + out.strip()[:300])
+        rc, out, result = step("run_tests", "run_tests", "after.log", timeout + 300)
+        why = judge("after", rc, result, 0)
+        if why:
+            return invalid(why, error_lines(out))
+
+        print("\n  VALID: fails before the fix, passes after")
+        report["valid"] = True
+        report["reason"] = "fails before the fix, passes after"
+        return _finish(instance_id, report)
+    except Exception as e:
+        print(f"  ERROR: {type(e).__name__}: {e}")
+        report["reason"] = f"error: {type(e).__name__}: {e}"
+        return _finish(instance_id, report)
+    finally:
+        if sandbox:
+            au.remove_sandbox(sandbox)
+        au.remove(run_dir)
+
+
 def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
              verbose: bool = False) -> bool:
     meta = instances.load_metadata(instance_id)
@@ -617,6 +751,8 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
         return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
     if meta["project"] == "nuttx" and meta.get("runtime") == "apptainer":
         return validate_nuttx_apptainer(instance_id, patch_override, timeout, verbose)
+    if meta["project"] == "mynewt" and meta.get("runtime") == "apptainer":
+        return validate_mynewt_apptainer(instance_id, patch_override, timeout, verbose)
     if meta["project"] == "zephyr":
         print(f"  SKIP: {instance_id} is a Docker Zephyr instance, kept as reference "
               f"metadata only; Zephyr instances are validated from the twister pipeline "

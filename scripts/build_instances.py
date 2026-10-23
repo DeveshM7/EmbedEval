@@ -23,7 +23,10 @@ not exist yet (scripts/apptainer_util.py), then the instance image FROM them.
 Images go under the work root, never into the repo.
 
 So are NuttX instances rendered with --runtime apptainer
-(scripts/render_nuttx_instance.py), FROM the shared NuttX image. Given local
+(scripts/render_nuttx_instance.py), FROM the shared NuttX image. Mynewt
+instances rendered with scripts/render_mynewt_instance.py are built the same
+way, FROM the shared Mynewt image (EMBEDEVAL_MYNEWT_CLONE for a local
+mynewt-core clone). Given local
 clones (EMBEDEVAL_NUTTX_CLONE, EMBEDEVAL_NUTTX_APPS_CLONE), the kernel and
 apps are checked out from them rather than cloned from GitHub.
 """
@@ -90,6 +93,51 @@ def build_nuttx_apptainer(instance_id: str, dry_run: bool = False) -> bool:
     return ok
 
 
+MYNEWT_APPTAINER_FILES = ("instance.def", "metadata.json", "test_patch.diff", "run_tests.sh",
+                          "bench.json")
+
+
+def build_mynewt_apptainer(instance_id: str, dry_run: bool = False) -> bool:
+    """Build a Mynewt instance as an Apptainer image, FROM the shared Mynewt
+    image. Given a local mynewt-core clone (EMBEDEVAL_MYNEWT_CLONE), the base
+    commit is fetched from it rather than GitHub."""
+    d = instances.instance_dir(instance_id)
+    meta = instances.load_metadata(instance_id)
+    missing = [f for f in MYNEWT_APPTAINER_FILES if not (d / f).exists()]
+    if missing:
+        print(f"  ERROR: {instance_id} missing {', '.join(missing)}")
+        return False
+    try:
+        au.require_host_arch(meta)
+    except RuntimeError as e:
+        print(f"  ERROR: {e}")
+        return False
+    image = au.instance_image(instance_id)
+    logdir = au.path("logs", instance_id, "x").parent
+    args, binds = {}, {}
+    clone = au.mynewt_clone()
+    if clone:
+        binds[clone.resolve()] = "/embedeval-src/mynewt-core.git"
+    print(f"\n=== {instance_id} -> {image} ===")
+    print(f"  source: {clone or 'GitHub'}")
+    if dry_run:
+        return True
+    start = time.time()
+    try:
+        args["BASE_IMAGE"] = str(au.ensure_mynewt_base_image(
+            au.path("logs", "bases", "x").parent))
+    except RuntimeError as e:
+        print(f"  ERROR: {e}")
+        return False
+    ok = au.build(image, d / "instance.def", args, logdir / "build.log",
+                  timeout_min=int(os.environ.get("EMBEDEVAL_BUILD_TIMEOUT_MIN", "60")),
+                  binds=binds)
+    mins = (time.time() - start) / 60
+    size = f", {image.stat().st_size / 2**30:.1f} GB" if ok else ""
+    print(f"  {'built' if ok else 'FAILED'} in {mins:.1f} min{size}; log: {logdir / 'build.log'}")
+    return ok
+
+
 def build_apptainer(instance_id: str, dry_run: bool = False) -> bool:
     """Build a twister-pipeline Zephyr instance as an Apptainer image."""
     d = instances.instance_dir(instance_id)
@@ -126,6 +174,8 @@ def build_instance(instance_id: str, dry_run: bool = False, no_cache: bool = Fal
     if (d / "instance.def").exists():
         if instances.split_instance(instance_id)[0] == "nuttx":
             return build_nuttx_apptainer(instance_id, dry_run)
+        if instances.split_instance(instance_id)[0] == "mynewt":
+            return build_mynewt_apptainer(instance_id, dry_run)
         return build_apptainer(instance_id, dry_run)
     if instances.split_instance(instance_id)[0] == "zephyr":
         print(f"  SKIP: {instance_id} has no instance.def. Zephyr instances are built with "

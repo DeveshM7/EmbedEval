@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Promote validated Zephyr and NuttX instances from generated/ to apptainer/instances/
-(NuttX: apptainer/instances/nuttx/).
+Promote validated Zephyr, NuttX and Mynewt instances from generated/ to
+apptainer/instances/ (NuttX: apptainer/instances/nuttx/, Mynewt:
+apptainer/instances/mynewt/).
 
     python scripts/promote_instance.py zephyr__zephyr-65697
     python scripts/promote_instance.py --all            # every valid one in generated/
@@ -18,7 +19,7 @@ validate and run on that architecture, for one found to validate on it only.
 
 Copies the recipe and its record -- instance.def, instance.json,
 run_tests.py, test_patch.diff (NuttX: instance.def, run_tests.sh,
-test_patch.diff), metadata.json, validation.json. Images are not in git;
+test_patch.diff; Mynewt: those and bench.json, sim_arm64.patch), metadata.json, validation.json. Images are not in git;
 build_instances.py rebuilds them from the recipe.
 """
 
@@ -44,8 +45,9 @@ RECORD_FILES = ("metadata.json", "validation.json")
 def promote(instance_id: str, source: Path = GENERATED,
             host_arch: str | None = None) -> tuple[bool, str]:
     src = source / instance_id
-    nuttx = instances.split_instance(instance_id)[0] == "nuttx"
-    recipe = au.nuttx_recipe_files(src) if nuttx else au.RECIPE_FILES
+    project = instances.split_instance(instance_id)[0]
+    recipe = (au.nuttx_recipe_files(src) if project == "nuttx"
+              else au.mynewt_recipe_files(src) if project == "mynewt" else au.RECIPE_FILES)
     report_path = src / "validation.json"
     if not report_path.exists():
         return False, "not validated (no validation.json)"
@@ -61,7 +63,7 @@ def promote(instance_id: str, source: Path = GENERATED,
     missing = [f for f in files if not (src / f).exists()]
     if missing:
         return False, f"missing {', '.join(missing)}"
-    dst = (DEST / "nuttx" if nuttx else DEST) / instance_id
+    dst = (DEST / project if project in ("nuttx", "mynewt") else DEST) / instance_id
     dst.mkdir(parents=True, exist_ok=True)
     for f in files:
         shutil.copy2(src / f, dst / f)

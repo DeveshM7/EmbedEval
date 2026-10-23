@@ -34,6 +34,7 @@ _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
                   if _override else [layout.generated()] if layout.run_dir()
                   else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "apptainer" / "instances" / "nuttx",
+                        REPO_ROOT / "apptainer" / "instances" / "mynewt",
                         REPO_ROOT / "docker" / "instances"])
 OUTPUTS_DIR = layout.outputs()
 

@@ -1,0 +1,39 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+# Shared layer of every Mynewt Apptainer instance: newt, Go-built from the same
+# commit as docker/bases/mynewt.Dockerfile, and what a native-BSP `newt test`
+# needs (gcc, make, and on x86_64 the 32-bit libraries, for kernels before
+# 2024-04-09 whose compiler/sim forces -m32).
+#
+#   apptainer build --fakeroot mynewt-sim.sif mynewt-sim.def
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+    retry() {
+        for i in 1 2 3 4 5 6; do
+            timeout 300 "$@" && return 0
+            echo "attempt $i failed: $*"; sleep 3
+        done
+        return 1
+    }
+    retry apt-get $APT update -qq
+    PKGS="ca-certificates git golang-go gcc g++ make file python3"
+    if [ "$(uname -m)" = x86_64 ]; then PKGS="$PKGS gcc-multilib g++-multilib"; fi
+    retry apt-get $APT install -y -qq --no-install-recommends $PKGS > /dev/null
+    rm -rf /var/lib/apt/lists/*
+    # Where a build binds a local mynewt-core clone: a bind needs its destination.
+    mkdir -p /embedeval-src/mynewt-core.git
+    retry git clone -q https://github.com/apache/mynewt-newt.git /opt/newt-src
+    cd /opt/newt-src
+    git checkout -q c36db0f3df0a2787dfa19914d79a687d6a6cb53a
+    retry go build -o /usr/local/bin/newt ./newt
+    newt version
+
+%environment
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.layer mynewt-sim
