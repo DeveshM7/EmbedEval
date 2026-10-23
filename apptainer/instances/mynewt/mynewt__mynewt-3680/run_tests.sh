@@ -15,6 +15,13 @@ from pathlib import Path
 def classify(output, returncode, expected):
     passed = set(re.findall(r"^\[pass\] (\S+)", output, re.MULTILINE))
     failed = set(re.findall(r"^\[FAIL\] (\S+)", output, re.MULTILINE))
+    if returncode < 0:
+        # Old tests (before 2019) use plain assert(): a failing case kills the
+        # whole binary with SIGABRT and prints no [FAIL] line. The cases that
+        # never reported are the ones that did not pass; a validator holding
+        # the exact inventory still rejects a crash that fails the wrong set.
+        failed |= set(expected) - passed - failed
+        returncode = 1
     result = {
         "passed": sorted(passed - failed),
         "failed": sorted(failed),
