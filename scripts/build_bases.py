@@ -49,11 +49,13 @@ def build_base(project: str, dry_run: bool = False) -> bool:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Build EmbedEval base images.")
-    p.add_argument("--repo", choices=instances.PROJECTS, help="only this project")
+    # Docker bases exist for NuttX and RIOT only; Zephyr's shared images are
+    # Apptainer layers built on demand by scripts/apptainer_util.py.
+    p.add_argument("--repo", choices=sorted(build_config.BUILD), help="only this project")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
-    targets = [args.repo] if args.repo else list(instances.PROJECTS)
+    targets = [args.repo] if args.repo else sorted(build_config.BUILD)
     results = {t: build_base(t, args.dry_run) for t in targets}
 
     print("\n=== summary ===")

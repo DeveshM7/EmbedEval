@@ -1,0 +1,100 @@
+Bootstrap: localimage
+From: {{ BASE_IMAGE }}
+
+# EmbedEval instance nuttx__nuttx-17569-a3382 -- rendered by scripts/render_nuttx_instance.py.
+#
+# Built FROM the shared NuttX sim image (base.def), whose path is passed at
+# build time, as are the repositories to clone (GitHub unless
+# scripts/build_instances.py has local clones to bind in):
+#
+#   apptainer build --fakeroot --build-arg BASE_IMAGE=<nuttx-sim.sif> \
+#       nuttx__nuttx-17569-a3382.sif instance.def
+#
+# The Apptainer counterpart of templates/nuttx/Dockerfile.tmpl: the kernel at
+# the base commit in /testbed, the apps at theirs in /testbed/apps, sim:nsh
+# configured for ostest, and the PR's test changes applied to the apps.
+# Not prebuilt, as in Docker.
+
+%arguments
+    BASE_IMAGE=nuttx-sim.sif
+    KERNEL_REPO=https://github.com/apache/nuttx.git
+    APPS_REPO=https://github.com/apache/nuttx-apps.git
+
+%files
+    test_patch.diff /opt/embedeval/test_patch.diff
+    run_tests.sh /usr/local/bin/run_tests
+
+%post
+    set -e
+    retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i: $*"; sleep 20; done; return 1; }
+
+    # Blobless from GitHub, as in Docker; a local clone is copied whole.
+    # Either way origin is GitHub afterwards.
+    retry git clone -q --filter=blob:none {{ KERNEL_REPO }} /testbed
+    cd /testbed
+    git checkout -q edf89ddedd1f01c34df7f0c0c5bc35be6e323515
+    git remote set-url origin https://github.com/apache/nuttx.git
+    retry git clone -q --filter=blob:none {{ APPS_REPO }} apps
+    git -C apps checkout -q 35f3690a4c46ed8e81312d7211652bd5358a57c9
+    git -C apps remote set-url origin https://github.com/apache/nuttx-apps.git
+    # apps is a repository of its own inside the kernel's tree. Kept out of the
+    # kernel's git, or the agent's patch (`git add -A` in /testbed) would carry
+    # it as a submodule entry that no longer applies.
+    echo /apps/ >> .git/info/exclude
+
+    # ARM64 sim only: kernels from 2023-07-17 to 2023-11-17 have no ARM64
+    # g_reg_offs table and do not build. The backport is committed, so it is
+    # part of the base the agent starts from, never of its patch.
+    if [ "sim:nsh" = sim:nsh ] && [ "$(uname -m)" = aarch64 ] \
+            && [ -f arch/sim/src/sim/sim_tcbinfo.c ] \
+            && ! grep -q CONFIG_HOST_ARM64 arch/sim/src/sim/sim_tcbinfo.c; then
+        git apply /opt/embedeval/compat/sim_tcbinfo_arm64.patch
+        git -c user.name=EmbedEval -c user.email=embedeval@localhost commit -q -a \
+            -m "sim: add the ARM64 g_reg_offs table (backport of 749655d785)"
+    fi
+
+    # Some sim revisions add x86's code model for every 64-bit host.
+    # ARM64 GCC rejects it; keep the host-only adjustment in the base commit.
+    if [ "sim:nsh" = sim:nsh ] && [ "$(uname -m)" = aarch64 ] \
+            && [ -f boards/sim/sim/sim/scripts/Make.defs ] \
+            && grep -q ' -mcmodel=medium' boards/sim/sim/sim/scripts/Make.defs; then
+        sed -i 's/ -mcmodel=medium//g' boards/sim/sim/sim/scripts/Make.defs
+        git -c user.name=EmbedEval -c user.email=embedeval@localhost commit -q -a \
+            -m "sim: omit x86 code model on ARM64 host"
+    fi
+
+    # RISC-V boards (templates/nuttx/qemu-misc): kernels whose -march lacks
+    # _zicsr need the older toolchain.
+    if [ -d /opt/riscv-old ] && [ -f arch/risc-v/src/common/Toolchain.defs ] \
+            && ! grep -q zicsr arch/risc-v/src/common/Toolchain.defs; then
+        ln -sfn /opt/riscv-old /opt/riscv
+    fi
+
+    # Keep assertions active: ostest uses ASSERT(), which CONFIG_NDEBUG disables.
+    ./tools/configure.sh -a ./apps sim:nsh
+    sed -i '/^CONFIG_TESTING_OSTEST=/d; /^# CONFIG_TESTING_OSTEST is not set/d; /^CONFIG_NSH_CONSOLE_LOGIN=/d; /^# CONFIG_NSH_CONSOLE_LOGIN is not set/d; /^CONFIG_NDEBUG=/d; /^# CONFIG_NDEBUG is not set/d' .config
+    printf '%s\n' 'CONFIG_TESTING_OSTEST=y' 'CONFIG_NSH_CONSOLE_LOGIN=n' 'CONFIG_NDEBUG=n' >> .config
+    make olddefconfig
+    grep -q '^CONFIG_TESTING_OSTEST=y$' .config
+    # Kernels before the NDEBUG symbol existed drop it and always assert.
+    ! grep -q '^CONFIG_NDEBUG=y$' .config
+    sed -i '/^CONFIG_BUILD_FLAT=/d; /^# CONFIG_BUILD_FLAT is not set/d' .config
+    printf '%s\n' 'CONFIG_BUILD_FLAT=y' >> .config
+    grep -q '^CONFIG_BUILD_FLAT=y$' .config
+    make olddefconfig
+    sed -i '/^CONFIG_BUILD_FLAT=/d; /^# CONFIG_BUILD_FLAT is not set/d' .config
+    printf '%s\n' 'CONFIG_BUILD_FLAT=y' >> .config
+    grep -q '^CONFIG_BUILD_FLAT=y$' .config
+    if grep -q '^CONFIG_ARCH_RV64ILP32=y$' .config && [ -d /opt/riscv-ilp32 ]; then
+        ln -sfn /opt/riscv-ilp32 /opt/riscv
+    fi
+
+    cd apps && git apply /opt/embedeval/test_patch.diff
+    chmod 755 /usr/local/bin/run_tests
+
+%environment
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.instance nuttx__nuttx-17569-a3382
+    embedeval.kernel_base_commit edf89ddedd1f01c34df7f0c0c5bc35be6e323515

@@ -2,45 +2,24 @@ FROM embedeval-nuttx-base:latest
 
 WORKDIR /testbed
 
-# ── Clone kernel at base commit (pthread_join of detached thread returns ESRCH)
-ARG KERNEL_BASE_COMMIT=2b18917a6b7a35b44c3448ef1f6a87caa13e4f90
+ARG KERNEL_BASE_COMMIT=87cec8d5c74676d739962d127f54866c8c87088c
+ARG APPS_BASE_COMMIT=fec49af501f15b547a062e38f13c020a90e6512b
 RUN git clone --filter=blob:none https://github.com/apache/nuttx.git . \
     && git checkout ${KERNEL_BASE_COMMIT}
-
-# ── Clone apps at base commit (before cancel.c asserts EINVAL)
-ARG APPS_BASE_COMMIT=fec49af501f15b547a062e38f13c020a90e6512b
 RUN git clone --filter=blob:none https://github.com/apache/nuttx-apps.git apps \
     && cd apps && git checkout ${APPS_BASE_COMMIT}
 
-# ── Configure sim:nsh with ostest enabled
-#
-# CONFIG_NDEBUG must be forced off. ostest reports test failures only through
-# ASSERT(), and assert() in include/assert.h is gated on NDEBUG, not on
-# CONFIG_DEBUG_ASSERTIONS (which governs only DEBUGASSERT/PANIC). Kconfig
-# declares `config NDEBUG` with `default !DEBUG_ASSERTIONS`, but a default
-# applies only to a symbol absent from .config, and sim:nsh's defconfig pins
-# CONFIG_NDEBUG=y -- so olddefconfig preserves it, every ASSERT() compiles to
-# nothing, and ostest exits 0 however broken the code under test is.
+# Keep assertions active: ostest uses ASSERT(), which CONFIG_NDEBUG disables.
 RUN ./tools/configure.sh -a ./apps sim:nsh \
-    && grep -v "CONFIG_NDEBUG\|CONFIG_TESTING_OSTEST\|CONFIG_NSH_CONSOLE_LOGIN" .config > .config.tmp \
-    && mv .config.tmp .config \
-    && echo "CONFIG_TESTING_OSTEST=y" >> .config \
-    && echo "CONFIG_NSH_CONSOLE_LOGIN=n" >> .config \
-    && echo "CONFIG_NDEBUG=n" >> .config \
+    && sed -i '/^CONFIG_TESTING_OSTEST=/d; /^# CONFIG_TESTING_OSTEST is not set/d; /^CONFIG_NSH_CONSOLE_LOGIN=/d; /^# CONFIG_NSH_CONSOLE_LOGIN is not set/d; /^CONFIG_NDEBUG=/d; /^# CONFIG_NDEBUG is not set/d' .config \
+    && printf '%s\n' 'CONFIG_TESTING_OSTEST=y' 'CONFIG_NSH_CONSOLE_LOGIN=n' 'CONFIG_NDEBUG=n' >> .config \
     && make olddefconfig \
-    && grep -q "^# CONFIG_NDEBUG is not set" .config
+    && grep -q '^CONFIG_TESTING_OSTEST=y$' .config \
+    && grep -q '^# CONFIG_NDEBUG is not set$' .config
 
-# ── Apply test patch (nuttx-apps PR #2329)
-# Changes cancel_test to assert EINVAL (not ESRCH) for pthread_join on detached thread
-COPY test_patch.diff /tmp/
+
+COPY test_patch.diff /tmp/test_patch.diff
 RUN cd apps && git apply /tmp/test_patch.diff
 
-# ── Pre-build (succeeds — cancel.c uses only existing kernel APIs, bug is behavioral)
-RUN make -j$(nproc) 2>&1 || true
-
-# ── Generate ctags index for agent code navigation
-RUN ctags -R --languages=C,C++ -f /testbed/tags /testbed
-
-# ── Install run_tests so agent can call it as a plain command
 COPY run_tests.sh /usr/local/bin/run_tests
 RUN chmod +x /usr/local/bin/run_tests

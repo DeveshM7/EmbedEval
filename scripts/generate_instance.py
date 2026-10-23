@@ -1,44 +1,65 @@
 #!/usr/bin/env python3
 """
-Build a complete Zephyr or Apache Mynewt instance from a triage verdict.
+Build a complete Zephyr (Apptainer recipe) or Apache Mynewt (Docker) instance
+from a triage verdict.
 
-    python scripts/generate_instance.py --pr 65697 --triage triage/65697.json
+    python scripts/generate_instance.py --pr 65697 --triage triage/ideal_verdicts/65697.json
+    python scripts/generate_instance.py --pr 65697 --triage verdict.json --out /tmp/check
     python scripts/generate_instance.py --repo mynewt --pr 3299 \
-        --triage triage/mynewt-3299.json \
-        --out /tmp/check
+        --triage triage/mynewt-3299.json --out /tmp/check
 
-Writes the four files an instance needs -- Dockerfile, run_tests.sh,
-test_patch.diff, metadata.json -- so that none of them is hand-written.
+Zephyr: writes an Apptainer recipe and everything it copies in, so none of it is
+hand-written. Mynewt: writes Dockerfile, run_tests.sh, test_patch.diff and
+metadata.json.
 
-Deterministic on purpose. Given a triage verdict and an enriched PR record
-there is nothing here to reason about, so no model is involved: the model
-supplies the platform, problem statement, and expected testcase inventory;
-everything else is derived. An agent only enters later, if the generated
-instance fails to build or validate.
+Writes an Apptainer recipe and everything it copies in, so none of it is
+hand-written:
 
-Output goes to generated/ by default, never to docker/instances/, so testing
-this cannot disturb an existing instance. Pass --out to put it elsewhere.
+    instance.def      the image recipe, FROM the shared SDK image of the PR's era
+    instance.json     board, scenario and twister options, read by run_tests
+    run_tests.py      becomes /usr/local/bin/run_tests in the image
+    test_patch.diff   the PR's test changes, written by git
+    metadata.json     the instance's description
+
+Nothing is built here; scripts/build_instances.py builds the image and
+scripts/validate_instance.py validates it.
+
+Deterministic on purpose. The verdict supplies the judgements -- the board and
+scenario, the problem statement, the test lists -- and everything else comes
+from the enriched record's `twister` block (scripts/zephyr_env.py): the base
+and head commits, the era's Python and SDK, and which twister options exist.
+
+Twister replaces `west build` throughout. It applies the scenario's own
+settings (extra_configs, extra_args), so there is no extra_configs field to
+copy by hand, and it reports a status per test.
+
+Output goes to generated/ by default, never to docker/instances/, so this
+cannot disturb an existing instance.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layout  # noqa: E402  (first: reads --run-dir)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUT = REPO_ROOT / "generated"
+ENRICHED = layout.enriched()
+DRYRUN = layout.dryrun()
+TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
+DEFAULT_OUT = layout.generated()
+
+REPO_URL = "https://github.com/zephyrproject-rtos/zephyr"
+CLONE_CACHE = layout.zephyr_clone()
 
 PROJECTS = {
-    "zephyr": {
-        "repo_url": "https://github.com/zephyrproject-rtos/zephyr",
-        "enriched": REPO_ROOT / "candidates" / "enriched",
-        "templates": REPO_ROOT / "templates" / "zephyr",
-        "clone": REPO_ROOT / "candidates" / "zephyr.git",
-    },
     "mynewt": {
         "repo_url": "https://github.com/apache/mynewt-core",
         "enriched": REPO_ROOT / "candidates" / "mynewt" / "enriched",
@@ -46,26 +67,6 @@ PROJECTS = {
         "clone": REPO_ROOT / "candidates" / "mynewt.git",
     },
 }
-
-# Used only by the Dockerfile's fallback path. Where the base commit carries a
-# SDK_VERSION file at the repo root -- from roughly 2024-06 -- `west sdk
-# install` reads it and installs exactly what the project specified, and this
-# constant is never consulted.
-#
-# 0.16.8 rather than something newer because it is the version this repo has
-# evidence for on precisely this path: four hand-built instances install it by
-# manual download, including 33690, whose base commit is from 2021. 0.17.x is
-# only ever reached here through `west sdk install`, so its manual-download
-# path is untested.
-#
-# Deliberately not derived from the base commit's era. Zephyr's CMake matches a
-# minimum compatible SDK rather than an exact one, so a modern SDK builds an old
-# tree: 33690's own docs ask for 0.12.3 and it is built with 0.16.8. Deriving a
-# version per era would mean scraping a version out of prose in a docs page
-# whose path moved, to obtain a number these instances show is not required,
-# and then handling three packaging formats -- .run for 0.12/0.13, .tar.gz for
-# 0.14/0.15, .tar.xz since 0.16.
-SDK_FALLBACK = "0.16.8"
 
 
 def run(cmd: list[str], timeout: int = 300, check: bool = True):
@@ -76,20 +77,30 @@ def run(cmd: list[str], timeout: int = 300, check: bool = True):
 
 
 def ensure_clone(project: str = "zephyr") -> Path:
-    """A blobless upstream mirror, reused across instances.
+    """A bare upstream mirror, reused across instances (Zephyr: full, shared
+    with triage_prs.py; other projects: blobless).
 
-    Blobless means all history metadata without file contents until asked for,
-    so any commit can be reached without a depth limit at a fraction of a full
-    clone. The same trick validate_instance.py uses.
+    Full rather than blobless. Blobless (all history, file contents fetched on
+    first use) is enough for building a test patch, but triage searches the
+    tree with git grep, and in a blobless clone that downloads every file under
+    the searched path one at a time -- so searches had to be capped at a few
+    hundred files, and the model spent its tool rounds guessing narrower
+    directories. A full clone is a few GB, once, and makes any search instant.
     """
-    cfg = PROJECTS[project]
-    clone = cfg["clone"]
-    if not clone.exists():
-        clone.parent.mkdir(parents=True, exist_ok=True)
-        print(f"  cloning {cfg['repo_url']} (blobless, one-time) ...")
-        run(["git", "clone", "--filter=blob:none", "--no-checkout", "--bare",
-             f"{cfg['repo_url']}.git", str(clone)], timeout=1800)
-    return clone
+    if project != "zephyr":
+        cfg = PROJECTS[project]
+        clone = cfg["clone"]
+        if not clone.exists():
+            clone.parent.mkdir(parents=True, exist_ok=True)
+            print(f"  cloning {cfg['repo_url']} (blobless, one-time) ...")
+            run(["git", "clone", "--filter=blob:none", "--no-checkout", "--bare",
+                 f"{cfg['repo_url']}.git", str(clone)], timeout=1800)
+        return clone
+    if not CLONE_CACHE.exists():
+        CLONE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  cloning {REPO_URL} (full, one-time; a few GB) ...")
+        run(["git", "clone", "--bare", f"{REPO_URL}.git", str(CLONE_CACHE)], timeout=3600)
+    return CLONE_CACHE
 
 
 def is_test_path(path: str, project: str) -> bool:
@@ -134,6 +145,10 @@ def build_test_patch(
     which is how 43405, 74435 and 82272 came to fail. Letting git write it
     removes that whole class of error rather than the one instance of it.
 
+    All of tests/, including testcase.yaml: a scenario setting the PR adds
+    there is part of how its test detects the bug (85079 adds
+    CONFIG_RTIO_SUBMIT_SEM=n to its scenario), and twister applies it.
+
     The range is safe because both ends are on the PR's own branch: base is its
     merge base, head its tip, and the branch contains nothing that landed on
     main after it forked. Contamination came from ranges ending at a *merge
@@ -141,7 +156,10 @@ def build_test_patch(
     put seven foreign files into the nuttx-11889 patch.
     """
     clone = ensure_clone(project)
-    run(["git", "-C", str(clone), "fetch", "-q", "origin", base, head], timeout=900)
+    for sha in (base, head):
+        if run(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"],
+               check=False).returncode:
+            run(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
     paths = ["tests/"] if project == "zephyr" else (test_files or [])
     if not paths:
         return ""
@@ -155,22 +173,18 @@ def check_applies(
     """Refuse to emit an instance whose patch git will not accept.
 
     Without this the first sign of a malformed patch is `git apply` failing
-    seven minutes into a Docker build, and only for instances someone happens
-    to build. A dry run against the base commit costs about a second and covers
-    every instance, every time -- so correctness stops depending on having
-    anticipated git's format rules, and is decided by git.
+    minutes into an image build, and only for instances someone happens to
+    build. A dry run against the base commit costs about a second and covers
+    every instance, every time.
     """
     clone = ensure_clone(project)
     patch_file = (inst / "test_patch.diff").resolve()
     with tempfile.TemporaryDirectory(prefix="embedeval-applycheck-") as tmp:
-        # Absolute paths throughout: `git -C <clone>` resolves relative paths
-        # against the clone, not the caller's directory.
         work = Path(tmp) / "tree"
         run(["git", "-C", str(clone), "worktree", "add", "-q", "--detach",
              str(work), base], timeout=300)
         try:
-            r = run(["git", "-C", str(work), "apply", "--check", str(patch_file)],
-                    check=False)
+            r = run(["git", "-C", str(work), "apply", "--check", str(patch_file)], check=False)
             if r.returncode != 0:
                 sys.exit("ERROR: generated test_patch.diff does not apply at "
                          f"{base[:12]}:\n{r.stderr.strip()[:400]}")
@@ -179,27 +193,127 @@ def check_applies(
                 timeout=120, check=False)
 
 
-def pick_runner(platform: str, project: str = "zephyr") -> Path:
-    """QEMU needs PID cleanup and process-group killing because it never exits
-    on its own; native_sim runs as a host process that does. Genuinely two
-    different scripts, not cosmetic drift."""
-    templates = PROJECTS[project]["templates"]
-    if project == "mynewt":
-        return templates / "run_tests.sh"
-    return templates / ("run_tests.qemu.sh" if platform.startswith("qemu")
-                        else "run_tests.native.sh")
+def check_choice(pr: int, facts: dict, platform: str, test_path: str, scenario: str,
+                 force: bool) -> None:
+    """The verdict's board and scenario must exist at this commit and, when a
+    dry run has been done, be a pair twister selects."""
+    problems = []
+    if platform not in [b for b in facts["boards"].values() if b]:
+        problems.append(f"board {platform!r} is not a candidate board at the base commit "
+                        f"(have {facts['boards']})")
+    suite = facts["suites"].get(test_path)
+    if not suite:
+        problems.append(f"{test_path!r} is not a suite this PR changes "
+                        f"(have {sorted(facts['suites'])})")
+    elif scenario not in suite.get("scenarios", {}):
+        problems.append(f"scenario {scenario!r} is not in {test_path} "
+                        f"(have {sorted(suite.get('scenarios', {}))})")
+    dr = DRYRUN / f"{pr}.json"
+    if dr.exists():
+        pairs = json.loads(dr.read_text())["pairs"]
+        hit = next((p for p in pairs if p["suite"] == test_path and p["scenario"] == scenario
+                    and p["board"] == platform), None)
+        if hit and hit["status"] != "selected":
+            problems.append(f"the dry run filtered {scenario} on {platform}: {hit['reason']}")
+    else:
+        print(f"  note: no dry run for {pr} (candidates/dryrun/{pr}.json); choice not checked")
+    if problems:
+        msg = "; ".join(problems)
+        if not force:
+            sys.exit(f"ERROR: verdict for {pr}: {msg}")
+        print(f"  WARNING (--force): {msg}")
 
 
-def generate(
+def generate_zephyr(pr: int, triage: dict, out_root: Path, force: bool = False) -> Path:
+    rec_path = ENRICHED / f"{pr}.json"
+    if not rec_path.exists():
+        sys.exit(f"ERROR: no enriched record at {rec_path}. Run `enrich` first.")
+    rec = json.loads(rec_path.read_text())
+    facts = rec.get("twister")
+    if not facts or "error" in facts:
+        sys.exit(f"ERROR: enriched record for {pr} has no twister facts; "
+                 f"run `filter_candidates.py enrich-twister --pr {pr}`")
+
+    for field in ("platform", "test_path", "scenario", "problem_statement", "fail_to_pass"):
+        if not triage.get(field):
+            sys.exit(f"ERROR: triage verdict for {pr} has no {field!r}")
+    platform, test_path, scenario = triage["platform"], triage["test_path"], triage["scenario"]
+    check_choice(pr, facts, platform, test_path, scenario, force)
+
+    base, head = facts["base_commit"], facts["head_commit"]
+    instance_id = f"zephyr__zephyr-{pr}"
+    inst = out_root / instance_id
+    inst.mkdir(parents=True, exist_ok=True)
+
+    patch = build_test_patch(base, head)
+    if not patch.strip():
+        sys.exit(f"ERROR: no test-file diff for {pr}; instance would have no tests")
+    (inst / "test_patch.diff").write_text(patch)
+    check_applies(patch, base, inst)
+
+    # Era-specific twister options. -W in every era: twister turns warnings
+    # into errors by default, and a newer compiler than upstream CI's warns
+    # about old code that CI built cleanly. --json-report only where that
+    # commit's twister has it (2021-01-25 to 2022-05-13); later twister writes
+    # the JSON report by default and rejects the option.
+    twister_args = ["-W"] + (["--json-report"] if facts["twister"]["json_report"] else [])
+    (inst / "instance.json").write_text(json.dumps(
+        {"platform": platform, "test_path": test_path, "scenario": scenario,
+         "twister_args": twister_args}, indent=2) + "\n")
+    shutil.copy(TEMPLATES / "run_tests.py", inst / "run_tests.py")
+
+    definition = (TEMPLATES / "instance.def.tmpl").read_text()
+    for key, val in {"@@INSTANCE_ID@@": instance_id, "@@REPO@@": REPO_URL,
+                     "@@BASE_COMMIT@@": base, "@@PYTHON@@": facts["python"],
+                     "@@SDK@@": facts["sdk"]}.items():
+        definition = definition.replace(key, val)
+    (inst / "instance.def").write_text(definition)
+
+    cmd = (f"scripts/twister -p {platform} -T {test_path} -s {test_path}/{scenario} -s {scenario} "
+           f"-O twister-out --no-clean {' '.join(twister_args)}")
+    meta = {
+        "instance_id": instance_id,
+        "project": "zephyr",
+        "pipeline": "twister",
+        "repo": REPO_URL,
+        # base_commit..fix_commit spans exactly this PR, which is the range
+        # validate_instance.py diffs to reconstruct the upstream fix.
+        "base_commit": base,
+        "fix_commit": head,
+        "test_commit": head,
+        "problem_statement": triage["problem_statement"],
+        "platform": platform,
+        "test_path": test_path,
+        "scenario": scenario,
+        "twister_command": cmd,
+        "twister_args": twister_args,
+        "run_command": "run_tests",
+        "python_version": facts["python"],
+        "sdk_version": facts["sdk"],
+        "sdk_archive": facts["sdk_archive"],
+        "apptainer_image": f"{instance_id}.sif",
+        "fail_to_pass": triage["fail_to_pass"],
+        "pass_to_pass": triage.get("pass_to_pass", []),
+        "files_changed_by_fix": [
+            f["filename"] for f in rec["files"]
+            if not f["filename"].startswith(("tests/", "doc/", ".github/", "samples/"))
+        ],
+        "pr_url": rec["url"],
+        "change_type": triage.get("change_type"),
+        "generated": True,
+    }
+    (inst / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
+    return inst
+
+
+def generate_mynewt(
     pr: int,
     triage: dict,
     out_root: Path,
     tag_suffix: str = "",
-    project: str = "zephyr",
     enriched_root: Path | None = None,
 ) -> Path:
-    if project not in PROJECTS:
-        sys.exit(f"ERROR: unknown project {project!r}")
+    project = "mynewt"
     cfg = PROJECTS[project]
     templates = cfg["templates"]
     rec_path = (enriched_root or cfg["enriched"]) / f"{pr}.json"
@@ -207,7 +321,7 @@ def generate(
         sys.exit(f"ERROR: no enriched record at {rec_path}. Run `enrich` first.")
     rec = json.loads(rec_path.read_text())
     linked = rec.get("linked_issues") or []
-    if project == "mynewt" and not linked:
+    if not linked:
         sys.exit(f"ERROR: enriched Mynewt record for {pr} has no linked issue")
 
     for field in ("platform", "problem_statement", "fail_to_pass"):
@@ -215,21 +329,11 @@ def generate(
             sys.exit(f"ERROR: triage verdict for {pr} has no {field!r}")
 
     platform = triage["platform"]
-    if project == "mynewt" and platform != "native":
+    if platform != "native":
         sys.exit("ERROR: Mynewt platform must be 'native'; QEMU is not supported")
-    if project == "mynewt" and "baseline_tests" not in triage:
+    if "baseline_tests" not in triage:
         sys.exit(f"ERROR: triage verdict for {pr} has no 'baseline_tests'")
 
-    # Kconfig overrides for the scenario this test belongs to. west build reads
-    # prj.conf only, so without these a test that depends on a scenario's
-    # extra_configs runs in the wrong variant and passes on broken code.
-    # -t installs one toolchain, -T installs none, and omitting both installs
-    # every architecture. qemu_* cross-compiles so it needs x86_64-zephyr-elf;
-    # native_sim uses the host gcc and needs nothing, so -T saves the download.
-    sdk_flag = "-T" if platform.startswith("native") else "-t x86_64-zephyr-elf"
-
-    extra = triage.get("extra_configs") or []
-    extra_args = (" -- " + " ".join(f"-D{c}" for c in extra)) if extra else ""
     suites = rec.get("test_suites") or {}
     if not suites:
         sys.exit(f"ERROR: enriched record for {pr} has no test_suites")
@@ -264,52 +368,39 @@ def generate(
     patch = build_test_patch(base_commit, test_commit, project, test_files)
     if not patch.strip():
         sys.exit(f"ERROR: no test-file diff for {pr}; instance would have no tests")
-    if project == "mynewt":
-        failure_mode = triage.get("failure_mode", "runtime")
-        if failure_mode not in ("runtime", "compile"):
-            sys.exit("ERROR: Mynewt failure_mode must be 'runtime' or 'compile'")
-        compile_test_source = triage.get("compile_test_source")
-        missing_api = triage.get("missing_api")
-        if failure_mode == "compile":
-            if not isinstance(compile_test_source, str) or not compile_test_source.strip():
-                sys.exit("ERROR: compile mode requires compile_test_source")
-            if not isinstance(missing_api, str) or not missing_api.strip():
-                sys.exit("ERROR: compile mode requires missing_api")
-            clone = ensure_clone(project)
-            changed = run([
-                "git", "-C", str(clone), "diff", "--name-only",
-                f"{base_commit}..{test_commit}", "--", *test_files,
-            ]).stdout.splitlines()
-            if (Path(compile_test_source).suffix not in (".c", ".cc", ".cpp", ".cxx", ".C")
-                    or not is_test_path(compile_test_source, project)
-                    or compile_test_source not in changed):
-                sys.exit("ERROR: compile_test_source must be a changed test-side C/C++ source in the test patch")
-            source = run([
-                "git", "-C", str(clone), "show", f"{test_commit}:{compile_test_source}",
-            ]).stdout
-            if missing_api not in source:
-                sys.exit("ERROR: missing_api is absent from compile_test_source")
+    failure_mode = triage.get("failure_mode", "runtime")
+    if failure_mode not in ("runtime", "compile"):
+        sys.exit("ERROR: Mynewt failure_mode must be 'runtime' or 'compile'")
+    compile_test_source = triage.get("compile_test_source")
+    missing_api = triage.get("missing_api")
+    if failure_mode == "compile":
+        if not isinstance(compile_test_source, str) or not compile_test_source.strip():
+            sys.exit("ERROR: compile mode requires compile_test_source")
+        if not isinstance(missing_api, str) or not missing_api.strip():
+            sys.exit("ERROR: compile mode requires missing_api")
+        clone = ensure_clone(project)
+        changed = run([
+            "git", "-C", str(clone), "diff", "--name-only",
+            f"{base_commit}..{test_commit}", "--", *test_files,
+        ]).stdout.splitlines()
+        if (Path(compile_test_source).suffix not in (".c", ".cc", ".cpp", ".cxx", ".C")
+                or not is_test_path(compile_test_source, project)
+                or compile_test_source not in changed):
+            sys.exit("ERROR: compile_test_source must be a changed test-side C/C++ source in the test patch")
+        source = run([
+            "git", "-C", str(clone), "show", f"{test_commit}:{compile_test_source}",
+        ]).stdout
+        if missing_api not in source:
+            sys.exit("ERROR: missing_api is absent from compile_test_source")
     (inst / "test_patch.diff").write_text(patch)
     check_applies(patch, base_commit, inst, project)
 
     dockerfile = (templates / "Dockerfile.tmpl").read_text()
-    replacements = {
-        "@@BASE_COMMIT@@": base_commit,
-        "@@REPO@@": cfg["repo_url"],
-    }
-    if project == "zephyr":
-        replacements.update({
-            "@@SDK_VERSION@@": SDK_FALLBACK,
-            "@@PLATFORM@@": platform,
-            "@@TEST_PATH@@": test_path,
-            "@@EXTRA_BUILD_ARGS@@": extra_args,
-            "@@SDK_TOOLCHAIN_FLAG@@": sdk_flag,
-        })
-    for key, val in replacements.items():
+    for key, val in {"@@BASE_COMMIT@@": base_commit, "@@REPO@@": cfg["repo_url"]}.items():
         dockerfile = dockerfile.replace(key, val)
     (inst / "Dockerfile").write_text(dockerfile)
 
-    (inst / "run_tests.sh").write_text(pick_runner(platform, project).read_text())
+    (inst / "run_tests.sh").write_text((templates / "run_tests.sh").read_text())
 
     meta = {
         "instance_id": instance_id,
@@ -324,11 +415,8 @@ def generate(
         "problem_statement": triage["problem_statement"],
         "platform": platform,
         "test_path": test_path,
-        "build_command": (
-            f"west build -b {platform} {test_path}{extra_args}"
-            if project == "zephyr" else "true"
-        ),
-        "run_command": "west build -t run" if project == "zephyr" else "run_tests",
+        "build_command": "true",
+        "run_command": "run_tests",
         "docker_image": f"embedeval:{project}-{pr}{tag_suffix}",
         "fail_to_pass": triage["fail_to_pass"],
         "pass_to_pass": triage.get("pass_to_pass", []),
@@ -340,53 +428,58 @@ def generate(
         "change_type": triage.get("change_type"),
         "generated": True,
     }
-    if project == "zephyr":
-        # `west sdk install` overrides this from the repo's own SDK_VERSION
-        # where present. Record the fallback so variation is explicit.
-        meta.update({
-            "sdk_fallback_version": SDK_FALLBACK,
-            "extra_configs": extra,
-        })
-    else:
-        meta.update({
-            "issue_url": f"https://github.com/apache/mynewt-core/issues/{linked[0]['number']}",
-            "failure_mode": failure_mode,
-            "compile_test_source": compile_test_source,
-            "missing_api": missing_api,
-            "docker_platform": "linux/amd64",
-            "structured_test_results": "/tmp/mynewt-result.json",
-            "baseline_tests": triage["baseline_tests"],
-            "protected_paths": [suite.rstrip("/") + "/" for suite in suites],
-            "compatibility_cflags": triage.get("compatibility_cflags", []),
-        })
-        if triage.get("gold_patch_three_way"):
-            meta["gold_patch_three_way"] = True
-        if test_commit != head_commit:
-            meta["gold_base_commit"] = test_commit
+    meta.update({
+        "issue_url": f"https://github.com/apache/mynewt-core/issues/{linked[0]['number']}",
+        "failure_mode": failure_mode,
+        "compile_test_source": compile_test_source,
+        "missing_api": missing_api,
+        "docker_platform": "linux/amd64",
+        "structured_test_results": "/tmp/mynewt-result.json",
+        "baseline_tests": triage["baseline_tests"],
+        "protected_paths": [suite.rstrip("/") + "/" for suite in suites],
+        "compatibility_cflags": triage.get("compatibility_cflags", []),
+    })
+    if triage.get("gold_patch_three_way"):
+        meta["gold_patch_three_way"] = True
+    if test_commit != head_commit:
+        meta["gold_base_commit"] = test_commit
     (inst / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
     return inst
+
+
+
+def generate(pr: int, triage: dict, out_root: Path, tag_suffix: str = "",
+             project: str = "zephyr", force: bool = False,
+             enriched_root: Path | None = None) -> Path:
+    if project == "mynewt":
+        return generate_mynewt(pr, triage, out_root, tag_suffix, enriched_root)
+    if project == "zephyr":
+        return generate_zephyr(pr, triage, out_root, force)
+    sys.exit(f"ERROR: unknown project {project!r}")
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Generate a Zephyr or Mynewt instance from a triage verdict."
     )
-    p.add_argument("--repo", choices=PROJECTS, default="zephyr")
+    p.add_argument("--repo", choices=("zephyr", "mynewt"), default="zephyr")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--triage", required=True, help="path to the triage verdict JSON")
     p.add_argument("--out", default=str(DEFAULT_OUT),
                    help="output root (default: generated/, never docker/instances/)")
+    p.add_argument("--force", action="store_true",
+                   help="generate even if the board/scenario check fails (for testing)")
     p.add_argument("--tag-suffix", default="",
-                   help="append to the image tag, e.g. -gen, so building a generated "
-                        "instance cannot overwrite the image of an existing one")
+                   help="Mynewt only: append to the image tag, e.g. -gen, so building a "
+                        "generated instance cannot overwrite an existing image")
     args = p.parse_args()
 
     triage = json.loads(Path(args.triage).read_text())
     if triage.get("verdict") == "reject":
         sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
 
-    inst = generate(args.pr, triage, Path(args.out), args.tag_suffix, args.repo)
-    print(f"  wrote {inst.relative_to(REPO_ROOT) if REPO_ROOT in inst.parents else inst}")
+    inst = generate(args.pr, triage, Path(args.out), args.tag_suffix, args.repo, args.force)
+    print(f"  wrote {layout.show(inst)}")
     for f in sorted(inst.iterdir()):
         print(f"    {f.name:<20} {f.stat().st_size:>7} B")
 

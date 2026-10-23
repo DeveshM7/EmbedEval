@@ -12,12 +12,21 @@ Evaluation is deliberately decoupled from the agent run: each patch is applied
 in a container started fresh from the instance image, so nothing the agent left
 behind -- stale build artefacts, a modified test file, a running process -- can
 influence the result. The patch text is the only thing that crosses over.
+
+Twister-pipeline Zephyr instances are graded in their Apptainer image instead
+(evaluate_apptainer): the patch on a fresh overlay, then the instance's
+`run_tests`, which must pass every test of the scenario. So are NuttX
+instances whose metadata says "runtime": "apptainer".
+
+    EMBEDEVAL_INSTANCES_DIR=generated python harness/evaluate_patches.py \
+        --instance zephyr__zephyr-65697 --model qwen38-nvfp4
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -29,8 +38,125 @@ import paths
 import projects
 
 
+RUN_TESTS_ERRORS = {1: "tests failed (a test, the build or the configuration)",
+                    2: "the test runner did not start", 3: "nothing ran"}
+NUTTX_RUN_TESTS_ERRORS = {1: "tests failed", 2: "tests timed out (possible infinite loop)"}
+
+
+def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: int) -> dict:
+    """Grade a patch on a twister-pipeline instance, in its Apptainer image.
+
+    A fresh writable overlay on the image as built (base commit + the PR's
+    tests), the agent's patch applied on top, then `run_tests`: twister builds
+    the instance's scenario and runs it. Pass means exit 0 -- every test case
+    of the scenario passed, not just the listed ones. The patch never contains
+    tests/ (the runner excludes protected paths when capturing it), so the
+    tests graded are the PR's own.
+
+    A NuttX instance rendered for Apptainer is graded the same way, except
+    that it is built first and `run_tests` runs ostest, as under Docker. Its
+    tests are in apps/, which the patch cannot reach: the image keeps that
+    repository out of the kernel's git.
+    """
+    sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
+    import apptainer_util as au
+
+    au.require_host_arch(meta)
+    patch_path = paths.patch_path(instance_id, model_name)
+    result = {"instance_id": instance_id, "model": paths.resolve_model(model_name),
+              "patch_file": str(paths.show(patch_path)),
+              "patch_empty": False, "patch_applied": False, "build_ok": False,
+              "tests_passed": False, "grade": "fail", "error": None, "elapsed_seconds": 0}
+    if not patch_path.exists():
+        result.update(grade="missing", error="no patch file (run not found)")
+        return result
+    if not patch_path.read_text().strip():
+        result.update(patch_empty=True, error="empty patch — agent made no changes")
+        return result
+    image = au.instance_image(instance_id)
+    if not image.exists():
+        result["error"] = f"instance image not built: {image}"
+        return result
+
+    start = time.time()
+    run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
+    overlay = run_dir / "overlay"
+    overlay.mkdir(parents=True)
+    (run_dir / "agent.patch").write_text(patch_path.read_text())
+    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay)
+    try:
+        print("  applying patch ...")
+        ap = subprocess.run(container + ["git", "-C", "/testbed", "apply",
+                                         "/embedeval-run/agent.patch"],
+                            capture_output=True, text=True, timeout=120)
+        if ap.returncode != 0:
+            result["error"] = f"git apply failed: {(ap.stdout + ap.stderr).strip()[:300]}"
+            return result
+        result["patch_applied"] = True
+        if meta["project"] == "nuttx":
+            # NuttX's run_tests only runs the simulator: build first, as in
+            # Docker. Before that, as in validation: re-apply the config
+            # overrides (some exist only once the fix is in) and clean if the
+            # fix needs it.
+            prepare = au.nuttx_reconfigure(meta.get("config_overrides") or {})
+            if meta.get("clean_after_patch"):
+                prepare += " && make clean"
+            cp = subprocess.run(container + ["bash", "-c", f"cd /testbed && {prepare}"],
+                                capture_output=True, text=True, timeout=600)
+            if cp.returncode != 0:
+                out = (cp.stdout or "") + (cp.stderr or "")
+                dropped = re.search(r"config override dropped: \S+", out)
+                result["error"] = (f"{dropped.group(0)} with the patch" if dropped
+                                   else f"reconfigure failed (rc={cp.returncode})")
+                result["build_output_tail"] = out[-600:]
+                return result
+            build_command = projects.setting(meta, "build_command")
+            print(f"  building ({build_command}) ...")
+            bp = subprocess.run(container + ["bash", "-c", f"cd /testbed && {build_command}"],
+                                capture_output=True, text=True, timeout=900)
+            if bp.returncode != 0:
+                result["error"] = f"build failed (rc={bp.returncode})"
+                result["build_output_tail"] = ((bp.stdout or "") + (bp.stderr or ""))[-600:]
+                return result
+            result["build_ok"] = True
+            print("  run_tests (ostest) ...")
+            # A minute over run_tests' own limit, so a hang ends as its exit 2.
+            tp = subprocess.run(container + ["run_tests"], capture_output=True, text=True,
+                                timeout=timeout + 60)
+            errors = NUTTX_RUN_TESTS_ERRORS
+        else:
+            print("  run_tests (twister build + run) ...")
+            tp = subprocess.run(container + ["run_tests"], capture_output=True, text=True,
+                                timeout=max(timeout, 1800))
+            errors = RUN_TESTS_ERRORS
+        out = (tp.stdout or "") + (tp.stderr or "")
+        result["test_output_tail"] = out[-2000:]
+        if meta["project"] != "nuttx":
+            result["build_ok"] = tp.returncode in (0, 3) or "Build failure" not in out
+        if tp.returncode == 0:
+            result.update(tests_passed=True, grade="pass")
+            print("  PASS")
+        else:
+            result["error"] = errors.get(tp.returncode, f"run_tests exited {tp.returncode}")
+            print(f"  FAIL — {result['error']}")
+    except subprocess.TimeoutExpired:
+        result["error"] = "evaluation timed out"
+        print("  FAIL — overall timeout")
+    finally:
+        result["elapsed_seconds"] = round(time.time() - start, 1)
+        au.remove(run_dir)
+    return result
+
+
 def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dict:
     meta = paths.load_metadata(instance_id)
+    if meta.get("pipeline") == "twister" or meta.get("runtime") == "apptainer":
+        return evaluate_apptainer(instance_id, model_name, meta, timeout)
+    if meta["project"] == "zephyr":
+        return {"instance_id": instance_id, "model": paths.resolve_model(model_name),
+                "grade": "missing", "error": "Docker Zephyr instance (reference metadata only); "
+                "grade Zephyr from generated/ (EMBEDEVAL_INSTANCES_DIR=generated)",
+                "elapsed_seconds": 0}
     cfg = projects.config(meta["project"])
     image = meta["docker_image"]
     build_command = projects.setting(meta, "build_command")
@@ -39,7 +165,7 @@ def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dic
     result = {
         "instance_id": instance_id,
         "model": paths.resolve_model(model_name),
-        "patch_file": str(patch_path.relative_to(paths.REPO_ROOT)),
+        "patch_file": str(paths.show(patch_path)),
         "patch_empty": False,
         "patch_applied": False,
         "build_ok": False,
@@ -196,7 +322,7 @@ def main() -> None:
         for i, m in pairs:
             pp = paths.patch_path(i, m)
             mark = "ok     " if pp.exists() else "MISSING"
-            print(f"  [{mark}] {pp.relative_to(paths.REPO_ROOT)}")
+            print(f"  [{mark}] {paths.show(pp)}")
         return
 
     results = []
@@ -220,7 +346,7 @@ def main() -> None:
     print(f"\n  {passed}/{len(graded)} graded patches pass"
           + (f"   ({missing} not run)" if missing else ""))
 
-    out = paths.REPO_ROOT / args.output
+    out = paths.layout.base() / args.output
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -230,7 +356,7 @@ def main() -> None:
         "passed": passed,
         "results": results,
     }, indent=2))
-    print(f"  written to {out.relative_to(paths.REPO_ROOT)}")
+    print(f"  written to {paths.show(out)}")
 
 
 if __name__ == "__main__":

@@ -25,19 +25,10 @@ def _riot_unit_tests(meta: dict) -> str:
     )
 
 
+# Docker builds only. Zephyr instances are Apptainer images built by the
+# twister pipeline (scripts/apptainer_util.py, templates/zephyr/apptainer/), so
+# Zephyr has no entry here.
 BUILD: dict[str, dict] = {
-    "zephyr": {
-        "base_image": "embedeval-zephyr-base:latest",
-        "base_dockerfile": "docker/bases/zephyr.Dockerfile",
-        # docker ARG name -> how to get its value from metadata
-        "build_args": {
-            "BASE_COMMIT": lambda m: m["base_commit"],
-            "PLATFORM": lambda m: m["platform"],
-            "TEST_PATH": lambda m: m["test_path"],
-        },
-        "platform": None,
-        "clean_paths": ["/testbed/build"],
-    },
     "nuttx": {
         "base_image": "embedeval-nuttx-base:latest",
         "base_dockerfile": "docker/bases/nuttx.Dockerfile",
@@ -46,7 +37,8 @@ BUILD: dict[str, dict] = {
             "KERNEL_BASE_COMMIT": lambda m: m["kernel_base_commit"],
             "APPS_BASE_COMMIT": lambda m: m["apps_base_commit"],
         },
-        "platform": None,
+        # The shared base installs gcc-multilib and an x64 xPack toolchain.
+        "platform": "linux/amd64",
         "clean_paths": [],
     },
     "riot": {
@@ -77,6 +69,10 @@ BUILD: dict[str, dict] = {
 
 
 def config(project: str) -> dict:
+    if project == "zephyr":
+        raise KeyError("Zephyr instances are Apptainer images from the twister pipeline "
+                       "(scripts/generate_instance.py, build_instances.py on an instance.def); "
+                       "there is no Docker build for Zephyr")
     if project not in BUILD:
         raise KeyError(f"unknown project {project!r}; known: {sorted(BUILD)}")
     return BUILD[project]

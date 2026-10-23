@@ -2,48 +2,29 @@ FROM embedeval-nuttx-base:latest
 
 WORKDIR /testbed
 
-# ── Clone kernel at base commit (kwork_thread.c processes only one work item per wakeup)
-ARG KERNEL_BASE_COMMIT=673a4aabf5d6856c9b87e258326cc4dae3f8689c
+ARG KERNEL_BASE_COMMIT=9a28cd2000af50ef15b8ecd08d09a1df34db71da
+ARG APPS_BASE_COMMIT=922f9932a6361cb6b25328e3995a4b6886e47d51
 RUN git clone --filter=blob:none https://github.com/apache/nuttx.git . \
     && git checkout ${KERNEL_BASE_COMMIT}
-
-# ── Clone apps at base commit (before wqueue.c test was added)
-ARG APPS_BASE_COMMIT=3a1893ba7e1e4ea5aef0f5181886defaa5e69e91
 RUN git clone --filter=blob:none https://github.com/apache/nuttx-apps.git apps \
     && cd apps && git checkout ${APPS_BASE_COMMIT}
 
-# ── Configure sim:nsh and enable work queues explicitly
-#
-# CONFIG_NDEBUG must be forced off. ostest reports test failures only through
-# ASSERT(), and assert() in include/assert.h is gated on NDEBUG, not on
-# CONFIG_DEBUG_ASSERTIONS (which governs only DEBUGASSERT/PANIC). Kconfig
-# declares `config NDEBUG` with `default !DEBUG_ASSERTIONS`, but a default
-# applies only to a symbol absent from .config, and sim:nsh's defconfig pins
-# CONFIG_NDEBUG=y -- so olddefconfig preserves it, every ASSERT() compiles to
-# nothing, and ostest exits 0 however broken the code under test is.
+# Keep assertions active: ostest uses ASSERT(), which CONFIG_NDEBUG disables.
 RUN ./tools/configure.sh -a ./apps sim:nsh \
-    && grep -v "CONFIG_NDEBUG\|CONFIG_TESTING_OSTEST\|CONFIG_NSH_CONSOLE_LOGIN\|CONFIG_SCHED_WORKQUEUE\|CONFIG_SCHED_LPWORK\|CONFIG_SCHED_HPWORK" \
-       .config > .config.tmp \
-    && mv .config.tmp .config \
-    && echo "CONFIG_TESTING_OSTEST=y" >> .config \
-    && echo "CONFIG_NSH_CONSOLE_LOGIN=n" >> .config \
-    && echo "CONFIG_SCHED_WORKQUEUE=y" >> .config \
-    && echo "CONFIG_SCHED_LPWORK=y" >> .config \
-    && echo "CONFIG_NDEBUG=n" >> .config \
+    && sed -i '/^CONFIG_TESTING_OSTEST=/d; /^# CONFIG_TESTING_OSTEST is not set/d; /^CONFIG_NSH_CONSOLE_LOGIN=/d; /^# CONFIG_NSH_CONSOLE_LOGIN is not set/d; /^CONFIG_NDEBUG=/d; /^# CONFIG_NDEBUG is not set/d' .config \
+    && printf '%s\n' 'CONFIG_TESTING_OSTEST=y' 'CONFIG_NSH_CONSOLE_LOGIN=n' 'CONFIG_NDEBUG=n' >> .config \
     && make olddefconfig \
-    && grep -q "^# CONFIG_NDEBUG is not set" .config
+    && grep -q '^CONFIG_TESTING_OSTEST=y$' .config \
+    && grep -q '^# CONFIG_NDEBUG is not set$' .config
+RUN sed -i '/^CONFIG_SCHED_LPWORK=/d; /^# CONFIG_SCHED_LPWORK is not set/d' .config \
+    && printf '%s\n' 'CONFIG_SCHED_LPWORK=y' >> .config \
+    && grep -q '^CONFIG_SCHED_LPWORK=y$' .config \
+    && sed -i '/^CONFIG_SCHED_WORKQUEUE=/d; /^# CONFIG_SCHED_WORKQUEUE is not set/d' .config \
+    && printf '%s\n' 'CONFIG_SCHED_WORKQUEUE=y' >> .config \
+    && grep -q '^CONFIG_SCHED_WORKQUEUE=y$' .config
 
-# ── Apply test patch (nuttx-apps PR #1665)
-# Adds wqueue.c and wires it into ostest — build succeeds, bug is runtime assertion
-COPY test_patch.diff /tmp/
+COPY test_patch.diff /tmp/test_patch.diff
 RUN cd apps && git apply /tmp/test_patch.diff
 
-# ── Pre-build (succeeds — wqueue.c uses existing kernel APIs, bug is runtime)
-RUN make -j$(nproc) 2>&1 || true
-
-# ── Generate ctags index for agent code navigation
-RUN ctags -R --languages=C,C++ -f /testbed/tags /testbed
-
-# ── Install run_tests so agent can call it as a plain command
 COPY run_tests.sh /usr/local/bin/run_tests
 RUN chmod +x /usr/local/bin/run_tests

@@ -1,80 +1,43 @@
 #!/usr/bin/env bash
-# Run NuttX ostest on the sim target and exit as soon as results are available.
+# Run the whole ostest suite to completion, then classify its log once.
+# Exit 0 when ostest finished cleanly and ran every changed test, 1 for any
+# other completed run, and 2 for timeout.
 #
-# cancel_test (PR #2329) now asserts that pthread_join on a detached thread
-# returns EINVAL. On the base kernel it returns ESRCH, so cancel_test prints
-# "ERROR pthread_join failed but with wrong status=3" — but crucially does NOT
-# call ASSERT(false) in this branch, so ostest still exits 0. A plain exit-code
-# check gives a false pass; this script checks for the specific PASS/FAIL string.
-#
-# Usage (from /testbed):
-#   run_tests
-#   run_tests [timeout_seconds]   (default: 300)
-#
-# Exit codes:
-#   0  — cancel_test: PASS pthread_join failed with status=EINVAL + ostest exits 0
-#   1  — cancel_test ERROR detected (wrong errno returned by kernel)
-#   2  — timed out before ostest completed
-
-set -euo pipefail
+# The simulator's own exit code is ignored: nsh's poweroff ends it with 0
+# even after ostest fails (status 256), so only the log decides.
+set -u
 
 TIMEOUT="${1:-300}"
+# The "user_main: ... test" lines ostest prints before each changed test.
+BANNERS=('user_main: cancel test')
 OUTFILE="$(mktemp /tmp/nuttx_test_output.XXXXXX)"
-trap 'rm -f "${OUTFILE}"' EXIT
+trap 'rm -f "$OUTFILE"' EXIT
 
-cd /testbed
+cd /testbed || exit 1
+printf 'ostest\npoweroff\n' | timeout -k 10 "$TIMEOUT" ./nuttx >"$OUTFILE" 2>&1
+SIM_RC=$?
+cat "$OUTFILE"
 
-printf 'ostest\npoweroff\n' | setsid ./nuttx > "${OUTFILE}" 2>&1 &
-SIM_PID=$!
-SIM_PGID="${SIM_PID}"
+# 124: timeout's TERM worked; 137: it needed KILL (or something else killed
+# the simulator, so check the elapsed time too).
+if (( SIM_RC == 124 || (SIM_RC == 137 && SECONDS >= TIMEOUT) )); then
+    echo "run_tests: result=2 (timed out after ${TIMEOUT}s)"
+    exit 2
+fi
 
-tail -f "${OUTFILE}" &
-TAIL_PID=$!
-
-ELAPSED=0
-RESULT=""
-while [ "${ELAPSED}" -lt "${TIMEOUT}" ]; do
-    # Detect the wrong-errno failure early — no need to wait for ostest to finish
-    if grep -q "cancel_test: ERROR pthread_join failed but with wrong status" "${OUTFILE}" 2>/dev/null; then
-        RESULT="FAIL"
-        break
-    fi
-    if grep -q "Exiting with status 0" "${OUTFILE}" 2>/dev/null; then
-        # ostest completed — verify cancel_test reached its PASS line
-        if grep -q "cancel_test: PASS pthread_join failed with status=EINVAL" "${OUTFILE}" 2>/dev/null; then
-            RESULT="PASS"
-        else
-            RESULT="FAIL"
-        fi
-        break
-    elif grep -qE "Exiting with status [^0]" "${OUTFILE}" 2>/dev/null; then
-        RESULT="FAIL"
-        break
-    fi
-    sleep 1
-    ELAPSED=$((ELAPSED + 1))
+REASONS=()
+grep -Fq 'user_main: Exiting' "$OUTFILE" || REASONS+=("no 'user_main: Exiting'")
+grep -Fq 'ostest_main: Exiting with status 0' "$OUTFILE" ||
+    REASONS+=("no 'ostest_main: Exiting with status 0'")
+grep -Fq 'ERROR' "$OUTFILE" && REASONS+=("ERROR in output")
+for banner in "${BANNERS[@]}"; do
+    grep -Fq -- "$banner" "$OUTFILE" || REASONS+=("changed test did not run: '$banner'")
 done
 
-kill "${TAIL_PID}" 2>/dev/null || true
-kill -- "-${SIM_PGID}" 2>/dev/null || true
-wait "${SIM_PID}" 2>/dev/null || true
-
-echo ""
-echo "--- Test Results ---"
-grep -E "cancel_test.*join|Exiting with status" "${OUTFILE}" || true
-echo "--------------------"
-
-case "${RESULT}" in
-    PASS)
-        echo "==> run_tests: cancel_test: PASS pthread_join failed with status=EINVAL — PASSED"
-        exit 0
-        ;;
-    FAIL)
-        echo "==> run_tests: cancel_test returned wrong errno or ostest failed — FAILED"
-        exit 1
-        ;;
-    *)
-        echo "==> run_tests: TIMEOUT after ${TIMEOUT}s — ostest did not complete"
-        exit 2
-        ;;
-esac
+if (( ${#REASONS[@]} == 0 )); then
+    echo "run_tests: result=0"
+    exit 0
+fi
+printf 'run_tests: %s\n' "${REASONS[@]}"
+echo "run_tests: result=1"
+exit 1
