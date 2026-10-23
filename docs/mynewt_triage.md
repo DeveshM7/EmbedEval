@@ -126,6 +126,11 @@ dependencies and the test's own source before deciding. Do not decide from a
   (the changed C source) and `missing_api` (the exact identifier or header as
   written in it). All other build failures are not a valid oracle.
 
+Determinism matters: a result that depends on host sockets or network
+interfaces, wall-clock timing, thread scheduling or races is not a reliable
+oracle. Give such a PR at most `low` confidence, and use `maintenance` when
+the PR itself is mainly about making that test synchronize or pass reliably.
+
 ## 4. Test and fix must separate
 
 Applying only the test changes to the old code must leave the production bug
@@ -154,7 +159,12 @@ PR's head, as `suite/testcase`, one list per package. Use these names exactly:
   the PR only modified belongs here only if the modified lines themselves
   contain the assertion or input the old code violates; when a new case
   already covers the bug and the modified case merely shares helper code or
-  gained unrelated lines, list the modified case in `pass_to_pass`. A case that only exists to exercise unchanged
+  gained unrelated lines, list the modified case in `pass_to_pass`. The
+  trigger condition (the input, size, sequence or state that exposes the bug)
+  must occur in that case's own body and parameters: an extra generic check
+  added to a case whose own inputs never reach the bug does not make it fail.
+  A wrong `fail_to_pass` entry invalidates the whole instance while an omitted
+  one only loses a check, so be conservative. A case that only exists to exercise unchanged
   behavior, or only changed in an unrelated way, is not here.
 - `pass_to_pass`: every other testcase of the package: unchanged cases and
   added cases that do not detect the change. A case is in exactly one of the
