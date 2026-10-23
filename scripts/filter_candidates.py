@@ -17,6 +17,8 @@ Hard filters for Zephyr, NuttX and Apache Mynewt PR candidates.
     python scripts/filter_candidates.py fetch --repo mynewt --since 2024-01-01 --until 2024-06-30
     python scripts/filter_candidates.py filter --repo mynewt
     python scripts/filter_candidates.py enrich --repo mynewt
+    (Mynewt runs scripts/mynewt_candidates.py: a candidate is a merged PR that
+    changes a pkg.type: unittest package; see its docstring.)
 
 Three stages, deliberately separate:
 
@@ -88,12 +90,6 @@ PROJECTS = {
     "zephyr": {
         "github_repo": "zephyrproject-rtos/zephyr",
         "known_good": [33690, 43405, 62109, 65697, 74435, 82272, 85079, 89534],
-    },
-    "mynewt": {
-        "github_repo": "apache/mynewt-core",
-        "known_good": [2809, 3299, 3680],
-        # triage/mynewt_gold.json's hard_filter_reject: never shown to the model.
-        "known_filtered": [3708, 3707, 2511, 821, 251],
     },
 }
 
@@ -910,6 +906,10 @@ def main() -> None:
     if getattr(args, "repo", "zephyr") == "nuttx":
         import nuttx_candidates
         nuttx_candidates.dispatch(args)
+        return
+    if getattr(args, "repo", "zephyr") == "mynewt":
+        import mynewt_candidates   # unit-test packages, from pkg.yml at each PR's revision
+        mynewt_candidates.dispatch(args)
         return
     {"selftest": cmd_selftest, "fetch": cmd_fetch, "filter": cmd_filter,
      "enrich": cmd_enrich, "enrich-twister": cmd_enrich_twister}[args.cmd](args)
