@@ -15,9 +15,10 @@ Docker instance is re-rendered from its own files:
 Old trees. Before the March 2019 rename the unit tests are in test/ packages
 (`pkg.type: unittest`), and the newt of that era must build them: the newest
 release tag that is an ancestor of the base commit picks the newt binary the
-shared image holds under /opt/newt/<version>/ (NEWT_FOR_CORE below; core 0.9
-and 1.0 betas -> newt 1.0.0-b1/b2, 1.0-1.1 -> 1.0.0, 1.2-1.3 -> 1.2.0,
-1.4 -> 1.4.0, 1.5-1.6 -> 1.6.0, later -> the pinned modern newt). Their
+shared image holds under /opt/newt/<version>/ (NEWT_FOR_LAST_RELEASE below:
+last release 0.9 -> newt 1.0.0-b1, 1.0 beta 1 -> b2, 1.0 beta 2 to 1.1 ->
+1.0.0, 1.2-1.3 -> 1.2.0, 1.4 -> 1.4.0, 1.5 -> 1.6.0, 1.6 and later -> the
+pinned modern newt). Their
 sources need `-Wno-error` and `-fcommon` under GCC 13, passed as target
 cflags. These instances build -m32 (x86 only), so they get no ARM64 patch and
 metadata says host_arch x86_64. Old test mains may return 0 on failures
@@ -96,10 +97,15 @@ AARCH64_FRAME_INIT = """#if defined(__aarch64__)
 """
 
 
-# (lowest core release that uses it, newt version in the image), checked from the
-# newest down. Releases are the mynewt_<a>_<b>_<c>[_b<n>]_tag tags.
-NEWT_FOR_CORE = (((1, 7, 0), "modern"), ((1, 5, 0), "1.6.0"), ((1, 4, 0), "1.4.0"),
-                 ((1, 2, 0), "1.2.0"), ((1, 0, 0), "1.0.0"), ((0, 0, 0), "1.0.0-b1"))
+# (lowest last-released core, newt version in the image), checked from the
+# newest down. The last release is the newest mynewt_<a>_<b>_<c>[_b<n>]_tag
+# committed no later than the base commit; the betas count as 0.9.9 and
+# 0.9.99, as repository.yml numbers them. A tree is built by the newt of the
+# release it is working towards, which is what these steps give (checked on
+# PRs 114-1594 of 2016-2019: tests/ in scratch codex_oldera/REPORT.md).
+NEWT_FOR_LAST_RELEASE = (((1, 6, 0), "modern"), ((1, 5, 0), "1.6.0"), ((1, 4, 0), "1.4.0"),
+                         ((1, 2, 0), "1.2.0"), ((0, 9, 99), "1.0.0"), ((0, 9, 9), "1.0.0-b2"),
+                         ((0, 0, 0), "1.0.0-b1"))
 OLD_CFLAGS = ["-Wno-error", "-fcommon"]
 RELEASE_TAG = re.compile(r"mynewt_(\d+)_(\d+)_(\d+)(?:_b(\d+))?_tag$")
 
@@ -113,23 +119,30 @@ def git(clone: Path, *args: str, cwd: Path | None = None, check: bool = True) ->
 
 
 def core_release(clone: Path, base: str) -> tuple[int, int, int]:
-    """The newest release tag (mynewt_a_b_c_tag, no rc) that is an ancestor of
-    the base commit, as (a, b, c); (0, 0, 0) before the first."""
+    """The newest release tag committed no later than the base commit, as a
+    version tuple; (0, 0, 0) before the first. By date, not ancestry: release
+    tags sit on release-branch commits that master does not contain."""
+    when = int(git(clone, "show", "-s", "--format=%ct", base))
     best = (0, 0, 0)
-    for tag in git(clone, "tag", "--merged", base).split():
-        m = RELEASE_TAG.match(tag)
-        if m and not m[4]:
-            best = max(best, tuple(int(x) for x in m.groups()[:3]))
+    for line in git(clone, "tag", "-l", "mynewt_*_tag",
+                    "--format=%(refname:strip=2) %(committerdate:unix) %(*committerdate:unix)").splitlines():
+        name, *dates = line.split()
+        m = RELEASE_TAG.match(name)
+        if not m or int(dates[-1]) > when:
+            continue
+        version = tuple(int(x) for x in m.groups()[:3])
+        if m[4]:                       # only the 1.0.0 betas matter; 0.8.0's do not
+            if version != (1, 0, 0):
+                continue
+            version = (0, 9, 9 if m[4] == "1" else 99)
+        best = max(best, version)
     return best
 
 
 def newt_for_base(clone: Path, base: str) -> tuple[str, str]:
-    """(newt version in the shared image, core release the choice is based on)."""
+    """(newt version in the shared image, last core release it is based on)."""
     rel = core_release(clone, base)
-    version = next(v for floor, v in NEWT_FOR_CORE if rel >= floor)
-    if version == "1.0.0-b1" and git(clone, "tag", "--merged", base).split().count(
-            "mynewt_1_0_0_b2_tag"):
-        version = "1.0.0-b2"
+    version = next(v for floor, v in NEWT_FOR_LAST_RELEASE if rel >= floor)
     return version, ".".join(map(str, rel))
 
 
