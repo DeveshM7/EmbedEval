@@ -200,7 +200,7 @@ def evaluate_mynewt(instance_id: str, model_name: str, meta: dict, timeout: int)
 
     start = time.time()
     run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
-    run_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "agent.patch").write_text(patch)
     sandbox = None
     try:
