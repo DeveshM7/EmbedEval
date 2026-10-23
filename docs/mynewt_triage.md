@@ -43,6 +43,13 @@ diff alone.
   a board, MCU peripheral, radio, sensor or other device, or another
   simulator.
 
+The test change itself must detect the behavior. A production fix that an
+unchanged or merely reformatted test happens to exercise does not qualify: if
+the PR's diff of the test package adds no case and changes no setup, input or
+assertion that the old code violates (a reformatted helper, a renamed variable,
+initialized locals, a removed setting), the kind is `maintenance` even when the
+suite runs the fixed code path.
+
 A fix without a detecting test cannot be graded. Test maintenance without a
 production behavior to implement is not a coding task. Judge by the changed
 assertion, never by the title or file names.
@@ -97,7 +104,11 @@ with `pkg.type: unittest`), not a file. The generated binary is executed
 directly and the runner reads the testutil lines `[pass] suite/testcase` and
 `[FAIL] suite/testcase`. A missing, unexpected or crashed testcase invalidates
 an instance, so the inventory below must be exact. Hosts are x86 Linux; before
-2024 the old native BSP is a 32-bit build. QEMU is not available.
+2024 the old native BSP is a 32-bit build. QEMU is not available. Old
+packages (2016-2019) live in `test/` or `test-*` directories instead of
+`selftest`; they are valid unit-test packages, and an old `main()` may return
+0 even when cases fail, so the inventory of `[pass]`/`[FAIL]` lines decides,
+not the exit status.
 
 Reject as `needs_hw` a package whose dependency chain needs real hardware: BLE
 controller or radio, MCU HAL or peripheral drivers, UART/SPI/I2C devices.
@@ -137,8 +148,13 @@ Your input ends with the testcases computed from the package sources at the
 PR's head, as `suite/testcase`, one list per package. Use these names exactly:
 
 - `fail_to_pass`: testcases that fail on the old code (with the test patch
-  applied) and pass with the fix. Include every case that is added or changed
-  in a way that detects the bug. A case that only exists to exercise unchanged
+  applied) and pass with the fix. Trace each one: take the case's own inputs
+  through the old production code and name the assertion that fails. A newly
+  added case that targets the bug is the usual entry. An existing case that
+  the PR only modified belongs here only if the modified lines themselves
+  contain the assertion or input the old code violates; when a new case
+  already covers the bug and the modified case merely shares helper code or
+  gained unrelated lines, list the modified case in `pass_to_pass`. A case that only exists to exercise unchanged
   behavior, or only changed in an unrelated way, is not here.
 - `pass_to_pass`: every other testcase of the package: unchanged cases and
   added cases that do not detect the change. A case is in exactly one of the
