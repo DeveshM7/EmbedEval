@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -89,7 +90,8 @@ def ensure_clone(project: str = "zephyr") -> Path:
     """
     if project != "zephyr":
         cfg = PROJECTS[project]
-        clone = cfg["clone"]
+        clone = (Path(os.environ.get("EMBEDEVAL_MYNEWT_CLONE", cfg["clone"]))
+                 if project == "mynewt" else cfg["clone"])
         if not clone.exists():
             clone.parent.mkdir(parents=True, exist_ok=True)
             print(f"  cloning {cfg['repo_url']} (blobless, one-time) ...")
@@ -307,6 +309,18 @@ def generate_zephyr(pr: int, triage: dict, out_root: Path, force: bool = False) 
     return inst
 
 
+def mynewt_instance_id(pr: int, triage: dict) -> str:
+    if triage.get("kind") == "test_only_detects_earlier_fix":
+        fix_pr = triage.get("fix_pr")
+        if fix_pr is not None:
+            return f"mynewt__mynewt-{fix_pr}-t{pr}"
+        fix_commit = triage.get("fix_commit") or ""
+        if len(fix_commit) < 8:
+            sys.exit("ERROR: test-only verdict without fix_pr requires fix_commit")
+        return f"mynewt__mynewt-{pr}-c{fix_commit[:8]}"
+    return f"mynewt__mynewt-{pr}"
+
+
 def generate_mynewt(
     pr: int,
     triage: dict,
@@ -326,11 +340,11 @@ def generate_mynewt(
     # writes the problem statement from the PR text and diff.
     linked = rec.get("linked_issues") or []
 
-    for field in ("platform", "problem_statement", "fail_to_pass"):
+    for field in ("problem_statement", "fail_to_pass"):
         if not triage.get(field):
             sys.exit(f"ERROR: triage verdict for {pr} has no {field!r}")
 
-    platform = triage["platform"]
+    platform = triage.get("platform", "native")
     if platform != "native":
         sys.exit("ERROR: Mynewt platform must be 'native'; QEMU is not supported")
     if "baseline_tests" not in triage:
@@ -342,18 +356,21 @@ def generate_mynewt(
     # One PR can touch several suites; the one holding the changed tests is
     # the one with the most test files in the diff.
     test_files = changed_test_paths(rec, project)
-    test_path = max(suites, key=lambda r: sum(t.startswith(r + "/") for t in test_files))
+    test_path = triage.get("test_path") or max(
+        suites, key=lambda r: sum(t.startswith(r + "/") for t in test_files))
+    if test_path not in suites:
+        sys.exit(f"ERROR: test_path {test_path!r} is not a test package changed by PR {pr}")
 
     base_commit = rec.get("base_commit")
     head_commit = rec.get("head_commit")
     if not base_commit or not head_commit:
         sys.exit(f"ERROR: enriched record for {pr} predates base_commit/head_commit; re-enrich it")
-    test_commit = triage.get("test_commit", head_commit)
+    test_commit = triage.get("test_commit") or head_commit
     support_paths = triage.get("test_support_paths", [])
-    if support_paths and "test_commit" not in triage:
+    if support_paths and not triage.get("test_commit"):
         sys.exit("ERROR: test_support_paths requires test_commit so production fix "
                  "changes cannot leak into the test patch")
-    if "test_commit" in triage:
+    if triage.get("test_commit"):
         commit_shas = {commit["sha"] for commit in rec.get("commits", [])}
         if test_commit not in commit_shas:
             sys.exit(f"ERROR: test_commit {test_commit} is not a commit in PR {pr}")
@@ -363,7 +380,59 @@ def generate_mynewt(
         sys.exit("ERROR: test_support_paths not changed by the PR: "
                  + ", ".join(unknown_support))
     test_files = list(dict.fromkeys([*test_files, *support_paths]))
-    instance_id = f"{project}__{project}-{pr}"
+    kind = triage.get("kind")
+    paired = kind == "test_only_detects_earlier_fix"
+    fix_pr = triage.get("fix_pr", pr)
+    fix_commit = head_commit
+    fix_paths = triage.get("fix_paths") or [
+        f["filename"] for f in rec["files"] if is_source_path(f["filename"], project)]
+    if paired:
+        if "fix_pr" not in triage:
+            sys.exit("ERROR: test-only verdict requires fix_pr (use null if no PR)")
+        fix_commit = triage.get("fix_commit")
+        if not fix_commit or not triage.get("fix_paths"):
+            sys.exit("ERROR: test-only verdict requires fix_commit and fix_paths")
+        clone = ensure_clone(project)
+        if fix_pr is not None:
+            fix_rec_path = (enriched_root or cfg["enriched"]) / f"{fix_pr}.json"
+            if fix_rec_path.exists():
+                fix_rec = json.loads(fix_rec_path.read_text())
+                commits = [c["sha"] for c in fix_rec.get("commits", [])]
+            else:
+                merge = run(["git", "-C", str(clone), "log", "--all", "--format=%H",
+                             "--extended-regexp", "--grep",
+                             rf"^Merge pull request #{fix_pr} "]).stdout.splitlines()
+                if len(merge) != 1:
+                    sys.exit(f"ERROR: no unique local merge for fix PR {fix_pr}; enrich that PR")
+                parents = run(["git", "-C", str(clone), "show", "-s", "--format=%P",
+                               merge[0]]).stdout.split()
+                if len(parents) != 2:
+                    sys.exit(f"ERROR: fix PR {fix_pr} merge is not a two-parent commit")
+                commits = run(["git", "-C", str(clone), "rev-list", "--reverse",
+                               f"{parents[0]}..{parents[1]}"]).stdout.splitlines()
+            if not commits or fix_commit not in commits:
+                sys.exit(f"ERROR: fix_commit is not a commit in fix PR {fix_pr}")
+            first_fix = commits[0]
+            instance_id = mynewt_instance_id(pr, triage)
+        else:
+            first_fix = fix_commit
+            instance_id = mynewt_instance_id(pr, triage)
+        base_commit = run(["git", "-C", str(clone), "rev-parse",
+                           f"{first_fix}^{{commit}}^"]).stdout.strip()
+        test_commit = head_commit
+        support_paths = []
+        test_files = [path for path in changed_test_paths(rec, project)
+                      if any(path.startswith(suite + "/") for suite in suites)]
+        for suite in suites:
+            if not any(path.startswith(suite + "/") for path in test_files):
+                continue
+            pkg = run(["git", "-C", str(clone), "cat-file", "-e",
+                       f"{base_commit}:{suite}/pkg.yml"], check=False)
+            if pkg.returncode:
+                sys.exit(f"ERROR: test package {suite!r} does not exist at fix base "
+                         f"{base_commit[:12]}")
+    else:
+        instance_id = mynewt_instance_id(pr, triage)
     inst = out_root / instance_id
     inst.mkdir(parents=True, exist_ok=True)
 
@@ -412,8 +481,10 @@ def generate_mynewt(
         # precedes the production fix, gold_base_commit below narrows the range
         # validate_instance.py uses to reconstruct that fix.
         "base_commit": base_commit,
-        "fix_commit": head_commit,
+        "fix_commit": fix_commit,
         "test_commit": test_commit,
+        "fix_pr": fix_pr,
+        "test_pr": pr,
         "problem_statement": triage["problem_statement"],
         "platform": platform,
         "test_path": test_path,
@@ -422,10 +493,7 @@ def generate_mynewt(
         "docker_image": f"embedeval:{project}-{pr}{tag_suffix}",
         "fail_to_pass": triage["fail_to_pass"],
         "pass_to_pass": triage.get("pass_to_pass", []),
-        "files_changed_by_fix": [
-            f["filename"] for f in rec["files"]
-            if is_source_path(f["filename"], project)
-        ],
+        "files_changed_by_fix": fix_paths,
         "pr_url": rec["url"],
         "change_type": triage.get("change_type"),
         "generated": True,
@@ -444,7 +512,7 @@ def generate_mynewt(
     })
     if triage.get("gold_patch_three_way"):
         meta["gold_patch_three_way"] = True
-    if test_commit != head_commit:
+    if not paired and test_commit != head_commit:
         meta["gold_base_commit"] = test_commit
     (inst / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
     if runtime == "apptainer":
@@ -475,6 +543,8 @@ def main() -> None:
     p.add_argument("--repo", choices=("zephyr", "mynewt"), default="zephyr")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--triage", required=True, help="path to the triage verdict JSON")
+    p.add_argument("--enriched-root", type=Path,
+                   help="Mynewt only: directory containing enriched <pr>.json records")
     p.add_argument("--out", default=str(DEFAULT_OUT),
                    help="output root (default: generated/, never docker/instances/)")
     p.add_argument("--force", action="store_true",
@@ -488,11 +558,11 @@ def main() -> None:
     args = p.parse_args()
 
     triage = json.loads(Path(args.triage).read_text())
-    if triage.get("verdict") == "reject":
+    if triage.get("verdict") == "reject" or triage.get("kind") in ("maintenance", "needs_hw"):
         sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
 
     inst = generate(args.pr, triage, Path(args.out), args.tag_suffix, args.repo, args.force,
-                    runtime=args.runtime)
+                    enriched_root=args.enriched_root, runtime=args.runtime)
     print(f"  wrote {layout.show(inst)}")
     for f in sorted(inst.iterdir()):
         print(f"    {f.name:<20} {f.stat().st_size:>7} B")

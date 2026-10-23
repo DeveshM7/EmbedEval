@@ -45,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import layout  # noqa: E402  (first: reads --run-dir)
+from generate_instance import mynewt_instance_id
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
@@ -78,14 +79,19 @@ def tail(logfile: Path, n: int = 12) -> str:
         return ""
 
 
+def source_instance_id(source: str, kind: str) -> str:
+    if kind == "pr":
+        pr = int(Path(source).stem)
+        return mynewt_instance_id(pr, json.loads(Path(source).read_text()))
+    return source
+
+
 def work_one(source: str, kind: str, run: Path, args, env: dict) -> dict:
     """kind: "pr" (source is a reviewed verdict path) or "docker" (an instance id)."""
     t0 = time.time()
+    iid = source_instance_id(source, kind)
     if kind == "pr":
         pr = int(Path(source).stem)
-        iid = f"mynewt__mynewt-{pr}"
-    else:
-        iid = source
     lg = run / "logs" / f"{iid}.log"
     res = {"instance_id": iid, "host": platform.machine(), "status": "generate_error",
            "stage": "generate", "reason": "", "log": str(lg)}
@@ -106,6 +112,8 @@ def work_one(source: str, kind: str, run: Path, args, env: dict) -> dict:
     if kind == "pr":
         cmd = [PY, "scripts/generate_instance.py", "--repo", "mynewt", "--runtime", "apptainer",
                "--pr", str(pr), "--triage", source]
+        if args.enriched_root:
+            cmd += ["--enriched-root", str(args.enriched_root)]
     else:
         d = args.source_root / iid
         cmd = [PY, "scripts/render_mynewt_instance.py", "--metadata", str(d / "metadata.json"),
@@ -151,6 +159,8 @@ def main() -> None:
     p.add_argument("--source-root", type=Path, default=REPO_ROOT / "docker" / "instances",
                    help="with --from-docker: where the <id>/metadata.json + test_patch.diff are")
     p.add_argument("--prs", nargs="+", type=int, help="with --reviewed: only these PRs")
+    p.add_argument("--enriched-root", type=Path,
+                   help="with --reviewed: directory of enriched PR records")
     p.add_argument("--parallel", type=int, default=2, help="instances at once on this node")
     p.add_argument("--build-cap", type=int, default=60, help="minutes per image build")
     p.add_argument("--validate-cap", type=int, default=30, help="minutes per validation")
@@ -170,8 +180,7 @@ def main() -> None:
     rank, size = int(os.environ.get("SLURM_PROCID", "0")), int(os.environ.get("SLURM_NTASKS", "1"))
     work = work[rank::size]
     todo = [(s, k) for s, k in work if args.force or not (
-        run / "results" / f"mynewt__mynewt-{Path(s).stem if k == 'pr' else s.rsplit('-', 1)[1]}.json"
-    ).exists()]
+        run / "results" / f"{source_instance_id(s, k)}.json").exists()]
     env = {**os.environ, "EMBEDEVAL_RUN_DIR": str(run)}
     print(f"[{rank}/{size}] {len(todo)} of {len(work)} instances to do, host {platform.machine()}",
           flush=True)

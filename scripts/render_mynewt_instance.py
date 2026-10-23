@@ -53,6 +53,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import apptainer_util as au  # noqa: E402
+import instances  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "mynewt"
@@ -193,7 +194,7 @@ def arm64_patch(clone: Path, base: str) -> tuple[str, str]:
 
 def render(meta: dict, patch_file: Path, out_root: Path, arm64: bool = True) -> Path:
     instance_id = meta["instance_id"]
-    if meta["project"] != "mynewt" or not re.fullmatch(r"mynewt__mynewt-\d+", instance_id):
+    if meta["project"] != "mynewt" or instances.split_instance(instance_id)[0] != "mynewt":
         raise ValueError("expected a Mynewt instance ID")
     if not re.fullmatch(r"[0-9a-f]{40}", meta["base_commit"]):
         raise ValueError("base_commit must be a full commit SHA")
