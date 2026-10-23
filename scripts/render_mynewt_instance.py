@@ -12,6 +12,17 @@ Docker instance is re-rendered from its own files:
         --metadata docker/instances/mynewt__mynewt-3299/metadata.json \
         --test-patch docker/instances/mynewt__mynewt-3299/test_patch.diff
 
+Old trees. Before the March 2019 rename the unit tests are in test/ packages
+(`pkg.type: unittest`), and the newt of that era must build them: the newest
+release tag that is an ancestor of the base commit picks the newt binary the
+shared image holds under /opt/newt/<version>/ (NEWT_FOR_CORE below; core 0.9
+and 1.0 betas -> newt 1.0.0-b1/b2, 1.0-1.1 -> 1.0.0, 1.2-1.3 -> 1.2.0,
+1.4 -> 1.4.0, 1.5-1.6 -> 1.6.0, later -> the pinned modern newt). Their
+sources need `-Wno-error` and `-fcommon` under GCC 13, passed as target
+cflags. These instances build -m32 (x86 only), so they get no ARM64 patch and
+metadata says host_arch x86_64. Old test mains may return 0 on failures
+(MYNEWT-934): run_tests judges the [pass]/[FAIL] lines, not the exit status.
+
 ARM64. Mynewt's native simulator has no aarch64 code upstream: the context
 switch (kernel/os/src/arch/sim/os_arch_stack_frame.s) is x86 assembly, and
 before 2024-04-09 compiler/sim forced -m32 and the kernel assumed 32-bit
@@ -85,12 +96,41 @@ AARCH64_FRAME_INIT = """#if defined(__aarch64__)
 """
 
 
+# (lowest core release that uses it, newt version in the image), checked from the
+# newest down. Releases are the mynewt_<a>_<b>_<c>[_b<n>]_tag tags.
+NEWT_FOR_CORE = (((1, 7, 0), "modern"), ((1, 5, 0), "1.6.0"), ((1, 4, 0), "1.4.0"),
+                 ((1, 2, 0), "1.2.0"), ((1, 0, 0), "1.0.0"), ((0, 0, 0), "1.0.0-b1"))
+OLD_CFLAGS = ["-Wno-error", "-fcommon"]
+RELEASE_TAG = re.compile(r"mynewt_(\d+)_(\d+)_(\d+)(?:_b(\d+))?_tag$")
+
+
 def git(clone: Path, *args: str, cwd: Path | None = None, check: bool = True) -> str:
     cmd = ["git", *(["-C", str(cwd)] if cwd else ["-C", str(clone)]), *args]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if check and r.returncode:
         raise RuntimeError(f"{' '.join(cmd)}: {r.stderr.strip()[:300]}")
     return r.stdout
+
+
+def core_release(clone: Path, base: str) -> tuple[int, int, int]:
+    """The newest release tag (mynewt_a_b_c_tag, no rc) that is an ancestor of
+    the base commit, as (a, b, c); (0, 0, 0) before the first."""
+    best = (0, 0, 0)
+    for tag in git(clone, "tag", "--merged", base).split():
+        m = RELEASE_TAG.match(tag)
+        if m and not m[4]:
+            best = max(best, tuple(int(x) for x in m.groups()[:3]))
+    return best
+
+
+def newt_for_base(clone: Path, base: str) -> tuple[str, str]:
+    """(newt version in the shared image, core release the choice is based on)."""
+    rel = core_release(clone, base)
+    version = next(v for floor, v in NEWT_FOR_CORE if rel >= floor)
+    if version == "1.0.0-b1" and git(clone, "tag", "--merged", base).split().count(
+            "mynewt_1_0_0_b2_tag"):
+        version = "1.0.0-b2"
+    return version, ".".join(map(str, rel))
 
 
 def port_aarch64(source: str) -> str:
@@ -153,20 +193,29 @@ def render(meta: dict, patch_file: Path, out_root: Path, arm64: bool = True) -> 
     if inst.exists():
         raise FileExistsError(f"output already exists: {inst}")
 
+    clone = au.mynewt_clone()
+    newt, core = "modern", None
+    if clone is not None:
+        newt, core = newt_for_base(clone, meta["base_commit"])
+    elif arm64:
+        raise RuntimeError("no mynewt-core clone to read the base commit's era: set "
+                           "EMBEDEVAL_MYNEWT_CLONE")
+    old = newt != "modern"
     cflags = list(meta.get("compatibility_cflags", []))
+    if old:
+        cflags += [f for f in OLD_CFLAGS if f not in cflags]
     pkg = ["pkg.name: targets/unittest", "pkg.type: target"]
     if cflags:
         pkg += ["pkg.cflags:"] + [f"    - {f}" for f in cflags]
 
     arm_patch, arm_kind = "", None
-    if arm64:
-        clone = au.mynewt_clone()
-        if clone is None:
-            raise RuntimeError("no mynewt-core clone for the ARM64 port patch: set "
-                               "EMBEDEVAL_MYNEWT_CLONE, or render with --no-arm64")
+    if arm64 and not old:
         arm_patch, arm_kind = arm64_patch(clone, meta["base_commit"])
 
     recipe = (TEMPLATES / "apptainer" / "instance.def.tmpl").read_text()
+    recipe = recipe.replace("@@NEWT_STEP@@\n", (
+        "    # The newt of this base's era (see render_mynewt_instance.py).\n"
+        f"    ln -sf /opt/newt/{newt}/newt /usr/local/bin/newt\n    newt version\n") if old else "")
     arm_step = ""
     if arm_patch:
         arm_step = (
@@ -194,6 +243,11 @@ def render(meta: dict, patch_file: Path, out_root: Path, arm64: bool = True) -> 
         (inst / "sim_arm64.patch").write_text(arm_patch)
     out = {k: v for k, v in meta.items() if k not in ("docker_image", "docker_platform")}
     out.update(runtime="apptainer", apptainer_image=f"{instance_id}.sif", generated=True)
+    out["newt_version"] = newt
+    if core:
+        out["core_release"] = core
+    if old:
+        out["host_arch"] = "x86_64"
     if arm_kind:
         out["arm64_sim_port"] = arm_kind
     (inst / "metadata.json").write_text(json.dumps(out, indent=4) + "\n")

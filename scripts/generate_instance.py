@@ -106,8 +106,9 @@ def ensure_clone(project: str = "zephyr") -> Path:
 def is_test_path(path: str, project: str) -> bool:
     if project == "zephyr":
         return path.startswith("tests/")
+    # Mynewt: a unittest package is selftest/ since March 2019, test/ before.
     return any(
-        part == "selftest" or part.startswith("selftest-")
+        part in ("selftest", "test") or part.startswith(("selftest-", "test-"))
         for part in path.split("/")
     )
 

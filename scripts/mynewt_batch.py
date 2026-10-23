@@ -107,7 +107,7 @@ def work_one(source: str, kind: str, run: Path, args, env: dict) -> dict:
         cmd = [PY, "scripts/generate_instance.py", "--repo", "mynewt", "--runtime", "apptainer",
                "--pr", str(pr), "--triage", source]
     else:
-        d = REPO_ROOT / "docker" / "instances" / iid
+        d = args.source_root / iid
         cmd = [PY, "scripts/render_mynewt_instance.py", "--metadata", str(d / "metadata.json"),
                "--test-patch", str(d / "test_patch.diff"), "--out", str(run / "instances")]
     rc = run_step(cmd, lg, 10, env)
@@ -148,6 +148,8 @@ def main() -> None:
     src.add_argument("--reviewed", type=Path, help="folder of reviewed verdicts <pr>.json")
     src.add_argument("--from-docker", nargs="+", metavar="ID",
                      help="existing docker/instances ids to re-render for Apptainer")
+    p.add_argument("--source-root", type=Path, default=REPO_ROOT / "docker" / "instances",
+                   help="with --from-docker: where the <id>/metadata.json + test_patch.diff are")
     p.add_argument("--prs", nargs="+", type=int, help="with --reviewed: only these PRs")
     p.add_argument("--parallel", type=int, default=2, help="instances at once on this node")
     p.add_argument("--build-cap", type=int, default=60, help="minutes per image build")
