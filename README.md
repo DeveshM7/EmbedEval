@@ -20,7 +20,8 @@ and the tests actually run.
   can also be rendered as an Apptainer recipe, for hosts without Docker such
   as Scholar's ARM64 nodes — see [NuttX in Apptainer](#nuttx-in-apptainer).
 
-**Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 7 NuttX, 3 RIOT.
+**Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 37 NuttX (30
+Apptainer ones in `apptainer/instances/nuttx/`, 7 Docker ones), 3 RIOT.
 
 ---
 
@@ -118,11 +119,12 @@ Every command takes the same three selection flags:
 ```bash
 --instance zephyr__zephyr-65697    # one or more, space separated
 --repo nuttx                       # every instance in one project
---all                              # all 17
+--all                              # all 58
 ```
 
 Instance ids are `<project>__<project>-<PR>`, matching the directory names under
-`apptainer/instances/` (Zephyr) and `docker/instances/` (NuttX, RIOT). Use
+`apptainer/instances/` (Zephyr), `apptainer/instances/nuttx/` (NuttX, Apptainer;
+ids `nuttx__nuttx-<kernel PR>-a<apps PR>`) and `docker/instances/` (NuttX, RIOT). Use
 lowercase. `EMBEDEVAL_INSTANCES_DIR` points every command at another folder
 instead -- `generated/`, say, to work on instances before they are promoted.
 
@@ -313,7 +315,7 @@ docker/bases/       Docker base images (NuttX, RIOT)
 docker/instances/   NuttX and RIOT instances; the hand-built Zephyr ones are
                     kept as reference metadata only and are not built
 apptainer/instances/  validated Zephyr instances: the benchmark (recipes; images
-                    are built from them)
+                    are built from them); nuttx/ holds the validated NuttX ones
 generated/          Zephyr instances being generated and validated (not in git)
 outputs/            agent runs and grades
 archive/            superseded work, kept for provenance
