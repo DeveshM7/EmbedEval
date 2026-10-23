@@ -163,6 +163,10 @@ PR's head, as `suite/testcase`, one list per package. Use these names exactly:
   trigger condition (the input, size, sequence or state that exposes the bug)
   must occur in that case's own body and parameters: an extra generic check
   added to a case whose own inputs never reach the bug does not make it fail.
+  Cases added in the same PR as control or baseline scenarios (the simple
+  configuration, the case where only one resource or path is involved, the
+  case that exercises the behavior that already worked) pass on the old code
+  too: they belong in `pass_to_pass` even though they are new.
   A wrong `fail_to_pass` entry invalidates the whole instance while an omitted
   one only loses a check, so be conservative. A case that only exists to exercise unchanged
   behavior, or only changed in an unrelated way, is not here.
