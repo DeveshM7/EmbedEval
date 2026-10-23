@@ -54,6 +54,8 @@ BUILD: dict[str, dict] = {
         # `clean all`, so there is nothing to wipe first.
         "clean_paths": [],
     },
+    # Docker only. Mynewt instances rendered with scripts/render_mynewt_instance.py
+    # are Apptainer images (scripts/apptainer_util.py, templates/mynewt/apptainer/).
     "mynewt": {
         "base_image": "embedeval-mynewt-base:latest",
         "base_dockerfile": "docker/bases/mynewt.Dockerfile",

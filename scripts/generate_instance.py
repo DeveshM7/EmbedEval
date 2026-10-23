@@ -106,8 +106,9 @@ def ensure_clone(project: str = "zephyr") -> Path:
 def is_test_path(path: str, project: str) -> bool:
     if project == "zephyr":
         return path.startswith("tests/")
+    # Mynewt: a unittest package is selftest/ since March 2019, test/ before.
     return any(
-        part == "selftest" or part.startswith("selftest-")
+        part in ("selftest", "test") or part.startswith(("selftest-", "test-"))
         for part in path.split("/")
     )
 
@@ -312,6 +313,7 @@ def generate_mynewt(
     out_root: Path,
     tag_suffix: str = "",
     enriched_root: Path | None = None,
+    runtime: str = "docker",
 ) -> Path:
     project = "mynewt"
     cfg = PROJECTS[project]
@@ -395,12 +397,12 @@ def generate_mynewt(
     (inst / "test_patch.diff").write_text(patch)
     check_applies(patch, base_commit, inst, project)
 
-    dockerfile = (templates / "Dockerfile.tmpl").read_text()
-    for key, val in {"@@BASE_COMMIT@@": base_commit, "@@REPO@@": cfg["repo_url"]}.items():
-        dockerfile = dockerfile.replace(key, val)
-    (inst / "Dockerfile").write_text(dockerfile)
-
-    (inst / "run_tests.sh").write_text((templates / "run_tests.sh").read_text())
+    if runtime == "docker":
+        dockerfile = (templates / "Dockerfile.tmpl").read_text()
+        for key, val in {"@@BASE_COMMIT@@": base_commit, "@@REPO@@": cfg["repo_url"]}.items():
+            dockerfile = dockerfile.replace(key, val)
+        (inst / "Dockerfile").write_text(dockerfile)
+        (inst / "run_tests.sh").write_text((templates / "run_tests.sh").read_text())
 
     meta = {
         "instance_id": instance_id,
@@ -444,15 +446,22 @@ def generate_mynewt(
     if test_commit != head_commit:
         meta["gold_base_commit"] = test_commit
     (inst / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
+    if runtime == "apptainer":
+        # An Apptainer recipe instead of the Dockerfile (scripts/render_mynewt_instance.py).
+        import render_mynewt_instance
+        with tempfile.TemporaryDirectory(prefix="embedeval-render-") as tmp:
+            rendered = render_mynewt_instance.render(meta, inst / "test_patch.diff", Path(tmp))
+            for f in rendered.iterdir():
+                shutil.copy2(f, inst / f.name)
     return inst
 
 
 
 def generate(pr: int, triage: dict, out_root: Path, tag_suffix: str = "",
              project: str = "zephyr", force: bool = False,
-             enriched_root: Path | None = None) -> Path:
+             enriched_root: Path | None = None, runtime: str = "docker") -> Path:
     if project == "mynewt":
-        return generate_mynewt(pr, triage, out_root, tag_suffix, enriched_root)
+        return generate_mynewt(pr, triage, out_root, tag_suffix, enriched_root, runtime)
     if project == "zephyr":
         return generate_zephyr(pr, triage, out_root, force)
     sys.exit(f"ERROR: unknown project {project!r}")
@@ -472,13 +481,17 @@ def main() -> None:
     p.add_argument("--tag-suffix", default="",
                    help="Mynewt only: append to the image tag, e.g. -gen, so building a "
                         "generated instance cannot overwrite an existing image")
+    p.add_argument("--runtime", choices=("docker", "apptainer"), default="docker",
+                   help="Mynewt only: write an Apptainer recipe (instance.def, for hosts "
+                        "without Docker such as Scholar) instead of a Dockerfile")
     args = p.parse_args()
 
     triage = json.loads(Path(args.triage).read_text())
     if triage.get("verdict") == "reject":
         sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
 
-    inst = generate(args.pr, triage, Path(args.out), args.tag_suffix, args.repo, args.force)
+    inst = generate(args.pr, triage, Path(args.out), args.tag_suffix, args.repo, args.force,
+                    runtime=args.runtime)
     print(f"  wrote {layout.show(inst)}")
     for f in sorted(inst.iterdir()):
         print(f"    {f.name:<20} {f.stat().st_size:>7} B")

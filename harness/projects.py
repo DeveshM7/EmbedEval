@@ -129,6 +129,8 @@ PROJECTS: dict[str, dict] = {
         "needs_qemu_cleanup": False,
         "clean_paths": [],
         "docker_platform": "linux/amd64",
+        # Instances whose metadata sets "runtime": "apptainer"
+        # (scripts/render_mynewt_instance.py) run in Apptainer, as for NuttX.
         "build_command": "true",
         "rebuild_command": "",
         "run_command": "run_tests",
