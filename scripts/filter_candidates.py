@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
-Hard filters for Zephyr and NuttX PR candidates.
+Hard filters for Zephyr PR candidates.
 
     python scripts/filter_candidates.py selftest
     python scripts/filter_candidates.py fetch --since 2024-01-01 --until 2024-06-30
     python scripts/filter_candidates.py filter
     python scripts/filter_candidates.py enrich
     python scripts/filter_candidates.py enrich-twister
-
-    python scripts/filter_candidates.py selftest --repo nuttx
-    python scripts/filter_candidates.py fetch --repo nuttx --since 2024-01-01 --until 2024-03-31
-    python scripts/filter_candidates.py filter --repo nuttx
-    python scripts/filter_candidates.py enrich --repo nuttx
 
 Three stages, deliberately separate:
 
@@ -695,24 +690,17 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def add_repo(command) -> None:
-        command.add_argument("--repo", choices=("zephyr", "nuttx"), default="zephyr")
-
-    check = sub.add_parser("selftest", help="check known-good PRs survive")
-    add_repo(check)
+    sub.add_parser("selftest", help="check known-good PRs survive")
 
     f = sub.add_parser("fetch", help="download PRs into the local cache")
-    add_repo(f)
     f.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
     f.add_argument("--since", default="2024-01-01")
     f.add_argument("--until", default="2024-12-31")
 
-    filtering = sub.add_parser("filter", help="apply hard filters to the cache")
-    add_repo(filtering)
+    sub.add_parser("filter", help="apply hard filters to the cache")
 
     e = sub.add_parser("enrich",
                        help="full GitHub context for PRs that passed filtering")
-    add_repo(e)
     e.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
     e.add_argument("--limit", type=int, help="only the first N candidates")
     e.add_argument("--parallel", type=int, default=4,
@@ -726,10 +714,6 @@ def main() -> None:
     t.add_argument("--refresh", action="store_true", help="recompute existing blocks")
 
     args = p.parse_args()
-    if getattr(args, "repo", "zephyr") == "nuttx":
-        import nuttx_candidates
-        nuttx_candidates.dispatch(args)
-        return
     {"selftest": cmd_selftest, "fetch": cmd_fetch, "filter": cmd_filter,
      "enrich": cmd_enrich, "enrich-twister": cmd_enrich_twister}[args.cmd](args)
 
