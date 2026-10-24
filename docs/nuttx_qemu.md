@@ -24,8 +24,11 @@ Files, all in `templates/nuttx/qemu-armv8a/`:
 `testing/ostest/smp_call.c` (gated by `CONFIG_SMP_CALL`).
 [Kernel #10934](https://github.com/apache/nuttx/pull/10934) adds
 `nxsched_smp_call_single()`/`nxsched_smp_call()` and `up_send_smp_call()`,
-which exists only for arm64. `docs/nuttx_bad_prs.md` rejects this pair for
-`sim:nsh` because the fixed kernel does not link there.
+which exists only for arm64. On `sim:nsh` (validator run, 2026-10-11, with
+`CONFIG_SMP` and `CONFIG_SMP_CALL` forced on) the old kernel fails to link
+with `undefined reference to 'nxsched_smp_call_single'`, as expected, but the
+fixed kernel still fails with `undefined reference to 'up_send_smp_call'`: the
+simulator has no implementation, so the pair cannot pass there.
 
 Slurm job 476984 (scholar-k060, 2026-10-16) ended with
 `RESULT: VALID on qemu-armv8a (fails before the fix, passes after 3/3)`:

@@ -1,14 +1,14 @@
-# Apache NuttX: seven benchmark rejection examples
+# Apache NuttX: six benchmark rejection examples
 
 These are legitimate upstream changes. “Bad” means they should not be accepted
 as **kernel-fix EmbedEval instances** on the evidence currently available. The
-list spans both repositories and is meant to test later triage instructions.
-The first six findings come from merged PR descriptions and changed-file
-diffs. Two of them (#1792, #3401) were later packaged and run through
-`scripts/validate_instance.py`; both ended ambiguous because the changed test
-never ran under `sim:nsh`, as noted in their entries. The seventh (#2137) comes
-from a validator run. A candidate with a new, reproducible old-code failure and
-fixed-code pass can be reconsidered.
+four apps PRs that change `testing/ostest/` (#1792, #3676, #3767, #3401) are
+gold cases in `triage/nuttx_apps_gold.json`. The findings come from merged PR
+descriptions and changed-file diffs. Two of them (#1792, #3401) were later
+packaged and run through `scripts/validate_instance.py`; both ended ambiguous
+because the changed test never ran under `sim:nsh`, as noted in their entries.
+A candidate with a new, reproducible old-code failure and fixed-code pass can
+be reconsidered.
 
 ## [nuttx #20091 — serialize `clearenv()`](https://github.com/apache/nuttx/pull/20091)
 
@@ -106,28 +106,6 @@ files against kernel #17011 for `sim:nsh`. `CONFIG_SCHED_SPORADIC` is not set
 there, so neither sporadic test is compiled or run; ostest exits 0 and
 `run_tests` exits 3 (ambiguous). This says nothing about the fix either way.
 
-## [nuttx-apps #2137 — SMP function call test](https://github.com/apache/nuttx-apps/pull/2137)
-
-**Evidence:** The apps PR adds `testing/ostest/smp_call.c`, gated by the new
-`CONFIG_SMP_CALL`, calling `nxsched_smp_call_single()` and `nxsched_smp_call()`.
-[Kernel PR #10934](https://github.com/apache/nuttx/pull/10934) adds those APIs
-in `sched/sched/sched_smp.c`, which relies on the per-architecture hook
-`up_send_smp_call()`. The PR implements that hook only for arm64
-(`arch/arm64/src/common/arm64_gicv3.c`).
-
-**Validator run (2026-10-11):** packaged for `sim:nsh` with `CONFIG_SMP`, its
-dependent options, and `CONFIG_SMP_CALL` forced on. On the old kernel the link
-fails with `undefined reference to 'nxsched_smp_call_single'`, the expected
-failure. After applying the kernel fix, the link still fails with
-`undefined reference to 'up_send_smp_call'` because the simulator has no
-implementation. The fixed kernel cannot pass on `sim:nsh`.
-
-**Reject point:** No passing fixed state on the native simulator. It also adds
-a feature rather than fixing a bug, which is a separate policy question.
-
-**Expected rejection point:** Triage of the runnable target, or validation.
-**Confidence:** High for `sim:nsh`; an arm64 QEMU target could revisit it.
-
 ## [nuttx-apps #3785 — sensor watchdog coverage](https://github.com/apache/nuttx-apps/pull/3785)
 
 **Evidence:** The merged apps PR adds `testing/drivers/drivertest` sensor
@@ -147,20 +125,3 @@ possible way to revisit it if that fixture can be provided.
 **Expected rejection point:** Reproduction and validation, unless a fixture
 produces a deterministic failure. **Confidence:** Medium, because another
 target or fixture may make the regression observable.
-
-## What these examples test
-
-The current hard filter keeps all six apps PRs above; it leaves #3676 and
-#3767 unresolved rather than guessing a kernel match. Enrichment resolves
-#3785's scoped #20145 as an issue and retains #20146 as the kernel PR. The
-kernel-only #20091 has no changed apps testcase to enter this apps-first
-candidate stream.
-
-The hard filter should preserve apps PRs that touch `testing/` so later
-triage can examine them; it must not mistake the path alone for an executable
-regression test. Enrichment must distinguish a scoped kernel issue from a
-kernel PR, preserve explicit cross-repository pairing evidence, and retain
-unresolved leads. Triage must identify which repository contains the fix,
-whether the changed test detects it, what target actually runs the test, and
-whether old code plus the new test fails for the intended reason. The final
-decision still belongs to live instance validation.
