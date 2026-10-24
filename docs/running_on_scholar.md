@@ -247,8 +247,8 @@ A run goes through these steps, each a command:
  ─────────────────────────────────────────  ───────────────────────────────────────────
  prepare.py  ──►  manifest.json
  (fetch, filter, enrich, dry run)
- submit.py   ──►  jobs/pipeline-*.sbatch ──► phase 1  triage       (each node its share)
-                                             phase 2  validation   (each node its share)
+ submit.py   ──►  jobs/pipeline-*.sbatch ──► phase 1  triage       (nodes take PRs from a queue)
+                                             phase 2  validation   (only once triage is complete)
                                              phase 3  report.md
  report.py   ◄──  (any time, even while the job runs)
  review, then promote_instance.py  ──►  apptainer/instances/ in the repository
@@ -258,9 +258,11 @@ A run goes through these steps, each a command:
   `manifest.json`: every PR, and where it stopped if it stopped early.
 - **submit** starts one job for whatever is still to do. Running it again
   later resumes the run.
-- **The job** splits the PRs over its nodes. In phase 1 every node starts
-  its own model server and triages its share; in phase 2 every node builds
-  and validates its share of the accepted PRs; phase 3 writes the report.
+- **The job** runs its nodes on a shared queue: each node takes the next
+  PR no one has, so fast nodes do more, and a node that dies leaves its PRs
+  to the others. In phase 1 every node starts its own model server and
+  triages; phase 2 starts only once all of the run's triage is done, and
+  every node builds and validates accepted PRs; phase 3 writes the report.
 - Each PR's outcome is written to `status/<pr>.json` as soon as it is
   known; the report is made from those files.
 
@@ -385,6 +387,7 @@ $SCRATCH/embedeval/runs/<name>/
 │                            (and whether it had uncommitted changes), a copy of the config
 ├── report.md, report.json   the results (section 7)
 ├── status/<pr>.json         each PR's outcome, per phase: the single source of truth
+├── claims/                  the queue: who has which PR (triage.json, validate.json)
 │
 ├── candidates/              fetched.json (this run's PRs); with --since also the hard filter's list
 ├── enriched/<pr>.json       the full record triage reads
@@ -455,10 +458,10 @@ minutes spent in triage and validation.
 | `triage: reject` | the model judged it unsuitable | read `triage/<pr>.json` -> `reason` if you doubt it |
 | `triage: cap` | no verdict within the 30-min cap | rare; raise `caps.triage_pr` and resubmit if it matters |
 | `triage: failed` | the triage step ended without a verdict | see `logs/node<N>/triage-<pr>.log` |
-| `triage: server failed` | that node's model server never started | see `logs/node<N>/server.log`; **retried by a resubmit** |
+| `triage: server failed` | (runs before the queue) that node's model server never started | **retried by a resubmit**; now a node whose server fails just takes no PRs |
 | `triage: not yet` | not reached (the job ended or was cancelled first) | resubmit |
 | `accepted, validation not yet` | accepted, not validated yet | resubmit |
-| `validation: skipped` | not started, because of the disk guard | **retried by a resubmit** |
+| `validation: skipped` | (runs before the queue) not started because of the disk guard | **retried by a resubmit**; now nodes wait for room instead |
 | `validation: failed` | generate or build failed, or a cap was hit | see `logs/node<N>/validate-<pr>.log` |
 | `INVALID` | built, but the tests did not fail-then-pass; the detail says how | not an instance; nothing to promote |
 | `VALID` | fails as built, passes with the fix | review it and promote it (section 9) |
@@ -510,8 +513,15 @@ It reads `status/` and does only what is left:
 - a PR with an outcome is never done again (its files are not touched);
 - a PR that was cut short has no outcome, so it is done again from the
   start of its step (a half-built image is cleaned up first);
-- `triage: server failed` and `validation: skipped` are tried again;
-- every other outcome is final.
+- `triage: server failed` and `validation: skipped` (from runs before the
+  queue) are tried again;
+- every other outcome is final;
+- if the job's triage phase ended with PRs left, the next job finishes
+  triage before any validation starts.
+
+A run has one job at a time: `submit.py` refuses while one is queued or
+running. A node that dies mid-job does not need a resubmit: the other
+nodes take over its PRs after 5 minutes.
 
 When nothing is left, submit says so and points at the report.
 

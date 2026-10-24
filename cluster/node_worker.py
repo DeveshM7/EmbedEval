@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-One node's share of a run's work. pipeline.sbatch starts one per node, per
+One node's part of a run's work. pipeline.sbatch starts one per node, per
 phase, with srun:
 
     node_worker.py --run RUN --config FROZEN.json --phase triage
     node_worker.py --run RUN --config FROZEN.json --phase validate
 
-Its share (fixed split): the PRs still to do in this phase, sorted, every
-NN-th one starting at its index N (SLURM_PROCID of SLURM_NTASKS).
+The PRs come from a queue (claims.py): each of the node's slots takes the
+next PR no one has, so a fast node does more and a slow one less. A node
+whose queue is empty waits while other nodes still hold PRs, and takes over
+those of a node that died; then it exits.
 
 triage    start the node's own model server (caches in nodes/node<N>/),
-          triage its PRs parallel.triage_per_node at a time, each capped at
+          then take PRs parallel.triage_per_node at a time, each capped at
           caps.triage_pr, then stop the server. If the server never comes
-          up, its PRs are marked "server failed" and retried on a resubmit.
-validate  generate, build and validate its accepted PRs
-          parallel.validate_per_node at a time, each capped; a PR's image and
-          overlays are always removed afterwards. No model server runs.
+          up, the node takes no PRs: the other nodes do them.
+validate  only once the run's triage is complete: take accepted PRs
+          parallel.validate_per_node at a time, generate, build and validate
+          each, capped; a PR's image and overlays are always removed
+          afterwards. While the run's instance images exceed disk_guard_gb,
+          no new PR is taken. No model server runs.
 
 Every PR gets status/<pr>.json once a phase is through with it (status.py).
 Each step runs in its own process group, killed whole on a timeout. On
@@ -42,6 +46,7 @@ from pathlib import Path
 CLUSTER = Path(__file__).resolve().parent
 REPO = CLUSTER.parent
 sys.path[:0] = [str(CLUSTER), str(REPO / "scripts")]
+import claims  # noqa: E402
 import config as cluster_config  # noqa: E402
 import report  # noqa: E402
 import status  # noqa: E402
@@ -112,8 +117,36 @@ def record(run: Path, pr: int, stage: str, info: dict) -> bool:
     return True
 
 
-def my_share(prs: list[int]) -> list[int]:
-    return [pr for i, pr in enumerate(sorted(prs)) if i % NN == N]
+_queue: claims.Queue | None = None     # this phase's queue, for on_sigterm
+
+
+def drain(q: claims.Queue, todo: list[int], one, slots: int, until: float,
+          ready=lambda: True) -> None:
+    """Run one(pr) on PRs taken from the queue, `slots` at a time, until none
+    is left or `until` (a time) has passed. While ready() is false, no PR is
+    taken. A slot with nothing to take waits while other nodes still hold
+    PRs, since a node that dies frees its PRs for the others."""
+    global _queue
+    _queue = q
+
+    def slot() -> None:
+        while not _stopping.is_set() and time.time() < until:
+            if not ready():
+                time.sleep(claims.BEAT)
+                continue
+            pr = q.take(todo)
+            if pr is None:
+                if q.busy_elsewhere(todo):
+                    time.sleep(claims.BEAT)
+                    continue
+                return
+            try:
+                one(pr)
+            finally:            # done if it now has its outcome (written by this node)
+                q.release(pr, done=not q.needed(pr))
+
+    with ThreadPoolExecutor(slots) as pool:
+        list(pool.map(lambda _: slot(), range(slots)))
 
 
 # ---------------------------------------------------------------- triage
@@ -190,19 +223,17 @@ def server_ready(p: subprocess.Popen, minutes: float) -> bool:
 
 
 def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
-    mine = my_share(status.triage_todo(run))
-    log(f"triage: {len(mine)} PRs {mine}")
-    if not mine:
+    todo = status.triage_todo(run)
+    log(f"triage: {len(todo)} PRs left in the run")
+    if not todo:
         return
     caps, profile = cfg["caps"], cfg["model"]["profile"]
     t0 = time.time()
     server = start_server(cfg, env, node_dir)
     try:
         if not server_ready(server, caps["server_start"]):
-            log("model server did not come up; see server.log")
-            for pr in mine:
-                record(run, pr, "triage", {"state": "server failed", "node": N,
-                       "note": f"server not ready (log: {LOGS / 'server.log'})"})
+            log("model server did not come up; see server.log. Taking no PRs: "
+                "the other nodes do them")
             return
         log(f"model server ready after {(time.time() - t0) / 60:.1f} min")
         cache_filled(cfg)
@@ -236,8 +267,8 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
             if record(run, pr, "triage", info):
                 log(f"triage {pr}: {info.get('verdict') or info['state']} ({minutes} min)")
 
-        with ThreadPoolExecutor(cfg["parallel"]["triage_per_node"]) as pool:
-            list(pool.map(one, mine))
+        q = claims.Queue(run, "triage", ME, lambda pr: status.triage_needed(run, pr))
+        drain(q, todo, one, cfg["parallel"]["triage_per_node"], deadline - 2 * 60)
     finally:
         kill_group(server.pid)
         with _lock:
@@ -275,9 +306,14 @@ def sweep(work: Path) -> None:
 
 
 def validate(cfg: dict, run: Path, env: dict) -> None:
-    mine = my_share(status.validate_todo(run))
-    log(f"validation: {len(mine)} PRs {mine}")
-    if not mine:
+    left = status.triage_todo(run)
+    if left:
+        log(f"triage is not complete ({len(left)} PRs left): no validation until a "
+            "job finishes it")
+        return
+    todo = status.validate_todo(run)
+    log(f"validation: {len(todo)} PRs left in the run")
+    if not todo:
         return
     caps = cfg["caps"]
     t0 = time.time()
@@ -304,11 +340,6 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
 
         if left() < 10 or _stopping.is_set():
             return                                         # stays to do
-        used = images_gb(run)
-        if used > cfg["disk_guard_gb"]:
-            done("skipped", f"disk guard: instance images at {used:.0f} GB "
-                            f"(limit {cfg['disk_guard_gb']} GB)")
-            return
         lg = LOGS / f"validate-{pr}.log"
         verdict = run / "triage" / f"{pr}.json"
         tried = []
@@ -331,8 +362,20 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
                 done("failed", f"{what}; {note}" if note else what)
             return
 
-    with ThreadPoolExecutor(cfg["parallel"]["validate_per_node"]) as pool:
-        list(pool.map(one, mine))
+    warned = threading.Event()
+
+    def room() -> bool:
+        used = images_gb(run)
+        if used <= cfg["disk_guard_gb"]:
+            return True
+        if not warned.is_set():
+            warned.set()
+            log(f"disk guard: instance images at {used:.0f} GB (limit "
+                f"{cfg['disk_guard_gb']} GB); taking no new PR until there is room")
+        return False
+
+    q = claims.Queue(run, "validate", ME, lambda pr: status.validate_needed(run, pr))
+    drain(q, todo, one, cfg["parallel"]["validate_per_node"], deadline - 10 * 60, room)
 
 
 def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: dict):
@@ -385,10 +428,6 @@ def other_board(run: Path, pr: int, verdict: Path, tried: list[str]) -> Path | N
     return out
 
 
-    with ThreadPoolExecutor(cfg["parallel"]["validate_per_node"]) as pool:
-        list(pool.map(one, mine))
-
-
 # ---------------------------------------------------------------- main
 
 
@@ -399,11 +438,13 @@ def on_sigterm(signum, frame) -> None:
         groups = list(_children)
     for g in groups:
         kill_group(g, grace=10)
+    if _queue:
+        _queue.release_all()                # what was cut short is free at once
     os._exit(128 + signum)
 
 
 def main() -> None:
-    global N, NN, LOGS
+    global N, NN, LOGS, ME
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True)
@@ -412,6 +453,7 @@ def main() -> None:
     args = p.parse_args()
     N = int(os.environ.get("SLURM_PROCID", "0"))
     NN = int(os.environ.get("SLURM_NTASKS", "1"))
+    ME = f"{os.environ.get('SLURM_JOB_ID', 'local')}-node{N}"
     run = Path(args.run)
     cfg = json.loads(Path(args.config).read_text())
     node_dir = run / "nodes" / f"node{N}"
@@ -425,6 +467,7 @@ def main() -> None:
            # never touch another node's work
            "EMBEDEVAL_WORK": str(node_dir / "work")}
     log(f"phase {args.phase}, node {N} of {NN}, run {run}")
+    claims.keep_alive(run, ME)
     if args.phase == "triage":
         triage(cfg, run, env, node_dir)
     else:
@@ -432,7 +475,7 @@ def main() -> None:
     log(f"phase {args.phase} done")
 
 
-N, NN, LOGS = 0, 1, Path(".")
+N, NN, LOGS, ME = 0, 1, Path("."), "local-node0"
 
 if __name__ == "__main__":
     main()

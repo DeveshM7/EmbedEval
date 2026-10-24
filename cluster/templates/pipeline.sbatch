@@ -12,8 +12,9 @@
 # EmbedEval pipeline job for run "{name}", written by cluster/submit.py at
 # {stamp}. To run again (e.g. to resume), submit again rather than edit this.
 #
-#   phase 1  triage       node_worker.py on every node, each its own share  (cap {triage_phase} min)
-#   phase 2  validation   node_worker.py on every node, each its own share  (cap {validate_phase} min)
+#   phase 1  triage       node_worker.py on every node, PRs from a shared queue  (cap {triage_phase} min)
+#   phase 2  validation   node_worker.py on every node, PRs from a shared queue  (cap {validate_phase} min)
+#                         -- only once the run's triage is complete
 #   phase 3  report       report.py
 #
 # Each phase starts when every node has finished the one before (srun

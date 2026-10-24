@@ -62,9 +62,10 @@ Two layers, kept apart on purpose:
 | `setup.py` | desktop | checks machine, Apptainer, `gh`, Slurm, weights, vLLM image; creates `shared/`, `runs/`; clones Zephyr; builds the base Python images. Never deletes | `shared/` |
 | `prepare.py` | desktop | the PR list (`--since/--until` or `--pr`), minus PRs the ledger has settled or another unfinished run has taken, hard filters, enrich, dry runs, missing SDK images, commits, manifest | `runs/<run>/` up to `manifest.json` |
 | `submit.py` | desktop | what is left (from `status/`), node count, the job script, `sbatch` | `jobs/` |
-| `node_worker.py` | each batch node | one node's share of one phase (section 4) | `status/`, `triage/`, `instances/`, `logs/node<N>/`, `nodes/node<N>/` |
+| `node_worker.py` | each batch node | one node's part of one phase, PRs taken from the queue (section 4) | `status/`, `triage/`, `instances/`, `logs/node<N>/`, `nodes/node<N>/` |
 | `status.py` | (library) | reads and writes `status/<pr>.json`; `triage_todo`, `validate_todo` | `status/` |
 | `report.py` | anywhere | the funnel and per-PR table, from the manifest and `status/` only; fills in any settled outcome missing from the ledger; `to_ledger()` is what the workers and `prepare.py` call as PRs settle | `report.md`, `report.json`, `shared/ledger.jsonl` |
+| `claims.py` | (library) | the work queue of a phase: who has which PR, and taking over PRs of a node that died (4.3) | `claims/` |
 | `ledger.py` | (library) | every PR's settled outcome across runs: which outcomes count as settled, `latest`, `record` (under a lock) | `shared/ledger.jsonl` |
 | `templates/pipeline.sbatch` | -- | the job script template | -- |
 
@@ -119,6 +120,8 @@ runs/<run>/
   triage/manifest-<t>-<pid>.json one per triage call, with pr_triage-<t>-<pid>.md
   validate/<pr>-<board>.json    node_worker.py, for a board retry
   instances/<id>/               generate_instance.py, validate_instance.py
+  claims/<phase>.json           the phase's queue: who has which PR (claims.py)
+  claims/alive/<job>-node<N>    touched every minute by each worker
   logs/node<N>/                 that node's worker and its steps
   nodes/node<N>/work/           that node's images, overlays, temp files (EMBEDEVAL_WORK)
   nodes/node<N>/scr/            that node's model-server caches
@@ -126,7 +129,8 @@ runs/<run>/
   report.md, report.json        report.py
 ```
 
-**No two processes ever write the same file.** Every PR belongs to exactly
+**No two processes ever write the same file**, apart from the queue's
+table, which is only changed under its lock. Every PR is taken by exactly
 one worker in a phase, so its files have one writer. Node folders belong to
 one node. Triage calls running side by side each write their own manifest.
 Nothing is merged: the report is made by reading the per-PR files.
@@ -153,9 +157,9 @@ What a status file looks like:
 | Stage | States | Final? |
 |---|---|---|
 | `triage` | `done` (with a verdict), `cap`, `failed` | yes |
-| | `server failed` | no: redone on a resubmit |
+| | `server failed` (older runs only) | no: redone on a resubmit |
 | `validate` | `done` (outcome `VALID` or `INVALID: <reason>`), `failed` | yes |
-| | `skipped` (disk guard) | no: redone on a resubmit |
+| | `skipped` (disk guard, older runs only) | no: redone on a resubmit |
 
 ---
 
@@ -208,23 +212,46 @@ python cluster/report.py --run <run>
 - `--kill-on-bad-exit=0`: one node's worker failing does not kill the rest.
 - The job never waits for a model server and never submits other jobs.
 
-### 4.3 How a node finds its share
+### 4.3 How a node gets its PRs: the queue
 
-Each worker gets `SLURM_PROCID` (`N`, 0-based) and `SLURM_NTASKS` (`NN`)
-from `srun`. It computes the PRs still to do in its phase, sorts them, and
-takes every `NN`-th one starting at index `N`. Every worker computes the
-same list from the same files, so they agree without talking to each other.
+Each worker has slots (`triage_per_node` or `validate_per_node`). At the
+start of a phase it reads what is still to do from `status/`; then each
+slot takes the next PR that no one has, works on it, and takes another, so
+a fast node does more and a slow one less (`claims.py`):
 
 ```
-to do, sorted:  33690 43405 62109 65697 74435 82272 85079 89534     NN = 3
-node0           33690             65697             85079
-node1                 43405             74435             89534
-node2                       62109             82272
+claims/triage.json      {"33690": {"owner": "480425-node0", "state": "done"},
+                         "43405": {"owner": "480425-node1", "state": "working"}, ...}
+
+slot:  take the first PR in the to-do list that is not "done" and not
+       "working" for a live worker  ->  mark it "working" (this worker)
+       work on it  ->  mark it "done" (it has its outcome) or free it (cut short)
+       nothing left to take, but others still working?  wait a minute, ask again
+       nothing left at all  ->  the slot ends; the worker ends with its last slot
 ```
 
-On a resubmit the list is only what is left, split again over the new
-job's nodes. A fixed split does not rebalance: a node whose PRs are quick
-waits for the slowest node at the phase barrier.
+- **One table, one lock.** The table is a single file, read and written
+  only while holding a lock on that same file (`fcntl.lockf`). On NFS,
+  taking the lock is what makes a node see the other nodes' latest writes;
+  a node's cached view of other files can be seconds behind. (A first
+  version with one claim file per PR let two nodes take the same PR, for
+  exactly that reason.)
+- **A node that dies frees its PRs.** Every worker touches
+  `claims/alive/<job>-node<N>` each minute. A "working" PR whose worker has
+  been silent for 5 minutes is taken over by the next slot that asks; slots
+  with nothing to take wait while other nodes still hold PRs, so they are
+  there to take them. A node whose model server never comes up takes no
+  PRs at all: the other nodes do them.
+- **Stopping frees PRs at once.** On SIGTERM the worker frees what it holds.
+- **One job per run at a time.** `submit.py` refuses a second one: the nodes
+  of a job are numbered, and two jobs would share `nodes/node<N>/`.
+- **Validation waits for triage.** A validation worker does nothing unless
+  the run's triage is complete (`status.triage_todo` empty); if a job's
+  triage phase ends with PRs left, the next job finishes triage first.
+
+Tested on 3 nodes: 40 PRs with one node killed while holding two (the other
+nodes took them over), and 200 PRs of under a second each, 4 slots per node:
+every PR done exactly once.
 
 ### 4.4 Inside a worker
 
@@ -232,20 +259,19 @@ waits for the slowest node at the phase barrier.
 
 1. Start the node's model server (`serve_triage_model.sh`) in its own
    process group, and wait for it, up to `caps.server_start`. If it never
-   comes up, every PR of this node is marked `server failed` and the worker
-   ends (no 30-minute wait per PR).
-2. Run `triage_per_node` PRs at a time, each one a `triage_prs.py --run-dir
+   comes up, the worker ends without taking a PR (4.3).
+2. Take PRs from the queue, `triage_per_node` at a time, each one a `triage_prs.py --run-dir
    <run> run --pr <pr>` subprocess, capped at `caps.triage_pr`. No new PR
    starts within 5 minutes of `caps.triage_phase`.
 3. Stop the server, always (in a `finally`).
 
-**Validation phase**:
+**Validation phase** (only once the run's triage is complete):
 
 1. Sweep this node's work folder: build temp folders and partial images a
    cancelled job left behind.
-2. Run `validate_per_node` PRs at a time. For each:
-   - skip it (`skipped`) if the run's instance images already exceed
-     `disk_guard_gb`;
+2. Take accepted PRs from the queue, `validate_per_node` at a time; while
+   the run's instance images exceed `disk_guard_gb`, take none (wait for
+   builds to finish and be cleaned up). For each:
    - `cleanup_instance.py` (leftovers of a cut-short try), then
      `generate_instance.py`, `build_instances.py` (each image build capped
      at `caps.build`), `validate_instance.py`;
@@ -569,9 +595,8 @@ run, trace and scoring machinery of `triage_prs.py`.
 - **The model is not deterministic.** The same PR can get a different board,
   problem statement or, rarely, verdict on another run. Review before
   promoting.
-- **The split is fixed.** Nodes do not take work from each other; the
-  slowest node sets the phase's length. A shared work queue is a possible
-  later change.
+- **Phases are barriers.** Validation starts only once all triage is done,
+  so nodes that finish triage early wait for the last PR.
 - **One job at a time per account**, with a desktop open (the 2-job limit).
 - **Images are not kept.** Every instance image is rebuilt from its recipe
   when needed (10-20 min). A container registry would avoid that; not done.

@@ -85,6 +85,14 @@ def main() -> None:
                  f"{caps['validate_phase']} min) leave no time for the report within "
                  f"slurm.time_limit {s['time_limit']}")
 
+    # One job per run at a time: the nodes of a job are numbered, and two jobs
+    # would share nodes/node<N>/. (Within a job, the queue balances the work.)
+    q = subprocess.run(["squeue", "-h", "--me", "-n", f"embedeval-{run.name}", "-o", "%i %T"],
+                       capture_output=True, text=True)
+    if q.stdout.strip():
+        sys.exit(f"run {run.name} already has a job ({q.stdout.strip()}); wait for it to "
+                 "end, or scancel it, then submit again")
+
     triage_left, validate_left = status.triage_todo(run), status.validate_todo(run)
     if not triage_left and not validate_left:
         print(f"nothing left to do in {run.name}: every PR has an outcome. "
