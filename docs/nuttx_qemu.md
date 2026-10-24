@@ -1,12 +1,13 @@
 # NuttX on QEMU (`qemu-armv8a`): prototype
 
-NuttX instances today run ostest on the native simulator `sim:nsh`
-(`templates/nuttx/Dockerfile.tmpl`, `templates/nuttx/run_tests.sh.tmpl`).
-Some pairs cannot: their kernel change exists only for a real architecture.
-This prototype runs ostest on the arm64 QEMU board `qemu-armv8a` (configs `nsh`
-and `nsh_smp`) in Apptainer on Scholar's ARM64 Spark nodes. It is standalone and
-is **not** wired into the generator, validator or harness. The last section
-lists what that wiring would take.
+Most NuttX instances run ostest on the native simulator `sim:nsh`. Some
+pairs cannot: their kernel change exists only for a real architecture. This
+prototype ran ostest on the arm64 QEMU board `qemu-armv8a` (configs `nsh` and
+`nsh_smp`) in Apptainer on Scholar's ARM64 Spark nodes. It has since been
+wired into the generator, validator and cluster pipeline:
+`scripts/nuttx_platforms.py` maps each QEMU target to its image and command
+line, and apps #2137 is a promoted instance (`nuttx__nuttx-10934-a2137`, with
+#10970 in `extra_fix_prs`). This page keeps the prototype's findings.
 
 Files, all in `templates/nuttx/qemu-armv8a/`:
 
@@ -203,47 +204,3 @@ The job builds `$T/nuttx-qemu.sif` if it is missing and reads the full clones in
 `/scratch/scholar/zhan5136/nuttx-qemu-dev/` (`job-476972.log`: the #10934-only
 hang; `job-476979.log`: sched info on; `job-476984.log`: VALID;
 `job-476980.log`: `nsh` and native gcc probe).
-
-## What integration would take (not done)
-
-1. **Triage and recipe.** `scripts/triage_nuttx_prs.py` accepts only
-   `sim:nsh` and records others as `qemu_lead`s
-   (`triage/nuttx_qemu_leads.jsonl` holds this pair). A reviewed recipe would
-   need `platform: qemu-armv8a:nsh_smp` and, for this pair, a second kernel
-   PR (#10970).
-2. **Multiple kernel commits.** `metadata.json` has one kernel range
-   (`kernel_base_commit..kernel_merge_commit`), and `gold_patch()` in
-   `scripts/validate_instance.py` diffs only that range. This pair needs a list
-   of follow-up commits or PRs, e.g. `kernel_extra_fix_commits`, applied in
-   order. `files_changed_by_fix` should be their union.
-3. **Generator and renderer.** `scripts/generate_nuttx_instance.py` raises for
-   any platform other than `sim:nsh`. `scripts/render_nuttx_instance.py`
-   checks `sim_config == "sim:nsh"`. Both would take the board config from the
-   recipe. The renderer would emit this `run_tests.sh.tmpl` (same
-   `@@BANNERS@@` placeholder) and a configure step with
-   `CONFIG_DEBUG_SCHED_INFO=n`.
-4. **Image.** Choose one of two paths. (a) Docker: give
-   `docker/bases/nuttx.Dockerfile` the Arm `aarch64-none-elf` toolchain (the
-   apt `gcc-aarch64-linux-gnu` is the wrong target; see above) and generate a
-   Dockerfile for the board. (b) Apptainer, as the Zephyr twister pipeline
-   does: `nuttx-qemu.def` becomes a shared base layer, and an `instance.def`
-   adds the checkout, configure, test patch and one pre-build. The pre-build
-   also fetches `dtc.zip` for `nsh`, and may fail for a `compile_error` pair.
-   `scripts/build_config.py` / `scripts/build_instances.py` would need the
-   NuttX Apptainer case.
-5. **Validator.** `scripts/validate_instance.py` runs NuttX in Docker. For
-   Apptainer it needs the NuttX equivalent of its Zephyr Apptainer path. The
-   compile_error logic (build fails before, `missing_api` in the log) already
-   matches what this sbatch checks.
-6. **Harness.** `harness/projects.py` NuttX defaults assume the simulator: the
-   orientation says "a native binary at /testbed/nuttx", and `run_command` is
-   `printf 'ostest\npoweroff\n' | timeout 300 ./nuttx`, which would hang on
-   QEMU (no poweroff, and QEMU is not `./nuttx`). Per-instance metadata
-   overrides (`projects.setting`) should point `run_command` at `run_tests`
-   and adjust the orientation (the board is qemu-armv8a, the binary runs under
-   QEMU, and `make distclean` loses the config). `harness/apptainer_env.py`
-   works unchanged.
-7. **Benchmark records.** `docs/nuttx_bad_prs.md` and `triage/nuttx_gold.json`
-   reject apps-2137 because it does not pass on `sim:nsh`. That reason no
-   longer holds on QEMU. The other reason in the doc (it adds a feature rather
-   than fixing a bug) is a policy decision this prototype does not settle.
