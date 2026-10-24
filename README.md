@@ -14,11 +14,13 @@ and the tests actually run.
   On Purdue Scholar the pipeline runs as one Slurm job over many nodes:
   [docs/running_on_scholar.md](docs/running_on_scholar.md) (how to use it) and
   [docs/pipeline_internals.md](docs/pipeline_internals.md) (how it works).
-- **NuttX and RIOT** instances are **Docker** images in `docker/instances/`.
-  The NuttX ones are generated from reviewed PR pairs — see
-  [docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md). A NuttX instance
-  can also be rendered as an Apptainer recipe, for hosts without Docker such
-  as Scholar's ARM64 nodes — see [NuttX in Apptainer](#nuttx-in-apptainer).
+- **NuttX** instances pair a `nuttx-apps` ostest change with the kernel fix it
+  checks, found by model triage and proven by validation — see
+  [docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md). The 30 from the
+  pipeline are **Apptainer** recipes in `apptainer/instances/nuttx/` (see
+  [NuttX in Apptainer](#nuttx-in-apptainer)); 7 older ones are **Docker**
+  images in `docker/instances/`.
+- **RIOT** instances are **Docker** images in `docker/instances/`.
 
 **Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 37 NuttX (30
 Apptainer ones in `apptainer/instances/nuttx/`, 7 Docker ones), 3 RIOT.
@@ -305,7 +307,8 @@ cluster/            the Zephyr pipeline on Scholar: config, setup.py, prepare.py
 docs/               running_on_scholar.md (using the pipeline),
                     pipeline_internals.md (how it works), pr_triage.md (the
                     model's triage instructions), stage1_pr_candidates.md (the gold PRs)
-triage/             models.json (model profiles), gold.json (the gold set)
+triage/             models.json (model profiles), gold.json (the Zephyr gold set),
+                    NuttX: nuttx_apps_gold.json, ga/ (prompt tuning), nuttx_reviewed/
 scripts/            Zephyr pipeline: filter_candidates.py, zephyr_env.py,
                     dry_run.py, triage_prs.py, generate_instance.py,
                     build_instances.py, validate_instance.py, twister_pipeline.py, ...
