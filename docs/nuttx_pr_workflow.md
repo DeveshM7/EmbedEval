@@ -58,9 +58,10 @@ output, to measure search without links; it is scored separately.
 `scripts/nuttx_ga.py` searches prompt and sampling variants against the gold:
 each individual is the base prompt (`triage/ga/base_prompt.md`) plus named
 rules from `triage/ga/rules.json` and knob settings, stored with its prompt
-under `triage/ga/individuals/<sha>/`. The variant the 189-PR run used is
-`68660ee811` (13/13 on the gold in two of three repeats); the cluster pipeline
-runs a frozen snapshot of it through `nuttx.individual` in its config.
+under `triage/ga/individuals/<sha>/`. The winner, `68660ee811` (13/13 on the
+gold in two of three repeats), is the prompt the 189-PR run used and the one
+in `docs/nuttx_apps_triage.md`. The cluster pipeline can also run a frozen
+snapshot of an individual through `nuttx.individual` in its config.
 
 ## Generate and validate
 

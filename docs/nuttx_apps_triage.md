@@ -31,6 +31,10 @@ that plausibly fits, with the evidence. Pairs at `low` are only recorded.
   board, not on native `sim:nsh` (for instance it needs SMP, an
   architecture-specific hook, or hardware the simulator lacks).
 
+When a kernel change only made existing apps code stop compiling or running
+and the apps PR repairs that apps code, the kind is `apps_fix`, and the kernel
+PR that exposed it is `low`.
+
 ## 2. Find the kernel PRs
 
 Search even when the PR names none. Useful evidence, strongest first:
@@ -101,6 +105,21 @@ Confidence for each kernel PR:
 `behavior_change` when it deliberately changes or adds behavior (including
 a new interface) that the changed test now expects.
 
+A later kernel PR that edits code the primary PR added or changed, merged
+before the apps PR, goes into `also_needs` unless its diff clearly cannot
+affect any path the changed test reaches. Reading cannot show that the test
+passes without it, and validation drops a follow-up that is not needed, so
+when unsure list it with the reason. Never dismiss a follow-up as unrelated
+from its subject line or its size alone.
+
+If the primary PR adds a function or a source file, every later commit that
+edits that function or file is a follow-up candidate: open it and judge it
+against the changed test's inputs and timing.
+
+A kernel PR whose diff only moves, renames or re-guards Kconfig symbols or
+build plumbing, and adds no behavior the changed test asserts, is `low` even
+when it is linked or merged near the apps PR.
+
 ## 3. Check the runnable target
 
 The generator and runner use native `sim:nsh` with `ostest`. A kernel
@@ -120,13 +139,6 @@ dropped has dependencies that are off: add them, or a setting that selects
 them, and check again. Settings the test needs that the board already
 enables need no override.
 
-Your input ends with the options the changed tests need, computed from the
-sources: put the listed required options (those not already on in the board's
-defaults) in `config_overrides`, and one option of each "one of" group. When
-the test has alternative `#if` branches, decide from the kernel diff which
-branch exercises the fixed code, say so in the evidence, and set the options
-that compile it; `check_config` reports which branches are compiled.
-
 `check_config` does not execute the test or prove it passes. Read the changed
 test's internal `#ifdef` branches to see which scenario the effective config
 selects. Check the effective values after `make olddefconfig` for every
@@ -136,6 +148,15 @@ called; adjust overrides and check again if a needed setting is off.
 The runner judges the whole `ostest` run: it passes only when the suite
 completes with status 0, prints no `ERROR` line, and prints the
 `user_main: ... test` banner of every changed test.
+
+Your input ends with the options the changed tests need, computed from the
+sources: put the listed required options (those not already on in the board's
+defaults) in `config_overrides`, and one option of each "one of" group.
+
+When the changed test has alternative `#if` branches, decide from the kernel
+diff which branch exercises the fixed code, say so in the evidence, and set
+the options that compile that branch; `check_config` reports which branches
+are compiled.
 
 ## 4. Tools
 
@@ -154,6 +175,10 @@ The tool budget is limited (calls and time). Search deliberately: start from
 explicit references, then symbols and dates. Decide from the evidence you
 gathered and say what remains uncertain. Do not use outside knowledge about
 specific PRs.
+
+Once you have confirmed the pairs, made the follow-up check and run
+`check_config`, answer. Do not spend the rest of the budget on further
+exploration.
 
 ## 5. Output
 
@@ -212,3 +237,7 @@ Return exactly one JSON object:
   `needs_reviewed_recipe` when you cannot tell. Use `needs_fixture` for a
   QEMU platform, another test program, or `runtime_other`.
 - Do not invent links, paths, target support, config settings or results.
+
+Before replying, re-read each pair against the rules above: its confidence,
+its `also_needs`, its `config_overrides` and its `readiness` must follow from
+the evidence you listed.
