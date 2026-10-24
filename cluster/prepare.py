@@ -12,7 +12,8 @@ Creates <scratch_root>/runs/<name>/ and, in it:
                       --pr: these PRs, through the same hard filters
                       (--no-filter: all of them, unfiltered).
                       Either way, PRs an earlier run settled are skipped
-                      (cluster/ledger.py; --redo takes them again).
+                      (cluster/ledger.py; --redo takes them again), and so
+                      are PRs another run has taken and not finished.
     2. enriched/      full GitHub context, several PRs at once
     3. dryrun/        twister's own selection on our boards, several at once
     4. shared SDK     any SDK image the PRs that reach triage need and that
@@ -43,6 +44,8 @@ REPO = CLUSTER.parent
 sys.path.insert(0, str(CLUSTER))
 import config as cluster_config  # noqa: E402
 import ledger  # noqa: E402
+import report  # noqa: E402
+import status  # noqa: E402
 
 PY = sys.executable
 
@@ -98,23 +101,31 @@ def main() -> None:
     timings = {}
     log(f"preparing {run}")
 
-    # 1. the PRs; those an earlier run settled (ledger.py) are skipped
+    # 1. the PRs; skipped: those an earlier run settled (ledger.py), and those
+    # another run has taken and not finished (never two runs on one PR)
     stage, notes = {}, {}
     done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]))
+    taken = status.unfinished(Path(cfg["derived"]["runs"]), but=run)
 
-    def skip_settled(prs):
+    def skip_known(prs):
         for pr in prs:
-            if pr in done:
+            if pr in taken:
+                stage[pr], notes[pr] = "in another run", (
+                    f"run {taken[pr]} has it and has not finished; finish or delete that run")
+            elif pr in done:
                 e = done[pr]
                 stage[pr], notes[pr] = "in ledger", f"{e['outcome']} in run {e['run']} ({e['date'][:10]})"
-        n = sum(1 for pr in prs if pr in done)
+        n = sum(1 for pr in prs if pr in done and pr not in taken)
         if n:
             log(f"{n} already settled in earlier runs (ledger); --redo takes them again")
+        n = sum(1 for pr in prs if pr in taken)
+        if n:
+            log(f"{n} taken by unfinished runs ({', '.join(sorted({taken[p] for p in prs if p in taken}))})")
 
     if args.pr:
         prs = list(dict.fromkeys(args.pr))
         source = {"pr": prs, "hard_filter": not args.no_filter, "redo": args.redo}
-        skip_settled(prs)
+        skip_known(prs)
         fresh = [pr for pr in prs if pr not in stage]
         if not args.no_filter and fresh:
             log("hard filters")
@@ -124,7 +135,10 @@ def main() -> None:
             import filter_candidates as fc
             for pr in fresh:
                 f = fc.CACHE / f"{pr}.json"
-                ok, why = fc.classify(json.loads(f.read_text())) if f.exists() else (False, "fetch failed")
+                if not f.exists():     # GitHub did not answer: not an outcome, so not settled
+                    stage[pr], notes[pr] = "fetch failed", f"see {logs / 'fetch.log'}"
+                    continue
+                ok, why = fc.classify(json.loads(f.read_text()))
                 if not ok:
                     stage[pr], notes[pr] = "hard filter", why
     else:
@@ -136,7 +150,7 @@ def main() -> None:
         if script("filter_candidates.py", "filter", env=env, logfile=logs / "filter.log"):
             sys.exit(f"filter failed; see {logs / 'filter.log'}")
         prs = [json.loads(l)["number"] for l in open(run / "candidates" / "candidates.jsonl")]
-        skip_settled(prs)
+        skip_known(prs)
     timings["select"] = time.time() - t0
     log(f"{len(prs)} PRs")
 
@@ -225,6 +239,7 @@ def main() -> None:
     tmp = run / "manifest.json.tmp"
     tmp.write_text(json.dumps(manifest, indent=2) + "\n")
     tmp.replace(run / "manifest.json")
+    report.to_ledger(run)          # the hard filters' and dry runs' settled outcomes
     log(f"done in {time.time() - t0:.0f} s -> {run / 'manifest.json'}")
     for s, n in manifest["counts"].items():
         print(f"    {n:>5}  {s}")

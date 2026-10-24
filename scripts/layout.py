@@ -7,7 +7,9 @@ outputs/ in the repository. With it, everything a run produces goes into that
 one folder, so one code checkout can serve many nodes at once and the
 repository is only written when an instance is promoted:
 
-    DIR/candidates/         fetched PRs (cache/) and the hard filter's candidates.jsonl
+    DIR/candidates/         this run's PR list (fetched.json), the hard filter's
+                            candidates.jsonl, and, with no shared folder, the
+                            fetch cache (cache/)
     DIR/enriched/           enriched records
     DIR/dryrun/             dry runs
     DIR/triage/             verdicts and traces, one file per PR
@@ -19,7 +21,8 @@ repository is only written when an instance is promoted:
 
 Shared between runs, set by environment variable:
 
-    EMBEDEVAL_SHARED        Python and SDK images, dry-run venvs, the uv cache
+    EMBEDEVAL_SHARED        Python and SDK images, dry-run venvs, the uv cache,
+                            and what GitHub said about each PR (github/)
                             (scripts/apptainer_util.py)
     EMBEDEVAL_ZEPHYR_CLONE  the full Zephyr clone; default candidates/zephyr.git
 

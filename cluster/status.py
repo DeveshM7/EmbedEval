@@ -71,6 +71,19 @@ def accepted(run: Path) -> list[int]:
             if (read(run, e["pr"]).get("triage") or {}).get("verdict") == "accept"]
 
 
+def unfinished(runs: Path, but: Path | None = None) -> dict[int, str]:
+    """PRs some run has taken and not finished -- what a resubmit of that run
+    would still do -- and the run's name. Every run under `runs` but `but`."""
+    out = {}
+    for m in sorted(Path(runs).glob("*/manifest.json")):
+        other = m.parent
+        if but and other.resolve() == Path(but).resolve():
+            continue
+        for pr in triage_todo(other) + validate_todo(other):
+            out.setdefault(pr, other.name)
+    return out
+
+
 def validate_todo(run: Path) -> list[int]:
     """Accepted PRs with no validation outcome yet. One skipped (by the disk
     guard, say) is tried again on a resubmit."""

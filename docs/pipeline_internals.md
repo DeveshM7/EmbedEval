@@ -60,11 +60,11 @@ Two layers, kept apart on purpose:
 |---|---|---|---|
 | `config.py` | (library) | loads `config.yaml` over `config.example.yaml`; strict: an unknown key or a wrong type is an error; derives paths; `env_for()` gives the environment the scripts read | -- |
 | `setup.py` | desktop | checks machine, Apptainer, `gh`, Slurm, weights, vLLM image; creates `shared/`, `runs/`; clones Zephyr; builds the base Python images. Never deletes | `shared/` |
-| `prepare.py` | desktop | the PR list (`--since/--until` or `--pr`), minus PRs the ledger has settled, hard filters, enrich, dry runs, missing SDK images, commits, manifest | `runs/<run>/` up to `manifest.json` |
+| `prepare.py` | desktop | the PR list (`--since/--until` or `--pr`), minus PRs the ledger has settled or another unfinished run has taken, hard filters, enrich, dry runs, missing SDK images, commits, manifest | `runs/<run>/` up to `manifest.json` |
 | `submit.py` | desktop | what is left (from `status/`), node count, the job script, `sbatch` | `jobs/` |
 | `node_worker.py` | each batch node | one node's share of one phase (section 4) | `status/`, `triage/`, `instances/`, `logs/node<N>/`, `nodes/node<N>/` |
 | `status.py` | (library) | reads and writes `status/<pr>.json`; `triage_todo`, `validate_todo` | `status/` |
-| `report.py` | anywhere | the funnel and per-PR table, from the manifest and `status/` only; appends settled outcomes to the ledger | `report.md`, `report.json`, `shared/ledger.jsonl` |
+| `report.py` | anywhere | the funnel and per-PR table, from the manifest and `status/` only; fills in any settled outcome missing from the ledger; `to_ledger()` is what the workers and `prepare.py` call as PRs settle | `report.md`, `report.json`, `shared/ledger.jsonl` |
 | `ledger.py` | (library) | every PR's settled outcome across runs: which outcomes count as settled, `latest`, `record` (under a lock) | `shared/ledger.jsonl` |
 | `templates/pipeline.sbatch` | -- | the job script template | -- |
 
@@ -72,7 +72,7 @@ Two layers, kept apart on purpose:
 
 | Script | Stage | In | Out (in the run folder) |
 |---|---|---|---|
-| `filter_candidates.py` | fetch, filter, enrich | GitHub API, the clone | `candidates/cache/`, `candidates/candidates.jsonl`, `enriched/<pr>.json` |
+| `filter_candidates.py` | fetch, filter, enrich | GitHub API, the clone, `shared/github/` | `shared/github/prs/`, `shared/github/enriched/`, `candidates/fetched.json`, `candidates/candidates.jsonl`, `enriched/<pr>.json` |
 | `zephyr_env.py` | (library, used by enrich) | the PR's commits in the clone | the record's `twister` block: suites, scenarios, boards, Python, SDK, twister options |
 | `dry_run.py` | dry run | the record; a minimal tree from `git archive`; twister `--dry-run` in the Python image | `dryrun/<pr>.json` |
 | `triage_prs.py` | triage | the record, the dry run, `docs/pr_triage.md`, the model server | `triage/<pr>.json`, `<pr>.trace.json` |
@@ -346,7 +346,8 @@ The variables `cluster/` sets for every step (`config.env_for()`):
 | Python, SDK images | `shared/images/` | `setup.py`, `prepare.py` | every run |
 | dry-run venvs | `shared/venvs/` | `dry_run.py`, under a lock per venv | every run |
 | vLLM compile cache | `shared/vllm-cache/` | the first server, under a lock | every server, each through its own copy |
-| ledger | `shared/ledger.jsonl` | `report.py`, under a lock | every `prepare.py` |
+| ledger | `shared/ledger.jsonl` | workers and `prepare.py` as PRs settle, `report.py`; under a lock | every `prepare.py` |
+| GitHub cache | `shared/github/prs/`, `shared/github/enriched/` | `filter_candidates.py`, each file written whole | every run; an enriched record is reused only if its `enrich_version` is current (raise `ENRICH_VERSION` when the record changes) |
 | instance images | `nodes/node<N>/work/images/instances/` | `build_instances.py` | nobody: deleted after validation |
 | everything else | `runs/<run>/` | the run | nobody |
 

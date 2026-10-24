@@ -43,6 +43,7 @@ CLUSTER = Path(__file__).resolve().parent
 REPO = CLUSTER.parent
 sys.path[:0] = [str(CLUSTER), str(REPO / "scripts")]
 import config as cluster_config  # noqa: E402
+import report  # noqa: E402
 import status  # noqa: E402
 
 PY = sys.executable
@@ -104,6 +105,10 @@ def record(run: Path, pr: int, stage: str, info: dict) -> bool:
     if _stopping.is_set():
         return False
     status.write_stage(run, pr, stage, info)
+    try:                        # settled now, so in the ledger now (report.py would catch up)
+        report.to_ledger(run, {pr})
+    except Exception as e:
+        log(f"ledger: could not record {pr}: {type(e).__name__}: {e}")
     return True
 
 

@@ -9,7 +9,8 @@ run at any time -- during a job it shows progress so far. Writes
 <run>/report.md and <run>/report.json, prints the funnel, and (with
 --scorecard) refreshes triage's scorecard of every verdict in the run.
 Settled outcomes also go into the ledger, <shared>/ledger.jsonl
-(cluster/ledger.py), so later runs skip those PRs.
+(cluster/ledger.py), so later runs skip those PRs; the workers write them as
+each PR settles, and this fills in anything missing.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
     return "INVALID", "; ".join(x for x in (v["outcome"], v.get("note")) if x)
 
 
-ORDER = ["in ledger", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "triage: server failed",
+ORDER = ["in ledger", "in another run", "fetch failed", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "triage: server failed",
          "triage: cap", "triage: failed", "triage: error", "triage: reject", "triage: not yet",
          "accepted, validation not yet", "validation: skipped", "validation: failed",
          "INVALID", "VALID"]
@@ -72,6 +73,22 @@ def build(run: Path) -> dict:
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
             "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"], "rows": rows}
+
+
+def to_ledger(run: Path, prs: set[int] | None = None) -> tuple[int, Path]:
+    """Record the settled outcomes of a run's PRs -- all of them, or these --
+    in the ledger. Workers call it as each PR settles; report and prepare
+    for the whole run. Returns (how many were new, the ledger)."""
+    m = status.manifest(run)
+    rows = []
+    for e in m["prs"]:
+        if prs is None or e["pr"] in prs:
+            where, detail = outcome(e, status.read(run, e["pr"]))
+            rows.append({"pr": e["pr"], "outcome": where, "detail": detail})
+    book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
+    n = ledger.record(book, m["name"], m["code"]["commit"],
+                      datetime.now().isoformat(timespec="seconds"), rows)
+    return n, book
 
 
 def markdown(rep: dict) -> str:
@@ -110,9 +127,7 @@ def main() -> None:
         print(f"  {v:>5}  {k}")
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
     print(f"  -> {run / 'report.md'}")
-    m = status.manifest(run)
-    book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
-    n = ledger.record(book, rep["run"], m["code"]["commit"], rep["generated"], rep["rows"])
+    n, book = to_ledger(run)      # normally already there: workers record as PRs settle
     print(f"  ledger: {n} new settled outcomes -> {book}")
     if args.scorecard and (run / "triage").exists():
         subprocess.run([sys.executable, str(REPO / "scripts" / "triage_prs.py"), "--run-dir",

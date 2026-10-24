@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -68,9 +69,27 @@ import zephyr_env  # noqa: E402
 
 REPO = "zephyrproject-rtos/zephyr"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CACHE = layout.candidates() / "cache"
+# With a shared folder (EMBEDEVAL_SHARED, set for every cluster/ run), what
+# GitHub says about a merged PR is fetched once for all runs: the fetch cache
+# and the enriched records live there, and each run copies the enriched
+# records it uses into its own enriched/.
+_SHARED = os.environ.get("EMBEDEVAL_SHARED")
+CACHE = Path(_SHARED) / "github" / "prs" if _SHARED else layout.candidates() / "cache"
+SHARED_ENRICHED = Path(_SHARED) / "github" / "enriched" if _SHARED else None
+FETCHED = layout.candidates() / "fetched.json"   # the PRs of this run's fetch
 OUT = layout.candidates() / "candidates.jsonl"
 ENRICHED = layout.enriched()
+# Raise this whenever fetch_full's record changes, so that enriched records
+# cached by older code are made again instead of reused.
+ENRICH_VERSION = 1
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Readers never see half a file, even with several writers on NFS."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
+    tmp.write_text(text)
+    tmp.replace(path)
 
 # Paths that are never the fix itself. A PR touching only these has nothing
 # for an agent to repair.
@@ -141,8 +160,7 @@ def fetch_pr(number: int) -> dict | None:
         # is incomplete and nothing we do can complete it.
         "files_truncated": len(files) >= 3000,
     }
-    CACHE.mkdir(parents=True, exist_ok=True)
-    cached.write_text(json.dumps(record, indent=2))
+    write_atomic(cached, json.dumps(record, indent=2))
     return record
 
 
@@ -394,6 +412,12 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
     out = ENRICHED / f"{number}.json"
     if out.exists() and not refresh:
         return json.loads(out.read_text())
+    shared = SHARED_ENRICHED / f"{number}.json" if SHARED_ENRICHED else None
+    if shared and shared.exists() and not refresh:
+        rec = json.loads(shared.read_text())
+        if rec.get("enrich_version") == ENRICH_VERSION:
+            write_atomic(out, json.dumps(rec, indent=2))
+            return rec
 
     pr = gh(f"repos/{REPO}/pulls/{number}")
     if not pr:
@@ -532,8 +556,12 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
         # the local clone (the twister block) and from scripts/dry_run.py.
         add_twister_facts(record)
 
-    ENRICHED.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(record, indent=2))
+    record["enrich_version"] = ENRICH_VERSION
+    text = json.dumps(record, indent=2)
+    write_atomic(out, text)
+    # Not shared when something failed along the way: the next run tries again.
+    if shared and base_commit and "error" not in record.get("twister", {}):
+        write_atomic(shared, text)
     return record
 
 
@@ -568,6 +596,7 @@ def cmd_selftest(_args) -> None:
 
 def cmd_fetch(args) -> None:
     numbers = args.pr or search_merged_prs(args.since, args.until)
+    write_atomic(FETCHED, json.dumps(numbers))      # what `filter` reads
     print(f"{len(numbers)} merged PRs to fetch\n")
     for i, n in enumerate(numbers, 1):
         got = fetch_pr(n)
@@ -577,7 +606,11 @@ def cmd_fetch(args) -> None:
 
 
 def cmd_filter(_args) -> None:
-    files = sorted(CACHE.glob("*.json"))
+    if FETCHED.exists():        # the cache can hold other runs' PRs too
+        files = [CACHE / f"{n}.json" for n in sorted(json.loads(FETCHED.read_text()))]
+        files = [f for f in files if f.exists()]
+    else:
+        files = sorted(CACHE.glob("*.json"))
     if not files:
         sys.exit("No cached PRs. Run `fetch` first.")
 

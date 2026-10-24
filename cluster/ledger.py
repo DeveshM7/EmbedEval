@@ -1,7 +1,8 @@
 """
 Every PR's settled outcome, across all runs: <shared>/ledger.jsonl.
 
-One line per PR per run, appended by report.py:
+One line per PR per run, appended as the PR settles (node_worker.py,
+prepare.py; report.py fills in anything missing):
 
     {"pr": 65697, "outcome": "VALID", "detail": "", "run": "2025-09",
      "commit": "c5e170e...", "date": "2026-10-15T14:26:42"}
@@ -12,7 +13,8 @@ INVALID unless twister itself failed to run. Failures of the machinery
 (server, caps, disk guard, unfinished work) are not, so the next run tries
 those PRs again. prepare.py skips every PR the ledger has settled, unless
 given --redo. A PR's latest line wins; deleting a run folder does not
-touch the ledger.
+touch the ledger. prepare.py also skips PRs another run has taken and not
+finished (status.unfinished), so two runs never work on the same PR.
 """
 
 from __future__ import annotations

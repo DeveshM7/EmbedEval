@@ -287,13 +287,21 @@ Pick a name and the PRs:
 ```
 
 PRs an earlier run already settled are skipped: `prepare.py` looks them up
-in the ledger, `shared/ledger.jsonl`, which `report.py` fills at the end of
-every run. A PR is settled once it is VALID, INVALID, rejected by triage,
-dropped by a hard filter, or has no runnable pair. Everything else (a
-server that failed, a cap, an environment problem, a run cut short) is
-tried again by the next run that includes the PR. Skipped PRs show as
-`in ledger`, with the outcome and the run that settled it. Use `--redo`
-after changing the pipeline, to take them again.
+in the ledger, `shared/ledger.jsonl`, where each PR's outcome is written the
+moment it settles (so a job cut short loses nothing). A PR is settled once it
+is VALID, INVALID, rejected by triage, dropped by a hard filter, or has no
+runnable pair. Everything else (a fetch or server that failed, a cap, an
+environment problem, a run cut short) is tried again by the next run that
+includes the PR. Skipped PRs show as `in ledger`, with the outcome and the
+run that settled it. Use `--redo` after changing the pipeline, to take them
+again.
+
+PRs another run has taken and not finished are skipped too, even with
+`--redo`, so two runs never work on the same PR. They show as
+`in another run`, naming that run: resubmit it to finish them, or delete it.
+
+What GitHub says about a PR is fetched once and kept in `shared/github/`,
+so later runs over the same PRs do not ask GitHub again.
 
 It prints its progress and ends with a count of where the PRs stand:
 
@@ -378,7 +386,7 @@ $SCRATCH/embedeval/runs/<name>/
 ├── report.md, report.json   the results (section 7)
 ├── status/<pr>.json         each PR's outcome, per phase: the single source of truth
 │
-├── candidates/              fetched PRs (cache/); with --since also the hard filter's list
+├── candidates/              fetched.json (this run's PRs); with --since also the hard filter's list
 ├── enriched/<pr>.json       the full record triage reads
 ├── dryrun/<pr>.json         every scenario/board pair: selected, or filtered and why
 ├── triage/<pr>.json         the verdict: accept/reject, the pair, problem statement, tests
@@ -437,6 +445,8 @@ minutes spent in triage and validation.
 
 | Outcome | Meaning | What to do |
 |---|---|---|
+| `in another run` | taken by another run that has not finished it | resubmit that run, or delete it |
+| `fetch failed` | GitHub did not answer for it | see `logs/prepare/fetch.log`; prepare again |
 | `in ledger` | settled by an earlier run (the detail says how and which run); not done again | nothing, or `--redo` to take it again |
 | `hard filter` | dropped by a hard filter; the detail says which (`revert`, `touches no tests/`, ...) | nothing, or `--pr ... --no-filter` to force it |
 | `enrich failed` | GitHub or the clone could not give its record | see `logs/prepare/enrich.log`; prepare again |
@@ -577,6 +587,7 @@ On the network file systems, the same from every node:
     │   ├── venvs/                      dry-run Python environments, one per Zephyr era
     │   ├── vllm-cache/                 the model server's compiled kernels
     │   ├── ledger.jsonl                every PR's settled outcome, across runs (+ its .lock)
+    │   ├── github/                     what GitHub said about each PR: prs/ (fetch), enriched/
     │   ├── cache/                      Apptainer and uv download caches
     │   └── logs/                       how the shared images were built
     └── runs/<name>/                    one folder per run (section 6)
@@ -588,6 +599,7 @@ What you can delete:
 |---|---|
 | a folder in `runs/` | yes, when you no longer need its results (promote first); the ledger keeps its outcomes |
 | `shared/ledger.jsonl` | only to forget every past outcome: the next runs take all PRs again |
+| `shared/github/` | yes; fetched again from GitHub when needed |
 | `shared/vllm-cache/`, `shared/venvs/` | yes; rebuilt on the next run (about 8 min for the cache, a minute or two per venv) |
 | `shared/images/` | yes; rebuilt when needed (minutes per image) |
 | `shared/zephyr.git` | yes; `setup.py` clones it again |
