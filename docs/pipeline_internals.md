@@ -82,6 +82,7 @@ Two layers, kept apart on purpose:
 | `validate_instance.py` | validate | the image; the upstream fix from the clone | `instances/<id>/validation.json` |
 | `cleanup_instance.py` | clean up | the instance id | removes its image, dry-run tree, overlays |
 | `promote_instance.py` | promote | a VALID instance in the run | `apptainer/instances/<id>/` in the repository |
+| `registry.py` | push, pull, publish | a VALID image; `validation.json` | the registry; `published` in `validation.json`; pulled images in the work root |
 | `serve_triage_model.sh` | model server | a profile in `triage/models.json` | a vLLM server on `127.0.0.1:$PORT` |
 
 Helpers: `layout.py` (where everything is read and written, section 5.1),
@@ -275,6 +276,9 @@ every PR done exactly once.
    - `cleanup_instance.py` (leftovers of a cut-short try), then
      `generate_instance.py`, `build_instances.py` (each image build capped
      at `caps.build`), `validate_instance.py`;
+   - if VALID and `registry` is set: `registry.py push`, which records the
+     image's address and sha256 in `validation.json` (`published`); a push
+     that fails leaves the PR VALID with a note, to publish later;
    - `cleanup_instance.py` again, always: the image and overlays go, the
      recipe and `validation.json` stay;
    - if the outcome is `nothing ran`, retry once on the next board twister
@@ -487,6 +491,7 @@ silently ignored setting. `${USER}` and `${SCRATCH}` are expanded.
 | `parallel.triage_per_node` | 4 | matches the server's `--max-num-seqs 4` |
 | `parallel.validate_per_node` | 4 | builds use all 20 cores between them |
 | `disk_guard_gb` | 250 | no new build while the run's images exceed this |
+| `registry` | `null` | where VALID images are pushed (`oras://ghcr.io/<user>/embedeval-zephyr`); passed to scripts as `EMBEDEVAL_REGISTRY` |
 
 Keep `triage_phase + validate_phase + 5 <= time_limit`; `submit.py`
 checks. To give one phase more time, take it from the other.
@@ -598,8 +603,19 @@ run, trace and scoring machinery of `triage_prs.py`.
 - **Phases are barriers.** Validation starts only once all triage is done,
   so nodes that finish triage early wait for the last PR.
 - **One job at a time per account**, with a desktop open (the 2-job limit).
-- **Images are not kept.** Every instance image is rebuilt from its recipe
-  when needed (10-20 min). A container registry would avoid that; not done.
+- **Images are kept only with a registry.** With `registry` set, every
+  VALID image is pushed (about 2.7 GB, a minute) and evaluation pulls it
+  and checks its sha256; without it, images are rebuilt from the recipe
+  (about 18 min), and a rebuild is not byte-identical to the validated
+  image. An OCI tag can be pushed again; the recorded sha256 is what pins
+  the image. Apptainer images are single files, so the registry stores the
+  SDK layer again in every image.
+- **Not yet published (to do):** of the 18 committed instances, only
+  `zephyr__zephyr-95188` is in the registry. The other 17 were validated
+  before it existed; publish them when wanted (one job, about 30-40 min on
+  5 nodes, about 45 GB):
+  `scripts/registry.py publish <id>...` (rebuilds, validates again, pushes
+  only if still VALID, and rewrites each `validation.json`).
 - **Scholar-specific.** Partition, node shape, and the vLLM workarounds are
   Scholar's. The config covers the first two; the third is in
   `serve_triage_model.sh`.

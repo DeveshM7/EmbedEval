@@ -64,9 +64,11 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     if not patch_path.read_text().strip():
         result.update(patch_empty=True, error="empty patch — agent made no changes")
         return result
-    image = au.instance_image(instance_id)
-    if not image.exists():
-        result["error"] = f"instance image not built: {image}"
+    import registry       # the validated image: pulled from the registry if published
+    try:
+        image = registry.image_for(instance_id)
+    except (FileNotFoundError, RuntimeError) as e:
+        result["error"] = str(e)
         return result
 
     start = time.time()

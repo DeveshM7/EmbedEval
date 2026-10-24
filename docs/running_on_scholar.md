@@ -185,6 +185,7 @@ most likely to change:
 | `slurm.nodes_max` | 16 | you want to leave nodes for others |
 | `slurm.time_limit` | 3 h | never above 4 h |
 | `model.profile` | `qwen38-nvfp4` | you use another model (pipeline_internals.md, 7.3) |
+| `registry` | `null` (images not kept) | you want every VALID image pushed to a registry (3.5) |
 
 All settings are explained in [pipeline_internals.md](pipeline_internals.md), section 7.
 
@@ -229,6 +230,30 @@ Each `FAIL` line says what to do. The usual ones:
 | Slurm partition | your account has no access to `spark-batch`; ask the cluster admins |
 | model weights / vLLM image | download them (3.2), or point `paths.*` at them |
 | Zephyr clone: left from an interrupted clone | delete the `.partial` folder it names, run again |
+
+### 3.5 The image registry (optional, recommended)
+
+An instance image is about 2.7 GB and takes about 18 minutes to build.
+With a registry, every VALID image is pushed right after validation, and
+evaluation downloads it (about a minute) instead of rebuilding it, checked
+against the sha256 recorded at validation, so it is exactly the validated
+image. GitHub's registry is free for public packages. Once:
+
+```bash
+gh auth refresh -h github.com -s write:packages,read:packages   # lets the token push
+```
+
+and in `cluster/config.yaml`:
+
+```yaml
+registry: oras://ghcr.io/<your-github-user>/embedeval-zephyr
+```
+
+After the first push, open the package on GitHub (your profile ->
+Packages -> embedeval-zephyr -> Package settings -> Change visibility) and
+make it **public**: new packages are private, and private storage is
+small. Later pushes go to the same package. The token is read from `gh`
+when a push runs and is never written into a job.
 
 ---
 
@@ -561,7 +586,8 @@ R=$SCRATCH/embedeval/runs/2025-09
 ```
 
 Promotion copies the recipe files, `metadata.json` and `validation.json`
-into `apptainer/instances/<id>/`. It refuses an instance that is not VALID,
+into `apptainer/instances/<id>/`; `validation.json` carries `published`
+(where the image is in the registry, and its sha256) when it was pushed. It refuses an instance that is not VALID,
 or whose recipe -- `instance.def`, `instance.json`, `run_tests.py`,
 `test_patch.diff` -- changed after it was validated; that needs validating
 again. The problem statement in `metadata.json` is not part of the recipe,
@@ -571,8 +597,12 @@ Promoting an id that is already in `apptainer/instances/` replaces it
 (another run of the same PR, say); check `git diff` before committing.
 Commit the new folders yourself.
 
-A promoted instance is used like any other: build its image and run an
-agent on it, as in the [README](../README.md#quick-start).
+A promoted instance is used like any other: run an agent on it, as in the
+[README](../README.md#quick-start). If it was published, the harness pulls
+its image (and refuses one whose sha256 differs); otherwise build it first
+with `scripts/build_instances.py`. Instances validated before the registry
+existed can be published later: `scripts/registry.py publish <id>...`
+builds, validates again, and pushes only if still VALID.
 
 ---
 

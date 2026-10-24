@@ -239,7 +239,8 @@ def make_environment(meta: dict):
         commit_tests = ("cd /testbed && git add -A -- tests/ && git -c user.name=EmbedEval "
                         "-c user.email=embedeval@localhost commit -q -m "
                         "'The PR test changes, without its fix'")
-        return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
+        import registry   # the validated image: pulled from the registry if published
+        return ApptainerEnvironment(image=registry.image_for(meta["instance_id"]),
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
                                     setup_commands=[commit_tests])

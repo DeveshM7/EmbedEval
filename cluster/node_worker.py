@@ -349,7 +349,7 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
             res = attempt(run, pr, iid, verdict, lg, left, venv)
             if res is None:
                 return                                     # stopping: stays to do
-            state, what = res
+            state, what, published = res
             nothing_ran = what.startswith("INVALID: nothing ran")
             if nothing_ran and len(tried) == 1 and left() >= 10:
                 verdict = other_board(run, pr, verdict, tried)
@@ -357,7 +357,7 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
                     log(f"validate {pr}: nothing ran on {tried[0]}; retrying on another board")
                     continue
             if state == "done":
-                done("done", note, outcome=what)
+                done("done", "; ".join(x for x in (note, published) if x), outcome=what)
             else:
                 done("failed", f"{what}; {note}" if note else what)
             return
@@ -379,8 +379,10 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
 
 
 def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: dict):
-    """One generate, build, validate of the verdict's pair: ("done", outcome),
-    ("failed", why), or None if the worker is stopping."""
+    """One generate, build, validate of the verdict's pair: ("done", outcome,
+    note), ("failed", why, ""), or None if the worker is stopping. A VALID
+    image is pushed to the registry, if there is one, before it is removed;
+    a push that fails leaves the PR VALID, with a note."""
     step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)   # leftovers of a cut-short try
     try:
         rc = step([PY, "scripts/generate_instance.py", "--pr", str(pr), "--triage", str(verdict)],
@@ -388,25 +390,30 @@ def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: d
         if rc == 143:
             return None
         if rc:
-            return "failed", "generate failed: the verdict's pair is not runnable"
+            return "failed", "generate failed: the verdict's pair is not runnable", ""
         rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
                   min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
         if rc == 143:
             return None
         if rc:
-            return "failed", "build failed" if rc != 124 else "build hit the cap"
+            return "failed", "build failed" if rc != 124 else "build hit the cap", ""
         if left() < 3:
-            return "failed", "no time left to validate"
+            return "failed", "no time left to validate", ""
         rc = step([PY, "scripts/validate_instance.py", iid], lg, left(), venv)
         if rc == 143:
             return None
         report = run / "instances" / iid / "validation.json"
         reason = json.loads(report.read_text()).get("reason") if report.exists() else None
         if rc == 0:
-            return "done", "VALID"
+            if not venv.get("EMBEDEVAL_REGISTRY"):
+                return "done", "VALID", ""
+            rc = step([PY, "scripts/registry.py", "push", iid], lg, max(left(), 10), venv)
+            return "done", "VALID", "" if rc == 0 else (
+                "not published (push cut short)" if rc == 143 else
+                f"not published (push failed, rc={rc}; see the log); scripts/registry.py publish")
         if rc == 124:
-            return "failed", "validation hit the cap"
-        return "done", f"INVALID: {reason or f'rc={rc}'}"
+            return "failed", "validation hit the cap", ""
+        return "done", f"INVALID: {reason or f'rc={rc}'}", ""
     finally:
         step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
 

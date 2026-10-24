@@ -99,6 +99,8 @@ def env_for(cfg: dict, run_dir: Path | None = None) -> dict:
            "EMBEDEVAL_ZEPHYR_CLONE": d["zephyr_clone"],
            "EMBEDEVAL_MODELS": p["models"],
            "EMBEDEVAL_VLLM_IMAGE": p["vllm_image"]}
+    if cfg.get("registry"):
+        env["EMBEDEVAL_REGISTRY"] = cfg["registry"]
     if run_dir is not None:
         env["EMBEDEVAL_RUN_DIR"] = str(run_dir)
     return env
