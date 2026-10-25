@@ -1,0 +1,520 @@
+diff --git a/tests/subsys/fs/native_mount/CMakeLists.txt b/tests/subsys/fs/native_mount/CMakeLists.txt
+new file mode 100644
+index 00000000000..ae6d0940b6c
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/CMakeLists.txt
+@@ -0,0 +1,21 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(native_mount)
++
++file(GLOB app_sources src/*.c)
++
++target_sources(app PRIVATE
++  ${app_sources}
++  ../common/test_fs_util.c
++  ../common/test_fs_open_flags.c
++  ../common/test_fs_dirops.c
++  ../common/test_fs_basic.c
++)
++
++file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_fs)
++
++target_compile_definitions(app PRIVATE
++  TEST_FS_DIR="${CMAKE_CURRENT_BINARY_DIR}/test_fs"
++)
+diff --git a/tests/subsys/fs/native_mount/prj.conf b/tests/subsys/fs/native_mount/prj.conf
+new file mode 100644
+index 00000000000..d52ea32741f
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/prj.conf
+@@ -0,0 +1,10 @@
++CONFIG_FILE_SYSTEM=y
++CONFIG_FILE_SYSTEM_MKFS=y
++CONFIG_FILE_SYSTEM_NATIVE_MOUNT=y
++CONFIG_MAIN_STACK_SIZE=4096
++
++CONFIG_LOG=y
++CONFIG_FS_LOG_LEVEL_DBG=y
++
++CONFIG_ZTEST=y
++CONFIG_ZTEST_STACK_SIZE=4096
+diff --git a/tests/subsys/fs/native_mount/src/main.c b/tests/subsys/fs/native_mount/src/main.c
+new file mode 100644
+index 00000000000..5f7ecba7126
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/src/main.c
+@@ -0,0 +1,10 @@
++/*
++ * Copyright (c) 2025 Golioth, Inc.
++ * Copyright (c) 2025 Marcin Niestroj
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++
++ZTEST_SUITE(native_mount, NULL, NULL, NULL, NULL, NULL);
+diff --git a/tests/subsys/fs/native_mount/src/mount.c b/tests/subsys/fs/native_mount/src/mount.c
+new file mode 100644
+index 00000000000..07cd5d934c5
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/src/mount.c
+@@ -0,0 +1,86 @@
++/*
++ * Copyright (c) 2025 Golioth, Inc.
++ * Copyright (c) 2025 Marcin Niestroj
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <zephyr/fs/fs.h>
++
++#include <zephyr/logging/log.h>
++LOG_MODULE_REGISTER(mount);
++
++#include "mount.h"
++
++struct fs_mount_t test_mp = {
++	.type = FS_NATIVE_MOUNT,
++	.mnt_point = "/test_fs",
++	.fs_data = TEST_FS_DIR,
++	.storage_dev = NULL,
++};
++
++static int fs_rm_child(const char *path, struct fs_dir_t *dp)
++{
++	struct fs_dirent entry;
++	char *path_child;
++	size_t path_child_len;
++	int err;
++
++	err = fs_readdir(dp, &entry);
++	if (err) {
++		LOG_ERR("Failed to readdir during rm: %d", err);
++		return err;
++	}
++
++	if (entry.name[0] == '\0') {
++		return -EAGAIN;
++	}
++
++	path_child_len = strlen(path) + strlen(entry.name) + sizeof("/");
++
++	path_child = malloc(path_child_len);
++	if (!path_child) {
++		return -ENOMEM;
++	}
++
++	snprintf(path_child, path_child_len, "%s/%s", path, entry.name);
++
++	if (entry.type == FS_DIR_ENTRY_DIR) {
++		err = fs_rm_all(path_child);
++		if (err) {
++			goto free_child_path;
++		}
++	}
++
++	LOG_INF("Unlinking %s", path_child);
++
++	err = fs_unlink(path_child);
++
++free_child_path:
++	free(path_child);
++
++	return err;
++}
++
++int fs_rm_all(const char *path)
++{
++	struct fs_dir_t dp = {};
++	int err = 0;
++
++	LOG_INF("rm all %s", path);
++
++	err = fs_opendir(&dp, path);
++	if (err) {
++		LOG_ERR("opendir failed: %d", err);
++		return err;
++	}
++
++	while (err == 0) {
++		err = fs_rm_child(path, &dp);
++	}
++
++	return fs_closedir(&dp);
++}
+diff --git a/tests/subsys/fs/native_mount/src/mount.h b/tests/subsys/fs/native_mount/src/mount.h
+new file mode 100644
+index 00000000000..6aaee89bb36
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/src/mount.h
+@@ -0,0 +1,17 @@
++/*
++ * Copyright (c) 2025 Golioth, Inc.
++ * Copyright (c) 2025 Marcin Niestroj
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef __FS_MOUNT_H__
++#define __FS_MOUNT_H__
++
++#include <zephyr/fs/fs.h>
++
++extern struct fs_mount_t test_mp;
++
++int fs_rm_all(const char *path);
++
++#endif /* __FS_MOUNT_H__ */
+diff --git a/tests/subsys/fs/native_mount/src/test_native_mount_basic.c b/tests/subsys/fs/native_mount/src/test_native_mount_basic.c
+new file mode 100644
+index 00000000000..a75f8e776b6
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/src/test_native_mount_basic.c
+@@ -0,0 +1,28 @@
++/*
++ * Copyright (c) 2025 Golioth, Inc.
++ * Copyright (c) 2025 Marcin Niestroj
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <string.h>
++#include <zephyr/ztest.h>
++#include <zephyr/fs/fs.h>
++
++#include "mount.h"
++
++void test_fs_basic(void);
++
++struct fs_mount_t *fs_basic_test_mp = &test_mp;
++
++ZTEST(native_mount, test_native_mount_basic)
++{
++	zassert_equal(fs_mount(&test_mp), 0, "mount failed");
++	zassert_equal(fs_rm_all(test_mp.mnt_point), 0, "rm all failed");
++	zassert_equal(fs_unmount(&test_mp), 0, "unmount small failed");
++
++	/* Common basic tests.
++	 * (File system is mounted and unmounted during that test.)
++	 */
++	test_fs_basic();
++}
+diff --git a/tests/subsys/fs/native_mount/src/test_native_mount_dirops.c b/tests/subsys/fs/native_mount/src/test_native_mount_dirops.c
+new file mode 100644
+index 00000000000..f3f59b18362
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/src/test_native_mount_dirops.c
+@@ -0,0 +1,30 @@
++/*
++ * Copyright (c) 2025 Golioth, Inc.
++ * Copyright (c) 2025 Marcin Niestroj
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <string.h>
++#include <stdlib.h>
++#include <zephyr/ztest.h>
++#include <zephyr/fs/fs.h>
++
++#include "mount.h"
++
++void test_fs_dirops(void);
++
++/* Mount structure needed by test_fs_basic tests. */
++struct fs_mount_t *fs_dirops_test_mp = &test_mp;
++
++ZTEST(native_mount, test_native_mount_dirops)
++{
++	zassert_equal(fs_mount(&test_mp), 0, "mount failed");
++	zassert_equal(fs_rm_all(test_mp.mnt_point), 0, "rm all failed");
++	zassert_equal(fs_unmount(&test_mp), 0, "unmount small failed");
++
++	/* Common dirops tests.
++	 * (File system is mounted and unmounted during that test.)
++	 */
++	test_fs_dirops();
++}
+diff --git a/tests/subsys/fs/native_mount/src/test_native_mount_open_flags.c b/tests/subsys/fs/native_mount/src/test_native_mount_open_flags.c
+new file mode 100644
+index 00000000000..be6f4c4512d
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/src/test_native_mount_open_flags.c
+@@ -0,0 +1,52 @@
++/*
++ * Copyright (c) 2025 Golioth, Inc.
++ * Copyright (c) 2025 Marcin Niestroj
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++
++#include "mount.h"
++
++void test_fs_open_flags(void);
++/* Expected by test_fs_open_flags() */
++const char *test_fs_open_flags_file_path = "/test_fs/the_file";
++
++static void mount(struct fs_mount_t *mp)
++{
++	TC_PRINT("Mount %s\n", mp->mnt_point);
++
++	zassert_equal(fs_mount(mp), 0, "Failed to %s partition", "mount");
++}
++
++static void unmount(struct fs_mount_t *mp)
++{
++	TC_PRINT("Unmounting %s\n", mp->mnt_point);
++
++	zassert_equal(fs_unmount(mp), 0, "Failed to %s partition", "unmount");
++}
++
++static void cleanup(struct fs_mount_t *mp)
++{
++	TC_PRINT("Clean %s\n", mp->mnt_point);
++
++	zassert_equal(fs_rm_all(mp->mnt_point), TC_PASS, "Failed to %s partition", "clean");
++}
++
++ZTEST(native_mount, test_native_mount_open_flags)
++
++{
++	/* Using smallest partition for this tests as they do not write
++	 * a lot of data, basically they just check flags.
++	 */
++	struct fs_mount_t *mp = &test_mp;
++
++	mp->flags = 0;
++	mount(mp);
++	cleanup(mp);
++
++	test_fs_open_flags();
++
++	unmount(mp);
++}
+diff --git a/tests/subsys/fs/native_mount/testcase.yaml b/tests/subsys/fs/native_mount/testcase.yaml
+new file mode 100644
+index 00000000000..074de6ca067
+--- /dev/null
++++ b/tests/subsys/fs/native_mount/testcase.yaml
+@@ -0,0 +1,11 @@
++common:
++  tags:
++    - filesystem
++    - native_mount
++  platform_allow:
++    - native_sim
++    - native_sim/native/64
++  integration_platforms:
++    - native_sim
++tests:
++  filesystem.native_mount.default: {}
+diff --git a/tests/subsys/fs/native_mount_cmdline/CMakeLists.txt b/tests/subsys/fs/native_mount_cmdline/CMakeLists.txt
+new file mode 100644
+index 00000000000..273e2157256
+--- /dev/null
++++ b/tests/subsys/fs/native_mount_cmdline/CMakeLists.txt
+@@ -0,0 +1,9 @@
++cmake_minimum_required(VERSION 3.20.0)
++
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(native_mount_cmdline)
++
++file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/${NATIVE_MOUNT_HOST_DIR_A}")
++file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/${NATIVE_MOUNT_HOST_DIR_B}")
++
++target_sources(app PRIVATE src/main.c)
+diff --git a/tests/subsys/fs/native_mount_cmdline/prj.conf b/tests/subsys/fs/native_mount_cmdline/prj.conf
+new file mode 100644
+index 00000000000..6cba4d7757e
+--- /dev/null
++++ b/tests/subsys/fs/native_mount_cmdline/prj.conf
+@@ -0,0 +1,2 @@
++CONFIG_FILE_SYSTEM=y
++CONFIG_FILE_SYSTEM_NATIVE_MOUNT=y
+diff --git a/tests/subsys/fs/native_mount_cmdline/pytest/test_native_mount_cmdline.py b/tests/subsys/fs/native_mount_cmdline/pytest/test_native_mount_cmdline.py
+new file mode 100644
+index 00000000000..d991bca78a1
+--- /dev/null
++++ b/tests/subsys/fs/native_mount_cmdline/pytest/test_native_mount_cmdline.py
+@@ -0,0 +1,72 @@
++# Copyright (c) 2026 Marcin Niestroj
++#
++# SPDX-License-Identifier: Apache-2.0
++
++"""
++Test native_mount command-line volume mounting.
++
++Two testcase variants (default and banana_apple) exercise different host
++directory names.  A single test function handles both by reading
++CONFIG_NATIVE_EXTRA_CMDLINE_ARGS from the built .config file to discover
++the actual host paths, rather than hardcoding them.
++"""
++
++import logging
++import pathlib
++
++from twister_harness import DeviceAdapter
++from twister_harness.helpers.utils import find_in_config
++
++logger = logging.getLogger(__name__)
++
++CONTENT_A = "hello_from_dir_a"
++CONTENT_B = "hello_from_dir_b"
++
++
++def _parse_volume_mappings(build_dir: pathlib.Path) -> dict:
++    """Return {zephyr_mount_point: host_path} by parsing the built .config.
++
++    Reads CONFIG_NATIVE_EXTRA_CMDLINE_ARGS which looks like:
++        CONFIG_NATIVE_EXTRA_CMDLINE_ARGS="-volume=./dir_a:/dir_a ..."
++
++    Relative host paths are resolved against build_dir (the CWD used by
++    twister when running native_sim binaries).
++    """
++    config_file = build_dir / "zephyr" / ".config"
++    value = find_in_config(config_file, "CONFIG_NATIVE_EXTRA_CMDLINE_ARGS")
++    mappings = {}
++    for arg in value.split():
++        if not arg.startswith("-volume="):
++            continue
++        # Split HOST:ZEPHYR on first colon only (POSIX host paths have no colon)
++        host, zephyr = arg[len("-volume=") :].split(":", 1)
++        host_path = pathlib.Path(host)
++        if not host_path.is_absolute():
++            host_path = (build_dir / host_path).resolve()
++        mappings[zephyr] = host_path
++    return mappings
++
++
++def test_native_mount_cmdline(dut: DeviceAdapter):
++    """Files written to two Zephyr mount points appear in the correct host dirs."""
++
++    dut.readlines_until(regex="native_mount_cmdline: PASS", timeout=10.0)
++
++    build_dir = pathlib.Path(dut.device_config.build_dir)
++    mappings = _parse_volume_mappings(build_dir)
++
++    logger.info("Volume mappings from .config: %s", mappings)
++    assert mappings, "No -volume= entries found in CONFIG_NATIVE_EXTRA_CMDLINE_ARGS"
++
++    for zephyr_path, expected_content in [("/dir_a", CONTENT_A), ("/dir_b", CONTENT_B)]:
++        host_dir = mappings.get(zephyr_path)
++        assert host_dir is not None, f"No volume mapping found for {zephyr_path}"
++
++        host_file = host_dir / "hello.txt"
++        assert host_file.exists(), f"File not found on host: {host_file}"
++
++        actual = host_file.read_text()
++        assert actual == expected_content, (
++            f"Wrong content in {host_file}: expected {expected_content!r}, got {actual!r}"
++        )
++        logger.info("Verified %s (%s) -> %r", zephyr_path, host_file, actual)
+diff --git a/tests/subsys/fs/native_mount_cmdline/src/main.c b/tests/subsys/fs/native_mount_cmdline/src/main.c
+new file mode 100644
+index 00000000000..beeeb06186a
+--- /dev/null
++++ b/tests/subsys/fs/native_mount_cmdline/src/main.c
+@@ -0,0 +1,58 @@
++/*
++ * Copyright (c) 2026 Marcin Niestroj
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/kernel.h>
++#include <zephyr/fs/fs.h>
++#include <string.h>
++
++/* Zephyr-side mount points, matching the -volume= command-line arguments */
++#define FILE_A "/dir_a/hello.txt"
++#define FILE_B "/dir_b/hello.txt"
++
++#define CONTENT_A "hello_from_dir_a"
++#define CONTENT_B "hello_from_dir_b"
++
++static int write_file(const char *path, const char *content)
++{
++	struct fs_file_t file;
++	ssize_t ret;
++
++	fs_file_t_init(&file);
++
++	ret = fs_open(&file, path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
++	if (ret < 0) {
++		printk("Failed to open %s: %d\n", path, (int)ret);
++		return (int)ret;
++	}
++
++	ret = fs_write(&file, content, strlen(content));
++	fs_close(&file);
++
++	if (ret < 0) {
++		printk("Failed to write %s: %d\n", path, (int)ret);
++		return (int)ret;
++	}
++
++	return 0;
++}
++
++int main(void)
++{
++	int ret;
++
++	ret = write_file(FILE_A, CONTENT_A);
++	if (ret) {
++		return ret;
++	}
++
++	ret = write_file(FILE_B, CONTENT_B);
++	if (ret) {
++		return ret;
++	}
++
++	printk("native_mount_cmdline: PASS\n");
++	return 0;
++}
+diff --git a/tests/subsys/fs/native_mount_cmdline/testcase.yaml b/tests/subsys/fs/native_mount_cmdline/testcase.yaml
+new file mode 100644
+index 00000000000..1687ebd2fee
+--- /dev/null
++++ b/tests/subsys/fs/native_mount_cmdline/testcase.yaml
+@@ -0,0 +1,30 @@
++tests:
++  filesystem.native_mount_cmdline.default:
++    tags:
++      - native_mount
++    platform_allow:
++      - native_sim
++      - native_sim/native/64
++    integration_platforms:
++      - native_sim
++    harness: pytest
++    timeout: 60
++    extra_configs:
++      - CONFIG_NATIVE_EXTRA_CMDLINE_ARGS="-volume=./dir_a:/dir_a -volume=./dir_b:/dir_b"
++    extra_args:
++      - NATIVE_MOUNT_HOST_DIR_A=dir_a
++      - NATIVE_MOUNT_HOST_DIR_B=dir_b
++
++  filesystem.native_mount_cmdline.banana_apple:
++    tags:
++      - native_mount
++    platform_allow:
++      - native_sim
++      - native_sim/native/64
++    harness: pytest
++    timeout: 60
++    extra_configs:
++      - CONFIG_NATIVE_EXTRA_CMDLINE_ARGS="-volume=./banana:/dir_a -volume=./apple:/dir_b"
++    extra_args:
++      - NATIVE_MOUNT_HOST_DIR_A=banana
++      - NATIVE_MOUNT_HOST_DIR_B=apple

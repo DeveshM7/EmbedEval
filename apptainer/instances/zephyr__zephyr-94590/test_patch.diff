@@ -1,0 +1,694 @@
+diff --git a/tests/subsys/usb/host/CMakeLists.txt b/tests/subsys/usb/host/CMakeLists.txt
+new file mode 100644
+index 00000000000..d932ad7c6ba
+--- /dev/null
++++ b/tests/subsys/usb/host/CMakeLists.txt
+@@ -0,0 +1,15 @@
++# SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(test_usbh)
++
++include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
++
++target_include_directories(app PRIVATE include)
++target_include_directories(app PRIVATE ${ZEPHYR_BASE}/tests/subsys/usb/host/common)
++target_include_directories(app PRIVATE ${ZEPHYR_BASE}/subsys/usb/host)
++
++target_sources(app PRIVATE src/main.c src/class.c)
+diff --git a/tests/subsys/usb/host/Kconfig b/tests/subsys/usb/host/Kconfig
+new file mode 100644
+index 00000000000..2e0b55a5818
+--- /dev/null
++++ b/tests/subsys/usb/host/Kconfig
+@@ -0,0 +1,12 @@
++# SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
++# SPDX-License-Identifier: Apache-2.0
++
++config SYS_CLOCK_TICKS_PER_SEC
++	default 1000000 if BOARD_NATIVE_SIM
++
++# Source common USB sample options used to initialize new experimental USB
++# device stack. The scope of these options is limited to USB samples in project
++# tree, you cannot use them in your own application.
++source "samples/subsys/usb/common/Kconfig.sample_usbd"
++
++source "Kconfig.zephyr"
+diff --git a/tests/subsys/usb/host/boards/native_sim.overlay b/tests/subsys/usb/host/boards/native_sim.overlay
+new file mode 100644
+index 00000000000..273319f67be
+--- /dev/null
++++ b/tests/subsys/usb/host/boards/native_sim.overlay
+@@ -0,0 +1,18 @@
++/*
++ * SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/delete-node/ &zephyr_udc0;
++
++/ {
++	zephyr_uhc0: uhc_vrt0 {
++		compatible = "zephyr,uhc-virtual";
++
++		zephyr_udc0: udc_vrt0 {
++			compatible = "zephyr,udc-virtual";
++			num-bidir-endpoints = <8>;
++			maximum-speed = "high-speed";
++		};
++	};
++};
+diff --git a/tests/subsys/usb/host/boards/native_sim_64.overlay b/tests/subsys/usb/host/boards/native_sim_64.overlay
+new file mode 100644
+index 00000000000..95557a41be5
+--- /dev/null
++++ b/tests/subsys/usb/host/boards/native_sim_64.overlay
+@@ -0,0 +1,6 @@
++/*
++ * SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "native_sim.overlay"
+diff --git a/tests/subsys/usb/host/include/usbh_test_common.h b/tests/subsys/usb/host/include/usbh_test_common.h
+new file mode 100644
+index 00000000000..bce0afa7ba9
+--- /dev/null
++++ b/tests/subsys/usb/host/include/usbh_test_common.h
+@@ -0,0 +1,18 @@
++/*
++ * SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef USBH_TEST_COMMON_H
++#define USBH_TEST_COMMON_H
++
++#define FOO_TEST_VID	0x2FE3
++#define FOO_TEST_PID	0x0000
++#define FOO_TEST_CLASS	USB_BCC_VENDOR
++#define FOO_TEST_SUB	0x0
++#define FOO_TEST_PROTO	0x0
++
++/* USB host context for using it from the tests */
++extern struct usbh_context *const uhs_ctx;
++
++#endif /* USBH_TEST_COMMON_H */
+diff --git a/tests/subsys/usb/host/prj.conf b/tests/subsys/usb/host/prj.conf
+new file mode 100644
+index 00000000000..526318a1a78
+--- /dev/null
++++ b/tests/subsys/usb/host/prj.conf
+@@ -0,0 +1,15 @@
++# SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++# SPDX-License-Identifier: Apache-2.0
++
++CONFIG_LOG=y
++CONFIG_ZTEST=y
++
++CONFIG_USB_DEVICE_STACK_NEXT=y
++CONFIG_USBD_LOOPBACK_CLASS=y
++CONFIG_UDC_BUF_POOL_SIZE=4096
++CONFIG_SAMPLE_USBD_PID=0xFFFF
++CONFIG_SAMPLE_USBD_REMOTE_WAKEUP=y
++CONFIG_SAMPLE_USBD_PRODUCT="Zephyr USB Test"
++
++CONFIG_UHC_DRIVER=y
++CONFIG_USB_HOST_STACK=y
+diff --git a/tests/subsys/usb/host/src/class.c b/tests/subsys/usb/host/src/class.c
+new file mode 100644
+index 00000000000..2ede4ab595c
+--- /dev/null
++++ b/tests/subsys/usb/host/src/class.c
+@@ -0,0 +1,185 @@
++/*
++ * SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++#include <zephyr/usb/usbh.h>
++#include <zephyr/logging/log.h>
++
++#include "usbh_ch9.h"
++#include "usbh_class.h"
++#include "usbh_class_api.h"
++#include "usbh_desc.h"
++#include "usbh_device.h"
++#include "usbh_host.h"
++
++#include "usbh_test_common.h"
++
++LOG_MODULE_REGISTER(test_class, LOG_LEVEL_DBG);
++
++/* Private class data, here just an integer but usually a custom struct. */
++struct usbh_foo_priv {
++	enum {
++		/* Test value stored before the class is initialized */
++		FOO_CLASS_PRIV_INACTIVE,
++		/* Test value stored after the class is initialized */
++		FOO_CLASS_PRIV_IDLE,
++		/* Test value stored after the class is probed */
++		FOO_CLASS_PRIV_ENABLED,
++		/* Test value stored after the class is initialized */
++		FOO_CLASS_PRIV_INITIALIZED,
++		/* Test value stored after the class is suspended */
++		FOO_CLASS_PRIV_SUSPENDED,
++	} state;
++};
++
++static struct usbh_foo_priv usbh_foo_priv = {
++	.state = FOO_CLASS_PRIV_INACTIVE,
++};
++
++static int usbh_foo_init(struct usbh_class_data *const c_data,
++			 struct usbh_context *const uhs_ctx)
++{
++	struct usbh_foo_priv *priv = c_data->priv;
++
++	LOG_DBG("initializing %p, priv value 0x%x", c_data, *priv);
++
++	zassert_equal(priv->state, FOO_CLASS_PRIV_INACTIVE,
++		      "Class should be initialized only once");
++
++	priv->state = FOO_CLASS_PRIV_IDLE;
++
++	return 0;
++}
++
++static int usbh_foo_completion_cb(struct usbh_class_data *const c_data,
++				  struct uhc_transfer *const xfer)
++{
++	struct usbh_foo_priv *priv = c_data->priv;
++
++	LOG_DBG("completion callback for %p, transfer %p", c_data, xfer);
++
++	zassert_equal(priv->state, FOO_CLASS_PRIV_ENABLED);
++
++	return -ENOTSUP;
++}
++
++static int usbh_foo_probe(struct usbh_class_data *const c_data,
++			  struct usb_device *const udev,
++			  const uint8_t iface)
++{
++	struct usbh_foo_priv *const priv = c_data->priv;
++	const struct usb_desc_header *desc;
++	const struct usb_if_descriptor *if_desc;
++
++	LOG_DBG("Probing class %s", c_data->name);
++
++	zassert_equal(priv->state, FOO_CLASS_PRIV_IDLE);
++
++	desc = usbh_desc_get_iface(udev, iface);
++	if (desc == NULL) {
++		LOG_WRN("Could not get interface %d", iface);
++		return -ENOENT;
++	}
++
++	if (desc->bDescriptorType != USB_DESC_INTERFACE) {
++		LOG_ERR("Not an interface descriptor");
++		return -ENOTSUP;
++	}
++
++	if_desc = (const struct usb_if_descriptor *)desc;
++	if (if_desc->bInterfaceClass != USB_BCC_VENDOR) {
++		LOG_ERR("Unexpected class code");
++		return -ENOTSUP;
++	}
++
++	priv->state = FOO_CLASS_PRIV_ENABLED;
++
++	return 0;
++}
++
++static int usbh_foo_removed(struct usbh_class_data *const c_data)
++{
++	struct usbh_foo_priv *const priv = c_data->priv;
++
++	LOG_INF("Removed class %s", c_data->name);
++
++	zassert_equal(priv->state, FOO_CLASS_PRIV_ENABLED);
++
++	priv->state = FOO_CLASS_PRIV_IDLE;
++
++	return 0;
++}
++
++static int usbh_foo_suspended(struct usbh_class_data *const c_data)
++{
++	struct usbh_foo_priv *const priv = c_data->priv;
++
++	zassert_equal(priv->state, FOO_CLASS_PRIV_ENABLED);
++
++	priv->state = FOO_CLASS_PRIV_SUSPENDED;
++
++	return 0;
++}
++
++static int usbh_foo_resumed(struct usbh_class_data *const c_data)
++{
++	struct usbh_foo_priv *const priv = c_data->priv;
++
++	zassert_equal(priv->state, FOO_CLASS_PRIV_SUSPENDED);
++
++	priv->state = FOO_CLASS_PRIV_ENABLED;
++
++	return 0;
++}
++
++static struct usbh_class_api usbh_foo_api = {
++	.init = &usbh_foo_init,
++	.completion_cb = &usbh_foo_completion_cb,
++	.probe = &usbh_foo_probe,
++	.removed = &usbh_foo_removed,
++	.suspended = &usbh_foo_suspended,
++	.resumed = &usbh_foo_resumed,
++};
++
++const struct usbh_class_filter filter_rules_vid_pid[] = {
++	{
++		.vid = FOO_TEST_VID,
++		.pid = FOO_TEST_PID,
++		.flags = USBH_CLASS_MATCH_VID_PID,
++	},
++	{0},
++};
++
++const struct usbh_class_filter filter_rules_triple[] = {
++	{
++		.class = FOO_TEST_CLASS,
++		.sub = FOO_TEST_SUB,
++		.proto = FOO_TEST_PROTO,
++		.flags = USBH_CLASS_MATCH_CODE_TRIPLE,
++	},
++	{0},
++};
++
++const struct usbh_class_filter filter_rules_either[] = {
++	{
++		.class = FOO_TEST_CLASS,
++		.sub = FOO_TEST_SUB,
++		.proto = FOO_TEST_PROTO,
++		.flags = USBH_CLASS_MATCH_CODE_TRIPLE,
++	},
++	{
++		.vid = FOO_TEST_VID,
++		.pid = FOO_TEST_PID,
++		.flags = USBH_CLASS_MATCH_VID_PID,
++	},
++	{0},
++};
++
++const struct usbh_class_filter filter_rules_empty[] = {
++	{0},
++};
++
++/* Define a class used in the tests */
++USBH_DEFINE_CLASS(foo, &usbh_foo_api, &usbh_foo_priv, filter_rules_triple);
+diff --git a/tests/subsys/usb/host/src/main.c b/tests/subsys/usb/host/src/main.c
+new file mode 100644
+index 00000000000..458b5ab1594
+--- /dev/null
++++ b/tests/subsys/usb/host/src/main.c
+@@ -0,0 +1,363 @@
++/*
++ * SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++#include <zephyr/usb/usbd.h>
++#include <zephyr/usb/usbh.h>
++#include <zephyr/logging/log.h>
++#include <sample_usbd.h>
++
++#include "usbh_ch9.h"
++#include "usbh_class.h"
++#include "usbh_class_api.h"
++#include "usbh_desc.h"
++#include "usbh_device.h"
++#include "usbh_device.h"
++#include "usbh_host.h"
++
++#include "usbh_test_common.h"
++
++LOG_MODULE_REGISTER(usbh_test, LOG_LEVEL_INF);
++
++static const struct usbh_class_filter filter_rules_vid_pid[] = {
++	{
++		.vid = FOO_TEST_VID,
++		.pid = FOO_TEST_PID,
++		.flags = USBH_CLASS_MATCH_VID_PID,
++	},
++	{0},
++};
++
++static const struct usbh_class_filter filter_rules_triple[] = {
++	{
++		.class = FOO_TEST_CLASS,
++		.sub = FOO_TEST_SUB,
++		.proto = FOO_TEST_PROTO,
++		.flags = USBH_CLASS_MATCH_CODE_TRIPLE,
++	},
++	{0},
++};
++
++static const struct usbh_class_filter filter_rules_either[] = {
++	{
++		.class = FOO_TEST_CLASS,
++		.sub = FOO_TEST_SUB,
++		.proto = FOO_TEST_PROTO,
++		.flags = USBH_CLASS_MATCH_CODE_TRIPLE,
++	},
++	{
++		.vid = FOO_TEST_VID,
++		.pid = FOO_TEST_PID,
++		.flags = USBH_CLASS_MATCH_VID_PID,
++	},
++	{0},
++};
++
++static const struct usbh_class_filter filter_rules_empty[] = {
++	{0},
++};
++
++static const struct usbh_class_filter filter_invalid_triple = {
++	.vid = FOO_TEST_VID,
++	.pid = FOO_TEST_PID,
++};
++
++static const struct usbh_class_filter filter_invalid_vid_triple = {
++	.vid = FOO_TEST_VID + 1,
++	.pid = FOO_TEST_PID,
++};
++
++static const struct usbh_class_filter filter_invalid_pid_triple = {
++	.vid = FOO_TEST_VID,
++	.pid = FOO_TEST_PID + 1,
++};
++
++static const struct usbh_class_filter filter_valid = {
++	.vid = FOO_TEST_VID,
++	.pid = FOO_TEST_PID,
++	.class = FOO_TEST_CLASS,
++	.sub = FOO_TEST_SUB,
++	.proto = FOO_TEST_PROTO,
++};
++
++static const struct usbh_class_filter filter_invalid_vid = {
++	.vid = FOO_TEST_VID + 1,
++	.pid = FOO_TEST_PID,
++	.class = FOO_TEST_CLASS,
++	.sub = FOO_TEST_SUB,
++	.proto = FOO_TEST_PROTO,
++};
++
++static const struct usbh_class_filter filter_invalid_pid = {
++	.vid = FOO_TEST_VID,
++	.pid = FOO_TEST_PID + 1,
++	.class = FOO_TEST_CLASS,
++	.sub = FOO_TEST_SUB,
++	.proto = FOO_TEST_PROTO,
++};
++
++ZTEST(usbh_test, test_class_matching)
++{
++	/* Invalid code triple */
++
++	zassert(usbh_class_is_matching(NULL, &filter_invalid_triple),
++		"Filtering on NULL rules should match");
++
++	zassert(!usbh_class_is_matching(filter_rules_empty, &filter_invalid_triple),
++		"Filtering on empty rules should not match");
++
++	zassert(!usbh_class_is_matching(filter_rules_vid_pid, &filter_invalid_vid_triple),
++		"Filtering on invalid VID + invalid code triple should not match");
++
++	zassert(!usbh_class_is_matching(filter_rules_vid_pid, &filter_invalid_pid_triple),
++		"Filtering on invalid PID + invalid code triple should not match");
++
++	zassert(usbh_class_is_matching(filter_rules_vid_pid, &filter_invalid_triple),
++		"Filtering on valid VID:PID + invalid code triple (ignored) should match");
++
++	zassert(!usbh_class_is_matching(filter_rules_triple, &filter_invalid_triple),
++		"Filtering on valid VID:PID (ignored) + invalid code triple should not match");
++
++	zassert(usbh_class_is_matching(filter_rules_either, &filter_invalid_triple),
++		"Filtering on valid VID:PID + invalid code triple should match");
++
++	zassert(!usbh_class_is_matching(filter_rules_either, &filter_invalid_pid_triple),
++		"Filtering on invalid VID:PID + invalid code triple should not match");
++
++	zassert(!usbh_class_is_matching(filter_rules_either, &filter_invalid_pid_triple),
++		"Filtering on invalid VID:PID + invalid code triple should not match");
++
++	/* Valid code triple */
++
++	zassert(usbh_class_is_matching(filter_rules_vid_pid, &filter_valid),
++		"Filtering on valid VID:PID + valid code triple (ignored) should match");
++
++	zassert(!usbh_class_is_matching(filter_rules_vid_pid, &filter_invalid_vid),
++		"Filtering on invalid VID + valid code triple (ignored) should not match");
++
++	zassert(!usbh_class_is_matching(filter_rules_vid_pid, &filter_invalid_pid),
++		"Filtering on invalid PID + valid code triple (ignored) should not match");
++
++	zassert(usbh_class_is_matching(filter_rules_triple, &filter_invalid_pid),
++		"Filtering on invalid PID (ignored) + valid code triple should match");
++
++	zassert(usbh_class_is_matching(filter_rules_triple, &filter_invalid_vid),
++		"Filtering on invalid VID (ignored) + valid code triple should match");
++
++	zassert(usbh_class_is_matching(filter_rules_either, &filter_invalid_pid),
++		"Filtering on invalid PID + valid code triple should match");
++
++	zassert(usbh_class_is_matching(filter_rules_either, &filter_valid),
++		"Filtering on valid VID:PID + valid code triple should match");
++}
++
++ZTEST(usbh_test, test_get_next_desc)
++{
++	const struct usb_device *udev;
++	const struct usb_desc_header *desc;
++
++	udev = usbh_device_get_any(uhs_ctx);
++	zassert_not_null(udev);
++
++	desc = udev->cfg_desc;
++	zassert_not_null(desc);
++
++	/* #0 cfg */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_CONFIGURATION);
++	desc = usbh_desc_get_next(desc);
++
++	/* #1 iad */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_INTERFACE_ASSOC);
++	desc = usbh_desc_get_next(desc);
++
++	/* #2 if0 */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_INTERFACE);
++	desc = usbh_desc_get_next(desc);
++
++	/* #3 if0_out_ep */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	desc = usbh_desc_get_next(desc);
++
++	/* #4 if0_in_ep */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	desc = usbh_desc_get_next(desc);
++
++	/* #5 if1 */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_INTERFACE);
++	desc = usbh_desc_get_next(desc);
++
++	/* #6 if1_int_out_ep */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	desc = usbh_desc_get_next(desc);
++
++	/* #7 if1_int_in_ep */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	desc = usbh_desc_get_next(desc);
++
++	/* #8 if2_0 */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_INTERFACE);
++	desc = usbh_desc_get_next(desc);
++
++	/* #9 if2_0_iso_in_ep */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	desc = usbh_desc_get_next(desc);
++
++	/* #10 if2_0_iso_out_ep */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	desc = usbh_desc_get_next(desc);
++
++	/* #11 if2_1 */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_INTERFACE);
++	desc = usbh_desc_get_next(desc);
++
++	/* #12 if2_1_iso_in_ep */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	desc = usbh_desc_get_next(desc);
++
++	/* #13 if2_1_iso_out_ep */
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	desc = usbh_desc_get_next(desc);
++
++	/* #14 nil_desc */
++	zassert_is_null(desc);
++}
++
++ZTEST(usbh_test, test_get_types)
++{
++	const struct usb_device *udev;
++	const struct usb_desc_header *desc;
++
++	udev = usbh_device_get_any(uhs_ctx);
++	zassert_not_null(udev);
++
++	/* #2 if0 */
++	desc = usbh_desc_get_iface(udev, 0);
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_INTERFACE);
++	zassert_equal(((struct usb_if_descriptor *)desc)->bInterfaceNumber, 0);
++
++	/* #3 if0_out_ep */
++	desc = usbh_desc_get_endpoint(udev, 0x01);
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	zassert_equal(((struct usb_ep_descriptor *)desc)->bEndpointAddress, 0x01);
++
++	/* #4 if0_in_ep */
++	desc = usbh_desc_get_endpoint(udev, 0x81);
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_ENDPOINT);
++	zassert_equal(((struct usb_ep_descriptor *)desc)->bEndpointAddress, 0x81);
++
++	/* #5 if1 */
++	desc = usbh_desc_get_iface(udev, 1);
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_INTERFACE);
++	zassert_equal(((struct usb_if_descriptor *)desc)->bInterfaceNumber, 1);
++	zassert_equal(((struct usb_if_descriptor *)desc)->bAlternateSetting, 0);
++	desc = usbh_desc_get_next_alt_setting(desc);
++	zassert_is_null(desc);
++}
++
++ZTEST(usbh_test, test_get_next_function)
++{
++	const struct usb_device *udev;
++	const struct usb_desc_header *desc;
++
++	udev = usbh_device_get_any(uhs_ctx);
++	zassert_not_null(udev);
++
++	desc = udev->cfg_desc;
++	zassert_not_null(desc);
++
++	/* #1 iad */
++	desc = usbh_desc_get_next_function(desc);
++	zassert_not_null(desc);
++	zassert_equal(desc->bDescriptorType, USB_DESC_INTERFACE_ASSOC);
++
++	/* end */
++	desc = usbh_desc_get_next_function(desc);
++	zassert_is_null(desc);
++}
++
++static struct usbd_context *test_usbd;
++
++USBH_CONTROLLER_DEFINE(test_uhs_ctx, DEVICE_DT_GET(DT_NODELABEL(zephyr_uhc0)));
++
++struct usbh_context *const uhs_ctx = &test_uhs_ctx;
++
++void *usbh_test_enable(void)
++{
++	int ret;
++
++	ret = usbh_init(uhs_ctx);
++	zassert_ok(ret, "Failed to initialize USB host");
++
++	ret = usbh_enable(uhs_ctx);
++	zassert_ok(ret, "Failed to enable USB host");
++
++	ret = uhc_bus_reset(uhs_ctx->dev);
++	zassert_ok(ret, "Failed to signal bus reset");
++
++	ret = uhc_bus_resume(uhs_ctx->dev);
++	zassert_ok(ret, "Failed to signal bus resume");
++
++	ret = uhc_sof_enable(uhs_ctx->dev);
++	zassert_ok(ret, "Failed to enable SoF generator");
++
++	LOG_INF("Host controller enabled");
++
++	test_usbd = sample_usbd_setup_device(NULL);
++	zassert_not_null(test_usbd, "Failed to setup USB device");
++
++	ret = usbd_init(test_usbd);
++	zassert_ok(ret, "Failed to initialize device support");
++
++	ret = usbd_enable(test_usbd);
++	zassert_ok(ret, "Failed to enable device support");
++
++	LOG_INF("Device support enabled");
++
++	/* Allow the host time to reset the device. */
++	k_msleep(200);
++
++	return NULL;
++}
++
++void usbh_test_shutdown(void *f)
++{
++	int ret;
++
++	ret = usbd_disable(test_usbd);
++	zassert_ok(ret, "Failed to disable device support");
++
++	ret = usbd_shutdown(test_usbd);
++	zassert_ok(ret, "Failed to shutdown device support");
++
++	LOG_INF("Device support disabled");
++
++	ret = usbh_disable(uhs_ctx);
++	zassert_ok(ret, "Failed to disable USB host");
++
++	ret = usbh_shutdown(uhs_ctx);
++	zassert_ok(ret, "Failed to shutdown host support");
++
++	LOG_INF("Host controller disabled");
++}
++
++ZTEST_SUITE(usbh_test, NULL, usbh_test_enable, NULL, NULL, usbh_test_shutdown);
+diff --git a/tests/subsys/usb/host/testcase.yaml b/tests/subsys/usb/host/testcase.yaml
+new file mode 100644
+index 00000000000..61fe9bdc714
+--- /dev/null
++++ b/tests/subsys/usb/host/testcase.yaml
+@@ -0,0 +1,8 @@
++tests:
++  usb.host:
++    platform_allow:
++      - native_sim
++      - native_sim/native/64
++    integration_platforms:
++      - native_sim
++    tags: usb

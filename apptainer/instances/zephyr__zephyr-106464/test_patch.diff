@@ -1,0 +1,3168 @@
+diff --git a/tests/net/ptp/btca_state_machine/CMakeLists.txt b/tests/net/ptp/btca_state_machine/CMakeLists.txt
+new file mode 100644
+index 00000000000..6575972ae35
+--- /dev/null
++++ b/tests/net/ptp/btca_state_machine/CMakeLists.txt
+@@ -0,0 +1,24 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(ptp_btca_state_machine)
++
++target_sources(app PRIVATE
++  src/main.c
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp/btca.c
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp/state_machine.c
++)
++
++target_include_directories(app PRIVATE
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp
++)
++
++target_compile_definitions(app PRIVATE
++  CONFIG_PTP_LOG_LEVEL=3
++  CONFIG_PTP_DISABLED_PRESENT=1
++  CONFIG_PTP_FAULTY_PRESENT=1
++  CONFIG_PTP_LISTENING_PRESENT=1
++  CONFIG_PTP_PRE_TIME_TRANSMITTER_PRESENT=1
++  CONFIG_PTP_UNCALIBRATED_PRESENT=1
++)
+diff --git a/tests/net/ptp/btca_state_machine/prj.conf b/tests/net/ptp/btca_state_machine/prj.conf
+new file mode 100644
+index 00000000000..5222d90259f
+--- /dev/null
++++ b/tests/net/ptp/btca_state_machine/prj.conf
+@@ -0,0 +1,7 @@
++CONFIG_ZTEST=y
++CONFIG_NETWORKING=y
++CONFIG_NET_TEST=y
++CONFIG_NET_L2_ETHERNET=y
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_PKT_TIMESTAMP_THREAD=y
++CONFIG_MAIN_STACK_SIZE=2048
+diff --git a/tests/net/ptp/btca_state_machine/src/main.c b/tests/net/ptp/btca_state_machine/src/main.c
+new file mode 100644
+index 00000000000..ecf724c17ec
+--- /dev/null
++++ b/tests/net/ptp/btca_state_machine/src/main.c
+@@ -0,0 +1,276 @@
++/*
++ * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <string.h>
++
++#include <zephyr/ztest.h>
++
++#include "btca.h"
++#include "clock.h"
++#include "port.h"
++#include "state_machine.h"
++
++static const struct ptp_dataset *stub_clock_default_ds;
++static const struct ptp_dataset *stub_clock_best_ds;
++static struct ptp_dataset *stub_port_best_ds;
++static enum ptp_port_state stub_port_state_value;
++static const struct ptp_foreign_tt_clock *stub_clock_best_foreign;
++
++const struct ptp_dataset *ptp_clock_ds(void)
++{
++	return stub_clock_default_ds;
++}
++
++const struct ptp_dataset *ptp_clock_best_foreign_ds(void)
++{
++	return stub_clock_best_ds;
++}
++
++struct ptp_dataset *ptp_port_best_foreign_ds(struct ptp_port *port)
++{
++	(void)port;
++
++	return stub_port_best_ds;
++}
++
++enum ptp_port_state ptp_port_state(struct ptp_port *port)
++{
++	(void)port;
++
++	return stub_port_state_value;
++}
++
++const struct ptp_foreign_tt_clock *ptp_clock_best_time_transmitter(void)
++{
++	return stub_clock_best_foreign;
++}
++
++static void set_clk_id(ptp_clk_id *clk_id, uint8_t value)
++{
++	memset(clk_id->id, value, sizeof(clk_id->id));
++}
++
++static struct ptp_port_id make_port_id(uint8_t clk_id_value, uint16_t port_number)
++{
++	struct ptp_port_id id = {0};
++
++	set_clk_id(&id.clk_id, clk_id_value);
++	id.port_number = port_number;
++
++	return id;
++}
++
++static struct ptp_dataset make_dataset(uint8_t clk_id_value)
++{
++	struct ptp_dataset ds = {
++		.priority1 = 128,
++		.clk_quality.cls = 128,
++		.clk_quality.accuracy = 0x31,
++		.clk_quality.offset_scaled_log_variance = 0x8100,
++		.priority2 = 128,
++		.steps_rm = 2,
++	};
++
++	set_clk_id(&ds.clk_id, clk_id_value);
++	ds.sender = make_port_id((uint8_t)(clk_id_value + 1), 10);
++	ds.receiver = make_port_id((uint8_t)(clk_id_value + 2), 20);
++
++	return ds;
++}
++
++static void reset_btca_stubs(void)
++{
++	stub_clock_default_ds = NULL;
++	stub_clock_best_ds = NULL;
++	stub_port_best_ds = NULL;
++	stub_port_state_value = PTP_PS_INITIALIZING;
++	stub_clock_best_foreign = NULL;
++}
++
++static void btca_state_machine_before(void *fixture)
++{
++	(void)fixture;
++	reset_btca_stubs();
++}
++
++ZTEST(ptp_btca_state_machine, test_btca_ds_cmp_ranking_order_lower_is_better)
++{
++	struct ptp_dataset a;
++	struct ptp_dataset b;
++	int ret;
++
++	a = make_dataset(0x10);
++	b = make_dataset(0x20);
++	a.priority1 = 100;
++	b.priority1 = 101;
++	ret = ptp_btca_ds_cmp(&a, &b);
++	zassert_true(ret > 0, "priority1 compare failed: %d", ret);
++	ret = ptp_btca_ds_cmp(&b, &a);
++	zassert_true(ret < 0, "priority1 reverse compare failed: %d", ret);
++
++	a = make_dataset(0x10);
++	b = make_dataset(0x20);
++	a.priority1 = b.priority1;
++	a.clk_quality.cls = 100;
++	b.clk_quality.cls = 101;
++	ret = ptp_btca_ds_cmp(&a, &b);
++	zassert_true(ret > 0, "clock class compare failed: %d", ret);
++	ret = ptp_btca_ds_cmp(&b, &a);
++	zassert_true(ret < 0, "clock class reverse compare failed: %d", ret);
++
++	a = make_dataset(0x10);
++	b = make_dataset(0x20);
++	a.priority1 = b.priority1;
++	a.clk_quality.cls = b.clk_quality.cls;
++	a.clk_quality.accuracy = 0x20;
++	b.clk_quality.accuracy = 0x21;
++	ret = ptp_btca_ds_cmp(&a, &b);
++	zassert_true(ret > 0, "accuracy compare failed: %d", ret);
++	ret = ptp_btca_ds_cmp(&b, &a);
++	zassert_true(ret < 0, "accuracy reverse compare failed: %d", ret);
++
++	a = make_dataset(0x10);
++	b = make_dataset(0x20);
++	a.priority1 = b.priority1;
++	a.clk_quality.cls = b.clk_quality.cls;
++	a.clk_quality.accuracy = b.clk_quality.accuracy;
++	a.clk_quality.offset_scaled_log_variance = 1000;
++	b.clk_quality.offset_scaled_log_variance = 1001;
++	ret = ptp_btca_ds_cmp(&a, &b);
++	zassert_true(ret > 0, "variance compare failed: %d", ret);
++	ret = ptp_btca_ds_cmp(&b, &a);
++	zassert_true(ret < 0, "variance reverse compare failed: %d", ret);
++
++	a = make_dataset(0x10);
++	b = make_dataset(0x20);
++	a.priority1 = b.priority1;
++	a.clk_quality.cls = b.clk_quality.cls;
++	a.clk_quality.accuracy = b.clk_quality.accuracy;
++	a.clk_quality.offset_scaled_log_variance = b.clk_quality.offset_scaled_log_variance;
++	a.priority2 = 100;
++	b.priority2 = 101;
++	ret = ptp_btca_ds_cmp(&a, &b);
++	zassert_true(ret > 0, "priority2 compare failed: %d", ret);
++	ret = ptp_btca_ds_cmp(&b, &a);
++	zassert_true(ret < 0, "priority2 reverse compare failed: %d", ret);
++}
++
++ZTEST(ptp_btca_state_machine, test_btca_ds_cmp_same_pointer_is_equal)
++{
++	struct ptp_dataset a = make_dataset(0x0A);
++
++	zassert_equal(ptp_btca_ds_cmp(&a, &a), 0, "same object must compare equal");
++}
++
++ZTEST(ptp_btca_state_machine, test_btca_ds_cmp_null_handling)
++{
++	struct ptp_dataset a = make_dataset(0x0B);
++	int ret;
++
++	ret = ptp_btca_ds_cmp(&a, NULL);
++	zassert_true(ret > 0, "dataset should beat NULL: %d", ret);
++
++	ret = ptp_btca_ds_cmp(NULL, &a);
++	zassert_true(ret < 0, "NULL should lose to dataset: %d", ret);
++}
++
++ZTEST(ptp_btca_state_machine, test_btca_ds_cmp_steps_removed_preference)
++{
++	struct ptp_dataset a = make_dataset(0x0C);
++	struct ptp_dataset b = a;
++	int ret;
++
++	/* Keep same clock identity to force the ds_cmp2() path. */
++	a.steps_rm = 1;
++	b.steps_rm = 3;
++
++	ret = ptp_btca_ds_cmp(&a, &b);
++	zassert_true(ret > 0, "fewer steps removed should win: %d", ret);
++
++	ret = ptp_btca_ds_cmp(&b, &a);
++	zassert_true(ret < 0, "more steps removed should lose: %d", ret);
++}
++
++ZTEST(ptp_btca_state_machine, test_btca_ds_cmp_receiver_port_tie_break)
++{
++	struct ptp_dataset a = make_dataset(0x33);
++	struct ptp_dataset b = a;
++	int ret;
++
++	a.sender = make_port_id(0x44, 8);
++	b.sender = a.sender;
++
++	a.receiver = make_port_id(0x55, 1);
++	b.receiver = make_port_id(0x55, 2);
++
++	ret = ptp_btca_ds_cmp(&a, &b);
++	zassert_true(ret > 0, "receiver tie-break failed: %d", ret);
++	ret = ptp_btca_ds_cmp(&b, &a);
++	zassert_true(ret < 0, "receiver tie-break reverse failed: %d", ret);
++}
++
++ZTEST(ptp_btca_state_machine, test_state_machine_time_transmitter_ignores_rs_grand_master)
++{
++	enum ptp_port_state new_state;
++
++	new_state = ptp_state_machine(PTP_PS_TIME_TRANSMITTER, PTP_EVT_RS_GRAND_MASTER, false);
++	zassert_equal(new_state, PTP_PS_TIME_TRANSMITTER, "unexpected state: %d", new_state);
++}
++
++ZTEST(ptp_btca_state_machine, test_btca_state_decision_passive_on_topology_tie_break)
++{
++	struct ptp_port local_port = {0};
++	struct ptp_port remote_port = {0};
++	struct ptp_foreign_tt_clock best_foreign = {
++		.port = &remote_port,
++	};
++	struct ptp_dataset clk_default = make_dataset(0x70);
++	struct ptp_dataset clk_best = make_dataset(0x22);
++	struct ptp_dataset port_best;
++	enum ptp_port_state decision;
++
++	clk_default.priority1 = 200;
++	clk_default.clk_quality.cls = 248;
++
++	clk_best.priority1 = 100;
++	clk_best.clk_quality.cls = 248;
++	clk_best.steps_rm = 4;
++	clk_best.sender = make_port_id(0x23, 20);
++	clk_best.receiver = make_port_id(0x24, 1);
++
++	port_best = clk_best;
++	port_best.receiver.port_number = 2;
++
++	stub_clock_default_ds = &clk_default;
++	stub_clock_best_ds = &clk_best;
++	stub_port_best_ds = &port_best;
++	stub_port_state_value = PTP_PS_TIME_TRANSMITTER;
++	stub_clock_best_foreign = &best_foreign;
++
++	decision = ptp_btca_state_decision(&local_port);
++	zassert_equal(decision, PTP_PS_PASSIVE, "expected PASSIVE, got %d", decision);
++}
++
++ZTEST(ptp_btca_state_machine, test_btca_state_decision_listening_without_foreign)
++{
++	struct ptp_port local_port = {0};
++	struct ptp_foreign_tt_clock best_foreign = {
++		.port = &local_port,
++	};
++	struct ptp_dataset ds = make_dataset(0x90);
++	enum ptp_port_state decision;
++
++	stub_clock_default_ds = &ds;
++	stub_clock_best_ds = &ds;
++	stub_port_best_ds = NULL;
++	stub_port_state_value = PTP_PS_LISTENING;
++	stub_clock_best_foreign = &best_foreign;
++
++	decision = ptp_btca_state_decision(&local_port);
++	zassert_equal(decision, PTP_PS_LISTENING, "expected LISTENING, got %d", decision);
++}
++
++ZTEST_SUITE(ptp_btca_state_machine, NULL, NULL, btca_state_machine_before, NULL, NULL);
+diff --git a/tests/net/ptp/btca_state_machine/testcase.yaml b/tests/net/ptp/btca_state_machine/testcase.yaml
+new file mode 100644
+index 00000000000..4e019a6233b
+--- /dev/null
++++ b/tests/net/ptp/btca_state_machine/testcase.yaml
+@@ -0,0 +1,13 @@
++common:
++  tags:
++    - net
++    - ptp
++    - unit
++  platform_allow:
++    - native_sim
++  integration_platforms:
++    - native_sim
++  depends_on: netif
++tests:
++  net.ptp.btca_state_machine:
++    min_ram: 32
+diff --git a/tests/net/ptp/clock_decision/CMakeLists.txt b/tests/net/ptp/clock_decision/CMakeLists.txt
+new file mode 100644
+index 00000000000..311964adbd1
+--- /dev/null
++++ b/tests/net/ptp/clock_decision/CMakeLists.txt
+@@ -0,0 +1,24 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(ptp_clock_decision)
++
++target_sources(app PRIVATE
++  src/main.c
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp/clock.c
++)
++
++target_include_directories(app PRIVATE
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp
++)
++
++target_compile_definitions(app PRIVATE
++  CONFIG_PTP_LOG_LEVEL=3
++  CONFIG_PTP_NUM_PORTS=8
++  CONFIG_PTP_CLOCK_TYPE=0
++  CONFIG_PTP_TIME_RECEIVER_ONLY=0
++  CONFIG_PTP_CLOCK_ACCURACY=0x31
++  CONFIG_PTP_PRIORITY1=128
++  CONFIG_PTP_PRIORITY2=128
++)
+diff --git a/tests/net/ptp/clock_decision/prj.conf b/tests/net/ptp/clock_decision/prj.conf
+new file mode 100644
+index 00000000000..4281f2b33fd
+--- /dev/null
++++ b/tests/net/ptp/clock_decision/prj.conf
+@@ -0,0 +1,9 @@
++CONFIG_ZTEST=y
++CONFIG_NETWORKING=y
++CONFIG_NET_TEST=y
++CONFIG_NET_L2_ETHERNET=y
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_PKT_TIMESTAMP_THREAD=y
++CONFIG_ZVFS=y
++CONFIG_ZVFS_EVENTFD=y
++CONFIG_MAIN_STACK_SIZE=2048
+diff --git a/tests/net/ptp/clock_decision/src/main.c b/tests/net/ptp/clock_decision/src/main.c
+new file mode 100644
+index 00000000000..206e8db9cb6
+--- /dev/null
++++ b/tests/net/ptp/clock_decision/src/main.c
+@@ -0,0 +1,501 @@
++/*
++ * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <string.h>
++
++#include <zephyr/kernel.h>
++#include <zephyr/ztest.h>
++
++#include "btca.h"
++#include "clock.h"
++#include "msg.h"
++#include "port.h"
++
++#define MAX_TRACKED_PORTS 16
++
++struct port_stub_ctx {
++	struct ptp_port *port;
++	struct ptp_foreign_tt_clock *foreign;
++	enum ptp_port_state decision;
++	int event_calls;
++	enum ptp_port_event last_event;
++	bool last_tt_diff;
++};
++
++struct foreign_desc {
++	uint8_t sender_seed;
++	uint16_t sender_port_num;
++	uint8_t priority1;
++	uint8_t priority2;
++	uint16_t steps_rm;
++};
++
++static struct port_stub_ctx ctx_map[MAX_TRACKED_PORTS];
++static size_t ctx_map_count;
++static int total_event_calls;
++
++static void set_clk_id(ptp_clk_id *clk_id, uint8_t seed)
++{
++	for (size_t i = 0; i < ARRAY_SIZE(clk_id->id); i++) {
++		clk_id->id[i] = (uint8_t)(seed + i);
++	}
++}
++
++static struct port_stub_ctx *ctx_for_port(struct ptp_port *port, bool create)
++{
++	for (size_t i = 0; i < ctx_map_count; i++) {
++		if (ctx_map[i].port == port) {
++			return &ctx_map[i];
++		}
++	}
++
++	if (!create || ctx_map_count >= ARRAY_SIZE(ctx_map)) {
++		return NULL;
++	}
++
++	ctx_map[ctx_map_count].port = port;
++	ctx_map[ctx_map_count].decision = PTP_PS_LISTENING;
++
++	return &ctx_map[ctx_map_count++];
++}
++
++bool ptp_port_id_eq(const struct ptp_port_id *p1, const struct ptp_port_id *p2)
++{
++	return memcmp(&p1->clk_id, &p2->clk_id, sizeof(p1->clk_id)) == 0 &&
++	       p1->port_number == p2->port_number;
++}
++
++struct ptp_foreign_tt_clock *ptp_port_best_foreign(struct ptp_port *port)
++{
++	struct port_stub_ctx *ctx = ctx_for_port(port, false);
++
++	return ctx ? ctx->foreign : NULL;
++}
++
++int ptp_btca_ds_cmp(const struct ptp_dataset *a, const struct ptp_dataset *b)
++{
++	int clk_id_cmp;
++
++	if (a == b) {
++		return 0;
++	}
++
++	if (a && !b) {
++		return 1;
++	}
++
++	if (!a && b) {
++		return -1;
++	}
++
++	if (a->priority1 < b->priority1) {
++		return 1;
++	}
++
++	if (a->priority1 > b->priority1) {
++		return -1;
++	}
++
++	if (a->priority2 < b->priority2) {
++		return 1;
++	}
++
++	if (a->priority2 > b->priority2) {
++		return -1;
++	}
++
++	clk_id_cmp = memcmp(&a->clk_id, &b->clk_id, sizeof(a->clk_id));
++	if (clk_id_cmp < 0) {
++		return 1;
++	}
++
++	if (clk_id_cmp > 0) {
++		return -1;
++	}
++
++	return 0;
++}
++
++enum ptp_port_state ptp_btca_state_decision(struct ptp_port *port)
++{
++	struct port_stub_ctx *ctx = ctx_for_port(port, false);
++
++	return ctx ? ctx->decision : PTP_PS_LISTENING;
++}
++
++void ptp_port_event_handle(struct ptp_port *port, enum ptp_port_event event, bool tt_diff)
++{
++	struct port_stub_ctx *ctx = ctx_for_port(port, false);
++
++	zassert_not_null(ctx, "missing context for port");
++
++	ctx->event_calls++;
++	ctx->last_event = event;
++	ctx->last_tt_diff = tt_diff;
++	total_event_calls++;
++}
++
++static struct ptp_default_ds *clock_default_ds_mut(void)
++{
++	return (struct ptp_default_ds *)ptp_clock_default_ds();
++}
++
++static struct ptp_parent_ds *clock_parent_ds_mut(void)
++{
++	return (struct ptp_parent_ds *)ptp_clock_parent_ds();
++}
++
++static struct ptp_current_ds *clock_current_ds_mut(void)
++{
++	return (struct ptp_current_ds *)ptp_clock_current_ds();
++}
++
++static struct ptp_time_prop_ds *clock_time_prop_ds_mut(void)
++{
++	return (struct ptp_time_prop_ds *)ptp_clock_time_prop_ds();
++}
++
++static void init_port(struct ptp_port *port, uint8_t clk_seed, uint16_t port_num)
++{
++	memset(port, 0, sizeof(*port));
++
++	set_clk_id(&port->port_ds.id.clk_id, clk_seed);
++	port->port_ds.id.port_number = port_num;
++
++	sys_slist_append(ptp_clock_ports_list(), &port->node);
++}
++
++static void init_announce_msg(struct ptp_msg *msg, uint8_t gm_seed, uint8_t prio1, uint8_t prio2,
++			      uint16_t steps_rm, uint16_t utc_offset, uint8_t flags1)
++{
++	memset(msg, 0, sizeof(*msg));
++
++	msg->announce.gm_priority1 = prio1;
++	msg->announce.gm_priority2 = prio2;
++	msg->announce.steps_rm = steps_rm;
++	msg->announce.current_utc_offset = utc_offset;
++	msg->header.flags[1] = flags1;
++
++	msg->announce.gm_clk_quality.cls = 128;
++	msg->announce.gm_clk_quality.accuracy = 0x33;
++	msg->announce.gm_clk_quality.offset_scaled_log_variance = 0x1234;
++
++	set_clk_id(&msg->announce.gm_id, gm_seed);
++}
++
++static struct foreign_desc make_foreign_desc(uint8_t sender_seed, uint16_t sender_port_num,
++					     uint8_t priority1, uint8_t priority2,
++					     uint16_t steps_rm)
++{
++	struct foreign_desc desc;
++
++	desc.sender_seed = sender_seed;
++	desc.sender_port_num = sender_port_num;
++	desc.priority1 = priority1;
++	desc.priority2 = priority2;
++	desc.steps_rm = steps_rm;
++
++	return desc;
++}
++
++static void init_foreign(struct ptp_foreign_tt_clock *foreign, struct ptp_port *receiver,
++			 struct foreign_desc desc, struct ptp_msg *announce_msg)
++{
++	memset(foreign, 0, sizeof(*foreign));
++
++	foreign->port = receiver;
++	foreign->dataset.priority1 = desc.priority1;
++	foreign->dataset.priority2 = desc.priority2;
++	foreign->dataset.steps_rm = desc.steps_rm;
++	foreign->dataset.sender.port_number = desc.sender_port_num;
++
++	set_clk_id(&foreign->dataset.clk_id, (uint8_t)(desc.sender_seed + 0x40));
++	set_clk_id(&foreign->dataset.sender.clk_id, desc.sender_seed);
++
++	if (receiver) {
++		foreign->dataset.receiver = receiver->port_ds.id;
++	}
++
++	k_fifo_init(&foreign->messages);
++	if (announce_msg) {
++		foreign->messages_count = 1;
++		k_fifo_put(&foreign->messages, announce_msg);
++	}
++}
++
++static void map_port(struct ptp_port *port, enum ptp_port_state decision,
++		     struct ptp_foreign_tt_clock *foreign)
++{
++	struct port_stub_ctx *ctx = ctx_for_port(port, true);
++
++	zassert_not_null(ctx, "could not allocate port context");
++	ctx->decision = decision;
++	ctx->foreign = foreign;
++	ctx->event_calls = 0;
++	ctx->last_event = PTP_EVT_NONE;
++	ctx->last_tt_diff = false;
++}
++
++static void assert_single_event(struct ptp_port *port, enum ptp_port_event expected_event)
++{
++	struct port_stub_ctx *ctx = ctx_for_port(port, false);
++
++	zassert_not_null(ctx, "missing context for asserted port");
++	zassert_equal(ctx->event_calls, 1, "unexpected event count");
++	zassert_equal(ctx->last_event, expected_event, "unexpected event value");
++	zassert_false(ctx->last_tt_diff, "tt_diff should remain false");
++}
++
++static void reset_clock_decision_state(void)
++{
++	struct ptp_default_ds *dds = clock_default_ds_mut();
++	struct ptp_parent_ds *pds = clock_parent_ds_mut();
++	struct ptp_current_ds *cds = clock_current_ds_mut();
++	struct ptp_time_prop_ds *tpds = clock_time_prop_ds_mut();
++
++	memset(dds, 0, sizeof(*dds));
++	memset(pds, 0, sizeof(*pds));
++	memset(cds, 0, sizeof(*cds));
++	memset(tpds, 0, sizeof(*tpds));
++	sys_slist_init(ptp_clock_ports_list());
++
++	memset(ctx_map, 0, sizeof(ctx_map));
++	ctx_map_count = 0;
++	total_event_calls = 0;
++
++	/* Force state-decision flag and best pointer into a known cleared state. */
++	ptp_clock_state_decision_req();
++	ptp_clock_handle_state_decision_evt();
++}
++
++static void clock_decision_before(void *fixture)
++{
++	ARG_UNUSED(fixture);
++	reset_clock_decision_state();
++}
++
++ZTEST(ptp_clock_decision, test_no_state_decision_request_noop)
++{
++	struct ptp_port port;
++	struct ptp_foreign_tt_clock foreign;
++
++	init_port(&port, 0x10, 1);
++	init_foreign(&foreign, &port, make_foreign_desc(0x20, 2, 120, 100, 3), NULL);
++	map_port(&port, PTP_PS_GRAND_MASTER, &foreign);
++
++	ptp_clock_handle_state_decision_evt();
++
++	zassert_equal(total_event_calls, 0, "handler should do nothing without request");
++	zassert_is_null(ptp_clock_best_time_transmitter(), "best foreign should remain unchanged");
++	zassert_is_null(ptp_clock_best_foreign_ds(), "best foreign dataset should remain NULL");
++}
++
++ZTEST(ptp_clock_decision, test_request_without_eligible_foreign_keeps_best_null)
++{
++	struct ptp_port port;
++
++	init_port(&port, 0x11, 1);
++	map_port(&port, PTP_PS_LISTENING, NULL);
++
++	ptp_clock_state_decision_req();
++	ptp_clock_handle_state_decision_evt();
++
++	zassert_is_null(ptp_clock_best_time_transmitter(), "best foreign should be NULL");
++	zassert_is_null(ptp_clock_best_foreign_ds(), "best foreign dataset should be NULL");
++	assert_single_event(&port, PTP_EVT_NONE);
++	zassert_equal(total_event_calls, 1, "unexpected total event calls");
++}
++
++ZTEST(ptp_clock_decision, test_best_selection_chooses_better_foreign)
++{
++	struct ptp_port port_a;
++	struct ptp_port port_b;
++	struct ptp_foreign_tt_clock foreign_a;
++	struct ptp_foreign_tt_clock foreign_b;
++
++	init_port(&port_a, 0x12, 1);
++	init_port(&port_b, 0x13, 2);
++
++	init_foreign(&foreign_a, &port_a, make_foreign_desc(0x22, 2, 130, 100, 1), NULL);
++	init_foreign(&foreign_b, &port_b, make_foreign_desc(0x23, 3, 120, 100, 1), NULL);
++
++	map_port(&port_a, PTP_PS_LISTENING, &foreign_a);
++	map_port(&port_b, PTP_PS_LISTENING, &foreign_b);
++
++	ptp_clock_state_decision_req();
++	ptp_clock_handle_state_decision_evt();
++
++	zassert_equal(ptp_clock_best_time_transmitter(), &foreign_b,
++		      "lower priority foreign should be selected");
++	zassert_equal(ptp_clock_best_foreign_ds(), &foreign_b.dataset,
++		      "best dataset getter should point to selected foreign");
++	assert_single_event(&port_a, PTP_EVT_NONE);
++	assert_single_event(&port_b, PTP_EVT_NONE);
++}
++
++ZTEST(ptp_clock_decision, test_negative_comparator_does_not_replace_best)
++{
++	struct ptp_port port_a;
++	struct ptp_port port_b;
++	struct ptp_foreign_tt_clock foreign_a;
++	struct ptp_foreign_tt_clock foreign_b;
++
++	init_port(&port_a, 0x14, 1);
++	init_port(&port_b, 0x15, 2);
++
++	init_foreign(&foreign_a, &port_a, make_foreign_desc(0x24, 2, 110, 100, 1), NULL);
++	init_foreign(&foreign_b, &port_b, make_foreign_desc(0x25, 3, 140, 100, 1), NULL);
++
++	map_port(&port_a, PTP_PS_LISTENING, &foreign_a);
++	map_port(&port_b, PTP_PS_LISTENING, &foreign_b);
++
++	ptp_clock_state_decision_req();
++	ptp_clock_handle_state_decision_evt();
++
++	zassert_equal(ptp_clock_best_time_transmitter(), &foreign_a,
++		      "worse foreign must not replace current best");
++}
++
++ZTEST(ptp_clock_decision, test_state_to_event_mapping)
++{
++	struct ptp_port p_listening;
++	struct ptp_port p_grand_master;
++	struct ptp_port p_time_transmitter;
++	struct ptp_port p_time_receiver;
++	struct ptp_port p_passive;
++	struct ptp_port p_unexpected;
++	struct ptp_foreign_tt_clock foreign_best;
++	struct ptp_msg best_msg;
++
++	init_announce_msg(&best_msg, 0x70, 90, 80, 5, 41, 0xA5);
++
++	init_port(&p_listening, 0x20, 1);
++	init_port(&p_grand_master, 0x21, 2);
++	init_port(&p_time_transmitter, 0x22, 3);
++	init_port(&p_time_receiver, 0x23, 4);
++	init_port(&p_passive, 0x24, 5);
++	init_port(&p_unexpected, 0x25, 6);
++
++	init_foreign(&foreign_best, &p_listening, make_foreign_desc(0x30, 9, 100, 90, 4),
++		     &best_msg);
++
++	map_port(&p_listening, PTP_PS_LISTENING, &foreign_best);
++	map_port(&p_grand_master, PTP_PS_GRAND_MASTER, NULL);
++	map_port(&p_time_transmitter, PTP_PS_TIME_TRANSMITTER, NULL);
++	map_port(&p_time_receiver, PTP_PS_TIME_RECEIVER, NULL);
++	map_port(&p_passive, PTP_PS_PASSIVE, NULL);
++	map_port(&p_unexpected, PTP_PS_INITIALIZING, NULL);
++
++	ptp_clock_state_decision_req();
++	ptp_clock_handle_state_decision_evt();
++
++	assert_single_event(&p_listening, PTP_EVT_NONE);
++	assert_single_event(&p_grand_master, PTP_EVT_RS_GRAND_MASTER);
++	assert_single_event(&p_time_transmitter, PTP_EVT_RS_TIME_TRANSMITTER);
++	assert_single_event(&p_time_receiver, PTP_EVT_RS_TIME_RECEIVER);
++	assert_single_event(&p_passive, PTP_EVT_RS_PASSIVE);
++	assert_single_event(&p_unexpected, PTP_EVT_FAULT_DETECTED);
++	zassert_equal(total_event_calls, 6, "unexpected mapped event call count");
++}
++
++ZTEST(ptp_clock_decision, test_grand_master_update_path)
++{
++	struct ptp_port port;
++	struct ptp_default_ds *dds = clock_default_ds_mut();
++	struct ptp_current_ds *cds = clock_current_ds_mut();
++	struct ptp_parent_ds *pds = clock_parent_ds_mut();
++	struct ptp_time_prop_ds *tpds = clock_time_prop_ds_mut();
++
++	init_port(&port, 0x31, 1);
++	map_port(&port, PTP_PS_GRAND_MASTER, NULL);
++
++	set_clk_id(&dds->clk_id, 0x50);
++	dds->clk_quality.cls = 7;
++	dds->clk_quality.accuracy = 0x20;
++	dds->clk_quality.offset_scaled_log_variance = 0x2200;
++	dds->priority1 = 100;
++	dds->priority2 = 101;
++
++	cds->steps_rm = 55;
++	cds->offset_from_tt = 0xAAAA;
++	cds->mean_delay = 0xBBBB;
++	tpds->current_utc_offset = 1;
++	tpds->flags = 0xFF;
++
++	ptp_clock_state_decision_req();
++	ptp_clock_handle_state_decision_evt();
++
++	zassert_equal(cds->steps_rm, 0, "current_ds.steps_rm should reset");
++	zassert_equal(cds->offset_from_tt, 0, "current_ds.offset should reset");
++	zassert_equal(cds->mean_delay, 0, "current_ds.mean_delay should reset");
++
++	zassert_mem_equal(&pds->port_id.clk_id, &dds->clk_id, sizeof(dds->clk_id),
++			  "parent port clock id mismatch");
++	zassert_mem_equal(&pds->gm_id, &dds->clk_id, sizeof(dds->clk_id),
++			  "grandmaster id mismatch");
++	zassert_equal(pds->port_id.port_number, 0, "parent port number mismatch");
++	zassert_mem_equal(&pds->gm_clk_quality, &dds->clk_quality, sizeof(dds->clk_quality),
++			  "clock quality mismatch");
++	zassert_equal(pds->gm_priority1, dds->priority1, "priority1 mismatch");
++	zassert_equal(pds->gm_priority2, dds->priority2, "priority2 mismatch");
++
++	zassert_equal(tpds->current_utc_offset, 37, "UTC offset should be forced to 37");
++	zassert_equal(tpds->flags, 0, "time properties flags should reset");
++	assert_single_event(&port, PTP_EVT_RS_GRAND_MASTER);
++}
++
++ZTEST(ptp_clock_decision, test_time_receiver_update_path)
++{
++	struct ptp_port port;
++	struct ptp_foreign_tt_clock foreign;
++	struct ptp_msg msg;
++	struct ptp_current_ds *cds = clock_current_ds_mut();
++	struct ptp_parent_ds *pds = clock_parent_ds_mut();
++	struct ptp_time_prop_ds *tpds = clock_time_prop_ds_mut();
++
++	init_announce_msg(&msg, 0x80, 111, 112, 6, 44, 0x5A);
++	init_port(&port, 0x41, 1);
++	init_foreign(&foreign, &port, make_foreign_desc(0x55, 7, 120, 100, 6), &msg);
++	map_port(&port, PTP_PS_TIME_RECEIVER, &foreign);
++
++	ptp_clock_state_decision_req();
++	ptp_clock_handle_state_decision_evt();
++
++	zassert_equal(cds->steps_rm, 7, "steps_rm should be 1 + best dataset steps");
++	zassert_mem_equal(&pds->gm_id, &msg.announce.gm_id, sizeof(msg.announce.gm_id),
++			  "parent gm_id mismatch");
++	zassert_true(ptp_port_id_eq(&pds->port_id, &foreign.dataset.sender),
++		     "parent sender port mismatch");
++	zassert_mem_equal(&pds->gm_clk_quality, &msg.announce.gm_clk_quality,
++			  sizeof(msg.announce.gm_clk_quality), "parent gm clock quality mismatch");
++	zassert_equal(pds->gm_priority1, msg.announce.gm_priority1, "priority1 mismatch");
++	zassert_equal(pds->gm_priority2, msg.announce.gm_priority2, "priority2 mismatch");
++
++	zassert_equal(tpds->current_utc_offset, msg.announce.current_utc_offset,
++		      "UTC offset mismatch");
++	zassert_equal(tpds->flags, msg.header.flags[1], "time_prop flags mismatch");
++	assert_single_event(&port, PTP_EVT_RS_TIME_RECEIVER);
++}
++
++ZTEST(ptp_clock_decision, test_getters_reflect_selected_best)
++{
++	struct ptp_port port;
++	struct ptp_foreign_tt_clock foreign;
++
++	init_port(&port, 0x42, 1);
++	init_foreign(&foreign, &port, make_foreign_desc(0x56, 8, 90, 80, 2), NULL);
++	map_port(&port, PTP_PS_LISTENING, &foreign);
++
++	ptp_clock_state_decision_req();
++	ptp_clock_handle_state_decision_evt();
++
++	zassert_equal(ptp_clock_best_time_transmitter(), &foreign,
++		      "best time transmitter getter mismatch");
++	zassert_equal(ptp_clock_best_foreign_ds(), &foreign.dataset,
++		      "best foreign dataset getter mismatch");
++}
++
++ZTEST_SUITE(ptp_clock_decision, NULL, NULL, clock_decision_before, NULL, NULL);
+diff --git a/tests/net/ptp/clock_decision/testcase.yaml b/tests/net/ptp/clock_decision/testcase.yaml
+new file mode 100644
+index 00000000000..45621daf28d
+--- /dev/null
++++ b/tests/net/ptp/clock_decision/testcase.yaml
+@@ -0,0 +1,13 @@
++common:
++  tags:
++    - net
++    - ptp
++    - unit
++  platform_allow:
++    - native_sim
++  integration_platforms:
++    - native_sim
++  depends_on: netif
++tests:
++  net.ptp.clock_decision:
++    min_ram: 32
+diff --git a/tests/net/ptp/clock_wakeup/CMakeLists.txt b/tests/net/ptp/clock_wakeup/CMakeLists.txt
+new file mode 100644
+index 00000000000..6e7afaba24a
+--- /dev/null
++++ b/tests/net/ptp/clock_wakeup/CMakeLists.txt
+@@ -0,0 +1,23 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(ptp_clock_wakeup)
++
++target_sources(app PRIVATE
++  src/main.c
++)
++
++target_include_directories(app PRIVATE
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp
++)
++
++target_compile_definitions(app PRIVATE
++  CONFIG_PTP_LOG_LEVEL=3
++  CONFIG_PTP_NUM_PORTS=4
++  CONFIG_PTP_CLOCK_TYPE=0
++  CONFIG_PTP_TIME_RECEIVER_ONLY=0
++  CONFIG_PTP_CLOCK_ACCURACY=0x31
++  CONFIG_PTP_PRIORITY1=128
++  CONFIG_PTP_PRIORITY2=128
++)
+diff --git a/tests/net/ptp/clock_wakeup/prj.conf b/tests/net/ptp/clock_wakeup/prj.conf
+new file mode 100644
+index 00000000000..5222d90259f
+--- /dev/null
++++ b/tests/net/ptp/clock_wakeup/prj.conf
+@@ -0,0 +1,7 @@
++CONFIG_ZTEST=y
++CONFIG_NETWORKING=y
++CONFIG_NET_TEST=y
++CONFIG_NET_L2_ETHERNET=y
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_PKT_TIMESTAMP_THREAD=y
++CONFIG_MAIN_STACK_SIZE=2048
+diff --git a/tests/net/ptp/clock_wakeup/src/main.c b/tests/net/ptp/clock_wakeup/src/main.c
+new file mode 100644
+index 00000000000..7b3e22a1c64
+--- /dev/null
++++ b/tests/net/ptp/clock_wakeup/src/main.c
+@@ -0,0 +1,271 @@
++/*
++ * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <string.h>
++
++#include <zephyr/drivers/ptp_clock.h>
++#include <zephyr/kernel.h>
++#include <zephyr/net/ethernet.h>
++#include <zephyr/net/socket.h>
++#include <zephyr/ztest.h>
++#include <zephyr/zvfs/eventfd.h>
++
++#include "btca.h"
++#include "clock.h"
++#include "msg.h"
++#include "port.h"
++#include "transport.h"
++
++static struct net_if fake_iface;
++static uint8_t fake_mac[NET_ETH_ADDR_LEN] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
++static struct net_linkaddr fake_linkaddr;
++static const struct device fake_phc;
++
++static int fake_eventfd_create_calls;
++static int fake_eventfd_write_calls;
++static int fake_eventfd_last_fd;
++static zvfs_eventfd_t fake_eventfd_last_value;
++
++static int fake_zvfs_eventfd(unsigned int initval, int flags)
++{
++	ARG_UNUSED(initval);
++	ARG_UNUSED(flags);
++
++	fake_eventfd_create_calls++;
++	return 17;
++}
++
++static int fake_zvfs_eventfd_write(int fd, zvfs_eventfd_t value)
++{
++	fake_eventfd_write_calls++;
++	fake_eventfd_last_fd = fd;
++	fake_eventfd_last_value = value;
++
++	return 0;
++}
++
++static int fake_zvfs_eventfd_read(int fd, zvfs_eventfd_t *value)
++{
++	ARG_UNUSED(fd);
++
++	if (value) {
++		*value = 0;
++	}
++
++	return 0;
++}
++
++static struct net_if *fake_net_if_get_first_by_type(const struct net_l2 *l2)
++{
++	ARG_UNUSED(l2);
++
++	return &fake_iface;
++}
++
++static struct net_linkaddr *fake_net_if_get_link_addr(struct net_if *iface)
++{
++	ARG_UNUSED(iface);
++
++	return &fake_linkaddr;
++}
++
++static const struct device *fake_net_eth_get_ptp_clock(struct net_if *iface)
++{
++	ARG_UNUSED(iface);
++
++	return &fake_phc;
++}
++
++static int fake_ptp_clock_get(const struct device *dev, struct net_ptp_time *tm)
++{
++	ARG_UNUSED(dev);
++
++	memset(tm, 0, sizeof(*tm));
++	return 0;
++}
++
++static int fake_ptp_clock_set(const struct device *dev, struct net_ptp_time *tm)
++{
++	ARG_UNUSED(dev);
++	ARG_UNUSED(tm);
++
++	return 0;
++}
++
++static int fake_ptp_clock_rate_adjust(const struct device *dev, double ratio)
++{
++	ARG_UNUSED(dev);
++	ARG_UNUSED(ratio);
++
++	return 0;
++}
++
++int ptp_btca_ds_cmp(const struct ptp_dataset *a, const struct ptp_dataset *b)
++{
++	ARG_UNUSED(a);
++	ARG_UNUSED(b);
++
++	return 0;
++}
++
++enum ptp_port_state ptp_btca_state_decision(struct ptp_port *port)
++{
++	ARG_UNUSED(port);
++
++	return PTP_PS_LISTENING;
++}
++
++struct ptp_foreign_tt_clock *ptp_port_best_foreign(struct ptp_port *port)
++{
++	ARG_UNUSED(port);
++
++	return NULL;
++}
++
++enum ptp_port_state ptp_port_state(struct ptp_port *port)
++{
++	ARG_UNUSED(port);
++
++	return PTP_PS_LISTENING;
++}
++
++void ptp_port_event_handle(struct ptp_port *port, enum ptp_port_event event, bool tt_diff)
++{
++	ARG_UNUSED(port);
++	ARG_UNUSED(event);
++	ARG_UNUSED(tt_diff);
++}
++
++void ptp_msg_pre_send(struct ptp_msg *msg)
++{
++	ARG_UNUSED(msg);
++}
++
++int ptp_msg_post_recv(struct ptp_port *port, struct ptp_msg *msg, int cnt)
++{
++	ARG_UNUSED(port);
++	ARG_UNUSED(msg);
++	ARG_UNUSED(cnt);
++
++	return 0;
++}
++
++int ptp_transport_send(struct ptp_port *port, struct ptp_msg *msg, enum ptp_socket idx)
++{
++	ARG_UNUSED(port);
++	ARG_UNUSED(msg);
++	ARG_UNUSED(idx);
++
++	return 0;
++}
++
++int ptp_port_management_resp(struct ptp_port *port, struct ptp_msg *req, struct ptp_tlv_mgmt *tlv)
++{
++	ARG_UNUSED(port);
++	ARG_UNUSED(req);
++	ARG_UNUSED(tlv);
++
++	return 0;
++}
++
++int ptp_port_management_error(struct ptp_port *port, struct ptp_msg *msg, enum ptp_mgmt_err err)
++{
++	ARG_UNUSED(port);
++	ARG_UNUSED(msg);
++	ARG_UNUSED(err);
++
++	return 0;
++}
++
++int ptp_port_management_msg_process(struct ptp_port *port, struct ptp_port *sender,
++				    struct ptp_msg *msg, struct ptp_tlv_mgmt *tlv)
++{
++	ARG_UNUSED(port);
++	ARG_UNUSED(sender);
++	ARG_UNUSED(msg);
++	ARG_UNUSED(tlv);
++
++	return 0;
++}
++
++#define zvfs_eventfd fake_zvfs_eventfd
++#define zvfs_eventfd_write fake_zvfs_eventfd_write
++#define zvfs_eventfd_read fake_zvfs_eventfd_read
++#define net_if_get_first_by_type fake_net_if_get_first_by_type
++#define net_if_get_link_addr fake_net_if_get_link_addr
++#define net_eth_get_ptp_clock fake_net_eth_get_ptp_clock
++#define ptp_clock_get fake_ptp_clock_get
++#define ptp_clock_set fake_ptp_clock_set
++#define ptp_clock_rate_adjust fake_ptp_clock_rate_adjust
++#include "../../../../../subsys/net/lib/ptp/clock.c"
++#undef ptp_clock_rate_adjust
++#undef ptp_clock_set
++#undef ptp_clock_get
++#undef net_eth_get_ptp_clock
++#undef net_if_get_link_addr
++#undef net_if_get_first_by_type
++#undef zvfs_eventfd_read
++#undef zvfs_eventfd_write
++#undef zvfs_eventfd
++
++static void reset_clock_state(void)
++{
++	memset(&ptp_clk, 0, sizeof(ptp_clk));
++	memset(&fake_linkaddr, 0, sizeof(fake_linkaddr));
++	fake_linkaddr.type = NET_LINK_ETHERNET;
++	fake_linkaddr.len = NET_ETH_ADDR_LEN;
++	memcpy(fake_linkaddr.addr, fake_mac, sizeof(fake_mac));
++	fake_eventfd_create_calls = 0;
++	fake_eventfd_write_calls = 0;
++	fake_eventfd_last_fd = -1;
++	fake_eventfd_last_value = 0;
++}
++
++static void clock_wakeup_before(void *fixture)
++{
++	ARG_UNUSED(fixture);
++
++	reset_clock_state();
++}
++
++ZTEST(ptp_clock_wakeup, test_pollfd_invalidate_is_quiet_before_init)
++{
++	ptp_clock_pollfd_invalidate();
++	zassert_equal(fake_eventfd_write_calls, 0, "unexpected wakeup before init");
++}
++
++ZTEST(ptp_clock_wakeup, test_pollfd_invalidate_wakes_worker_after_init)
++{
++	zassert_not_null(ptp_clock_init(), "clock init failed");
++	zassert_equal(fake_eventfd_create_calls, 1, "eventfd should be created once");
++
++	ptp_clk.pollfd_valid = true;
++	fake_eventfd_write_calls = 0;
++
++	ptp_clock_pollfd_invalidate();
++
++	zassert_false(ptp_clk.pollfd_valid, "pollfd cache should be invalidated");
++	zassert_equal(fake_eventfd_write_calls, 1, "worker was not woken");
++	zassert_equal(fake_eventfd_last_fd, 17, "unexpected eventfd target");
++	zassert_equal(fake_eventfd_last_value, 1, "unexpected wakeup value");
++}
++
++ZTEST(ptp_clock_wakeup, test_state_decision_request_wakes_only_once_per_pending_event)
++{
++	zassert_not_null(ptp_clock_init(), "clock init failed");
++
++	ptp_clk.state_decision_event = false;
++	fake_eventfd_write_calls = 0;
++
++	ptp_clock_state_decision_req();
++	zassert_true(ptp_clk.state_decision_event, "state decision flag not set");
++	zassert_equal(fake_eventfd_write_calls, 1, "initial state decision wakeup missing");
++
++	ptp_clock_state_decision_req();
++	zassert_equal(fake_eventfd_write_calls, 1, "duplicate wakeup for pending decision");
++}
++
++ZTEST_SUITE(ptp_clock_wakeup, NULL, NULL, clock_wakeup_before, NULL, NULL);
+diff --git a/tests/net/ptp/clock_wakeup/testcase.yaml b/tests/net/ptp/clock_wakeup/testcase.yaml
+new file mode 100644
+index 00000000000..af671373876
+--- /dev/null
++++ b/tests/net/ptp/clock_wakeup/testcase.yaml
+@@ -0,0 +1,13 @@
++common:
++  tags:
++    - net
++    - ptp
++    - unit
++  platform_allow:
++    - native_sim
++  integration_platforms:
++    - native_sim
++  depends_on: netif
++tests:
++  net.ptp.clock_wakeup:
++    min_ram: 32
+diff --git a/tests/net/ptp/foreign_master/CMakeLists.txt b/tests/net/ptp/foreign_master/CMakeLists.txt
+new file mode 100644
+index 00000000000..5f3c8bdc6d8
+--- /dev/null
++++ b/tests/net/ptp/foreign_master/CMakeLists.txt
+@@ -0,0 +1,26 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(ptp_foreign_master)
++
++target_sources(app PRIVATE
++  src/main.c
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp/port.c
++)
++
++target_include_directories(app PRIVATE
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp
++)
++
++target_compile_definitions(app PRIVATE
++  CONFIG_PTP_LOG_LEVEL=3
++  CONFIG_PTP_NUM_PORTS=1
++  CONFIG_PTP_FOREIGN_TIME_TRANSMITTER_FEATURE=1
++  CONFIG_PTP_FOREIGN_TIME_TRANSMITTER_RECORD_SIZE=5
++  CONFIG_PTP_MIN_DELAY_REQ_LOG_INTERVAL=0
++  CONFIG_PTP_ANNOUNCE_LOG_INTERVAL=1
++  CONFIG_PTP_ANNOUNCE_RECV_TIMEOUT=3
++  CONFIG_PTP_SYNC_LOG_INTERVAL=0
++  CONFIG_PTP_MIN_PDELAY_REQ_LOG_INTERVAL=0
++)
+diff --git a/tests/net/ptp/foreign_master/prj.conf b/tests/net/ptp/foreign_master/prj.conf
+new file mode 100644
+index 00000000000..16528cf7428
+--- /dev/null
++++ b/tests/net/ptp/foreign_master/prj.conf
+@@ -0,0 +1,11 @@
++CONFIG_ZTEST=y
++CONFIG_NETWORKING=y
++CONFIG_NET_TEST=y
++CONFIG_NET_L2_ETHERNET=y
++CONFIG_NET_MGMT=y
++CONFIG_NET_MGMT_EVENT=y
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_PKT_TIMESTAMP_THREAD=y
++CONFIG_ENTROPY_GENERATOR=y
++CONFIG_TEST_RANDOM_GENERATOR=y
++CONFIG_MAIN_STACK_SIZE=2048
+diff --git a/tests/net/ptp/foreign_master/src/main.c b/tests/net/ptp/foreign_master/src/main.c
+new file mode 100644
+index 00000000000..de9e619d2df
+--- /dev/null
++++ b/tests/net/ptp/foreign_master/src/main.c
+@@ -0,0 +1,495 @@
++/*
++ * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <stddef.h>
++#include <string.h>
++
++#include <zephyr/kernel.h>
++#include <zephyr/ztest.h>
++
++#include "btca.h"
++#include "clock.h"
++#include "msg.h"
++#include "port.h"
++
++/* Port foreign-master tests only need basic announce comparison and ref handling. */
++int ptp_msg_announce_cmp(const struct ptp_announce_msg *m1, const struct ptp_announce_msg *m2)
++{
++	size_t offset = offsetof(struct ptp_announce_msg, gm_priority1);
++	size_t len = offsetof(struct ptp_announce_msg, time_src) - offset;
++
++	return memcmp((const uint8_t *)m1 + offset, (const uint8_t *)m2 + offset, len);
++}
++
++void ptp_msg_ref(struct ptp_msg *msg)
++{
++	ARG_UNUSED(msg);
++}
++
++void ptp_msg_unref(struct ptp_msg *msg)
++{
++	ARG_UNUSED(msg);
++}
++
++/* Signed comparator contract: > 0 means a is better, < 0 means b is better. */
++int ptp_btca_ds_cmp(const struct ptp_dataset *a, const struct ptp_dataset *b)
++{
++	int clk_id_cmp;
++
++	if (a == b) {
++		return 0;
++	}
++
++	if (a && !b) {
++		return 1;
++	}
++
++	if (!a && b) {
++		return -1;
++	}
++
++	if (a->priority1 < b->priority1) {
++		return 1;
++	}
++
++	if (a->priority1 > b->priority1) {
++		return -1;
++	}
++
++	if (a->priority2 < b->priority2) {
++		return 1;
++	}
++
++	if (a->priority2 > b->priority2) {
++		return -1;
++	}
++
++	clk_id_cmp = memcmp(&a->clk_id, &b->clk_id, sizeof(a->clk_id));
++	if (clk_id_cmp < 0) {
++		return 1;
++	}
++	if (clk_id_cmp > 0) {
++		return -1;
++	}
++
++	return 0;
++}
++
++static struct ptp_port port;
++static struct ptp_msg msg1;
++static struct ptp_msg msg2;
++static struct ptp_msg msg3;
++static struct ptp_msg msg4;
++
++static void timer_dummy_cb(struct k_timer *timer)
++{
++	ARG_UNUSED(timer);
++}
++
++static void set_clk_id(ptp_clk_id *clk_id, uint8_t value)
++{
++	memset(clk_id->id, value, sizeof(clk_id->id));
++}
++
++static void set_host_timestamp_now(struct ptp_msg *msg)
++{
++	int64_t now_ns = k_uptime_get() * NSEC_PER_MSEC;
++
++	msg->timestamp.host.second = now_ns / NSEC_PER_SEC;
++	msg->timestamp.host.nanosecond = now_ns % NSEC_PER_SEC;
++}
++
++static void set_host_timestamp_ns(struct ptp_msg *msg, int64_t timestamp_ns)
++{
++	msg->timestamp.host.second = timestamp_ns / NSEC_PER_SEC;
++	msg->timestamp.host.nanosecond = timestamp_ns % NSEC_PER_SEC;
++}
++
++static void init_announce_msg_ext(struct ptp_msg *msg, uint8_t sender_id, uint16_t sender_port,
++				  uint8_t gm_priority1, uint8_t gm_priority2, uint16_t steps_rm,
++				  int8_t log_msg_interval)
++{
++	memset(msg, 0, sizeof(*msg));
++
++	set_clk_id(&msg->header.src_port_id.clk_id, sender_id);
++	msg->header.src_port_id.port_number = sender_port;
++	msg->header.log_msg_interval = log_msg_interval;
++
++	msg->announce.gm_priority1 = gm_priority1;
++	msg->announce.gm_priority2 = gm_priority2;
++	msg->announce.steps_rm = steps_rm;
++	msg->announce.gm_clk_quality.cls = 128;
++	msg->announce.gm_clk_quality.accuracy = 0x31;
++	msg->announce.gm_clk_quality.offset_scaled_log_variance = 0x200;
++	set_clk_id(&msg->announce.gm_id, (uint8_t)(sender_id + 1));
++
++	set_host_timestamp_now(msg);
++}
++
++static void init_announce_msg(struct ptp_msg *msg, uint8_t sender_id, uint16_t sender_port,
++			      uint8_t gm_priority1)
++{
++	init_announce_msg_ext(msg, sender_id, sender_port, gm_priority1, 100, 1, 0);
++}
++
++static struct ptp_foreign_tt_clock *first_foreign_clock(struct ptp_port *port_ctx)
++{
++	sys_snode_t *node = sys_slist_peek_head(&port_ctx->foreign_list);
++
++	if (!node) {
++		return NULL;
++	}
++
++	return CONTAINER_OF(node, struct ptp_foreign_tt_clock, node);
++}
++
++static int foreign_clock_count(struct ptp_port *port_ctx)
++{
++	struct ptp_foreign_tt_clock *foreign;
++	int count = 0;
++
++	SYS_SLIST_FOR_EACH_CONTAINER(&port_ctx->foreign_list, foreign, node) {
++		count++;
++	}
++
++	return count;
++}
++
++static struct ptp_foreign_tt_clock *find_foreign_clock(struct ptp_port *port_ctx, uint8_t sender_id,
++						       uint16_t sender_port)
++{
++	struct ptp_foreign_tt_clock *foreign;
++	struct ptp_port_id sender = {0};
++
++	set_clk_id(&sender.clk_id, sender_id);
++	sender.port_number = sender_port;
++
++	SYS_SLIST_FOR_EACH_CONTAINER(&port_ctx->foreign_list, foreign, node) {
++		if (ptp_port_id_eq(&foreign->dataset.sender, &sender)) {
++			return foreign;
++		}
++	}
++
++	return NULL;
++}
++
++static void foreign_master_before(void *fixture)
++{
++	ARG_UNUSED(fixture);
++
++	memset(&port, 0, sizeof(port));
++	sys_slist_init(&port.foreign_list);
++
++	port.port_ds.id.port_number = 1;
++	port.port_ds.announce_receipt_timeout = 3;
++	port.port_ds.log_announce_interval = 0;
++
++	k_timer_init(&port.timers.announce, timer_dummy_cb, NULL);
++}
++
++static void foreign_master_after(void *fixture)
++{
++	ARG_UNUSED(fixture);
++
++	ptp_port_free_foreign_tts(&port);
++}
++
++ZTEST(ptp_foreign_master, test_first_foreign_announce_is_stored)
++{
++	struct ptp_foreign_tt_clock *foreign;
++	int ret;
++
++	init_announce_msg(&msg1, 0x11, 1, 120);
++
++	ret = ptp_port_add_foreign_tt(&port, &msg1);
++	zassert_equal(ret, 0, "first announce should not trigger threshold");
++
++	foreign = first_foreign_clock(&port);
++	zassert_not_null(foreign, "foreign clock was not created");
++	zassert_equal(foreign->messages_count, 1, "first announce was not stored");
++	zassert_equal(k_fifo_peek_tail(&foreign->messages), &msg1,
++		      "first announce is not queue tail");
++}
++
++ZTEST(ptp_foreign_master, test_second_announce_reaches_threshold)
++{
++	struct ptp_foreign_tt_clock *foreign;
++	int ret;
++
++	init_announce_msg(&msg1, 0x22, 1, 120);
++	init_announce_msg(&msg2, 0x22, 1, 120);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++
++	ret = ptp_port_add_foreign_tt(&port, &msg2);
++	zassert_equal(ret, 1, "second announce should raise threshold event");
++
++	foreign = first_foreign_clock(&port);
++	zassert_not_null(foreign, "foreign clock missing");
++	zassert_equal(foreign->messages_count, FOREIGN_TIME_TRANSMITTER_THRESHOLD,
++		      "unexpected foreign message count");
++	zassert_equal(k_fifo_peek_tail(&foreign->messages), &msg2,
++		      "second announce is not queue tail");
++}
++
++ZTEST(ptp_foreign_master, test_repeated_announce_no_diff_after_threshold)
++{
++	struct ptp_foreign_tt_clock *foreign;
++	int ret;
++
++	init_announce_msg(&msg1, 0x26, 1, 120);
++	init_announce_msg(&msg2, 0x26, 1, 120);
++	init_announce_msg(&msg3, 0x26, 1, 120);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1,
++		      "second add should report threshold");
++
++	ret = ptp_port_add_foreign_tt(&port, &msg3);
++	zassert_equal(ret, 0, "repeated announce should not report dataset change");
++
++	foreign = first_foreign_clock(&port);
++	zassert_not_null(foreign, "foreign clock missing");
++	zassert_equal(foreign_clock_count(&port), 1, "unexpected number of foreign clocks");
++	zassert_equal(k_fifo_peek_tail(&foreign->messages), &msg3,
++		      "latest repeated announce is not queue tail");
++}
++
++ZTEST(ptp_foreign_master, test_changed_announce_returns_nonzero_on_add_path)
++{
++	int ret;
++
++	init_announce_msg(&msg1, 0x27, 1, 120);
++	init_announce_msg(&msg2, 0x27, 1, 120);
++	init_announce_msg(&msg3, 0x27, 1, 110);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1,
++		      "second add should report threshold");
++
++	ret = ptp_port_add_foreign_tt(&port, &msg3);
++	zassert_not_equal(ret, 0, "changed announce dataset should be detected");
++}
++
++ZTEST(ptp_foreign_master, test_two_distinct_senders_are_tracked)
++{
++	init_announce_msg(&msg1, 0x28, 1, 120);
++	init_announce_msg(&msg4, 0x38, 1, 120);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg4), 0, "second sender add failed");
++	zassert_equal(foreign_clock_count(&port), 2,
++		      "two distinct source IDs should create two foreign entries");
++}
++
++ZTEST(ptp_foreign_master, test_update_current_tt_compares_against_previous_latest)
++{
++	struct ptp_foreign_tt_clock *foreign;
++	int ret;
++
++	init_announce_msg(&msg1, 0x33, 1, 110);
++	init_announce_msg(&msg2, 0x33, 1, 110);
++	init_announce_msg(&msg3, 0x33, 1, 111);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "second add failed");
++
++	foreign = first_foreign_clock(&port);
++	zassert_not_null(foreign, "foreign clock missing");
++	port.best = foreign;
++
++	ret = ptp_port_update_current_time_transmitter(&port, &msg3);
++	zassert_not_equal(ret, 0, "changed announce must differ from previous latest");
++	zassert_equal(foreign->messages_count, FOREIGN_TIME_TRANSMITTER_THRESHOLD + 1,
++		      "unexpected message count after update");
++	zassert_equal(k_fifo_peek_tail(&foreign->messages), &msg3,
++		      "updated announce is not queue tail");
++}
++
++ZTEST(ptp_foreign_master, test_update_current_tt_falls_back_to_add_for_new_sender)
++{
++	int ret;
++
++	init_announce_msg(&msg1, 0x44, 1, 120);
++	init_announce_msg(&msg4, 0x55, 1, 120);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	port.best = first_foreign_clock(&port);
++	zassert_not_null(port.best, "best foreign not set");
++
++	ret = ptp_port_update_current_time_transmitter(&port, &msg4);
++	zassert_equal(ret, 0, "new sender should behave as first add");
++	zassert_equal(foreign_clock_count(&port), 2, "new sender should add new foreign clock");
++}
++
++ZTEST(ptp_foreign_master, test_best_foreign_returns_null_below_threshold)
++{
++	init_announce_msg(&msg1, 0x61, 1, 120);
++	init_announce_msg(&msg2, 0x71, 1, 110);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first sender add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 0, "second sender add failed");
++
++	zassert_is_null(ptp_port_best_foreign(&port),
++			"best foreign should be NULL below threshold");
++}
++
++ZTEST(ptp_foreign_master, test_best_foreign_returns_null_when_time_transmitter_only)
++{
++	init_announce_msg(&msg1, 0x62, 1, 120);
++	init_announce_msg(&msg2, 0x62, 1, 120);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "second add failed");
++
++	port.port_ds.time_transmitter_only = true;
++
++	zassert_is_null(ptp_port_best_foreign(&port),
++			"timeTransmitterOnly port should not select foreign best");
++}
++
++ZTEST(ptp_foreign_master, test_best_foreign_selects_better_sender)
++{
++	struct ptp_foreign_tt_clock *best;
++	struct ptp_foreign_tt_clock *foreign_a;
++	struct ptp_foreign_tt_clock *foreign_b;
++
++	init_announce_msg(&msg1, 0x63, 1, 130);
++	init_announce_msg(&msg2, 0x63, 1, 130);
++	init_announce_msg(&msg3, 0x73, 1, 120);
++	init_announce_msg(&msg4, 0x73, 1, 120);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "sender A add 1 failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "sender A add 2 failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg3), 0, "sender B add 1 failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg4), 1, "sender B add 2 failed");
++
++	foreign_a = find_foreign_clock(&port, 0x63, 1);
++	foreign_b = find_foreign_clock(&port, 0x73, 1);
++
++	zassert_not_null(foreign_a, "sender A foreign clock missing");
++	zassert_not_null(foreign_b, "sender B foreign clock missing");
++
++	best = ptp_port_best_foreign(&port);
++	zassert_equal(best, foreign_b, "lower priority sender should be selected as best");
++}
++
++ZTEST(ptp_foreign_master, test_best_foreign_negative_cmp_does_not_replace_best)
++{
++	struct ptp_foreign_tt_clock *best;
++	struct ptp_foreign_tt_clock *foreign_a;
++	struct ptp_foreign_tt_clock *foreign_b;
++
++	init_announce_msg(&msg1, 0x64, 1, 110);
++	init_announce_msg(&msg2, 0x64, 1, 110);
++	init_announce_msg(&msg3, 0x74, 1, 140);
++	init_announce_msg(&msg4, 0x74, 1, 140);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "sender A add 1 failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "sender A add 2 failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg3), 0, "sender B add 1 failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg4), 1, "sender B add 2 failed");
++
++	foreign_a = find_foreign_clock(&port, 0x64, 1);
++	foreign_b = find_foreign_clock(&port, 0x74, 1);
++
++	zassert_not_null(foreign_a, "sender A foreign clock missing");
++	zassert_not_null(foreign_b, "sender B foreign clock missing");
++
++	best = ptp_port_best_foreign(&port);
++	zassert_equal(best, foreign_a, "worse foreign should not replace the current best");
++	zassert_equal(foreign_b->messages_count, 0,
++		      "losing foreign should be cleared after comparison");
++}
++
++ZTEST(ptp_foreign_master, test_best_foreign_dataset_fields_populated)
++{
++	struct ptp_foreign_tt_clock *best;
++	struct ptp_port_id expected_sender = {0};
++
++	init_announce_msg_ext(&msg1, 0x65, 7, 101, 88, 9, 0);
++	init_announce_msg_ext(&msg2, 0x65, 7, 101, 88, 9, 0);
++
++	msg1.announce.gm_clk_quality.cls = 6;
++	msg1.announce.gm_clk_quality.accuracy = 0x20;
++	msg1.announce.gm_clk_quality.offset_scaled_log_variance = 0x1234;
++	set_clk_id(&msg1.announce.gm_id, 0xAB);
++
++	msg2.announce.gm_clk_quality = msg1.announce.gm_clk_quality;
++	msg2.announce.gm_id = msg1.announce.gm_id;
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "second add failed");
++
++	best = ptp_port_best_foreign(&port);
++	zassert_not_null(best, "best foreign missing");
++
++	set_clk_id(&expected_sender.clk_id, 0x65);
++	expected_sender.port_number = 7;
++
++	zassert_equal(best->dataset.priority1, msg1.announce.gm_priority1, "priority1 mismatch");
++	zassert_equal(best->dataset.priority2, msg1.announce.gm_priority2, "priority2 mismatch");
++	zassert_equal(best->dataset.steps_rm, msg1.announce.steps_rm, "steps_rm mismatch");
++	zassert_mem_equal(&best->dataset.clk_quality, &msg1.announce.gm_clk_quality,
++			  sizeof(msg1.announce.gm_clk_quality), "clock quality mismatch");
++	zassert_mem_equal(&best->dataset.clk_id, &msg1.announce.gm_id, sizeof(msg1.announce.gm_id),
++			  "gm clock id mismatch");
++	zassert_true(ptp_port_id_eq(&best->dataset.receiver, &port.port_ds.id),
++		     "receiver port ID mismatch");
++	zassert_true(ptp_port_id_eq(&best->dataset.sender, &expected_sender),
++		     "sender port ID mismatch");
++}
++
++ZTEST(ptp_foreign_master, test_best_foreign_cleanup_trims_to_threshold)
++{
++	struct ptp_foreign_tt_clock *foreign;
++
++	init_announce_msg(&msg1, 0x66, 1, 120);
++	init_announce_msg(&msg2, 0x66, 1, 120);
++	init_announce_msg(&msg3, 0x66, 1, 120);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "second add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg3), 0, "third add failed");
++
++	foreign = find_foreign_clock(&port, 0x66, 1);
++	zassert_not_null(foreign, "foreign clock missing");
++	zassert_equal(foreign->messages_count, FOREIGN_TIME_TRANSMITTER_THRESHOLD + 1,
++		      "test setup did not exceed threshold");
++
++	zassert_not_null(ptp_port_best_foreign(&port), "best foreign should exist");
++	zassert_equal(foreign->messages_count, FOREIGN_TIME_TRANSMITTER_THRESHOLD,
++		      "cleanup should trim message count to threshold");
++	zassert_equal(k_fifo_peek_head(&foreign->messages), &msg2,
++		      "oldest message after trim should be msg2");
++	zassert_equal(k_fifo_peek_tail(&foreign->messages), &msg3,
++		      "newest message after trim should be msg3");
++}
++
++ZTEST(ptp_foreign_master, test_best_foreign_cleanup_drops_expired_records)
++{
++	struct ptp_foreign_tt_clock *foreign;
++
++	init_announce_msg(&msg1, 0x67, 1, 120);
++	init_announce_msg(&msg2, 0x67, 1, 120);
++
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
++	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "second add failed");
++
++	msg1.header.log_msg_interval = -31;
++	msg2.header.log_msg_interval = -31;
++	set_host_timestamp_ns(&msg1, 0);
++	set_host_timestamp_ns(&msg2, 0);
++
++	zassert_is_null(ptp_port_best_foreign(&port), "expired records should not produce best");
++
++	foreign = find_foreign_clock(&port, 0x67, 1);
++	zassert_not_null(foreign, "foreign clock missing");
++	zassert_equal(foreign->messages_count, 0, "expired records should be removed");
++	zassert_true(k_fifo_is_empty(&foreign->messages), "foreign message queue should be empty");
++}
++
++ZTEST_SUITE(ptp_foreign_master, NULL, NULL, foreign_master_before, foreign_master_after, NULL);
+diff --git a/tests/net/ptp/foreign_master/testcase.yaml b/tests/net/ptp/foreign_master/testcase.yaml
+new file mode 100644
+index 00000000000..c4733bac4ff
+--- /dev/null
++++ b/tests/net/ptp/foreign_master/testcase.yaml
+@@ -0,0 +1,13 @@
++common:
++  tags:
++    - net
++    - ptp
++    - unit
++  platform_allow:
++    - native_sim
++  integration_platforms:
++    - native_sim
++  depends_on: netif
++tests:
++  net.ptp.foreign_master:
++    min_ram: 32
+diff --git a/tests/net/ptp/msg_post_recv/CMakeLists.txt b/tests/net/ptp/msg_post_recv/CMakeLists.txt
+new file mode 100644
+index 00000000000..8a979898ca4
+--- /dev/null
++++ b/tests/net/ptp/msg_post_recv/CMakeLists.txt
+@@ -0,0 +1,19 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(ptp_msg_post_recv)
++
++target_sources(app PRIVATE
++  src/main.c
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp/msg.c
++)
++
++target_include_directories(app PRIVATE
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp
++)
++
++target_compile_definitions(app PRIVATE
++  CONFIG_PTP_LOG_LEVEL=3
++  CONFIG_PTP_MSG_POLL_SIZE=4
++)
+diff --git a/tests/net/ptp/msg_post_recv/prj.conf b/tests/net/ptp/msg_post_recv/prj.conf
+new file mode 100644
+index 00000000000..5222d90259f
+--- /dev/null
++++ b/tests/net/ptp/msg_post_recv/prj.conf
+@@ -0,0 +1,7 @@
++CONFIG_ZTEST=y
++CONFIG_NETWORKING=y
++CONFIG_NET_TEST=y
++CONFIG_NET_L2_ETHERNET=y
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_PKT_TIMESTAMP_THREAD=y
++CONFIG_MAIN_STACK_SIZE=2048
+diff --git a/tests/net/ptp/msg_post_recv/src/main.c b/tests/net/ptp/msg_post_recv/src/main.c
+new file mode 100644
+index 00000000000..e2dd2a9dbb6
+--- /dev/null
++++ b/tests/net/ptp/msg_post_recv/src/main.c
+@@ -0,0 +1,99 @@
++/*
++ * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <string.h>
++
++#include <zephyr/kernel.h>
++#include <zephyr/net/ptp.h>
++#include <zephyr/ztest.h>
++
++#include "clock.h"
++#include "msg.h"
++#include "tlv.h"
++
++static struct ptp_parent_ds test_parent_ds;
++
++struct ptp_tlv_container *ptp_tlv_alloc(void)
++{
++	zassert_unreachable("Unexpected TLV allocation");
++	return NULL;
++}
++
++void ptp_tlv_free(struct ptp_tlv_container *tlv_container)
++{
++	ARG_UNUSED(tlv_container);
++	zassert_unreachable("Unexpected TLV free");
++}
++
++int ptp_tlv_post_recv(struct ptp_tlv *tlv)
++{
++	ARG_UNUSED(tlv);
++	zassert_unreachable("Unexpected TLV post-receive");
++	return -EINVAL;
++}
++
++void ptp_tlv_pre_send(struct ptp_tlv *tlv)
++{
++	ARG_UNUSED(tlv);
++	zassert_unreachable("Unexpected TLV pre-send");
++}
++
++const struct ptp_parent_ds *ptp_clock_parent_ds(void)
++{
++	return &test_parent_ds;
++}
++
++static void init_announce_msg(struct ptp_msg *msg)
++{
++	memset(msg, 0, sizeof(*msg));
++	sys_slist_init(&msg->tlvs);
++
++	msg->header.type_major_sdo_id = PTP_MSG_ANNOUNCE;
++	msg->header.version = PTP_VERSION;
++	msg->header.msg_length = net_htons(sizeof(struct ptp_announce_msg));
++
++	msg->announce.current_utc_offset = net_htons(37);
++	msg->announce.gm_clk_quality.offset_scaled_log_variance = net_htons(0x1234);
++	msg->announce.steps_rm = net_htons(2);
++}
++
++ZTEST(ptp_msg_post_recv, test_announce_preserves_transport_timestamp)
++{
++	struct ptp_port port = {0};
++	struct ptp_msg msg;
++	int ret;
++
++	init_announce_msg(&msg);
++	port.port_ds.id.port_number = 1;
++
++	msg.timestamp.host.second = 1234;
++	msg.timestamp.host.nanosecond = 567890123;
++
++	ret = ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_announce_msg));
++	zassert_ok(ret, "announce post-receive failed");
++	zassert_equal(msg.timestamp.host.second, 1234, "transport timestamp seconds changed");
++	zassert_equal(msg.timestamp.host.nanosecond, 567890123,
++		      "transport timestamp nanoseconds changed");
++}
++
++ZTEST(ptp_msg_post_recv, test_announce_synthesizes_fallback_timestamp)
++{
++	struct ptp_port port = {0};
++	struct ptp_msg msg;
++	int ret;
++
++	k_sleep(K_MSEC(1));
++
++	init_announce_msg(&msg);
++	port.port_ds.id.port_number = 1;
++
++	ret = ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_announce_msg));
++	zassert_ok(ret, "announce post-receive failed");
++	zassert_true(msg.timestamp.host.second != 0 || msg.timestamp.host.nanosecond != 0,
++		     "missing synthesized fallback timestamp");
++}
++
++ZTEST_SUITE(ptp_msg_post_recv, NULL, NULL, NULL, NULL, NULL);
+diff --git a/tests/net/ptp/msg_post_recv/testcase.yaml b/tests/net/ptp/msg_post_recv/testcase.yaml
+new file mode 100644
+index 00000000000..08d66367127
+--- /dev/null
++++ b/tests/net/ptp/msg_post_recv/testcase.yaml
+@@ -0,0 +1,13 @@
++common:
++  tags:
++    - net
++    - ptp
++    - unit
++  platform_allow:
++    - native_sim
++  integration_platforms:
++    - native_sim
++  depends_on: netif
++tests:
++  net.ptp.msg_post_recv:
++    min_ram: 32
+diff --git a/tests/net/ptp/state_matrix/CMakeLists.txt b/tests/net/ptp/state_matrix/CMakeLists.txt
+new file mode 100644
+index 00000000000..c4b9b0cef05
+--- /dev/null
++++ b/tests/net/ptp/state_matrix/CMakeLists.txt
+@@ -0,0 +1,23 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(ptp_state_matrix)
++
++target_sources(app PRIVATE
++  src/main.c
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp/state_machine.c
++)
++
++target_include_directories(app PRIVATE
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp
++)
++
++target_compile_definitions(app PRIVATE
++  CONFIG_PTP_LOG_LEVEL=3
++  CONFIG_PTP_DISABLED_PRESENT=1
++  CONFIG_PTP_FAULTY_PRESENT=1
++  CONFIG_PTP_LISTENING_PRESENT=1
++  CONFIG_PTP_PRE_TIME_TRANSMITTER_PRESENT=1
++  CONFIG_PTP_UNCALIBRATED_PRESENT=1
++)
+diff --git a/tests/net/ptp/state_matrix/prj.conf b/tests/net/ptp/state_matrix/prj.conf
+new file mode 100644
+index 00000000000..5222d90259f
+--- /dev/null
++++ b/tests/net/ptp/state_matrix/prj.conf
+@@ -0,0 +1,7 @@
++CONFIG_ZTEST=y
++CONFIG_NETWORKING=y
++CONFIG_NET_TEST=y
++CONFIG_NET_L2_ETHERNET=y
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_PKT_TIMESTAMP_THREAD=y
++CONFIG_MAIN_STACK_SIZE=2048
+diff --git a/tests/net/ptp/state_matrix/src/main.c b/tests/net/ptp/state_matrix/src/main.c
+new file mode 100644
+index 00000000000..1c5cce9e25f
+--- /dev/null
++++ b/tests/net/ptp/state_matrix/src/main.c
+@@ -0,0 +1,479 @@
++/*
++ * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++
++#include "state_machine.h"
++
++static const enum ptp_port_state all_states[] = {
++	PTP_PS_INITIALIZING,         PTP_PS_FAULTY,           PTP_PS_DISABLED,     PTP_PS_LISTENING,
++	PTP_PS_PRE_TIME_TRANSMITTER, PTP_PS_TIME_TRANSMITTER, PTP_PS_GRAND_MASTER, PTP_PS_PASSIVE,
++	PTP_PS_UNCALIBRATED,         PTP_PS_TIME_RECEIVER,
++};
++
++static const enum ptp_port_event all_events[] = {
++	PTP_EVT_NONE,
++	PTP_EVT_POWERUP,
++	PTP_EVT_INITIALIZE,
++	PTP_EVT_INIT_COMPLETE,
++	PTP_EVT_FAULT_DETECTED,
++	PTP_EVT_FAULT_CLEARED,
++	PTP_EVT_STATE_DECISION,
++	PTP_EVT_ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES,
++	PTP_EVT_QUALIFICATION_TIMEOUT_EXPIRES,
++	PTP_EVT_DESIGNATED_ENABLED,
++	PTP_EVT_DESIGNATED_DISABLED,
++	PTP_EVT_TIME_TRANSMITTER_CLOCK_SELECTED,
++	PTP_EVT_SYNCHRONIZATION_FAULT,
++	PTP_EVT_RS_TIME_TRANSMITTER,
++	PTP_EVT_RS_GRAND_MASTER,
++	PTP_EVT_RS_TIME_RECEIVER,
++	PTP_EVT_RS_PASSIVE,
++};
++
++static const char *state_name(enum ptp_port_state state)
++{
++	switch (state) {
++	case PTP_PS_INITIALIZING:
++		return "INITIALIZING";
++	case PTP_PS_FAULTY:
++		return "FAULTY";
++	case PTP_PS_DISABLED:
++		return "DISABLED";
++	case PTP_PS_LISTENING:
++		return "LISTENING";
++	case PTP_PS_PRE_TIME_TRANSMITTER:
++		return "PRE_TIME_TRANSMITTER";
++	case PTP_PS_TIME_TRANSMITTER:
++		return "TIME_TRANSMITTER";
++	case PTP_PS_GRAND_MASTER:
++		return "GRAND_MASTER";
++	case PTP_PS_PASSIVE:
++		return "PASSIVE";
++	case PTP_PS_UNCALIBRATED:
++		return "UNCALIBRATED";
++	case PTP_PS_TIME_RECEIVER:
++		return "TIME_RECEIVER";
++	default:
++		return "UNKNOWN_STATE";
++	}
++}
++
++static const char *event_name(enum ptp_port_event event)
++{
++	switch (event) {
++	case PTP_EVT_NONE:
++		return "NONE";
++	case PTP_EVT_POWERUP:
++		return "POWERUP";
++	case PTP_EVT_INITIALIZE:
++		return "INITIALIZE";
++	case PTP_EVT_INIT_COMPLETE:
++		return "INIT_COMPLETE";
++	case PTP_EVT_FAULT_DETECTED:
++		return "FAULT_DETECTED";
++	case PTP_EVT_FAULT_CLEARED:
++		return "FAULT_CLEARED";
++	case PTP_EVT_STATE_DECISION:
++		return "STATE_DECISION";
++	case PTP_EVT_ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES:
++		return "ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES";
++	case PTP_EVT_QUALIFICATION_TIMEOUT_EXPIRES:
++		return "QUALIFICATION_TIMEOUT_EXPIRES";
++	case PTP_EVT_DESIGNATED_ENABLED:
++		return "DESIGNATED_ENABLED";
++	case PTP_EVT_DESIGNATED_DISABLED:
++		return "DESIGNATED_DISABLED";
++	case PTP_EVT_TIME_TRANSMITTER_CLOCK_SELECTED:
++		return "TIME_TRANSMITTER_CLOCK_SELECTED";
++	case PTP_EVT_SYNCHRONIZATION_FAULT:
++		return "SYNCHRONIZATION_FAULT";
++	case PTP_EVT_RS_TIME_TRANSMITTER:
++		return "RS_TIME_TRANSMITTER";
++	case PTP_EVT_RS_GRAND_MASTER:
++		return "RS_GRAND_MASTER";
++	case PTP_EVT_RS_TIME_RECEIVER:
++		return "RS_TIME_RECEIVER";
++	case PTP_EVT_RS_PASSIVE:
++		return "RS_PASSIVE";
++	default:
++		return "UNKNOWN_EVENT";
++	}
++}
++
++static enum ptp_port_state expected_ptp_state_machine_all_present(enum ptp_port_state state,
++								  enum ptp_port_event event)
++{
++	enum ptp_port_state new_state = state;
++
++	if (event == PTP_EVT_INITIALIZE || event == PTP_EVT_POWERUP) {
++		return PTP_PS_INITIALIZING;
++	}
++
++	switch (state) {
++	case PTP_PS_INITIALIZING:
++		switch (event) {
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_INIT_COMPLETE:
++			new_state = PTP_PS_LISTENING;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_FAULTY:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_CLEARED:
++			new_state = PTP_PS_INITIALIZING;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_DISABLED:
++		if (event == PTP_EVT_DESIGNATED_ENABLED) {
++			new_state = PTP_PS_INITIALIZING;
++		}
++		break;
++	case PTP_PS_LISTENING:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES:
++			new_state = PTP_PS_TIME_TRANSMITTER;
++			break;
++		case PTP_EVT_RS_TIME_TRANSMITTER:
++			new_state = PTP_PS_PRE_TIME_TRANSMITTER;
++			break;
++		case PTP_EVT_RS_GRAND_MASTER:
++			new_state = PTP_PS_GRAND_MASTER;
++			break;
++		case PTP_EVT_RS_PASSIVE:
++			new_state = PTP_PS_PASSIVE;
++			break;
++		case PTP_EVT_RS_TIME_RECEIVER:
++			new_state = PTP_PS_UNCALIBRATED;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_PRE_TIME_TRANSMITTER:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_QUALIFICATION_TIMEOUT_EXPIRES:
++			new_state = PTP_PS_TIME_TRANSMITTER;
++			break;
++		case PTP_EVT_RS_PASSIVE:
++			new_state = PTP_PS_PASSIVE;
++			break;
++		case PTP_EVT_RS_TIME_RECEIVER:
++			new_state = PTP_PS_UNCALIBRATED;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_TIME_TRANSMITTER:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_RS_PASSIVE:
++			new_state = PTP_PS_PASSIVE;
++			break;
++		case PTP_EVT_RS_TIME_RECEIVER:
++			new_state = PTP_PS_UNCALIBRATED;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_GRAND_MASTER:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_RS_PASSIVE:
++			new_state = PTP_PS_PASSIVE;
++			break;
++		case PTP_EVT_RS_TIME_RECEIVER:
++			new_state = PTP_PS_UNCALIBRATED;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_PASSIVE:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_RS_TIME_TRANSMITTER:
++			new_state = PTP_PS_PRE_TIME_TRANSMITTER;
++			break;
++		case PTP_EVT_RS_GRAND_MASTER:
++			new_state = PTP_PS_GRAND_MASTER;
++			break;
++		case PTP_EVT_RS_TIME_RECEIVER:
++			new_state = PTP_PS_UNCALIBRATED;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_UNCALIBRATED:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES:
++			new_state = PTP_PS_TIME_TRANSMITTER;
++			break;
++		case PTP_EVT_TIME_TRANSMITTER_CLOCK_SELECTED:
++			new_state = PTP_PS_TIME_RECEIVER;
++			break;
++		case PTP_EVT_RS_TIME_TRANSMITTER:
++			new_state = PTP_PS_PRE_TIME_TRANSMITTER;
++			break;
++		case PTP_EVT_RS_GRAND_MASTER:
++			new_state = PTP_PS_GRAND_MASTER;
++			break;
++		case PTP_EVT_RS_PASSIVE:
++			new_state = PTP_PS_PASSIVE;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_TIME_RECEIVER:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_SYNCHRONIZATION_FAULT:
++			new_state = PTP_PS_UNCALIBRATED;
++			break;
++		case PTP_EVT_ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES:
++			new_state = PTP_PS_TIME_TRANSMITTER;
++			break;
++		case PTP_EVT_RS_TIME_TRANSMITTER:
++			new_state = PTP_PS_PRE_TIME_TRANSMITTER;
++			break;
++		case PTP_EVT_RS_GRAND_MASTER:
++			new_state = PTP_PS_GRAND_MASTER;
++			break;
++		case PTP_EVT_RS_PASSIVE:
++			new_state = PTP_PS_PASSIVE;
++			break;
++		default:
++			break;
++		}
++		break;
++	default:
++		break;
++	}
++
++	return new_state;
++}
++
++static enum ptp_port_state expected_ptp_tr_state_machine_all_present(enum ptp_port_state state,
++								     enum ptp_port_event event)
++{
++	enum ptp_port_state new_state = state;
++
++	if (event == PTP_EVT_INITIALIZE || event == PTP_EVT_POWERUP) {
++		return PTP_PS_INITIALIZING;
++	}
++
++	switch (state) {
++	case PTP_PS_INITIALIZING:
++		switch (event) {
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_INIT_COMPLETE:
++			new_state = PTP_PS_LISTENING;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_FAULTY:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_CLEARED:
++			new_state = PTP_PS_INITIALIZING;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_DISABLED:
++		if (event == PTP_EVT_DESIGNATED_ENABLED) {
++			new_state = PTP_PS_INITIALIZING;
++		}
++		break;
++	case PTP_PS_LISTENING:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_RS_TIME_RECEIVER:
++			new_state = PTP_PS_UNCALIBRATED;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_UNCALIBRATED:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES:
++		case PTP_EVT_RS_TIME_TRANSMITTER:
++		case PTP_EVT_RS_GRAND_MASTER:
++		case PTP_EVT_RS_PASSIVE:
++			new_state = PTP_PS_LISTENING;
++			break;
++		case PTP_EVT_TIME_TRANSMITTER_CLOCK_SELECTED:
++			new_state = PTP_PS_TIME_RECEIVER;
++			break;
++		default:
++			break;
++		}
++		break;
++	case PTP_PS_TIME_RECEIVER:
++		switch (event) {
++		case PTP_EVT_DESIGNATED_DISABLED:
++			new_state = PTP_PS_DISABLED;
++			break;
++		case PTP_EVT_FAULT_DETECTED:
++			new_state = PTP_PS_FAULTY;
++			break;
++		case PTP_EVT_SYNCHRONIZATION_FAULT:
++			new_state = PTP_PS_UNCALIBRATED;
++			break;
++		case PTP_EVT_ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES:
++		case PTP_EVT_RS_TIME_TRANSMITTER:
++		case PTP_EVT_RS_GRAND_MASTER:
++		case PTP_EVT_RS_PASSIVE:
++			new_state = PTP_PS_LISTENING;
++			break;
++		default:
++			break;
++		}
++		break;
++	default:
++		break;
++	}
++
++	return new_state;
++}
++
++ZTEST(ptp_state_matrix, test_ptp_state_machine_full_matrix_tt_diff_false)
++{
++	size_t checks = 0;
++	const size_t expected_checks = ARRAY_SIZE(all_states) * ARRAY_SIZE(all_events);
++
++	for (size_t i = 0; i < ARRAY_SIZE(all_states); i++) {
++		for (size_t j = 0; j < ARRAY_SIZE(all_events); j++) {
++			enum ptp_port_state state = all_states[i];
++			enum ptp_port_event event = all_events[j];
++			enum ptp_port_state expected =
++				expected_ptp_state_machine_all_present(state, event);
++			enum ptp_port_state actual = ptp_state_machine(state, event, false);
++
++			checks++;
++			zassert_equal(actual, expected,
++				      "ptp_state_machine(%s,%s,false): actual=%s expected=%s",
++				      state_name(state), event_name(event), state_name(actual),
++				      state_name(expected));
++		}
++	}
++
++	zassert_equal(checks, expected_checks, "unexpected matrix check count");
++}
++
++ZTEST(ptp_state_matrix, test_ptp_tr_state_machine_full_matrix_tt_diff_false)
++{
++	size_t checks = 0;
++	const size_t expected_checks = ARRAY_SIZE(all_states) * ARRAY_SIZE(all_events);
++
++	for (size_t i = 0; i < ARRAY_SIZE(all_states); i++) {
++		for (size_t j = 0; j < ARRAY_SIZE(all_events); j++) {
++			enum ptp_port_state state = all_states[i];
++			enum ptp_port_event event = all_events[j];
++			enum ptp_port_state expected =
++				expected_ptp_tr_state_machine_all_present(state, event);
++			enum ptp_port_state actual = ptp_tr_state_machine(state, event, false);
++
++			checks++;
++			zassert_equal(actual, expected,
++				      "ptp_tr_state_machine(%s,%s,false): actual=%s expected=%s",
++				      state_name(state), event_name(event), state_name(actual),
++				      state_name(expected));
++		}
++	}
++
++	zassert_equal(checks, expected_checks, "unexpected matrix check count");
++}
++
++ZTEST(ptp_state_matrix, test_ptp_state_machine_tt_diff_delta)
++{
++	zassert_equal(ptp_state_machine(PTP_PS_TIME_RECEIVER, PTP_EVT_RS_TIME_RECEIVER, false),
++		      PTP_PS_TIME_RECEIVER, "tt_diff=false should keep TIME_RECEIVER");
++	zassert_equal(ptp_state_machine(PTP_PS_TIME_RECEIVER, PTP_EVT_RS_TIME_RECEIVER, true),
++		      PTP_PS_UNCALIBRATED, "tt_diff=true should transition to UNCALIBRATED");
++}
++
++ZTEST(ptp_state_matrix, test_ptp_tr_state_machine_tt_diff_delta)
++{
++	zassert_equal(ptp_tr_state_machine(PTP_PS_TIME_RECEIVER, PTP_EVT_RS_TIME_RECEIVER, false),
++		      PTP_PS_TIME_RECEIVER, "tt_diff=false should keep TIME_RECEIVER");
++	zassert_equal(ptp_tr_state_machine(PTP_PS_TIME_RECEIVER, PTP_EVT_RS_TIME_RECEIVER, true),
++		      PTP_PS_UNCALIBRATED, "tt_diff=true should transition to UNCALIBRATED");
++}
++
++ZTEST_SUITE(ptp_state_matrix, NULL, NULL, NULL, NULL, NULL);
+diff --git a/tests/net/ptp/state_matrix/testcase.yaml b/tests/net/ptp/state_matrix/testcase.yaml
+new file mode 100644
+index 00000000000..38fb42a280a
+--- /dev/null
++++ b/tests/net/ptp/state_matrix/testcase.yaml
+@@ -0,0 +1,13 @@
++common:
++  tags:
++    - net
++    - ptp
++    - unit
++  platform_allow:
++    - native_sim
++  integration_platforms:
++    - native_sim
++  depends_on: netif
++tests:
++  net.ptp.state_matrix:
++    min_ram: 32
+diff --git a/tests/net/ptp/transport_retry/CMakeLists.txt b/tests/net/ptp/transport_retry/CMakeLists.txt
+new file mode 100644
+index 00000000000..95010929f5b
+--- /dev/null
++++ b/tests/net/ptp/transport_retry/CMakeLists.txt
+@@ -0,0 +1,19 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(ptp_transport_retry)
++
++target_sources(app PRIVATE src/main.c)
++
++target_include_directories(app PRIVATE
++  ${ZEPHYR_BASE}/subsys/net/lib/ptp
++)
++
++target_compile_definitions(app PRIVATE
++  CONFIG_PTP_LOG_LEVEL=3
++  CONFIG_PTP_DSCP_VALUE=0
++  CONFIG_PTP_IEEE_802_3_PROTOCOL=1
++  CONFIG_PTP_UDP_IPv4_PROTOCOL=0
++  CONFIG_PTP_UDP_IPv6_PROTOCOL=0
++)
+diff --git a/tests/net/ptp/transport_retry/prj.conf b/tests/net/ptp/transport_retry/prj.conf
+new file mode 100644
+index 00000000000..47433ca11e5
+--- /dev/null
++++ b/tests/net/ptp/transport_retry/prj.conf
+@@ -0,0 +1,11 @@
++CONFIG_ZTEST=y
++CONFIG_LOG=y
++CONFIG_NETWORKING=y
++CONFIG_NET_SOCKETS=y
++CONFIG_NET_L2_ETHERNET=y
++CONFIG_NET_SOCKETS_PACKET=y
++CONFIG_ETH_NATIVE_TAP=n
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_PKT_TIMESTAMP_THREAD=y
++CONFIG_MAIN_STACK_SIZE=2048
++CONFIG_HEAP_MEM_POOL_SIZE=4096
+diff --git a/tests/net/ptp/transport_retry/src/main.c b/tests/net/ptp/transport_retry/src/main.c
+new file mode 100644
+index 00000000000..582510b97de
+--- /dev/null
++++ b/tests/net/ptp/transport_retry/src/main.c
+@@ -0,0 +1,220 @@
++/*
++ * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <errno.h>
++#include <string.h>
++
++#include <zephyr/drivers/ptp_clock.h>
++#include <zephyr/net/ethernet.h>
++#include <zephyr/net/socket.h>
++#include <zephyr/net/ptp_time.h>
++#include <zephyr/sys/util.h>
++#include <zephyr/ztest.h>
++
++#include "transport.h"
++
++struct fake_recv_action {
++	int ret;
++	int err;
++	bool with_timestamp;
++};
++
++static int64_t fake_now_ms;
++static int recvmsg_call_count;
++static int recvfrom_call_count;
++static struct fake_recv_action recvmsg_script[4];
++static size_t recvmsg_script_len;
++static size_t recvmsg_script_pos;
++static struct fake_recv_action recvfrom_script[4];
++static size_t recvfrom_script_len;
++static size_t recvfrom_script_pos;
++static const struct net_ptp_time fake_rx_timestamp = {
++	.second = 42,
++	.nanosecond = 123456789,
++};
++
++static int64_t fake_k_uptime_get(void)
++{
++	return fake_now_ms;
++}
++
++static const struct device *fake_net_eth_get_ptp_clock(struct net_if *iface)
++{
++	ARG_UNUSED(iface);
++
++	return NULL;
++}
++
++static int fake_ptp_clock_get(const struct device *dev, struct net_ptp_time *tm)
++{
++	ARG_UNUSED(dev);
++	ARG_UNUSED(tm);
++
++	return -ENODEV;
++}
++
++static struct fake_recv_action next_action(struct fake_recv_action *script, size_t script_len,
++					   size_t *script_pos, const char *name)
++{
++	zassert_true(*script_pos < script_len, "No scripted action left for %s", name);
++
++	return script[(*script_pos)++];
++}
++
++static void fill_payload(void *buf, size_t len, int ret, uint8_t seed)
++{
++	if (ret > 0) {
++		memset(buf, seed, MIN(len, (size_t)ret));
++	}
++}
++
++static ssize_t fake_zsock_recvmsg(int sock, struct net_msghdr *msg, int flags)
++{
++	struct fake_recv_action action =
++		next_action(recvmsg_script, recvmsg_script_len, &recvmsg_script_pos, "recvmsg");
++	struct net_cmsghdr *cmsg;
++
++	ARG_UNUSED(sock);
++	ARG_UNUSED(flags);
++
++	recvmsg_call_count++;
++
++	if (action.ret < 0) {
++		errno = action.err;
++		return -1;
++	}
++
++	fill_payload(msg->msg_iov[0].iov_base, msg->msg_iov[0].iov_len, action.ret, 0xA5);
++
++	if (!action.with_timestamp) {
++		return action.ret;
++	}
++
++	cmsg = NET_CMSG_FIRSTHDR(msg);
++	zassert_not_null(cmsg, "Missing control buffer for timestamp");
++
++	cmsg->cmsg_level = ZSOCK_SOL_SOCKET;
++	cmsg->cmsg_type = ZSOCK_SO_TIMESTAMPING;
++	cmsg->cmsg_len = NET_CMSG_LEN(sizeof(fake_rx_timestamp));
++	memcpy(NET_CMSG_DATA(cmsg), &fake_rx_timestamp, sizeof(fake_rx_timestamp));
++
++	return action.ret;
++}
++
++static ssize_t fake_zsock_recvfrom(int sock, void *buf, size_t max_len, int flags,
++				   struct net_sockaddr *src_addr, net_socklen_t *addrlen)
++{
++	struct fake_recv_action action =
++		next_action(recvfrom_script, recvfrom_script_len, &recvfrom_script_pos, "recvfrom");
++
++	ARG_UNUSED(sock);
++	ARG_UNUSED(flags);
++	ARG_UNUSED(src_addr);
++	ARG_UNUSED(addrlen);
++
++	recvfrom_call_count++;
++
++	if (action.ret < 0) {
++		errno = action.err;
++		return -1;
++	}
++
++	fill_payload(buf, max_len, action.ret, 0x5A);
++
++	return action.ret;
++}
++
++#define k_uptime_get fake_k_uptime_get
++#define net_eth_get_ptp_clock fake_net_eth_get_ptp_clock
++#define ptp_clock_get fake_ptp_clock_get
++#define zsock_recvmsg fake_zsock_recvmsg
++#define zsock_recvfrom fake_zsock_recvfrom
++#include "../../../../../subsys/net/lib/ptp/transport.c"
++#undef zsock_recvfrom
++#undef zsock_recvmsg
++#undef ptp_clock_get
++#undef net_eth_get_ptp_clock
++#undef k_uptime_get
++
++static void reset_fakes(void)
++{
++	fake_now_ms = 0;
++	recvmsg_call_count = 0;
++	recvfrom_call_count = 0;
++	recvmsg_script_len = 0;
++	recvmsg_script_pos = 0;
++	recvfrom_script_len = 0;
++	recvfrom_script_pos = 0;
++	memset(recvmsg_script, 0, sizeof(recvmsg_script));
++	memset(recvfrom_script, 0, sizeof(recvfrom_script));
++}
++
++static void transport_retry_before(void *fixture)
++{
++	ARG_UNUSED(fixture);
++
++	reset_fakes();
++}
++
++ZTEST(ptp_transport_retry, test_recvmsg_failure_temporarily_falls_back_then_retries)
++{
++	struct ptp_port port = {0};
++	struct ptp_msg msg = {0};
++	int ret;
++
++	port.socket[PTP_SOCKET_EVENT] = 7;
++	port.l2_try_recvmsg = true;
++
++	recvmsg_script[recvmsg_script_len++] = (struct fake_recv_action){
++		.ret = -1,
++		.err = EIO,
++	};
++	recvmsg_script[recvmsg_script_len++] = (struct fake_recv_action){
++		.ret = 24,
++		.with_timestamp = true,
++	};
++
++	recvfrom_script[recvfrom_script_len++] = (struct fake_recv_action){
++		.ret = 16,
++	};
++	recvfrom_script[recvfrom_script_len++] = (struct fake_recv_action){
++		.ret = 20,
++	};
++
++	fake_now_ms = 100;
++	ret = ptp_transport_recv(&port, &msg, PTP_SOCKET_EVENT);
++	zassert_equal(ret, 16, "unexpected recv return after recvmsg failure");
++	zassert_false(port.l2_try_recvmsg, "recvmsg should be disabled until retry");
++	zassert_equal(port.l2_recvmsg_retry_at, 100 + PTP_L2_RECVMSG_RETRY_MS,
++		      "retry deadline not scheduled");
++	zassert_equal(recvmsg_call_count, 1, "recvmsg should have been tried once");
++	zassert_equal(recvfrom_call_count, 1, "recvfrom fallback should have been used");
++	zassert_false(msg.rx_timestamp_valid, "fallback path should not mark RX timestamp valid");
++
++	memset(&msg, 0, sizeof(msg));
++	fake_now_ms = 100 + PTP_L2_RECVMSG_RETRY_MS - 1;
++	ret = ptp_transport_recv(&port, &msg, PTP_SOCKET_EVENT);
++	zassert_equal(ret, 20, "unexpected recv return before retry window");
++	zassert_false(port.l2_try_recvmsg, "recvmsg should remain disabled before retry time");
++	zassert_equal(recvmsg_call_count, 1, "recvmsg should not be retried early");
++	zassert_equal(recvfrom_call_count, 2, "recvfrom should handle packets during backoff");
++
++	memset(&msg, 0, sizeof(msg));
++	fake_now_ms = 100 + PTP_L2_RECVMSG_RETRY_MS;
++	ret = ptp_transport_recv(&port, &msg, PTP_SOCKET_EVENT);
++	zassert_equal(ret, 24, "unexpected recv return after retry");
++	zassert_true(port.l2_try_recvmsg, "recvmsg should be re-enabled after retry");
++	zassert_equal(port.l2_recvmsg_retry_at, 0, "retry deadline should be cleared on success");
++	zassert_equal(recvmsg_call_count, 2, "recvmsg should be retried after timeout");
++	zassert_equal(recvfrom_call_count, 2, "recvfrom should not run after recvmsg recovery");
++	zassert_true(msg.rx_timestamp_valid, "recvmsg timestamp should be accepted after retry");
++	zassert_equal(msg.timestamp.host.second, fake_rx_timestamp.second,
++		      "timestamp seconds mismatch");
++	zassert_equal(msg.timestamp.host.nanosecond, fake_rx_timestamp.nanosecond,
++		      "timestamp nanoseconds mismatch");
++}
++
++ZTEST_SUITE(ptp_transport_retry, NULL, NULL, transport_retry_before, NULL, NULL);
+diff --git a/tests/net/ptp/transport_retry/testcase.yaml b/tests/net/ptp/transport_retry/testcase.yaml
+new file mode 100644
+index 00000000000..4294f501b5d
+--- /dev/null
++++ b/tests/net/ptp/transport_retry/testcase.yaml
+@@ -0,0 +1,9 @@
++tests:
++  net.ptp.transport_retry:
++    platform_allow:
++      - native_sim/native/64
++    integration_platforms:
++      - native_sim/native/64
++    tags:
++      - net
++      - ptp
+diff --git a/tests/net/socket/af_packet/prj.conf b/tests/net/socket/af_packet/prj.conf
+index ed02e5be4a9..5d57ad12d18 100644
+--- a/tests/net/socket/af_packet/prj.conf
++++ b/tests/net/socket/af_packet/prj.conf
+@@ -22,5 +22,7 @@ CONFIG_NET_MAX_CONTEXTS=8
+ CONFIG_NET_MAX_CONN=8
+ CONFIG_NET_IF_MAX_IPV4_COUNT=2
+ CONFIG_NET_CONTEXT_RCVTIMEO=y
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_CONTEXT_TIMESTAMPING=y
+ 
+ CONFIG_MAIN_STACK_SIZE=1024
+diff --git a/tests/net/socket/af_packet/src/main.c b/tests/net/socket/af_packet/src/main.c
+index 70ea6a3ef9f..6196406a8f7 100644
+--- a/tests/net/socket/af_packet/src/main.c
++++ b/tests/net/socket/af_packet/src/main.c
+@@ -16,6 +16,7 @@ LOG_MODULE_REGISTER(net_test, CONFIG_NET_SOCKETS_LOG_LEVEL);
+ #include <zephyr/net/ethernet.h>
+ #include <zephyr/net/net_ip.h>
+ #include <zephyr/net/net_log.h>
++#include <zephyr/net/ptp_time.h>
+ 
+ /* This test suite verifies that NET_AF_PACKET sockets behave according to well known behaviors.
+  * Note, that this is not well standardized and relies on behaviors known from Linux or FreeBSD.
+@@ -102,6 +103,10 @@ static const uint8_t test_payload[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+ static uint8_t rx_buf[64];
+ static uint8_t tx_buf[64];
+ static struct net_in_addr fake_src = { { { 192, 0, 2, 2 } } };
++static struct net_ptp_time test_rx_timestamp = {
++	.second = 1234,
++	.nanosecond = 567890123,
++};
+ 
+ static uint8_t lladdr1[] = { 0x02, 0x01, 0x01, 0x01, 0x01, 0x01 };
+ static uint8_t lladdr2[] = { 0x02, 0x02, 0x02, 0x02, 0x02, 0x02 };
+@@ -143,6 +148,8 @@ static int eth_fake_send(const struct device *dev, struct net_pkt *pkt)
+ 	recv_pkt = net_pkt_rx_clone(pkt, K_NO_WAIT);
+ 
+ 	net_pkt_set_iface(recv_pkt, target_iface);
++	net_pkt_set_timestamp(recv_pkt, &test_rx_timestamp);
++	net_pkt_set_rx_timestamping(recv_pkt, true);
+ 
+ 	k_sleep(K_MSEC(10)); /* Let the receiver run */
+ 
+@@ -846,6 +853,79 @@ static void test_recv_common(int sock_type, int proto, bool success)
+ 	}
+ }
+ 
++static void test_recvmsg_timestamping_common(size_t cmsgbuf_len, bool expect_trunc)
++{
++	struct net_sockaddr_ll ll_dst;
++	struct net_iovec io_vector = {
++		.iov_base = rx_buf,
++		.iov_len = sizeof(rx_buf),
++	};
++	struct net_msghdr msg = {
++		.msg_iov = &io_vector,
++		.msg_iovlen = 1,
++	};
++	uint8_t timestamping = ZSOCK_SOF_TIMESTAMPING_RX_HARDWARE;
++	uint16_t offset = sizeof(struct net_eth_hdr);
++	uint16_t pkt_len;
++	int ret;
++	union {
++		struct net_cmsghdr hdr;
++		uint8_t buf[NET_CMSG_SPACE(sizeof(struct net_ptp_time))];
++	} cmsgbuf = {0};
++
++	__ASSERT_NO_MSG(cmsgbuf_len <= sizeof(cmsgbuf.buf));
++
++	setup_packet_socket(&packet_sock_1, NET_SOCK_RAW, 0);
++	prepare_test_packet(NET_SOCK_RAW, ETH_P_IP, lladdr2, lladdr1, &pkt_len);
++	prepare_test_dst_lladdr(&ll_dst, ETH_P_IP, lladdr1, ud.second);
++
++	setup_packet_socket(&packet_sock_2, NET_SOCK_DGRAM, net_htons(ETH_P_ALL));
++	bind_packet_socket(packet_sock_2, ud.first);
++
++	ret = zsock_setsockopt(packet_sock_2, ZSOCK_SOL_SOCKET, ZSOCK_SO_TIMESTAMPING,
++			       &timestamping, sizeof(timestamping));
++	zassert_equal(ret, 0, "timestamping setsockopt failed (%d)", errno);
++
++	msg.msg_control = cmsgbuf.buf;
++	msg.msg_controllen = cmsgbuf_len;
++
++	ret = zsock_sendto(packet_sock_1, tx_buf, pkt_len, 0, (struct net_sockaddr *)&ll_dst,
++			   sizeof(struct net_sockaddr_ll));
++	zassert_not_equal(ret, -1, "Failed to send (%d)", errno);
++	zassert_equal(ret, pkt_len, "Invalid data length sent (%d/%d)", ret, pkt_len);
++
++	pkt_len -= offset;
++
++	ret = zsock_recvmsg(packet_sock_2, &msg, 0);
++	zassert_not_equal(ret, -1, "Failed to receive packet (%d)", errno);
++	zassert_equal(ret, pkt_len, "Invalid data size received (%d, expected %d)", ret, pkt_len);
++	zassert_mem_equal(rx_buf, tx_buf + offset, pkt_len, "Invalid payload received");
++
++	if (expect_trunc) {
++		zassert_true(msg.msg_flags & ZSOCK_MSG_CTRUNC,
++			     "Control data should have been truncated");
++		zassert_equal(msg.msg_controllen, 0, "Unexpected control data length %zu",
++			      msg.msg_controllen);
++		zassert_is_null(NET_CMSG_FIRSTHDR(&msg), "Unexpected control header");
++		return;
++	}
++
++	struct net_cmsghdr *cmsg = NET_CMSG_FIRSTHDR(&msg);
++	struct net_ptp_time timestamp;
++
++	zassert_not_null(cmsg, "Missing timestamp control message");
++	zassert_equal(msg.msg_controllen, NET_CMSG_SPACE(sizeof(struct net_ptp_time)),
++		      "Unexpected msg_controllen %zu", msg.msg_controllen);
++	zassert_equal(cmsg->cmsg_level, ZSOCK_SOL_SOCKET, "Unexpected cmsg level");
++	zassert_equal(cmsg->cmsg_type, ZSOCK_SO_TIMESTAMPING, "Unexpected cmsg type");
++	zassert_equal(cmsg->cmsg_len, NET_CMSG_LEN(sizeof(struct net_ptp_time)),
++		      "Unexpected cmsg length %u", cmsg->cmsg_len);
++
++	memcpy(&timestamp, NET_CMSG_DATA(cmsg), sizeof(timestamp));
++	zassert_mem_equal(&timestamp, &test_rx_timestamp, sizeof(timestamp),
++			  "Unexpected timestamp payload");
++}
++
+ ZTEST(socket_packet, test_raw_sock_recv_no_proto)
+ {
+ 	test_recv_common(NET_SOCK_RAW, 0, false);
+@@ -938,6 +1018,16 @@ ZTEST(socket_packet, test_dgram_sock_recv_proto_wildcard)
+ 	test_recv_common(NET_SOCK_DGRAM, ETH_P_ALL, true);
+ }
+ 
++ZTEST(socket_packet, test_dgram_sock_recvmsg_timestamping)
++{
++	test_recvmsg_timestamping_common(NET_CMSG_SPACE(sizeof(struct net_ptp_time)), false);
++}
++
++ZTEST(socket_packet, test_dgram_sock_recvmsg_timestamping_truncated_control)
++{
++	test_recvmsg_timestamping_common(NET_CMSG_SPACE(sizeof(struct net_ptp_time)) - 1, true);
++}
++
+ ZTEST(socket_packet, test_dgram_sock_recvfrom_proto_wildcard)
+ {
+ 	test_recvfrom_common(NET_SOCK_DGRAM, ETH_P_ALL);
+diff --git a/tests/net/socket/udp/prj.conf b/tests/net/socket/udp/prj.conf
+index eec32e93ab8..f28a11740f1 100644
+--- a/tests/net/socket/udp/prj.conf
++++ b/tests/net/socket/udp/prj.conf
+@@ -32,3 +32,5 @@ CONFIG_NET_CONTEXT_PRIORITY=y
+ CONFIG_NET_CONTEXT_TXTIME=y
+ CONFIG_NET_CONTEXT_RCVTIMEO=y
+ CONFIG_NET_CONTEXT_SNDTIMEO=y
++CONFIG_NET_PKT_TIMESTAMP=y
++CONFIG_NET_CONTEXT_TIMESTAMPING=y
+diff --git a/tests/net/socket/udp/src/main.c b/tests/net/socket/udp/src/main.c
+index a936ed267fa..bd8b2bf2f0d 100644
+--- a/tests/net/socket/udp/src/main.c
++++ b/tests/net/socket/udp/src/main.c
+@@ -17,6 +17,7 @@ LOG_MODULE_REGISTER(net_test, CONFIG_NET_SOCKETS_LOG_LEVEL);
+ #include <zephyr/net/ethernet.h>
+ #include <zephyr/net/net_mgmt.h>
+ #include <zephyr/net/net_event.h>
++#include <zephyr/net/ptp_time.h>
+ 
+ #include "ipv6.h"
+ #include "net_private.h"
+@@ -2404,6 +2405,66 @@ ZTEST_USER(net_socket_udp, test_recvmsg_msg_controllen_update)
+ 	zassert_equal(rv, 0, "close failed");
+ }
+ 
++ZTEST_USER(net_socket_udp, test_recvmsg_timestamping_msg_controllen_update)
++{
++	int rv;
++	int client_sock;
++	int server_sock;
++	uint8_t timestamping = ZSOCK_SOF_TIMESTAMPING_RX_HARDWARE;
++	struct net_sockaddr_in client_addr;
++	struct net_sockaddr_in server_addr;
++	struct net_msghdr msg, server_msg;
++	struct net_iovec io_vector[1];
++	struct net_cmsghdr *cmsg;
++	union {
++		struct net_cmsghdr hdr;
++		unsigned char buf[NET_CMSG_SPACE(sizeof(struct net_ptp_time))];
++	} cmsgbuf;
++
++	prepare_sock_udp_v4(MY_IPV4_ADDR, ANY_PORT, &client_sock, &client_addr);
++	prepare_sock_udp_v4(MY_IPV4_ADDR, SERVER_PORT, &server_sock, &server_addr);
++
++	rv = zsock_bind(server_sock, (struct net_sockaddr *)&server_addr, sizeof(server_addr));
++	zassert_equal(rv, 0, "server bind failed");
++
++	rv = zsock_bind(client_sock, (struct net_sockaddr *)&client_addr, sizeof(client_addr));
++	zassert_equal(rv, 0, "client bind failed");
++
++	rv = zsock_setsockopt(server_sock, ZSOCK_SOL_SOCKET, ZSOCK_SO_TIMESTAMPING, &timestamping,
++			      sizeof(timestamping));
++	zassert_equal(rv, 0, "timestamping setsockopt failed (%d)", errno);
++
++	memset(&cmsgbuf, 0, sizeof(cmsgbuf));
++
++	io_vector[0].iov_base = TEST_STR_SMALL;
++	io_vector[0].iov_len = strlen(TEST_STR_SMALL);
++
++	memset(&msg, 0, sizeof(msg));
++	msg.msg_iov = io_vector;
++	msg.msg_iovlen = 1;
++	msg.msg_name = &server_addr;
++	msg.msg_namelen = sizeof(server_addr);
++
++	comm_sendmsg_recvmsg(client_sock, (struct net_sockaddr *)&client_addr, sizeof(client_addr),
++			     &msg, server_sock, (struct net_sockaddr *)&server_addr,
++			     sizeof(server_addr), &server_msg, &cmsgbuf.buf, sizeof(cmsgbuf.buf),
++			     true);
++
++	cmsg = NET_CMSG_FIRSTHDR(&server_msg);
++	zassert_not_null(cmsg, "Missing timestamp control message");
++	zassert_equal(server_msg.msg_controllen, NET_CMSG_SPACE(sizeof(struct net_ptp_time)),
++		      "Unexpected msg_controllen %zu", server_msg.msg_controllen);
++	zassert_equal(cmsg->cmsg_level, ZSOCK_SOL_SOCKET, "Unexpected cmsg level");
++	zassert_equal(cmsg->cmsg_type, ZSOCK_SO_TIMESTAMPING, "Unexpected cmsg type");
++	zassert_equal(cmsg->cmsg_len, NET_CMSG_LEN(sizeof(struct net_ptp_time)),
++		      "Unexpected cmsg length %u", cmsg->cmsg_len);
++
++	rv = zsock_close(client_sock);
++	zassert_equal(rv, 0, "close failed");
++	rv = zsock_close(server_sock);
++	zassert_equal(rv, 0, "close failed");
++}
++
+ ZTEST(net_socket_udp, test_v6_address_removal)
+ {
+ 	int ret;
+diff --git a/tests/net/tx_timestamp/src/main.c b/tests/net/tx_timestamp/src/main.c
+index 3fe5700f074..a5e30e5e708 100644
+--- a/tests/net/tx_timestamp/src/main.c
++++ b/tests/net/tx_timestamp/src/main.c
+@@ -70,9 +70,15 @@ static bool test_failed;
+ static bool test_started;
+ static bool do_timestamp;
+ static bool timestamp_cb_called;
++static int self_unregister_called;
++static int unregister_other_called;
++static int unregistered_target_called;
+ static struct net_if_timestamp_cb timestamp_cb;
+ static struct net_if_timestamp_cb timestamp_cb_2;
+ static struct net_if_timestamp_cb timestamp_cb_3;
++static struct net_if_timestamp_cb timestamp_cb_self_unregister;
++static struct net_if_timestamp_cb timestamp_cb_unregister_other;
++static struct net_if_timestamp_cb timestamp_cb_unregister_target;
+ 
+ static K_SEM_DEFINE(wait_data, 0, UINT_MAX);
+ 
+@@ -228,6 +234,31 @@ static void timestamp_callback_2(struct net_pkt *pkt)
+ 	}
+ }
+ 
++static void timestamp_callback_self_unregister(struct net_pkt *pkt)
++{
++	self_unregister_called++;
++
++	net_if_unregister_timestamp_cb(&timestamp_cb_self_unregister);
++
++	net_pkt_unref(pkt);
++}
++
++static void timestamp_callback_unregister_target(struct net_pkt *pkt)
++{
++	unregistered_target_called++;
++
++	net_pkt_unref(pkt);
++}
++
++static void timestamp_callback_unregister_other(struct net_pkt *pkt)
++{
++	unregister_other_called++;
++
++	net_if_unregister_timestamp_cb(&timestamp_cb_unregister_target);
++
++	net_pkt_unref(pkt);
++}
++
+ void test_timestamp_setup_2nd_iface(void)
+ {
+ 	struct net_if *iface;
+@@ -301,6 +332,64 @@ void test_timestamp_cleanup(void)
+ 	net_pkt_unref(pkt);
+ }
+ 
++void test_timestamp_unregister_self(void)
++{
++	struct net_if *iface = eth_interfaces[0];
++	struct net_pkt *pkt;
++
++	self_unregister_called = 0;
++
++	net_if_register_timestamp_cb(&timestamp_cb_self_unregister, NULL, iface,
++				     timestamp_callback_self_unregister);
++
++	pkt = net_pkt_alloc_on_iface(iface, K_FOREVER);
++	net_if_call_timestamp_cb(pkt);
++
++	zassert_equal(self_unregister_called, 1,
++		      "Self unregister callback count %d",
++		      self_unregister_called);
++	zassert_equal(atomic_get(&pkt->atomic_ref), 0,
++		      "Pkt %p not released\n", pkt);
++
++	pkt = net_pkt_alloc_on_iface(iface, K_FOREVER);
++	net_if_call_timestamp_cb(pkt);
++
++	zassert_equal(self_unregister_called, 1,
++		      "Self unregister callback called after removal");
++	zassert_true(atomic_get(&pkt->atomic_ref) > 0,
++		     "Pkt %p released\n", pkt);
++
++	net_pkt_unref(pkt);
++}
++
++void test_timestamp_unregister_other(void)
++{
++	struct net_if *iface = eth_interfaces[0];
++	struct net_pkt *pkt;
++
++	unregister_other_called = 0;
++	unregistered_target_called = 0;
++
++	net_if_register_timestamp_cb(&timestamp_cb_unregister_target, NULL, iface,
++				     timestamp_callback_unregister_target);
++	net_if_register_timestamp_cb(&timestamp_cb_unregister_other, NULL, iface,
++				     timestamp_callback_unregister_other);
++
++	pkt = net_pkt_alloc_on_iface(iface, K_FOREVER);
++	net_if_call_timestamp_cb(pkt);
++
++	zassert_equal(unregister_other_called, 1,
++		      "Unregister-other callback count %d",
++		      unregister_other_called);
++	zassert_equal(unregistered_target_called, 0,
++		      "Removed callback was still invoked");
++	zassert_equal(atomic_get(&pkt->atomic_ref), 0,
++		      "Pkt %p not released\n", pkt);
++
++	net_if_unregister_timestamp_cb(&timestamp_cb_unregister_other);
++	net_if_unregister_timestamp_cb(&timestamp_cb_unregister_target);
++}
++
+ struct user_data {
+ 	int eth_if_count;
+ 	int total_if_count;
+@@ -493,5 +582,7 @@ ZTEST(net_tx_timestamp, test_tx_timestamp)
+ 	test_timestamp_setup_all();
+ 	test_check_timestamp_after_enabling();
+ 	test_timestamp_cleanup();
++	test_timestamp_unregister_self();
++	test_timestamp_unregister_other();
+ }
+ ZTEST_SUITE(net_tx_timestamp, NULL, NULL, NULL, NULL, NULL);

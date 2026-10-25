@@ -1,0 +1,273 @@
+diff --git a/tests/subsys/pm/device_runtime_stress/CMakeLists.txt b/tests/subsys/pm/device_runtime_stress/CMakeLists.txt
+new file mode 100644
+index 00000000000..c6d4640382d
+--- /dev/null
++++ b/tests/subsys/pm/device_runtime_stress/CMakeLists.txt
+@@ -0,0 +1,8 @@
++# Copyright (c) 2026 Nordic Semiconductor ASA
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(device_runtime_stress)
++
++target_sources(app PRIVATE src/main.c src/emulated_pm_device.c)
+diff --git a/tests/subsys/pm/device_runtime_stress/prj.conf b/tests/subsys/pm/device_runtime_stress/prj.conf
+new file mode 100644
+index 00000000000..496a485763d
+--- /dev/null
++++ b/tests/subsys/pm/device_runtime_stress/prj.conf
+@@ -0,0 +1,5 @@
++CONFIG_ZTEST=y
++CONFIG_PM_DEVICE=y
++CONFIG_PM_DEVICE_RUNTIME=y
++CONFIG_MP_MAX_NUM_CPUS=1
++CONFIG_ZTEST_THREAD_PRIORITY=3
+diff --git a/tests/subsys/pm/device_runtime_stress/src/emulated_pm_device.c b/tests/subsys/pm/device_runtime_stress/src/emulated_pm_device.c
+new file mode 100644
+index 00000000000..832d99c6b16
+--- /dev/null
++++ b/tests/subsys/pm/device_runtime_stress/src/emulated_pm_device.c
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (c) 2026 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "emulated_pm_device.h"
++
++#include <zephyr/kernel.h>
++#include <zephyr/pm/device.h>
++#include <zephyr/pm/device_runtime.h>
++
++struct emulated_pm_stress_data {
++	const struct device *self;
++	struct k_timer timer;
++	struct k_sem op_done;
++	atomic_t async_err;
++};
++
++static void timer_handler(struct k_timer *timer)
++{
++	struct emulated_pm_stress_data *data =
++		CONTAINER_OF(timer, struct emulated_pm_stress_data, timer);
++	int ret;
++
++	ret = pm_device_runtime_put_async(data->self, K_NO_WAIT);
++	if (ret != 0) {
++		atomic_set(&data->async_err, ret);
++	}
++	k_sem_give(&data->op_done);
++}
++
++static int emulated_pm_action(const struct device *dev, enum pm_device_action action)
++{
++	ARG_UNUSED(dev);
++	ARG_UNUSED(action);
++
++	/* Emulate PM operation duration. */
++	k_busy_wait(50);
++
++	return 0;
++}
++
++PM_DEVICE_DEFINE(emulated_pm_stress, emulated_pm_action, 0);
++
++static struct emulated_pm_stress_data emulated_data;
++
++static int emulated_pm_stress_init(const struct device *dev)
++{
++	struct emulated_pm_stress_data *data = dev->data;
++
++	data->self = dev;
++	k_sem_init(&data->op_done, 0, 1);
++	atomic_clear(&data->async_err);
++	k_timer_init(&data->timer, timer_handler, NULL);
++
++	return 0;
++}
++
++DEVICE_DEFINE(emulated_pm_stress, "emulated_pm_stress", emulated_pm_stress_init,
++	      PM_DEVICE_GET(emulated_pm_stress), &emulated_data, NULL, POST_KERNEL,
++	      CONFIG_KERNEL_INIT_PRIORITY_DEVICE, NULL);
++
++const struct device *emulated_pm_stress_dev(void)
++{
++	return DEVICE_GET(emulated_pm_stress);
++}
++
++int emulated_pm_stress_submit(const struct device *dev)
++{
++	struct emulated_pm_stress_data *data = dev->data;
++	int ret;
++
++	ret = pm_device_runtime_get(dev);
++	if (ret < 0) {
++		return ret;
++	}
++
++	atomic_clear(&data->async_err);
++	k_timer_start(&data->timer, K_TICKS(1), K_NO_WAIT);
++
++	return 0;
++}
++
++int emulated_pm_stress_wait(const struct device *dev)
++{
++	struct emulated_pm_stress_data *data = dev->data;
++
++	k_sem_take(&data->op_done, K_FOREVER);
++
++	return atomic_get(&data->async_err);
++}
+diff --git a/tests/subsys/pm/device_runtime_stress/src/emulated_pm_device.h b/tests/subsys/pm/device_runtime_stress/src/emulated_pm_device.h
+new file mode 100644
+index 00000000000..a267c3fc818
+--- /dev/null
++++ b/tests/subsys/pm/device_runtime_stress/src/emulated_pm_device.h
+@@ -0,0 +1,38 @@
++/*
++ * Copyright (c) 2026 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef ZEPHYR_TESTS_SUBSYS_PM_DEVICE_RUNTIME_STRESS_EMULATED_PM_DEVICE_H_
++#define ZEPHYR_TESTS_SUBSYS_PM_DEVICE_RUNTIME_STRESS_EMULATED_PM_DEVICE_H_
++
++#include <zephyr/device.h>
++
++/** @return Pointer to the emulated stress test device. */
++const struct device *emulated_pm_stress_dev(void);
++
++/**
++ * @brief Start one emulated operation (k_timer emulates completion IRQ).
++ *
++ * Calls pm_device_runtime_get() for the device, then arms a one-shot timer.
++ * The timer expiry calls pm_device_runtime_put_async().
++ *
++ * @param dev Emulated device instance.
++ *
++ * @retval 0 Success.
++ * @retval -errno From pm_device_runtime_get().
++ */
++int emulated_pm_stress_submit(const struct device *dev);
++
++/**
++ * @brief Wait until the emulated operation completes.
++ *
++ * @param dev Emulated device instance.
++ *
++ * @retval 0 Timer path completed successfully (put_async returned 0).
++ * @retval non-zero pm_device_runtime_put_async() error from timer context.
++ */
++int emulated_pm_stress_wait(const struct device *dev);
++
++#endif /* ZEPHYR_TESTS_SUBSYS_PM_DEVICE_RUNTIME_STRESS_EMULATED_PM_DEVICE_H_ */
+diff --git a/tests/subsys/pm/device_runtime_stress/src/main.c b/tests/subsys/pm/device_runtime_stress/src/main.c
+new file mode 100644
+index 00000000000..425bfbf4c41
+--- /dev/null
++++ b/tests/subsys/pm/device_runtime_stress/src/main.c
+@@ -0,0 +1,87 @@
++/*
++ * Copyright (c) 2026 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++#include <zephyr/pm/device.h>
++#include <zephyr/pm/device_runtime.h>
++
++#include "emulated_pm_device.h"
++
++#define STRESS_ITERATIONS 1024
++
++static const struct device *stress_dev;
++
++static void *device_runtime_stress_setup(void)
++{
++	stress_dev = emulated_pm_stress_dev();
++	zassert_not_null(stress_dev, "");
++
++	zassert_ok(pm_device_runtime_enable(stress_dev));
++
++	return NULL;
++}
++
++static void device_runtime_stress_suite_teardown(void *data)
++{
++	ARG_UNUSED(data);
++
++	if (stress_dev != NULL) {
++		(void)pm_device_runtime_disable(stress_dev);
++	}
++}
++
++ZTEST(device_runtime_stress, test_pm_runtime_timer_emulated_irq)
++{
++	enum pm_device_state state;
++	int wait_us = k_ticks_to_us_ceil32(1);
++	int delay;
++
++	if (wait_us < STRESS_ITERATIONS / 2) {
++		delay = 1;
++	} else {
++		delay = wait_us - STRESS_ITERATIONS / 2;
++	}
++
++	for (int i = 0; i < STRESS_ITERATIONS; i++) {
++		int ret;
++
++		zassert_equal(pm_device_runtime_usage(stress_dev), 0, "iter %d", i);
++
++		ret = pm_device_runtime_get(stress_dev);
++		zassert_ok(ret, "iter %d outer get", i);
++
++		(void)pm_device_state_get(stress_dev, &state);
++		zassert_equal(state, PM_DEVICE_STATE_ACTIVE, "iter %d", i);
++
++		ret = emulated_pm_stress_submit(stress_dev);
++		zassert_ok(ret, "iter %d submit (inner get + timer arm)", i);
++
++		/* Keep increasing delay to simulate different application code execution times.
++		 * At some point, we should run into a case where PM put function is preempted
++		 * by the interrupt handler.
++		 */
++		k_busy_wait(delay);
++		delay++;
++
++		/* Application is releasing the device and the device is self-releasing
++		 * when operation is completed. Device operation is asynchronous so
++		 * user code may be pre-empted. Test checks if PM runtime management
++		 * is handling this correctly.
++		 */
++		ret = pm_device_runtime_put(stress_dev);
++		zassert_ok(ret, "iter %d outer put", i);
++
++		/* Wait for device completion without any error. */
++		ret = emulated_pm_stress_wait(stress_dev);
++		zassert_ok(ret, "iter %d wait (put_async from timer)", i);
++
++		(void)pm_device_state_get(stress_dev, &state);
++		zassert_equal(state, PM_DEVICE_STATE_SUSPENDED, "iter %d", i);
++	}
++}
++
++ZTEST_SUITE(device_runtime_stress, NULL, device_runtime_stress_setup, NULL, NULL,
++	    device_runtime_stress_suite_teardown);
+diff --git a/tests/subsys/pm/device_runtime_stress/testcase.yaml b/tests/subsys/pm/device_runtime_stress/testcase.yaml
+new file mode 100644
+index 00000000000..2d6b2723e60
+--- /dev/null
++++ b/tests/subsys/pm/device_runtime_stress/testcase.yaml
+@@ -0,0 +1,7 @@
++common:
++  tags: pm
++
++tests:
++  pm.device_runtime.stress:
++    platform_allow:
++      - qemu_x86

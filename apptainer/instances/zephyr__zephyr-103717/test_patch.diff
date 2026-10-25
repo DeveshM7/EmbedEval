@@ -1,0 +1,200 @@
+diff --git a/tests/drivers/firmware/qemu_fwcfg/CMakeLists.txt b/tests/drivers/firmware/qemu_fwcfg/CMakeLists.txt
+new file mode 100644
+index 00000000000..ba5929da4ec
+--- /dev/null
++++ b/tests/drivers/firmware/qemu_fwcfg/CMakeLists.txt
+@@ -0,0 +1,7 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(qemu_fwcfg_test)
++
++target_sources(app PRIVATE src/main.c)
+diff --git a/tests/drivers/firmware/qemu_fwcfg/boards/qemu_cortex_a53.overlay b/tests/drivers/firmware/qemu_fwcfg/boards/qemu_cortex_a53.overlay
+new file mode 100644
+index 00000000000..1cffb3b5b28
+--- /dev/null
++++ b/tests/drivers/firmware/qemu_fwcfg/boards/qemu_cortex_a53.overlay
+@@ -0,0 +1,12 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Maximilian Zimmermann
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/ {
++	fwcfg0: fw-cfg@9020000 {
++		compatible = "qemu,fw-cfg-mmio";
++		reg = <0x0 0x09020000 0x0 0x18>;
++		status = "okay";
++	};
++};
+diff --git a/tests/drivers/firmware/qemu_fwcfg/boards/qemu_riscv64.overlay b/tests/drivers/firmware/qemu_fwcfg/boards/qemu_riscv64.overlay
+new file mode 100644
+index 00000000000..a4aedc4040b
+--- /dev/null
++++ b/tests/drivers/firmware/qemu_fwcfg/boards/qemu_riscv64.overlay
+@@ -0,0 +1,12 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Maximilian Zimmermann
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/ {
++	fwcfg0: fw-cfg@10100000 {
++		compatible = "qemu,fw-cfg-mmio";
++		reg = <0x10100000 0x18>;
++		status = "okay";
++	};
++};
+diff --git a/tests/drivers/firmware/qemu_fwcfg/boards/qemu_x86.overlay b/tests/drivers/firmware/qemu_fwcfg/boards/qemu_x86.overlay
+new file mode 100644
+index 00000000000..a8924cb13be
+--- /dev/null
++++ b/tests/drivers/firmware/qemu_fwcfg/boards/qemu_x86.overlay
+@@ -0,0 +1,12 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Maximilian Zimmermann
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/ {
++	fwcfg0: fw-cfg@510 {
++		compatible = "qemu,fw-cfg-ioport";
++		reg = <0x510 0x18>;
++		status = "okay";
++	};
++};
+diff --git a/tests/drivers/firmware/qemu_fwcfg/prj.conf b/tests/drivers/firmware/qemu_fwcfg/prj.conf
+new file mode 100644
+index 00000000000..8ad58af3876
+--- /dev/null
++++ b/tests/drivers/firmware/qemu_fwcfg/prj.conf
+@@ -0,0 +1,4 @@
++CONFIG_QEMU_EXTRA_FLAGS="-fw_cfg name=opt/zephyr/string,string=FWCFG_ZEPHYR_TEST"
++CONFIG_HEAP_MEM_POOL_SIZE=4096
++CONFIG_ZTEST=y
++CONFIG_ZTEST_STACK_SIZE=1536
+diff --git a/tests/drivers/firmware/qemu_fwcfg/src/main.c b/tests/drivers/firmware/qemu_fwcfg/src/main.c
+new file mode 100644
+index 00000000000..9b55b673de6
+--- /dev/null
++++ b/tests/drivers/firmware/qemu_fwcfg/src/main.c
+@@ -0,0 +1,96 @@
++/*
++ * Copyright (c) 2026 Maximilian Zimmermann
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++#include <errno.h>
++
++#include <zephyr/kernel.h>
++#include <zephyr/device.h>
++#include <zephyr/devicetree.h>
++#include <zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.h>
++#include <zephyr/sys/util.h>
++#include <zephyr/ztest.h>
++
++static const struct device *get_fwcfg_device(void)
++{
++	const struct device *fwcfg = DEVICE_DT_GET(DT_NODELABEL(fwcfg0));
++
++	zassert_not_null(fwcfg, "Unable to get fwcfg device");
++	zassert_true(device_is_ready(fwcfg), "fwcfg device not ready");
++
++	return fwcfg;
++}
++
++ZTEST(fwcfg, test_fwcfg_device_instantiation)
++{
++	(void)get_fwcfg_device();
++}
++
++ZTEST(fwcfg, test_fwcfg_device_features)
++{
++	const struct device *fwcfg = get_fwcfg_device();
++	int ret;
++	uint32_t features;
++	bool dma_supported;
++
++	ret = qemu_fwcfg_get_features(fwcfg, &features);
++	dma_supported = qemu_fwcfg_dma_supported(fwcfg);
++
++	zassert_ok(ret, "Failed to get features: (%d)", ret);
++	zassert_true(features & FW_CFG_ID_F_TRADITIONAL,
++		     "Required feature (traditional interface) not available");
++	zassert_equal((features & FW_CFG_ID_F_DMA) != 0U, dma_supported,
++		      "Feature DMA support bit mismatch: %u != %u",
++		      (uint32_t)((features & FW_CFG_ID_F_DMA) != 0U), (uint32_t)dma_supported);
++}
++
++ZTEST(fwcfg, test_fwcfg_find_file)
++{
++	const struct device *fwcfg = get_fwcfg_device();
++	int ret;
++	uint16_t select;
++	uint32_t size;
++
++	ret = qemu_fwcfg_find_file(fwcfg, "etc/ramfb", &select, &size);
++	zassert_not_ok(ret, "Returned success for non-existing directory");
++
++	ret = qemu_fwcfg_find_file(fwcfg, "opt/zephyr/string", &select, &size);
++	zassert_ok(ret, "Failed to get file selector: (%d)", ret);
++	zassert(size > 0, "Returned size is invalid");
++}
++
++ZTEST(fwcfg, test_fwcfg_read)
++{
++	const struct device *fwcfg = get_fwcfg_device();
++	static const char expected[] = "FWCFG_ZEPHYR_TEST";
++	const size_t expected_len = sizeof(expected) - 1U;
++	char *buf;
++	int ret;
++	uint16_t select;
++	uint32_t size;
++
++	ret = qemu_fwcfg_find_file(fwcfg, "opt/zephyr/string", &select, &size);
++	zassert_ok(ret, "Failed to get file selector: (%d)", ret);
++	zassert_true(size == expected_len || size == (expected_len + 1U),
++		     "Unexpected file size: %u", (unsigned int)size);
++
++	buf = k_malloc((size_t)size + 1U);
++	zassert_not_null(buf, "Failed to allocate %u bytes", (unsigned int)(size + 1U));
++
++	(void)memset(buf, 0, (size_t)size + 1U);
++	ret = qemu_fwcfg_read_item(fwcfg, select, buf, size);
++	zassert_ok(ret, "Failed to read data: %d", ret);
++	zassert_mem_equal(buf, expected, expected_len, "Unexpected fwcfg file content");
++	if (size == (expected_len + 1U)) {
++		zassert_equal(buf[expected_len], '\0', "Missing trailing NUL");
++	}
++
++	k_free(buf);
++}
++
++ZTEST_SUITE(fwcfg, NULL, NULL, NULL, NULL, NULL);
+diff --git a/tests/drivers/firmware/qemu_fwcfg/testcase.yaml b/tests/drivers/firmware/qemu_fwcfg/testcase.yaml
+new file mode 100644
+index 00000000000..35e6b477f7a
+--- /dev/null
++++ b/tests/drivers/firmware/qemu_fwcfg/testcase.yaml
+@@ -0,0 +1,15 @@
++common:
++  tags:
++    - drivers
++    - firmware
++
++tests:
++  drivers.firmware.qemu_fwcfg:
++    harness: ztest
++    timeout: 60
++    integration_platforms:
++      - qemu_x86
++    platform_allow:
++      - qemu_cortex_a53
++      - qemu_x86
++      - qemu_riscv64

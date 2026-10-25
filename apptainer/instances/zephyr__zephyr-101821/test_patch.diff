@@ -1,0 +1,241 @@
+diff --git a/tests/subsys/mgmt/mcumgr/transport_raw_uart/CMakeLists.txt b/tests/subsys/mgmt/mcumgr/transport_raw_uart/CMakeLists.txt
+new file mode 100644
+index 00000000000..c00c8118d4d
+--- /dev/null
++++ b/tests/subsys/mgmt/mcumgr/transport_raw_uart/CMakeLists.txt
+@@ -0,0 +1,14 @@
++#
++# Copyright (c) 2026 Nordic Semiconductor ASA
++#
++# SPDX-License-Identifier: Apache-2.0
++#
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(transport_raw_uart)
++
++FILE(GLOB app_sources src/*.c)
++
++target_sources(app PRIVATE ${app_sources})
++target_include_directories(app PRIVATE ${ZEPHYR_BASE}/subsys/mgmt/mcumgr/transport/include/mgmt/mcumgr/transport/)
+diff --git a/tests/subsys/mgmt/mcumgr/transport_raw_uart/prj.conf b/tests/subsys/mgmt/mcumgr/transport_raw_uart/prj.conf
+new file mode 100644
+index 00000000000..759021e171d
+--- /dev/null
++++ b/tests/subsys/mgmt/mcumgr/transport_raw_uart/prj.conf
+@@ -0,0 +1,17 @@
++#
++# Copyright (c) 2025 Jamie McCrae
++#
++# SPDX-License-Identifier: Apache-2.0
++#
++
++CONFIG_ZTEST=y
++CONFIG_NET_BUF=y
++CONFIG_BASE64=n
++CONFIG_ZCBOR=y
++CONFIG_CRC=n
++CONFIG_MCUMGR=y
++CONFIG_MCUMGR_TRANSPORT_RAW_DUMMY=y
++CONFIG_MCUMGR_TRANSPORT_RAW_DUMMY_RX_BUF_SIZE=384
++CONFIG_MCUMGR_GRP_OS=y
++CONFIG_MCUMGR_GRP_OS_ECHO=y
++CONFIG_ZTEST_STACK_SIZE=2048
+diff --git a/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/main.c b/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/main.c
+new file mode 100644
+index 00000000000..aa301b51822
+--- /dev/null
++++ b/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/main.c
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (c) 2023-2026 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++#include <zephyr/net_buf.h>
++#include <zephyr/mgmt/mcumgr/mgmt/mgmt.h>
++#include <zephyr/mgmt/mcumgr/transport/smp_dummy.h>
++#include <zephyr/mgmt/mcumgr/transport/smp_raw_dummy.h>
++#include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
++#include <zephyr/mgmt/mcumgr/grp/os_mgmt/os_mgmt.h>
++#include <zcbor_common.h>
++#include <zcbor_decode.h>
++#include <zcbor_encode.h>
++#include <mgmt/mcumgr/util/zcbor_bulk.h>
++#include <string.h>
++#include <zephyr/sys/byteorder.h>
++#include "smp_test_util.h"
++
++#define SMP_RESPONSE_WAIT_TIME 3
++#define ZCBOR_BUFFER_SIZE 128
++#define OUTPUT_BUFFER_SIZE 384
++#define ZCBOR_HISTORY_ARRAY_SIZE 8
++#define TEST_STRING "tEsTiNg eChO dAtA"
++
++static struct net_buf *nb;
++
++static void cleanup_test(void *p)
++{
++	if (nb != NULL) {
++		net_buf_reset(nb);
++		net_buf_unref(nb);
++		nb = NULL;
++	}
++}
++
++ZTEST(transport_raw_uart, test_os_mgmt_echo)
++{
++	uint8_t buffer[ZCBOR_BUFFER_SIZE];
++	uint8_t buffer_out[OUTPUT_BUFFER_SIZE];
++	bool ok;
++	uint16_t buffer_size;
++	zcbor_state_t zse[ZCBOR_HISTORY_ARRAY_SIZE] = { 0 };
++	zcbor_state_t zsd[ZCBOR_HISTORY_ARRAY_SIZE] = { 0 };
++	bool received;
++	struct smp_hdr *header;
++	size_t decoded = 0;
++	struct zcbor_string data = { 0 };
++
++	struct zcbor_map_decode_key_val output_decode[] = {
++		ZCBOR_MAP_DECODE_KEY_DECODER("r", zcbor_tstr_decode, &data),
++	};
++
++	memset(buffer, 0, sizeof(buffer));
++	memset(buffer_out, 0, sizeof(buffer_out));
++	buffer_size = 0;
++	memset(zse, 0, sizeof(zse));
++	memset(zsd, 0, sizeof(zsd));
++
++	/* Test 1: Get the unused default memory pool values as a baseline */
++	zcbor_new_encode_state(zse, 2, buffer, ARRAY_SIZE(buffer), 0);
++	ok = create_os_mgmt_echo_packet(zse, buffer, buffer_out, &buffer_size, TEST_STRING);
++	zassert_true(ok, "Expected packet creation to be successful");
++
++	/* Enable dummy SMP backend and ready for usage */
++	smp_raw_dummy_enable();
++	smp_raw_dummy_clear_state();
++
++	/* Send query command to dummy SMP backend */
++	(void)smp_raw_dummy_tx_pkt(buffer_out, buffer_size);
++	smp_raw_dummy_add_data();
++
++	/* For a short duration to see if response has been received */
++	received = smp_raw_dummy_wait_for_data(SMP_RESPONSE_WAIT_TIME);
++	zassert_true(received, "Expected to receive data but timed out");
++
++	/* Retrieve response buffer */
++	nb = smp_raw_dummy_get_outgoing();
++	smp_raw_dummy_disable();
++
++	/* Check response is as expected */
++	header = net_buf_pull_mem(nb, sizeof(struct smp_hdr));
++
++	zassert_equal(header->nh_flags, 0, "SMP header flags mismatch");
++	zassert_equal(header->nh_op, MGMT_OP_READ_RSP, "SMP header operation mismatch");
++	zassert_equal(header->nh_group, sys_cpu_to_be16(MGMT_GROUP_ID_OS),
++		      "SMP header group mismatch");
++	zassert_equal(header->nh_seq, 1, "SMP header sequence number mismatch");
++	zassert_equal(header->nh_id, OS_MGMT_ID_ECHO, "SMP header command ID mismatch");
++	zassert_equal(header->nh_version, 1, "SMP header version mismatch");
++
++	/* Get the response value to compare */
++	zcbor_new_decode_state(zsd, 4, nb->data, nb->len, 1, NULL, 0);
++	ok = zcbor_map_decode_bulk(zsd, output_decode, ARRAY_SIZE(output_decode), &decoded) == 0;
++	zassert_true(ok, "Expected decode to be successful");
++	zassert_equal(decoded, 1, "Expected to receive 1 decoded zcbor element");
++	zassert_equal(data.len, strlen(TEST_STRING), "os mgmt echo response length mismatch");
++	zassert_mem_equal(data.value, TEST_STRING, data.len, "os mgmt echo response mismatch");
++}
++
++ZTEST_SUITE(transport_raw_uart, NULL, NULL, NULL, cleanup_test, NULL);
+diff --git a/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/smp_test_util.c b/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/smp_test_util.c
+new file mode 100644
+index 00000000000..85e230037ff
+--- /dev/null
++++ b/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/smp_test_util.c
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (c) 2022-2026 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "smp_test_util.h"
++#include <zephyr/mgmt/mcumgr/grp/os_mgmt/os_mgmt.h>
++#include <zephyr/net_buf.h>
++#include <zephyr/sys/byteorder.h>
++#include <zcbor_encode.h>
++
++/* SMP header function for generating MCUmgr command header with sequence number set to 1 */
++static void smp_make_hdr(struct smp_hdr *rsp_hdr, size_t len, uint8_t type)
++{
++	*rsp_hdr = (struct smp_hdr) {
++		.nh_len = sys_cpu_to_be16(len),
++		.nh_flags = 0,
++		.nh_op = MGMT_OP_READ,
++		.nh_group = sys_cpu_to_be16(MGMT_GROUP_ID_OS),
++		.nh_seq = 1,
++		.nh_id = type,
++		.nh_version = 1,
++	};
++}
++
++bool create_os_mgmt_echo_packet(zcbor_state_t *zse, uint8_t *buffer, uint8_t *output_buffer,
++				uint16_t *buffer_size, char *data)
++{
++	bool ok;
++
++	ok = zcbor_map_start_encode(zse, 2) &&
++	     zcbor_tstr_put_lit(zse, "d")  &&
++	     zcbor_tstr_put_term(zse, data, CONFIG_ZCBOR_MAX_STR_LEN) &&
++	     zcbor_map_end_encode(zse, 2);
++
++	*buffer_size = (zse->payload_mut - buffer);
++	smp_make_hdr((struct smp_hdr *)output_buffer, *buffer_size, OS_MGMT_ID_ECHO);
++	memcpy(&output_buffer[sizeof(struct smp_hdr)], buffer, *buffer_size);
++	*buffer_size += sizeof(struct smp_hdr);
++
++	return ok;
++}
+diff --git a/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/smp_test_util.h b/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/smp_test_util.h
+new file mode 100644
+index 00000000000..b4b0a2a0114
+--- /dev/null
++++ b/tests/subsys/mgmt/mcumgr/transport_raw_uart/src/smp_test_util.h
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (c) 2026 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef H_SMP_TEST_UTIL_
++#define H_SMP_TEST_UTIL_
++
++#include <zephyr/ztest.h>
++#include <zephyr/mgmt/mcumgr/mgmt/mgmt.h>
++#include <zcbor_common.h>
++#include <smp_internal.h>
++
++/* Function for creating an os_mgmt echo command */
++bool create_os_mgmt_echo_packet(zcbor_state_t *zse, uint8_t *buffer, uint8_t *output_buffer,
++				uint16_t *buffer_size, char *data);
++
++#endif
+diff --git a/tests/subsys/mgmt/mcumgr/transport_raw_uart/testcase.yaml b/tests/subsys/mgmt/mcumgr/transport_raw_uart/testcase.yaml
+new file mode 100644
+index 00000000000..1b53e6bff85
+--- /dev/null
++++ b/tests/subsys/mgmt/mcumgr/transport_raw_uart/testcase.yaml
+@@ -0,0 +1,9 @@
++tests:
++  mgmt.mcumgr.transport.raw.uart:
++    platform_allow:
++      - native_sim
++      - native_sim/native/64
++      - nrf52840dk/nrf52840
++    tags:
++      - os_mgmt
++      - mcumgr

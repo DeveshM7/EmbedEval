@@ -1,0 +1,175 @@
+diff --git a/tests/cmake/snippets/Kconfig b/tests/cmake/snippets/Kconfig
+index b56985d877d..e4d74de6a84 100644
+--- a/tests/cmake/snippets/Kconfig
++++ b/tests/cmake/snippets/Kconfig
+@@ -47,6 +47,11 @@ config TEST_TYPE_VER_CHECK_SPECIFIC
+ 	help
+ 	  Test board version snippet application with specific board version
+ 
++config TEST_TYPE_FILE_LIST
++	bool "Test Type: File list"
++	help
++	  Test list support for snippet conf and overlay files.
++
+ endchoice
+ 
+ # Test values set by the snippet config overlays and tested by the test logic
+@@ -78,3 +83,16 @@ config TEST_VER_CHECK_SPECIFIC_VERSION_APPLIED
+ 	bool "Test version check with board version snippet applied"
+ 	help
+ 	  This option's value should be set by the ver_check snippet.
++
++# Used for testing board file list variables
++config TEST_BOARD1
++	bool "Test value set by the snippet file list board 1 config overlay"
++	help
++	  This option's value should be overridden by the snippet config
++	  overlays.
++
++config TEST_BOARD2
++	bool "Test value set by the snippet file list board 2 config overlay"
++	help
++	  This option's value should be overridden by the snippet config
++	  overlays.
+diff --git a/tests/cmake/snippets/snippets/file_list/boards/board1.conf b/tests/cmake/snippets/snippets/file_list/boards/board1.conf
+new file mode 100644
+index 00000000000..a1946716cdb
+--- /dev/null
++++ b/tests/cmake/snippets/snippets/file_list/boards/board1.conf
+@@ -0,0 +1 @@
++CONFIG_TEST_BOARD1=y
+diff --git a/tests/cmake/snippets/snippets/file_list/boards/board2.conf b/tests/cmake/snippets/snippets/file_list/boards/board2.conf
+new file mode 100644
+index 00000000000..90180bf2e87
+--- /dev/null
++++ b/tests/cmake/snippets/snippets/file_list/boards/board2.conf
+@@ -0,0 +1 @@
++CONFIG_TEST_BOARD2=y
+diff --git a/tests/cmake/snippets/snippets/file_list/file_list1.conf b/tests/cmake/snippets/snippets/file_list/file_list1.conf
+new file mode 100644
+index 00000000000..da6e9d2006a
+--- /dev/null
++++ b/tests/cmake/snippets/snippets/file_list/file_list1.conf
+@@ -0,0 +1 @@
++CONFIG_TEST_FOO_VAL=464372
+diff --git a/tests/cmake/snippets/snippets/file_list/file_list1.overlay b/tests/cmake/snippets/snippets/file_list/file_list1.overlay
+new file mode 100644
+index 00000000000..7ca3a2fcac7
+--- /dev/null
++++ b/tests/cmake/snippets/snippets/file_list/file_list1.overlay
+@@ -0,0 +1,7 @@
++/ {
++	added-by-conf1 {};
++
++#ifdef CMAKE_DTS_CONFIGURE
++	cmake-dts-configure {};
++#endif /* CMAKE_DTS_CONFIGURE */
++};
+diff --git a/tests/cmake/snippets/snippets/file_list/file_list2.conf b/tests/cmake/snippets/snippets/file_list/file_list2.conf
+new file mode 100644
+index 00000000000..9fea2941158
+--- /dev/null
++++ b/tests/cmake/snippets/snippets/file_list/file_list2.conf
+@@ -0,0 +1 @@
++CONFIG_TEST_COMMON_VAL=271983
+diff --git a/tests/cmake/snippets/snippets/file_list/file_list2.overlay b/tests/cmake/snippets/snippets/file_list/file_list2.overlay
+new file mode 100644
+index 00000000000..f5723e5436a
+--- /dev/null
++++ b/tests/cmake/snippets/snippets/file_list/file_list2.overlay
+@@ -0,0 +1,3 @@
++/ {
++	added-by-conf2 {};
++};
+diff --git a/tests/cmake/snippets/snippets/file_list/snippet.yml b/tests/cmake/snippets/snippets/file_list/snippet.yml
+new file mode 100644
+index 00000000000..4319257c1a4
+--- /dev/null
++++ b/tests/cmake/snippets/snippets/file_list/snippet.yml
+@@ -0,0 +1,16 @@
++name: file_list
++append:
++  EXTRA_CONF_FILE:
++    - file_list1.conf
++    - file_list2.conf
++  EXTRA_DTC_OVERLAY_FILE:
++    - file_list1.overlay
++    - file_list2.overlay
++  DTS_EXTRA_CPPFLAGS: -DCMAKE_DTS_CONFIGURE
++
++boards:
++  native_sim/native:
++    append:
++      EXTRA_CONF_FILE:
++        - boards/board1.conf
++        - boards/board2.conf
+diff --git a/tests/cmake/snippets/src/main.c b/tests/cmake/snippets/src/main.c
+index 6eb860c7eb7..a00d46f4671 100644
+--- a/tests/cmake/snippets/src/main.c
++++ b/tests/cmake/snippets/src/main.c
+@@ -84,6 +84,21 @@ ZTEST(snippet_tests, test_overlay_config)
+ 		zassert_equal(CONFIG_TEST_FOO_VAL, TEST_FOO_VAL_FOO);
+ 		zassert_equal(CONFIG_TEST_BAR_VAL, TEST_BAR_VAL_BAR);
+ 		zassert_equal(CONFIG_TEST_COMMON_VAL, TEST_COMMON_VAL_FOO);
++	} else if (IS_ENABLED(CONFIG_TEST_TYPE_FILE_LIST)) {
++		/*
++		 * The 'file_list' snippet will apply two configs that should
++		 * combine to match the 'foo' values. Specifically for native_sim
++		 * we have additional configs set.
++		 */
++		zassert_equal(CONFIG_TEST_FOO_VAL, TEST_FOO_VAL_FOO);
++		zassert_equal(CONFIG_TEST_COMMON_VAL, TEST_COMMON_VAL_FOO);
++		if (strcmp(CONFIG_BOARD_TARGET, "native_sim/native") == 0) {
++			zassert_true(IS_ENABLED(CONFIG_TEST_BOARD1));
++			zassert_true(IS_ENABLED(CONFIG_TEST_BOARD2));
++		} else {
++			zassert_false(IS_ENABLED(CONFIG_TEST_BOARD1));
++			zassert_false(IS_ENABLED(CONFIG_TEST_BOARD2));
++		}
+ 	} else {
+ 		zassert(false, "Invalid test type");
+ 	}
+@@ -141,6 +156,13 @@ ZTEST(snippet_tests, test_dtc_overlay)
+ 		zassert_false(DT_NODE_EXISTS(DT_PATH(deleted_by_bar)));
+ 		zassert_true(DT_NODE_EXISTS(DT_PATH(added_by_foo)));
+ 		zassert_false(DT_NODE_EXISTS(DT_PATH(added_by_bar)));
++	} else if (IS_ENABLED(CONFIG_TEST_TYPE_FILE_LIST)) {
++		/*
++		 * The 'file_list' snippet will apply two overlays, each adding
++		 * a node.
++		 */
++		zassert_true(DT_NODE_EXISTS(DT_PATH(added_by_conf1)));
++		zassert_true(DT_NODE_EXISTS(DT_PATH(added_by_conf2)));
+ 	} else {
+ 		zassert(false, "Invalid test type");
+ 	}
+@@ -150,7 +172,8 @@ ZTEST(snippet_tests, test_cmake_include)
+ {
+ 	if (IS_ENABLED(CONFIG_TEST_TYPE_FOO) ||
+ 	    IS_ENABLED(CONFIG_TEST_TYPE_FOO_BAR) ||
+-	    IS_ENABLED(CONFIG_TEST_TYPE_BAR_FOO)) {
++	    IS_ENABLED(CONFIG_TEST_TYPE_BAR_FOO) ||
++	    IS_ENABLED(CONFIG_TEST_TYPE_FILE_LIST)) {
+ 		zassert_true(DT_NODE_EXISTS(DT_PATH(cmake_dts_configure)));
+ 	} else {
+ 		zassert_false(DT_NODE_EXISTS(DT_PATH(cmake_dts_configure)));
+diff --git a/tests/cmake/snippets/testcase.yaml b/tests/cmake/snippets/testcase.yaml
+index 0cd821ab1e4..f58e8c35434 100644
+--- a/tests/cmake/snippets/testcase.yaml
++++ b/tests/cmake/snippets/testcase.yaml
+@@ -81,3 +81,15 @@ tests:
+     integration_platforms:
+     - nrf9160dk@0.7.0/nrf9160
+     build_only: true
++  # Test support for the *_FILE variables being lists.
++  buildsystem.snippets.file_list:
++    extra_args: SNIPPET="file_list"
++    extra_configs:
++    - CONFIG_TEST_TYPE_FILE_LIST=y
++    platform_allow:
++    - native_sim
++    - qemu_x86
++    - qemu_x86_64
++    - qemu_cortex_m3
++    integration_platforms:
++    - native_sim
