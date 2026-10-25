@@ -170,7 +170,9 @@ What a status file looks like:
 
 1. **What is left**: `status.triage_todo()` (reached triage, no triage
    outcome, or `server failed`) and `status.validate_todo()` (accepted, no
-   validation outcome, or `skipped`).
+   validation outcome, `skipped`, or failed for lack of time: `hit the cap`,
+   `no time left`). Such a PR is taken again even though an earlier job
+   marked it done in the queue: a job's done marks bind only that job.
 2. **Nodes**: `work = max(ceil(triage_left / triage_per_node),
    ceil(validate_left / validate_per_node))`; `wanted = min(nodes_max,
    work)`; `minimum = min(nodes_min, wanted)`, lowered to the number of idle

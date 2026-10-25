@@ -62,9 +62,13 @@ def triage_needed(run: Path, pr: int) -> bool:
 
 def validate_needed(run: Path, pr: int) -> bool:
     """No validation outcome yet ("skipped" was the disk guard's, before the
-    queue: workers now wait for space instead)."""
+    queue: workers now wait for space instead). A PR that ran out of time
+    ("... hit the cap", "no time left") has none either: the next job tries
+    it again, as do jobs with longer caps or fewer builds per node."""
     v = read(run, pr).get("validate")
-    return not v or v["state"] == "skipped"
+    return (not v or v["state"] == "skipped"
+            or (v["state"] == "failed" and ("hit the cap" in v.get("note", "")
+                                            or "no time left" in v.get("note", ""))))
 
 
 def triage_todo(run: Path) -> list[int]:

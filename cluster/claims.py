@@ -15,7 +15,9 @@ worker has not touched its alive file for STALE seconds -- a node that died
 
 What is left to do comes from status/ (status.triage_todo, validate_todo),
 read once when a phase starts; the table only says who is doing it, and
-which PRs this job has finished since.
+which PRs this job has finished since. A PR an earlier job finished is
+taken again if status/ says it is needed (a validation that ran out of
+time, say).
 """
 
 from __future__ import annotations
@@ -61,6 +63,9 @@ class Queue:
         self.held: set[int] = set()
         self._mutex = threading.Lock()     # POSIX locks do not exclude a process's own threads
 
+    def _this_job(self, owner: str) -> bool:
+        return owner.rsplit("-node", 1)[0] == self.me.rsplit("-node", 1)[0]
+
     def _live(self, owner: str) -> bool:
         if owner == self.me:
             return True
@@ -97,7 +102,8 @@ class Queue:
         with self._table() as t:
             for pr in todo:
                 e = t.get(pr)
-                if e and (e["state"] == "done" or self._live(e["owner"])):
+                if e and ((e["state"] == "done" and self._this_job(e["owner"]))
+                          or (e["state"] == "working" and self._live(e["owner"]))):
                     continue
                 if not self.needed(pr):
                     continue
