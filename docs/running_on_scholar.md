@@ -364,7 +364,7 @@ Look at the plan first, then submit:
 ```
 run 2025-09: 15 PRs to triage, 0 to validate
   nodes: 2-4 (work needs 4; 20 idle; max 16)
-  limit: 03:00:00; phase caps: triage 95 min, validation 75 min
+  limit: 03:00:00; triage may use all of it, validation what is left (if 30+ min), less 8 min for the report
   job script: /scratch/scholar/you/embedeval/runs/2025-09/jobs/pipeline-20261014-110728.sbatch
   forecast: sbatch: Job 475313 to start at 2026-10-14T11:25:30 ...
   submitted: job 475314; log /scratch/scholar/you/embedeval/runs/2025-09/jobs/job-475314.out

@@ -31,6 +31,12 @@ from pathlib import Path
 
 CLUSTER = Path(__file__).resolve().parent
 REPO = CLUSTER.parent
+# The job's phases share its time limit: triage may take all of it,
+# validation what triage leaves, if at least VALIDATE_MIN (less is not worth
+# starting: a PR takes up to caps.validate_pr). REPORT_MIN is kept for the
+# report and for srun's kill grace.
+REPORT_MIN = 8
+VALIDATE_MIN = 30
 sys.path.insert(0, str(CLUSTER))
 import config as cluster_config  # noqa: E402
 import status  # noqa: E402
@@ -79,11 +85,9 @@ def main() -> None:
     if not (run / "manifest.json").exists():
         sys.exit(f"{run} is not a prepared run (no manifest.json); run cluster/prepare.py first")
 
-    s, caps, par = cfg["slurm"], cfg["caps"], cfg["parallel"]
-    if caps["triage_phase"] + caps["validate_phase"] + 5 > minutes(s["time_limit"]):
-        sys.exit(f"caps.triage_phase + caps.validate_phase ({caps['triage_phase']} + "
-                 f"{caps['validate_phase']} min) leave no time for the report within "
-                 f"slurm.time_limit {s['time_limit']}")
+    s, par = cfg["slurm"], cfg["parallel"]
+    if minutes(s["time_limit"]) < REPORT_MIN + VALIDATE_MIN:
+        sys.exit(f"slurm.time_limit {s['time_limit']} is too short for a phase")
 
     # One job per run at a time: the nodes of a job are numbered, and two jobs
     # would share nodes/node<N>/. (Within a job, the queue balances the work.)
@@ -113,13 +117,14 @@ def main() -> None:
         partition=s["partition"], nodes=f"{lowest}-{wanted}" if lowest < wanted else wanted,
         cpus=s["cpus_per_node"], gres=s["gres"], mem=s["mem"], time_limit=s["time_limit"],
         name=run.name, run=run, repo=REPO, config=frozen, python=sys.executable,
-        triage_phase=caps["triage_phase"], validate_phase=caps["validate_phase"], stamp=stamp))
+        limit_min=minutes(s["time_limit"]), report_min=REPORT_MIN, validate_min=VALIDATE_MIN,
+        stamp=stamp))
 
     print(f"run {run.name}: {len(triage_left)} PRs to triage, {len(validate_left)} to validate")
     print(f"  nodes: {lowest}-{wanted} (work needs {work}; {idle} idle; max {s['nodes_max']})"
           + (f"\n  note: {note}" if note else ""))
-    print(f"  limit: {s['time_limit']}; phase caps: triage {caps['triage_phase']} min, "
-          f"validation {caps['validate_phase']} min")
+    print(f"  limit: {s['time_limit']}; triage may use all of it, validation what is left "
+          f"(if {VALIDATE_MIN}+ min), less {REPORT_MIN} min for the report")
     print(f"  job script: {script}")
     forecast = subprocess.run(["sbatch", "--test-only", str(script)], capture_output=True, text=True)
     lines = (forecast.stderr or forecast.stdout).strip().splitlines()

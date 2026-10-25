@@ -177,8 +177,9 @@ What a status file looks like:
    nodes (`sinfo`) if fewer are idle. The job is submitted with `-N
    minimum-wanted`: Slurm starts it on as many idle nodes as it can, up to
    `wanted`, as soon as `minimum` are free.
-3. **Time**: refuses to submit unless `triage_phase + validate_phase + 5 <=
-   time_limit` (the 5 minutes are for the report and slack).
+3. **Time**: the phases share the job's `time_limit`, less 8 minutes for
+   the report. Triage may use all of it; validation gets what triage leaves,
+   and is skipped if that is under 30 minutes (the next job validates).
 4. **The job script**: `templates/pipeline.sbatch` filled in, written to
    `jobs/pipeline-<time>.sbatch`, with the whole config frozen beside it as
    `jobs/config-<time>.json`. The workers read the frozen copy, so editing
@@ -200,16 +201,18 @@ The generated script, with the default config:
 #SBATCH -t 03:00:00
 #SBATCH -o <run>/jobs/job-%j.out
 
-timeout -k 2m 95m srun -N $NN -n $NN --ntasks-per-node=1 -c 20 --kill-on-bad-exit=0 \
-    python cluster/node_worker.py --run <run> --config <frozen> --phase triage
-timeout -k 2m 75m srun ... --phase validate
+M=$(left)        # minutes left in the job, less 8 for the report
+timeout -k 2m ${M}m srun -N $NN -n $NN --ntasks-per-node=1 -c 20 --kill-on-bad-exit=0 \
+    python cluster/node_worker.py --run <run> --config <frozen> --phase triage --minutes $M
+M=$(left)        # validation only if 30+ minutes are left
+timeout -k 2m ${M}m srun ... --phase validate --minutes $M
 python cluster/report.py --run <run>
 ```
 
 - `srun` returns when every node's worker has finished, so it is the
   **barrier between phases**: validation starts only when all triage is done.
-- `timeout` around each `srun` makes the phase cap hard; the workers also
-  stop starting new PRs near it (4.4), so the hard cap is a backstop.
+- `timeout` around each `srun` makes the phase's end hard; the workers also
+  stop starting new PRs near it (4.4), so the hard end is a backstop.
 - `--kill-on-bad-exit=0`: one node's worker failing does not kill the rest.
 - The job never waits for a model server and never submits other jobs.
 
@@ -263,7 +266,7 @@ every PR done exactly once.
    comes up, the worker ends without taking a PR (4.3).
 2. Take PRs from the queue, `triage_per_node` at a time, each one a `triage_prs.py --run-dir
    <run> run --pr <pr>` subprocess, capped at `caps.triage_pr`. No new PR
-   starts within 5 minutes of `caps.triage_phase`.
+   starts within 5 minutes of the end of the phase.
 3. Stop the server, always (in a `finally`).
 
 **Validation phase** (only once the run's triage is complete):
@@ -283,7 +286,7 @@ every PR done exactly once.
      recipe and `validation.json` stay;
    - if the outcome is `nothing ran`, retry once on the next board twister
      selected for the scenario (QEMU first), if 10 minutes are left.
-   No PR starts with under 10 minutes left of `caps.validate_phase`; each is
+   No PR starts with under 10 minutes left of the phase; each is
    capped at `caps.validate_pr`.
 
 **Every step** runs in its own process group with its own cap. On a cap the
@@ -483,18 +486,16 @@ silently ignored setting. `${USER}` and `${SCRATCH}` are expanded.
 | `model.profile` | `qwen38-nvfp4` | an entry of `triage/models.json` |
 | `caps.server_start` | 30 | min until the server must answer |
 | `caps.triage_pr` | 30 | min per PR's triage |
-| `caps.triage_phase` | 95 | min for all of triage |
 | `caps.build` | 45 | min per image build |
 | `caps.validate_pr` | 70 | min per PR: generate, build, validate (a retry included) |
-| `caps.validate_phase` | 75 | min for all of validation |
 | `parallel.enrich`, `dry_run` | 4, 8 | on the desktop, in `prepare.py` |
 | `parallel.triage_per_node` | 4 | matches the server's `--max-num-seqs 4` |
 | `parallel.validate_per_node` | 4 | builds use all 20 cores between them |
 | `disk_guard_gb` | 250 | no new build while the run's images exceed this |
 | `registry` | `null` | where VALID images are pushed (`oras://ghcr.io/<user>/embedeval-zephyr`); passed to scripts as `EMBEDEVAL_REGISTRY` |
 
-Keep `triage_phase + validate_phase + 5 <= time_limit`; `submit.py`
-checks. To give one phase more time, take it from the other.
+There are no phase caps: triage may use the whole job, validation what is
+left (4.1, step 3).
 
 To use different settings for one run only, keep a second file and pass it
 everywhere: `--config cluster/big-run.yaml` to `prepare.py`, `submit.py`

@@ -12,12 +12,15 @@
 # EmbedEval pipeline job for run "{name}", written by cluster/submit.py at
 # {stamp}. To run again (e.g. to resume), submit again rather than edit this.
 #
-#   phase 1  triage       node_worker.py on every node, PRs from a shared queue  (cap {triage_phase} min)
-#   phase 2  validation   node_worker.py on every node, PRs from a shared queue  (cap {validate_phase} min)
-#                         -- only once the run's triage is complete
+#   phase 1  triage       node_worker.py on every node, PRs from a shared queue
+#   phase 2  validation   node_worker.py on every node, PRs from a shared queue
+#                         -- only once the run's triage is complete, and only
+#                         with at least {validate_min} min of the job left
 #   phase 3  report       report.py
 #
-# Each phase starts when every node has finished the one before (srun
+# Each phase may use what is left of the job, less {report_min} min for the
+# report: triage the whole job if it needs it, validation whatever triage
+# leaves. Each starts when every node has finished the one before (srun
 # returns). The job waits only for the workers, never for a model server, and
 # never submits other jobs.
 
@@ -26,18 +29,26 @@ cd {repo}
 RUN={run}
 CONFIG={config}
 NN=$SLURM_JOB_NUM_NODES
+END=$(( $(date +%s) + {limit_min} * 60 ))
+left() {{ echo $(( (END - $(date +%s)) / 60 - {report_min} )); }}
 log() {{ echo "[$(date +%T)] $*"; }}
 log "job $SLURM_JOB_ID, run {name}, $NN nodes: $SLURM_JOB_NODELIST"
 
-log "phase 1: triage"
-timeout -k 2m {triage_phase}m srun -N $NN -n $NN --ntasks-per-node=1 -c {cpus} --kill-on-bad-exit=0 \
-    {python} cluster/node_worker.py --run "$RUN" --config "$CONFIG" --phase triage
+M=$(left)
+log "phase 1: triage ($M min)"
+timeout -k 2m ${{M}}m srun -N $NN -n $NN --ntasks-per-node=1 -c {cpus} --kill-on-bad-exit=0 \
+    {python} cluster/node_worker.py --run "$RUN" --config "$CONFIG" --phase triage --minutes $M
 log "phase 1 done (rc=$?)"
 
-log "phase 2: validation"
-timeout -k 2m {validate_phase}m srun -N $NN -n $NN --ntasks-per-node=1 -c {cpus} --kill-on-bad-exit=0 \
-    {python} cluster/node_worker.py --run "$RUN" --config "$CONFIG" --phase validate
-log "phase 2 done (rc=$?)"
+M=$(left)
+if [ "$M" -ge {validate_min} ]; then
+    log "phase 2: validation ($M min)"
+    timeout -k 2m ${{M}}m srun -N $NN -n $NN --ntasks-per-node=1 -c {cpus} --kill-on-bad-exit=0 \
+        {python} cluster/node_worker.py --run "$RUN" --config "$CONFIG" --phase validate --minutes $M
+    log "phase 2 done (rc=$?)"
+else
+    log "phase 2: skipped, $M min left (under {validate_min}); the next job validates"
+fi
 
 log "phase 3: report"
 {python} cluster/report.py --run "$RUN"

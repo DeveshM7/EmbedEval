@@ -222,7 +222,7 @@ def server_ready(p: subprocess.Popen, minutes: float) -> bool:
     return False
 
 
-def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
+def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> None:
     todo = status.triage_todo(run)
     log(f"triage: {len(todo)} PRs left in the run")
     if not todo:
@@ -237,8 +237,8 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
             return
         log(f"model server ready after {(time.time() - t0) / 60:.1f} min")
         cache_filled(cfg)
-        # verdicts are copied out per PR, so stop starting PRs 5 min before the phase cap
-        deadline = t0 + (caps["triage_phase"] - 5) * 60
+        # verdicts are copied out per PR, so stop starting PRs 5 min before the phase ends
+        deadline = t0 + (minutes - 5) * 60
 
         def one(pr: int) -> None:
             left = (deadline - time.time()) / 60
@@ -305,7 +305,7 @@ def sweep(work: Path) -> None:
             log(f"could not remove leftover {p}: {e}")
 
 
-def validate(cfg: dict, run: Path, env: dict) -> None:
+def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     left = status.triage_todo(run)
     if left:
         log(f"triage is not complete ({len(left)} PRs left): no validation until a "
@@ -317,7 +317,7 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
         return
     caps = cfg["caps"]
     t0 = time.time()
-    deadline = t0 + (caps["validate_phase"] - 3) * 60
+    deadline = t0 + (minutes - 3) * 60
     venv = {**env, "EMBEDEVAL_BUILD_TIMEOUT_MIN": str(caps["build"])}
     sweep(Path(env["EMBEDEVAL_WORK"]))
 
@@ -457,6 +457,8 @@ def main() -> None:
     p.add_argument("--run", required=True)
     p.add_argument("--config", required=True, help="the frozen settings submit.py wrote")
     p.add_argument("--phase", required=True, choices=["triage", "validate"])
+    p.add_argument("--minutes", type=float, required=True,
+                   help="the phase's time: what is left of the job, less the report's")
     args = p.parse_args()
     N = int(os.environ.get("SLURM_PROCID", "0"))
     NN = int(os.environ.get("SLURM_NTASKS", "1"))
@@ -473,12 +475,12 @@ def main() -> None:
            # this node's own images, overlays and temp files: its cleanup can
            # never touch another node's work
            "EMBEDEVAL_WORK": str(node_dir / "work")}
-    log(f"phase {args.phase}, node {N} of {NN}, run {run}")
+    log(f"phase {args.phase}, node {N} of {NN}, run {run}, {args.minutes:.0f} min")
     claims.keep_alive(run, ME)
     if args.phase == "triage":
-        triage(cfg, run, env, node_dir)
+        triage(cfg, run, env, node_dir, args.minutes)
     else:
-        validate(cfg, run, env)
+        validate(cfg, run, env, args.minutes)
     log(f"phase {args.phase} done")
 
 
