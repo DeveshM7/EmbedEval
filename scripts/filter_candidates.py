@@ -61,6 +61,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -103,22 +104,48 @@ KNOWN_GOOD = [33690, 43405, 62109, 65697, 74435, 82272, 85079, 89534]
 # ---------------------------------------------------------------- github
 
 
+def _rate_reset(path: str) -> float:
+    """Seconds until the rate limit of `path` resets: search has its own,
+    of 30 calls a minute (asking costs no quota)."""
+    which = "search" if path.startswith("search/") else "core"
+    proc = subprocess.run(["gh", "api", "rate_limit", "--jq", f".resources.{which}.reset"],
+                          capture_output=True, text=True, timeout=60)
+    try:
+        return max(0.0, int(proc.stdout.strip()) - time.time())
+    except ValueError:
+        return 300.0
+
+
 def gh(path: str, retries: int = 3):
-    """GET a GitHub API path via the gh CLI. Returns parsed JSON or None."""
-    for attempt in range(retries):
+    """GET a GitHub API path via the gh CLI. Returns parsed JSON or None.
+
+    Out of quota (5000 calls an hour), it waits for the reset and carries
+    on, however long that is: a large fetch or enrich spans several hours
+    of quota, and giving up would record thousands of PRs as failed. Search
+    quota resets every minute. The
+    secondary limit (too many calls too fast) is waited out `retries` times.
+    """
+    attempt = 0
+    while True:
         proc = subprocess.run(
-            ["gh", "api", path], capture_output=True, text=True
+            ["gh", "api", path], capture_output=True, text=True, timeout=300
         )
         if proc.returncode == 0:
             return json.loads(proc.stdout)
         err = proc.stderr.lower()
-        if "rate limit" in err or "was submitted too quickly" in err:
-            wait = 20 * (attempt + 1)
-            print(f"  rate limited, sleeping {wait}s ...", file=sys.stderr)
+        if "api rate limit exceeded" in err and "secondary" not in err:
+            wait = _rate_reset(path) + 5
+            print(f"  out of GitHub quota, waiting {wait:.0f}s for the reset ...",
+                  file=sys.stderr, flush=True)
+            time.sleep(wait)
+            continue
+        if ("rate limit" in err or "was submitted too quickly" in err) and attempt < retries:
+            attempt += 1
+            wait = 60 * attempt
+            print(f"  rate limited, sleeping {wait}s ...", file=sys.stderr, flush=True)
             time.sleep(wait)
             continue
         return None
-    return None
 
 
 def fetch_pr(number: int) -> dict | None:
@@ -165,25 +192,33 @@ def fetch_pr(number: int) -> dict | None:
 
 
 def search_merged_prs(since: str, until: str) -> list[int]:
-    """PR numbers merged in a date window. Windows must stay under 1000
-    results -- that is a hard cap in GitHub's search API, and exceeding it
-    silently truncates rather than erroring."""
-    numbers, page = [], 1
+    """PR numbers merged in a date window. GitHub's search returns at most
+    1000 results and silently drops the rest, so a window with more is
+    split in two, as often as it takes."""
     q = f"repo:{REPO}+is:pr+is:merged+merged:{since}..{until}"
-    while True:
-        data = gh(f"search/issues?q={q}&per_page=100&page={page}")
-        if not data or not data.get("items"):
-            break
+    first = gh(f"search/issues?q={q}&per_page=100&page=1")
+    if first is None:
+        sys.exit(f"search failed for {since}..{until}")
+    total = first.get("total_count", 0)
+    a, b = date.fromisoformat(since), date.fromisoformat(until)
+    if total > 1000 and a < b:
+        mid = a + (b - a) // 2
+        print(f"  {total} PRs merged {since}..{until}: splitting at {mid}", flush=True)
+        return (search_merged_prs(since, mid.isoformat())
+                + search_merged_prs((mid + timedelta(days=1)).isoformat(), until))
+    if total > 1000:
+        print(f"  WARNING: {total} PRs merged on {since} alone; search returns only "
+              f"1000 of them.", file=sys.stderr)
+    numbers, data, page = [], first, 1
+    while data and data.get("items"):
         numbers += [i["number"] for i in data["items"]]
         if len(data["items"]) < 100 or page >= 10:
-            if data.get("total_count", 0) > 1000:
-                print(f"  WARNING: {data['total_count']} results in "
-                      f"{since}..{until}; search caps at 1000. Narrow the "
-                      f"window or candidates are being silently dropped.",
-                      file=sys.stderr)
             break
         page += 1
-    return numbers
+        data = gh(f"search/issues?q={q}&per_page=100&page={page}")
+        if data is None:
+            sys.exit(f"search failed for {since}..{until}, page {page}")
+    return sorted(set(numbers))
 
 
 # ---------------------------------------------------------------- filters
