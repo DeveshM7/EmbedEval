@@ -91,10 +91,13 @@ def main() -> None:
 
     # One job per run at a time: the nodes of a job are numbered, and two jobs
     # would share nodes/node<N>/. (Within a job, the queue balances the work.)
+    # A job left COMPLETING has no workers (a dead node can hold it there for
+    # hours), so it does not count.
     q = subprocess.run(["squeue", "-h", "--me", "-n", f"embedeval-{run.name}", "-o", "%i %T"],
                        capture_output=True, text=True)
-    if q.stdout.strip():
-        sys.exit(f"run {run.name} already has a job ({q.stdout.strip()}); wait for it to "
+    live = [l for l in q.stdout.splitlines() if l.strip() and not l.endswith("COMPLETING")]
+    if live:
+        sys.exit(f"run {run.name} already has a job ({'; '.join(live)}); wait for it to "
                  "end, or scancel it, then submit again")
 
     triage_left, validate_left = status.triage_todo(run), status.validate_todo(run)
