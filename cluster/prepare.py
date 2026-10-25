@@ -54,15 +54,17 @@ def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
-def script(name: str, *args: str, env: dict, logfile: Path, timeout: int = 7200) -> int:
-    """One of the pipeline's scripts, with the run's environment, logged."""
+def script(name: str, *args: str, env: dict, logfile: Path, timeout: int | None = 7200) -> int:
+    """One of the pipeline's scripts, with the run's environment, logged as
+    it goes. GitHub steps take timeout=None: they wait out the rate limit
+    (filter_candidates.gh), which for thousands of PRs is hours."""
     logfile.parent.mkdir(parents=True, exist_ok=True)
     with open(logfile, "a") as fh:
         fh.write(f"\n$ {name} {' '.join(args)}\n")
         fh.flush()
         try:
             return subprocess.run([PY, str(REPO / "scripts" / name), *args], cwd=REPO,
-                                  env={**os.environ, **env}, stdout=fh,
+                                  env={**os.environ, **env, "PYTHONUNBUFFERED": "1"}, stdout=fh,
                                   stderr=subprocess.STDOUT, timeout=timeout).returncode
         except subprocess.TimeoutExpired:
             fh.write(f"\n(timed out after {timeout} s)\n")
@@ -130,7 +132,7 @@ def main() -> None:
         if not args.no_filter and fresh:
             log("hard filters")
             script("filter_candidates.py", "fetch", "--pr", *map(str, fresh), env=env,
-                   logfile=logs / "fetch.log")
+                   logfile=logs / "fetch.log", timeout=None)
             sys.path.insert(0, str(REPO / "scripts"))
             import filter_candidates as fc
             for pr in fresh:
@@ -145,7 +147,7 @@ def main() -> None:
         source = {"since": args.since, "until": args.until, "redo": args.redo}
         log(f"fetching PRs merged {args.since} .. {args.until}")
         if script("filter_candidates.py", "fetch", "--since", args.since, "--until", args.until,
-                  env=env, logfile=logs / "fetch.log"):
+                  env=env, logfile=logs / "fetch.log", timeout=None):
             sys.exit(f"fetch failed; see {logs / 'fetch.log'}")
         if script("filter_candidates.py", "filter", env=env, logfile=logs / "filter.log"):
             sys.exit(f"filter failed; see {logs / 'filter.log'}")
@@ -160,7 +162,7 @@ def main() -> None:
     kept = [pr for pr in prs if pr not in stage]
     if kept:
         script("filter_candidates.py", "enrich", "--parallel", str(par["enrich"]),
-               "--pr", *map(str, kept), env=env, logfile=logs / "enrich.log")
+               "--pr", *map(str, kept), env=env, logfile=logs / "enrich.log", timeout=None)
     enriched = [pr for pr in kept if (run / "enriched" / f"{pr}.json").exists()]
     timings["enrich"] = time.time() - t
     log(f"enriched {len(enriched)}/{len(kept)} in {timings['enrich']:.0f} s")
