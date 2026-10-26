@@ -1,0 +1,50 @@
+--- a/tests/posix/common/src/key.c
++++ b/tests/posix/common/src/key.c
+@@ -244,3 +244,47 @@
+ 		zassert_ok(pthread_key_delete(keys[i]), "failed to delete key %zu", i);
+ 	}
+ }
++
++
++struct key_destructor_probe {
++	pthread_key_t key;
++	int setspecific_result;
++	size_t destructor_calls;
++};
++
++static void count_key_destructor(void *value)
++{
++	struct key_destructor_probe *probe = value;
++
++	probe->destructor_calls++;
++}
++
++static void *thread_with_key_destructor(void *arg)
++{
++	struct key_destructor_probe *probe = arg;
++
++	probe->setspecific_result = pthread_setspecific(probe->key, probe);
++	return NULL;
++}
++
++ZTEST(posix_apis, test_key_thread_exit_calls_destructor)
++{
++	struct key_destructor_probe probe = {0};
++	struct sched_param schedparam = {.sched_priority = 2};
++	pthread_attr_t attr;
++	pthread_t worker;
++
++	zassert_ok(pthread_key_create(&probe.key, count_key_destructor));
++	zassert_ok(pthread_attr_init(&attr));
++	zassert_ok(pthread_attr_setschedparam(&attr, &schedparam));
++	zassert_ok(pthread_attr_setstack(&attr, &stackp[0][0], STACKSZ));
++	zassert_ok(pthread_create(&worker, &attr, thread_with_key_destructor, &probe));
++	zassert_ok(pthread_join(worker, NULL));
++	zassert_ok(pthread_attr_destroy(&attr));
++	zassert_ok(pthread_key_delete(probe.key));
++
++	/* Assert after cleanup so failure cannot exhaust the shared key pool. */
++	zassert_ok(probe.setspecific_result, "worker failed to associate key data");
++	zassert_equal(probe.destructor_calls, 1,
++		      "expected one key destructor call, got %zu", probe.destructor_calls);
++}

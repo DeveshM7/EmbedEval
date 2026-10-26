@@ -1,0 +1,160 @@
+diff --git a/tests/unit/test_multi_frame_buffer_recovery.cpp b/tests/unit/test_multi_frame_buffer_recovery.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_multi_frame_buffer_recovery.cpp
+@@ -0,0 +1,155 @@
++// Regression tests for OpenThread PR #13189.
++// Compile directly against the production header, using upstream test helpers.
++#include "common/code_utils.hpp"
++#include "lib/spinel/multi_frame_buffer.hpp"
++#include "test_util.h"
++
++using ot::Spinel::MultiFrameBuffer;
++typedef MultiFrameBuffer<128> Buffer;
++
++static void WriteFrame(Buffer &aBuffer, uint16_t aLength, uint8_t aValue)
++{
++    for (uint16_t i = 0; i < aLength; i++)
++    {
++        SuccessOrQuit(aBuffer.WriteByte(aValue));
++    }
++}
++
++static void CheckFrame(Buffer &aBuffer, uint8_t *&aFrame, uint16_t &aLength,
++                       uint16_t aExpectedLength, uint8_t aExpectedValue)
++{
++    SuccessOrQuit(aBuffer.GetNextSavedFrame(aFrame, aLength));
++    VerifyOrQuit(aLength == aExpectedLength);
++    for (uint16_t i = 0; i < aLength; i++)
++    {
++        VerifyOrQuit(aFrame[i] == aExpectedValue);
++    }
++}
++
++static void CheckEnd(Buffer &aBuffer, uint8_t *&aFrame, uint16_t &aLength)
++{
++    VerifyOrQuit(aBuffer.GetNextSavedFrame(aFrame, aLength) == OT_ERROR_NOT_FOUND,
++                 "a cleared buffer must terminate the active iteration");
++    VerifyOrQuit(aFrame == nullptr);
++    VerifyOrQuit(aLength == 0);
++}
++
++static void TestNormalIteration(void)
++{
++    Buffer buffer;
++    uint8_t *frame = nullptr;
++    uint16_t length = 0;
++    CheckEnd(buffer, frame, length);
++    SuccessOrQuit(buffer.SetSkipLength(3));
++    WriteFrame(buffer, 8, 0x11);
++    SuccessOrQuit(buffer.SaveFrame());
++    WriteFrame(buffer, 4, 0x22);
++    SuccessOrQuit(buffer.SaveFrame());
++    CheckFrame(buffer, frame, length, 8, 0x11);
++    CheckFrame(buffer, frame, length, 4, 0x22);
++    CheckEnd(buffer, frame, length);
++    // Restarting without a clear must also work.
++    CheckFrame(buffer, frame, length, 8, 0x11);
++    CheckFrame(buffer, frame, length, 4, 0x22);
++    CheckEnd(buffer, frame, length);
++}
++
++static void TestAppendDuringIteration(void)
++{
++    Buffer buffer;
++    uint8_t *frame = nullptr;
++    uint16_t length = 0;
++    WriteFrame(buffer, 8, 0x11);
++    SuccessOrQuit(buffer.SaveFrame());
++    CheckFrame(buffer, frame, length, 8, 0x11);
++    // SaveFrame and DiscardFrame must not invalidate an active iteration.
++    WriteFrame(buffer, 3, 0x33);
++    buffer.DiscardFrame();
++    WriteFrame(buffer, 4, 0x22);
++    SuccessOrQuit(buffer.SaveFrame());
++    CheckFrame(buffer, frame, length, 4, 0x22);
++    CheckEnd(buffer, frame, length);
++}
++
++static void TestClearDuringIteration(uint16_t aReplacementLength)
++{
++    Buffer buffer;
++    uint8_t *frame = nullptr;
++    uint16_t length = 0;
++    // Three initialized old frames make the stale next header deterministic.
++    for (uint8_t i = 0; i < 3; i++)
++    {
++        WriteFrame(buffer, 8, 0x11);
++        SuccessOrQuit(buffer.SaveFrame());
++    }
++    CheckFrame(buffer, frame, length, 8, 0x11);
++    CheckFrame(buffer, frame, length, 8, 0x11);
++    // This models ClearRxBuffer inside the saved-frame handler during recovery.
++    buffer.Clear();
++    if (aReplacementLength != 0)
++    {
++        WriteFrame(buffer, aReplacementLength, 0x55);
++        SuccessOrQuit(buffer.SaveFrame());
++    }
++    // Recovery's WaitResponse may save new frames before the handler returns.
++    // The old cursor would advance to offset 24. Replacement end offsets are
++    // 5, 24, and 40: cover stale cursors beyond, at, and inside the new region.
++    CheckEnd(buffer, frame, length);
++    if (aReplacementLength != 0)
++    {
++        VerifyOrQuit(buffer.HasSavedFrame());
++        CheckFrame(buffer, frame, length, aReplacementLength, 0x55);
++        CheckEnd(buffer, frame, length);
++    }
++}
++
++static void TestClearSavedFramesDuringIteration(void)
++{
++    Buffer buffer;
++    uint8_t *frame = nullptr;
++    uint16_t length = 0;
++    WriteFrame(buffer, 8, 0x11);
++    SuccessOrQuit(buffer.SaveFrame());
++    WriteFrame(buffer, 8, 0x22);
++    SuccessOrQuit(buffer.SaveFrame());
++    // Compaction preserves this in-progress frame, including reserved bytes.
++    SuccessOrQuit(buffer.SetSkipLength(3));
++    WriteFrame(buffer, 36, 0x55);
++    CheckFrame(buffer, frame, length, 8, 0x11);
++    CheckFrame(buffer, frame, length, 8, 0x22);
++    buffer.ClearSavedFrames();
++    VerifyOrQuit(buffer.GetLength() == 36);
++    SuccessOrQuit(buffer.SaveFrame());
++    CheckEnd(buffer, frame, length);
++    CheckFrame(buffer, frame, length, 36, 0x55);
++    // With no saved frames left, ClearSavedFrames is a no-op.
++    CheckEnd(buffer, frame, length);
++    buffer.ClearSavedFrames();
++    buffer.ClearSavedFrames();
++    WriteFrame(buffer, 4, 0x66);
++    SuccessOrQuit(buffer.SaveFrame());
++    CheckFrame(buffer, frame, length, 4, 0x66);
++    CheckEnd(buffer, frame, length);
++}
++
++int main(int argc, char *argv[])
++{
++    VerifyOrQuit(argc == 2, "expected one test name");
++    if (strcmp(argv[1], "normal_iteration") == 0)
++        TestNormalIteration();
++    else if (strcmp(argv[1], "append_during_iteration") == 0)
++        TestAppendDuringIteration();
++    else if (strcmp(argv[1], "clear_empty") == 0)
++        TestClearDuringIteration(0);
++    else if (strcmp(argv[1], "clear_shorter") == 0)
++        TestClearDuringIteration(1);
++    else if (strcmp(argv[1], "clear_same_boundary") == 0)
++        TestClearDuringIteration(20);
++    else if (strcmp(argv[1], "clear_longer") == 0)
++        TestClearDuringIteration(36);
++    else if (strcmp(argv[1], "clear_saved_frames") == 0)
++        TestClearSavedFramesDuringIteration();
++    else
++        VerifyOrQuit(false, "unknown test name");
++    return 0;
++}
