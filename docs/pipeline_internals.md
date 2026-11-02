@@ -60,11 +60,12 @@ Two layers, kept apart on purpose:
 |---|---|---|---|
 | `config.py` | (library) | loads `config.yaml` over `config.example.yaml`; strict: an unknown key or a wrong type is an error; derives paths; `env_for()` gives the environment the scripts read | -- |
 | `setup.py` | desktop | checks machine, Apptainer, `gh`, Slurm, weights, vLLM image; creates `shared/`, `runs/`; clones Zephyr; builds the base Python images. Never deletes | `shared/` |
-| `prepare.py` | desktop | the PR list (`--since/--until` or `--pr`), minus PRs the ledger has settled, hard filters, enrich, dry runs, missing SDK images, commits, manifest | `runs/<run>/` up to `manifest.json` |
+| `prepare.py` | desktop | the PR list (`--since/--until` or `--pr`), minus PRs the ledger has settled or another unfinished run has taken, hard filters, enrich, dry runs, missing SDK images, commits, manifest | `runs/<run>/` up to `manifest.json` |
 | `submit.py` | desktop | what is left (from `status/`), node count, the job script, `sbatch` | `jobs/` |
-| `node_worker.py` | each batch node | one node's share of one phase (section 4) | `status/`, `triage/`, `instances/`, `logs/node<N>/`, `nodes/node<N>/` |
+| `node_worker.py` | each batch node | one node's part of one phase, PRs taken from the queue (section 4) | `status/`, `triage/`, `instances/`, `logs/node<N>/`, `nodes/node<N>/` |
 | `status.py` | (library) | reads and writes `status/<pr>.json`; `triage_todo`, `validate_todo` | `status/` |
-| `report.py` | anywhere | the funnel and per-PR table, from the manifest and `status/` only; appends settled outcomes to the ledger | `report.md`, `report.json`, `shared/ledger.jsonl` |
+| `report.py` | anywhere | the funnel and per-PR table, from the manifest and `status/` only; fills in any settled outcome missing from the ledger; `to_ledger()` is what the workers and `prepare.py` call as PRs settle | `report.md`, `report.json`, `shared/ledger.jsonl` |
+| `claims.py` | (library) | the work queue of a phase: who has which PR, and taking over PRs of a node that died (4.3) | `claims/` |
 | `ledger.py` | (library) | every PR's settled outcome across runs: which outcomes count as settled, `latest`, `record` (under a lock) | `shared/ledger.jsonl` |
 | `templates/pipeline.sbatch` | -- | the job script template | -- |
 
@@ -72,7 +73,7 @@ Two layers, kept apart on purpose:
 
 | Script | Stage | In | Out (in the run folder) |
 |---|---|---|---|
-| `filter_candidates.py` | fetch, filter, enrich | GitHub API, the clone | `candidates/cache/`, `candidates/candidates.jsonl`, `enriched/<pr>.json` |
+| `filter_candidates.py` | fetch, filter, enrich | GitHub API, the clone, `shared/github/` | `shared/github/prs/`, `shared/github/enriched/`, `candidates/fetched.json`, `candidates/candidates.jsonl`, `enriched/<pr>.json` |
 | `zephyr_env.py` | (library, used by enrich) | the PR's commits in the clone | the record's `twister` block: suites, scenarios, boards, Python, SDK, twister options |
 | `dry_run.py` | dry run | the record; a minimal tree from `git archive`; twister `--dry-run` in the Python image | `dryrun/<pr>.json` |
 | `triage_prs.py` | triage | the record, the dry run, `docs/pr_triage.md`, the model server | `triage/<pr>.json`, `<pr>.trace.json` |
@@ -80,7 +81,8 @@ Two layers, kept apart on purpose:
 | `build_instances.py` | build | the recipe; shared Python and SDK images | `work/images/instances/<id>.sif` |
 | `validate_instance.py` | validate | the image; the upstream fix from the clone | `instances/<id>/validation.json` |
 | `cleanup_instance.py` | clean up | the instance id | removes its image, dry-run tree, overlays |
-| `promote_instance.py` | promote | a VALID instance in the run | `apptainer/instances/<id>/` (NuttX: `apptainer/instances/nuttx/<id>/`) in the repository |
+| `promote_instance.py` | promote | a VALID instance in the run | `apptainer/instances/<id>/` in the repository |
+| `registry.py` | push, pull, publish | a VALID image; `validation.json` | the registry; `published` in `validation.json`; pulled images in the work root |
 | `serve_triage_model.sh` | model server | a profile in `triage/models.json` | a vLLM server on `127.0.0.1:$PORT` |
 
 Helpers: `layout.py` (where everything is read and written, section 5.1),
@@ -119,6 +121,8 @@ runs/<run>/
   triage/manifest-<t>-<pid>.json one per triage call, with pr_triage-<t>-<pid>.md
   validate/<pr>-<board>.json    node_worker.py, for a board retry
   instances/<id>/               generate_instance.py, validate_instance.py
+  claims/<phase>.json           the phase's queue: who has which PR (claims.py)
+  claims/alive/<job>-node<N>    touched every minute by each worker
   logs/node<N>/                 that node's worker and its steps
   nodes/node<N>/work/           that node's images, overlays, temp files (EMBEDEVAL_WORK)
   nodes/node<N>/scr/            that node's model-server caches
@@ -126,7 +130,8 @@ runs/<run>/
   report.md, report.json        report.py
 ```
 
-**No two processes ever write the same file.** Every PR belongs to exactly
+**No two processes ever write the same file**, apart from the queue's
+table, which is only changed under its lock. Every PR is taken by exactly
 one worker in a phase, so its files have one writer. Node folders belong to
 one node. Triage calls running side by side each write their own manifest.
 Nothing is merged: the report is made by reading the per-PR files.
@@ -153,9 +158,9 @@ What a status file looks like:
 | Stage | States | Final? |
 |---|---|---|
 | `triage` | `done` (with a verdict), `cap`, `failed` | yes |
-| | `server failed` | no: redone on a resubmit |
+| | `server failed` (older runs only) | no: redone on a resubmit |
 | `validate` | `done` (outcome `VALID` or `INVALID: <reason>`), `failed` | yes |
-| | `skipped` (disk guard) | no: redone on a resubmit |
+| | `skipped` (disk guard, older runs only) | no: redone on a resubmit |
 
 ---
 
@@ -165,15 +170,18 @@ What a status file looks like:
 
 1. **What is left**: `status.triage_todo()` (reached triage, no triage
    outcome, or `server failed`) and `status.validate_todo()` (accepted, no
-   validation outcome, or `skipped`).
+   validation outcome, `skipped`, or failed for lack of time: `hit the cap`,
+   `no time left`). Such a PR is taken again even though an earlier job
+   marked it done in the queue: a job's done marks bind only that job.
 2. **Nodes**: `work = max(ceil(triage_left / triage_per_node),
    ceil(validate_left / validate_per_node))`; `wanted = min(nodes_max,
    work)`; `minimum = min(nodes_min, wanted)`, lowered to the number of idle
    nodes (`sinfo`) if fewer are idle. The job is submitted with `-N
    minimum-wanted`: Slurm starts it on as many idle nodes as it can, up to
    `wanted`, as soon as `minimum` are free.
-3. **Time**: refuses to submit unless `triage_phase + validate_phase + 5 <=
-   time_limit` (the 5 minutes are for the report and slack).
+3. **Time**: the phases share the job's `time_limit`, less 8 minutes for
+   the report. Triage may use all of it; validation gets what triage leaves,
+   and is skipped if that is under 30 minutes (the next job validates).
 4. **The job script**: `templates/pipeline.sbatch` filled in, written to
    `jobs/pipeline-<time>.sbatch`, with the whole config frozen beside it as
    `jobs/config-<time>.json`. The workers read the frozen copy, so editing
@@ -195,36 +203,61 @@ The generated script, with the default config:
 #SBATCH -t 03:00:00
 #SBATCH -o <run>/jobs/job-%j.out
 
-timeout -k 2m 95m srun -N $NN -n $NN --ntasks-per-node=1 -c 20 --kill-on-bad-exit=0 \
-    python cluster/node_worker.py --run <run> --config <frozen> --phase triage
-timeout -k 2m 75m srun ... --phase validate
+M=$(left)        # minutes left in the job, less 8 for the report
+timeout -k 2m ${M}m srun -N $NN -n $NN --ntasks-per-node=1 -c 20 --kill-on-bad-exit=0 \
+    python cluster/node_worker.py --run <run> --config <frozen> --phase triage --minutes $M
+M=$(left)        # validation only if 30+ minutes are left
+timeout -k 2m ${M}m srun ... --phase validate --minutes $M
 python cluster/report.py --run <run>
 ```
 
 - `srun` returns when every node's worker has finished, so it is the
   **barrier between phases**: validation starts only when all triage is done.
-- `timeout` around each `srun` makes the phase cap hard; the workers also
-  stop starting new PRs near it (4.4), so the hard cap is a backstop.
+- `timeout` around each `srun` makes the phase's end hard; the workers also
+  stop starting new PRs near it (4.4), so the hard end is a backstop.
 - `--kill-on-bad-exit=0`: one node's worker failing does not kill the rest.
 - The job never waits for a model server and never submits other jobs.
 
-### 4.3 How a node finds its share
+### 4.3 How a node gets its PRs: the queue
 
-Each worker gets `SLURM_PROCID` (`N`, 0-based) and `SLURM_NTASKS` (`NN`)
-from `srun`. It computes the PRs still to do in its phase, sorts them, and
-takes every `NN`-th one starting at index `N`. Every worker computes the
-same list from the same files, so they agree without talking to each other.
+Each worker has slots (`triage_per_node` or `validate_per_node`). At the
+start of a phase it reads what is still to do from `status/`; then each
+slot takes the next PR that no one has, works on it, and takes another, so
+a fast node does more and a slow one less (`claims.py`):
 
 ```
-to do, sorted:  33690 43405 62109 65697 74435 82272 85079 89534     NN = 3
-node0           33690             65697             85079
-node1                 43405             74435             89534
-node2                       62109             82272
+claims/triage.json      {"33690": {"owner": "480425-node0", "state": "done"},
+                         "43405": {"owner": "480425-node1", "state": "working"}, ...}
+
+slot:  take the first PR in the to-do list that is not "done" and not
+       "working" for a live worker  ->  mark it "working" (this worker)
+       work on it  ->  mark it "done" (it has its outcome) or free it (cut short)
+       nothing left to take, but others still working?  wait a minute, ask again
+       nothing left at all  ->  the slot ends; the worker ends with its last slot
 ```
 
-On a resubmit the list is only what is left, split again over the new
-job's nodes. A fixed split does not rebalance: a node whose PRs are quick
-waits for the slowest node at the phase barrier.
+- **One table, one lock.** The table is a single file, read and written
+  only while holding a lock on that same file (`fcntl.lockf`). On NFS,
+  taking the lock is what makes a node see the other nodes' latest writes;
+  a node's cached view of other files can be seconds behind. (A first
+  version with one claim file per PR let two nodes take the same PR, for
+  exactly that reason.)
+- **A node that dies frees its PRs.** Every worker touches
+  `claims/alive/<job>-node<N>` each minute. A "working" PR whose worker has
+  been silent for 5 minutes is taken over by the next slot that asks; slots
+  with nothing to take wait while other nodes still hold PRs, so they are
+  there to take them. A node whose model server never comes up takes no
+  PRs at all: the other nodes do them.
+- **Stopping frees PRs at once.** On SIGTERM the worker frees what it holds.
+- **One job per run at a time.** `submit.py` refuses a second one: the nodes
+  of a job are numbered, and two jobs would share `nodes/node<N>/`.
+- **Validation waits for triage.** A validation worker does nothing unless
+  the run's triage is complete (`status.triage_todo` empty); if a job's
+  triage phase ends with PRs left, the next job finishes triage first.
+
+Tested on 3 nodes: 40 PRs with one node killed while holding two (the other
+nodes took them over), and 200 PRs of under a second each, 4 slots per node:
+every PR done exactly once.
 
 ### 4.4 Inside a worker
 
@@ -232,28 +265,30 @@ waits for the slowest node at the phase barrier.
 
 1. Start the node's model server (`serve_triage_model.sh`) in its own
    process group, and wait for it, up to `caps.server_start`. If it never
-   comes up, every PR of this node is marked `server failed` and the worker
-   ends (no 30-minute wait per PR).
-2. Run `triage_per_node` PRs at a time, each one a `triage_prs.py --run-dir
+   comes up, the worker ends without taking a PR (4.3).
+2. Take PRs from the queue, `triage_per_node` at a time, each one a `triage_prs.py --run-dir
    <run> run --pr <pr>` subprocess, capped at `caps.triage_pr`. No new PR
-   starts within 5 minutes of `caps.triage_phase`.
+   starts within 5 minutes of the end of the phase.
 3. Stop the server, always (in a `finally`).
 
-**Validation phase**:
+**Validation phase** (only once the run's triage is complete):
 
 1. Sweep this node's work folder: build temp folders and partial images a
    cancelled job left behind.
-2. Run `validate_per_node` PRs at a time. For each:
-   - skip it (`skipped`) if the run's instance images already exceed
-     `disk_guard_gb`;
+2. Take accepted PRs from the queue, `validate_per_node` at a time; while
+   the run's instance images exceed `disk_guard_gb`, take none (wait for
+   builds to finish and be cleaned up). For each:
    - `cleanup_instance.py` (leftovers of a cut-short try), then
      `generate_instance.py`, `build_instances.py` (each image build capped
      at `caps.build`), `validate_instance.py`;
+   - if VALID and `registry` is set: `registry.py push`, which records the
+     image's address and sha256 in `validation.json` (`published`); a push
+     that fails leaves the PR VALID with a note, to publish later;
    - `cleanup_instance.py` again, always: the image and overlays go, the
      recipe and `validation.json` stay;
    - if the outcome is `nothing ran`, retry once on the next board twister
      selected for the scenario (QEMU first), if 10 minutes are left.
-   No PR starts with under 10 minutes left of `caps.validate_phase`; each is
+   No PR starts with under 10 minutes left of the phase; each is
    capped at `caps.validate_pr`.
 
 **Every step** runs in its own process group with its own cap. On a cap the
@@ -346,7 +381,8 @@ The variables `cluster/` sets for every step (`config.env_for()`):
 | Python, SDK images | `shared/images/` | `setup.py`, `prepare.py` | every run |
 | dry-run venvs | `shared/venvs/` | `dry_run.py`, under a lock per venv | every run |
 | vLLM compile cache | `shared/vllm-cache/` | the first server, under a lock | every server, each through its own copy |
-| ledger | `shared/ledger.jsonl` | `report.py`, under a lock | every `prepare.py` |
+| ledger | `shared/ledger.jsonl` | workers and `prepare.py` as PRs settle, `report.py`; under a lock | every `prepare.py` |
+| GitHub cache | `shared/github/prs/`, `shared/github/enriched/` | `filter_candidates.py`, each file written whole | every run; an enriched record is reused only if its `enrich_version` is current (raise `ENRICH_VERSION` when the record changes) |
 | instance images | `nodes/node<N>/work/images/instances/` | `build_instances.py` | nobody: deleted after validation |
 | everything else | `runs/<run>/` | the run | nobody |
 
@@ -452,17 +488,16 @@ silently ignored setting. `${USER}` and `${SCRATCH}` are expanded.
 | `model.profile` | `qwen38-nvfp4` | an entry of `triage/models.json` |
 | `caps.server_start` | 30 | min until the server must answer |
 | `caps.triage_pr` | 30 | min per PR's triage |
-| `caps.triage_phase` | 95 | min for all of triage |
 | `caps.build` | 45 | min per image build |
 | `caps.validate_pr` | 70 | min per PR: generate, build, validate (a retry included) |
-| `caps.validate_phase` | 75 | min for all of validation |
 | `parallel.enrich`, `dry_run` | 4, 8 | on the desktop, in `prepare.py` |
 | `parallel.triage_per_node` | 4 | matches the server's `--max-num-seqs 4` |
 | `parallel.validate_per_node` | 4 | builds use all 20 cores between them |
 | `disk_guard_gb` | 250 | no new build while the run's images exceed this |
+| `registry` | `null` | where VALID images are pushed (`oras://ghcr.io/<user>/embedeval-zephyr`); passed to scripts as `EMBEDEVAL_REGISTRY` |
 
-Keep `triage_phase + validate_phase + 5 <= time_limit`; `submit.py`
-checks. To give one phase more time, take it from the other.
+There are no phase caps: triage may use the whole job, validation what is
+left (4.1, step 3).
 
 To use different settings for one run only, keep a second file and pass it
 everywhere: `--config cluster/big-run.yaml` to `prepare.py`, `submit.py`
@@ -568,12 +603,22 @@ run, trace and scoring machinery of `triage_prs.py`.
 - **The model is not deterministic.** The same PR can get a different board,
   problem statement or, rarely, verdict on another run. Review before
   promoting.
-- **The split is fixed.** Nodes do not take work from each other; the
-  slowest node sets the phase's length. A shared work queue is a possible
-  later change.
+- **Phases are barriers.** Validation starts only once all triage is done,
+  so nodes that finish triage early wait for the last PR.
 - **One job at a time per account**, with a desktop open (the 2-job limit).
-- **Images are not kept.** Every instance image is rebuilt from its recipe
-  when needed (10-20 min). A container registry would avoid that; not done.
+- **Images are kept only with a registry.** With `registry` set, every
+  VALID image is pushed (about 2.7 GB, a minute) and evaluation pulls it
+  and checks its sha256; without it, images are rebuilt from the recipe
+  (about 18 min), and a rebuild is not byte-identical to the validated
+  image. An OCI tag can be pushed again; the recorded sha256 is what pins
+  the image. Apptainer images are single files, so the registry stores the
+  SDK layer again in every image.
+- **Not yet published (to do):** of the 18 committed instances, only
+  `zephyr__zephyr-95188` is in the registry. The other 17 were validated
+  before it existed; publish them when wanted (one job, about 30-40 min on
+  5 nodes, about 45 GB):
+  `scripts/registry.py publish <id>...` (rebuilds, validates again, pushes
+  only if still VALID, and rewrites each `validation.json`).
 - **Scholar-specific.** Partition, node shape, and the vLLM workarounds are
   Scholar's. The config covers the first two; the third is in
   `serve_triage_model.sh`.

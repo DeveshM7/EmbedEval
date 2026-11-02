@@ -41,23 +41,20 @@ _ORIENTATION = {
     "nuttx": (
         "Two repos: the kernel at /testbed and the applications at /testbed/apps. "
         "Builds use GNU Make and are already configured for sim:nsh, which produces "
-        "a native binary at /testbed/nuttx. Run `make -j$(nproc)` to build; "
-        "later builds are incremental. Never run distclean or configure.sh -- reconfiguring "
+        "a native binary at /testbed/nuttx. Run `make -j$(nproc)` to rebuild "
+        "incrementally. Never run distclean or configure.sh -- reconfiguring "
         "discards the container's setup and breaks the test runner."
+    ),
+    "mynewt": (
+        "The Apache Mynewt (mynewt-core) source is at /testbed; its tests are a "
+        "selftest package built with `newt` for the native simulator through a "
+        "newt project at /project. `run_tests` builds and runs every test case. "
+        "Fix library source, never the selftest package. Do not edit /project."
     ),
     "riot": (
         "Builds use GNU Make. Tests are unit-test suites under tests/unittests that "
         "compile to a native host binary -- there is no emulator. `run_tests` already "
         "selects and builds the right suite; do not construct make invocations by hand."
-    ),
-    "mynewt": (
-        "The Apache Mynewt (mynewt-core) source is at /testbed; its tests are a "
-        "selftest (unit test) package built with `newt` for the native simulator "
-        "(a host executable, no board or emulator) through a newt project at "
-        "/project. `run_tests` does a clean `newt test` of that package and runs "
-        "every test case, printing [pass]/[FAIL] per case. Fix the library source, "
-        "never the selftest package. Do not edit /project or run newt "
-        "yourself with other targets or packages."
     ),
 }
 
@@ -81,8 +78,7 @@ PROJECTS: dict[str, dict] = {
         # were touched.
         "protected_paths": ["tests/"],
         # Zephyr instances are Apptainer images from the twister pipeline
-        # (harness/apptainer_env.py). NuttX and RIOT still run in Docker,
-        # except NuttX instances whose metadata sets "runtime": "apptainer".
+        # (harness/apptainer_env.py). NuttX and RIOT still run in Docker.
         "runtime": "apptainer",
         # run_tests rebuilds as well as running, so there is no separate
         # rebuild step to show the agent.
@@ -98,10 +94,6 @@ PROJECTS: dict[str, dict] = {
         "extra_warnings": "",
         "protected_paths": ["apps/testing/", "apps/examples/"],
         "clean_paths": [],
-        "docker_platform": "linux/amd64",
-        # Generated images are configured but not prebuilt; a cold native
-        # compile plus ostest took up to five minutes in local validation.
-        "command_timeout": 600,
         "build_command": "make -j$(nproc)",
         "rebuild_command": "make -j$(nproc)",
         "run_command": "printf 'ostest\\npoweroff\\n' | timeout 300 ./nuttx",
@@ -124,16 +116,11 @@ PROJECTS: dict[str, dict] = {
         "label": "Apache Mynewt",
         "orientation": _ORIENTATION["mynewt"],
         "extra_warnings": "",
-        "protected_paths": [
-            "fs/fcb2/selftest/",
-            "kernel/os/selftest/",
-            "encoding/json/selftest/",
-        ],
+        "protected_paths": ["fs/fcb2/selftest/", "kernel/os/selftest/", "encoding/json/selftest/"],
         "needs_qemu_cleanup": False,
         "clean_paths": [],
         "docker_platform": "linux/amd64",
-        # Instances whose metadata sets "runtime": "apptainer"
-        # (scripts/render_mynewt_instance.py) run in Apptainer, as for NuttX.
+        "runtime": "apptainer",
         "build_command": "true",
         "rebuild_command": "",
         "run_command": "run_tests",

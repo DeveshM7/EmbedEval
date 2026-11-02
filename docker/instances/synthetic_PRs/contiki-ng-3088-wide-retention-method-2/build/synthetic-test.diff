@@ -1,0 +1,50 @@
+--- a/tests/08-native-runs/embedeval-tcp-retention/main.c
++++ b/tests/08-native-runs/embedeval-tcp-retention/main.c
+@@ -146,10 +146,37 @@
+   CHECK(setup()==1);
+   CHECK(tcp_socket_register(NULL,NULL,NULL,0,NULL,0,NULL,NULL)==-1); return 0;
+ }
++static unsigned wide_calls, wide_length;
++static uint8_t wide_data[512];
++static int wide_callback(struct tcp_socket *s, void *ptr, const uint8_t *data, int len)
++{
++  (void)s; (void)ptr;
++  if(len < 0 || len > 512) abort();
++  wide_length = len; memcpy(wide_data, data, len);
++  return wide_calls++ == 0 ? 300 : 0;
++}
++static int wide_retention(void)
++{
++  static uint8_t input[512], first[400], next[20];
++  CHECK(setup() == 1);
++  wide_calls = 0;
++  for(unsigned i=0;i<400;i++) first[i]=(uint8_t)(i*17+3);
++  for(unsigned i=0;i<20;i++) next[i]=(uint8_t)(i+91);
++  CHECK(tcp_socket_register(&socket,NULL,input,512,output,sizeof(output),wide_callback,NULL)==1);
++  receive(first,400);
++  CHECK(socket.input_data_len==300);
++  receive(next,20);
++  CHECK(wide_calls==2 && wide_length==320);
++  CHECK(memcmp(wide_data,first+100,300)==0);
++  CHECK(memcmp(wide_data+300,next,20)==0);
++  CHECK(socket.input_data_len==0);
++  return 0;
++}
+ struct test { const char *name; int (*run)(void); };
+ static const struct test tests[]={
+   {"registration_resets_retention",registration_resets_retention},
+   {"suffix_compaction",suffix_compaction},
++  {"wide_retention",wide_retention},
+   {"retain_across_events",retain_across_events},
+   {"retain_within_large_event",retain_within_large_event},
+   {"overretain_clamped",overretain_clamped},
+--- a/tests/08-native-runs/embedeval-tcp-retention/run.py
++++ b/tests/08-native-runs/embedeval-tcp-retention/run.py
+@@ -1,6 +1,6 @@
+ import subprocess,sys
+ from pathlib import Path
+-regressions = ['registration_resets_retention', 'suffix_compaction', 'retain_across_events', 'retain_within_large_event', 'overretain_clamped', 'full_retained_buffer_bounded']
++regressions = ['registration_resets_retention', 'wide_retention', 'suffix_compaction', 'retain_across_events', 'retain_within_large_event', 'overretain_clamped', 'full_retained_buffer_bounded']
+ controls = ['ordinary_receive', 'large_stream', 'binary_payload', 'absent_callback', 'send_queue', 'invalid_registration']
+ mode=sys.argv[1] if len(sys.argv)>1 else "all"
+ if mode not in ["all","regression","control"]: raise SystemExit(1)

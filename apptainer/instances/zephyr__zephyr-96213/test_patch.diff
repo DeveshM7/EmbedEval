@@ -1,0 +1,136 @@
+diff --git a/tests/lib/devicetree/api/app.overlay b/tests/lib/devicetree/api/app.overlay
+index 6ef12651902..f05726da6b6 100644
+--- a/tests/lib/devicetree/api/app.overlay
++++ b/tests/lib/devicetree/api/app.overlay
+@@ -735,6 +735,98 @@
+ 			};
+ 		};
+ 
++		test_children_on_bus: controller@ccccdddd {
++			compatible = "vnd,controller";
++			reg = <0xccccdddd 0x1000>;
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			/* Child number 1 of the controller */
++			test_child_on_bus_a: test-child-a@0 {
++				compatible = "vnd,device";
++				reg = <0x0 0x100>;
++				status = "okay";
++			};
++
++			/* Child number 2 of the controller */
++			test_child_on_bus_b: test-child-b@100 {
++				compatible = "vnd,device";
++				reg = <0x100 0x100>;
++				status = "okay";
++			};
++
++			/* Child number 3 of the controller */
++			test_child_on_bus_c: test-child-c@200 {
++				compatible = "vnd,device";
++				reg = <0x200 0x100>;
++				status = "disabled";
++			};
++
++			/*
++			 * Structural container only (no compatible/on-bus): descendants
++			 * below this node are still counted for the controller bus.
++			 */
++			test_child_on_bus_d: test-child-on-bus-d {
++				#address-cells = <1>;
++				#size-cells = <1>;
++				ranges;
++
++				/* Child number 4 of the controller */
++				test_child_dd: test-child-dd@300 {
++					compatible = "vnd,device";
++					reg = <0x300 0x100>;
++					status = "okay";
++				};
++
++				/* Child number 5 of the controller */
++				test_child_ee: test-child-ee@400 {
++					compatible = "vnd,device";
++					reg = <0x400 0x100>;
++					status = "disabled";
++				};
++			};
++
++			/*
++			 * Child number 6 of the controller.
++			 * Also acts as a child bus controller, so it is counted for the
++			 * parent bus, while descendants behind this node are counted only
++			 * when querying this node itself.
++			 */
++			test_child_on_bus_ext: test-child-on-bus-ext@500 {
++				compatible = "vnd,device-extender";
++				reg = <0x500 0x300>;
++				ranges = <0x0 0x600 0x200>;
++				#address-cells = <1>;
++				#size-cells = <1>;
++
++				/* Child number 1 of the extender */
++				test_child_a_on_ext: test-child-a-on-ext@0 {
++					compatible = "vnd,device";
++					reg = <0x0 0x100>;
++					status = "okay";
++				};
++
++				/* Child number 2 of the extender */
++				test_child_b_on_ext: test-child-b-on-ext@100 {
++					compatible = "vnd,device";
++					reg = <0x100 0x100>;
++					status = "disabled";
++				};
++			};
++
++			/* Not a physical child node of the controller bus */
++			controller_dev_setting_a: setting-a {
++				compatible = "vnd,controller-device-setting";
++				val1 = <1>;
++			};
++
++			/* Not a physical child node of the controller bus */
++			controller_dev_setting_b: setting-b {
++				compatible = "vnd,controller-device-setting";
++				val1 = <2>;
++			};
++		};
++
+ 		test-ranges {
+ 			#address-cells = <2>;
+ 			#size-cells = <1>;
+diff --git a/tests/lib/devicetree/api/src/main.c b/tests/lib/devicetree/api/src/main.c
+index 6ae87e69f6f..93321ad7ae5 100644
+--- a/tests/lib/devicetree/api/src/main.c
++++ b/tests/lib/devicetree/api/src/main.c
+@@ -77,6 +77,9 @@
+ #define TEST_DMA_CTLR_1 DT_NODELABEL(test_dma1)
+ #define TEST_DMA_CTLR_2 DT_NODELABEL(test_dma2)
+ 
++#define TEST_CONTROLLER DT_NODELABEL(test_children_on_bus)
++#define TEST_BUS_EXT    DT_NODELABEL(test_child_on_bus_ext)
++
+ #define TEST_VIDEO2           DT_NODELABEL(test_video2)
+ #define TEST_VIDEO2_PORT0     DT_NODELABEL(test_video2_port0)
+ #define TEST_VIDEO2_PORT0_IN0 DT_NODELABEL(test_video2_port0_in0)
+@@ -2819,6 +2822,18 @@ ZTEST(devicetree_api, test_great_grandchild)
+ 	zassert_equal(DT_PROP(DT_NODELABEL(test_ggc), ggc_prop), 42, "");
+ }
+ 
++#undef DT_DRV_COMPAT
++#define DT_DRV_COMPAT vnd_controller
++ZTEST(devicetree_api, test_descendant_on_bus_nodes_number)
++{
++	zassert_equal(DT_DESCENDANT_NUM_ON_BUS(TEST_CONTROLLER, generic), 6, "");
++	zassert_equal(DT_INST_DESCENDANT_NUM_ON_BUS(0, generic), 6, "");
++	zassert_equal(DT_DESCENDANT_NUM_ON_BUS_STATUS_OKAY(TEST_CONTROLLER, generic), 4, "");
++	zassert_equal(DT_INST_DESCENDANT_NUM_ON_BUS_STATUS_OKAY(0, generic), 4, "");
++	zassert_equal(DT_DESCENDANT_NUM_ON_BUS(TEST_BUS_EXT, generic), 2, "");
++	zassert_equal(DT_DESCENDANT_NUM_ON_BUS_STATUS_OKAY(TEST_BUS_EXT, generic), 1, "");
++}
++
+ #undef DT_DRV_COMPAT
+ #define DT_DRV_COMPAT vnd_test_ranges_pcie
+ ZTEST(devicetree_api, test_ranges_pcie)

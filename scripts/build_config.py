@@ -37,8 +37,7 @@ BUILD: dict[str, dict] = {
             "KERNEL_BASE_COMMIT": lambda m: m["kernel_base_commit"],
             "APPS_BASE_COMMIT": lambda m: m["apps_base_commit"],
         },
-        # The shared base installs gcc-multilib and an x64 xPack toolchain.
-        "platform": "linux/amd64",
+        "platform": None,
         "clean_paths": [],
     },
     "riot": {
@@ -54,8 +53,6 @@ BUILD: dict[str, dict] = {
         # `clean all`, so there is nothing to wipe first.
         "clean_paths": [],
     },
-    # Docker only. Mynewt instances rendered with scripts/render_mynewt_instance.py
-    # are Apptainer images (scripts/apptainer_util.py, templates/mynewt/apptainer/).
     "mynewt": {
         "base_image": "embedeval-mynewt-base:latest",
         "base_dockerfile": "docker/bases/mynewt.Dockerfile",

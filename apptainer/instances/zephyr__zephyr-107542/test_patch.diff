@@ -1,0 +1,237 @@
+diff --git a/tests/subsys/shell/shell/CMakeLists.txt b/tests/subsys/shell/shell/CMakeLists.txt
+index a8fae2b9931..a5794a0e7b2 100644
+--- a/tests/subsys/shell/shell/CMakeLists.txt
++++ b/tests/subsys/shell/shell/CMakeLists.txt
+@@ -6,3 +6,14 @@ project(shell)
+ 
+ FILE(GLOB app_sources src/*.c)
+ target_sources(app PRIVATE ${app_sources})
++
++if(CONFIG_SHELL_ALIASES_HAS_FILE)
++  set(gen_dir ${ZEPHYR_BINARY_DIR}/include/generated/)
++  set(aliases_src ${CONFIG_SHELL_ALIASES_FILE})
++
++  generate_shell_aliases_inc_file_for_target(
++    app
++    ${aliases_src}
++    ${gen_dir}/generated-shell-aliases.inc
++  )
++endif()
+diff --git a/tests/subsys/shell/shell/shell_aliases.txt b/tests/subsys/shell/shell/shell_aliases.txt
+new file mode 100644
+index 00000000000..2ce8c6959ab
+--- /dev/null
++++ b/tests/subsys/shell/shell/shell_aliases.txt
+@@ -0,0 +1,5 @@
++zzcmd=test_shell_cmd
++colorset="shell colors"
++statscmd="shell stats"
++shell=test_shell_cmd
++cmd1=test_shell_cmd
+diff --git a/tests/subsys/shell/shell/src/main.c b/tests/subsys/shell/shell/src/main.c
+index f366c054b1e..3cb0bac22e6 100644
+--- a/tests/subsys/shell/shell/src/main.c
++++ b/tests/subsys/shell/shell/src/main.c
+@@ -35,6 +35,66 @@ static void test_shell_execute_cmd(const char *cmd, int result)
+ 							cmd, ret, result);
+ }
+ 
++static void test_shell_reset_state(const struct shell *sh)
++{
++	shell_backend_dummy_clear_input(sh);
++	shell_backend_dummy_clear_output(sh);
++	sh->ctx->cmd_buff[0] = '\0';
++	sh->ctx->cmd_buff_len = 0U;
++	sh->ctx->cmd_buff_pos = 0U;
++}
++
++static void test_shell_push_input(const struct shell *sh, const char *input)
++{
++	struct shell_dummy *sh_dummy = (struct shell_dummy *)sh->iface->ctx;
++	int ret = shell_backend_dummy_push_input(sh, input, strlen(input));
++
++	zassert_equal(ret, 0, "Failed to push input '%s': %d", input, ret);
++
++	while (sh_dummy->input_pos < sh_dummy->input_len) {
++		shell_process(sh);
++		k_msleep(1);
++	}
++}
++
++static void test_shell_wait_for_cmd(const struct shell *sh, const char *expected)
++{
++	size_t expected_len = strlen(expected);
++
++	WAIT_FOR((sh->ctx->cmd_buff_len == expected_len) &&
++		 (sh->ctx->cmd_buff_pos == expected_len) &&
++		 (strcmp(sh->ctx->cmd_buff, expected) == 0),
++		 20000, k_msleep(1));
++	zassert_equal(sh->ctx->cmd_buff_len, expected_len,
++		      "Unexpected command length: %u, buffer '%s'",
++		      sh->ctx->cmd_buff_len, sh->ctx->cmd_buff);
++	zassert_equal(sh->ctx->cmd_buff_pos, expected_len,
++		      "Unexpected cursor position: %u, buffer '%s'",
++		      sh->ctx->cmd_buff_pos, sh->ctx->cmd_buff);
++	zassert_str_equal(sh->ctx->cmd_buff, expected,
++			  "Unexpected command buffer");
++}
++
++static bool test_shell_output_contains(const struct shell *sh, const char *expected)
++{
++	struct shell_dummy *sh_dummy = (struct shell_dummy *)sh->iface->ctx;
++
++	sh_dummy->buf[sh_dummy->len] = '\0';
++
++	return strstr(sh_dummy->buf, expected) != NULL;
++}
++
++static void test_shell_wait_for_output(const struct shell *sh, const char *expected)
++{
++	struct shell_dummy *sh_dummy = (struct shell_dummy *)sh->iface->ctx;
++
++	WAIT_FOR(test_shell_output_contains(sh, expected), 20000, k_msleep(1));
++	sh_dummy->buf[sh_dummy->len] = '\0';
++	zassert_not_null(strstr(sh_dummy->buf, expected),
++			 "Expected output to contain '%s', got '%s'",
++			 expected, sh_dummy->buf);
++}
++
+ ZTEST(shell_1cpu, test_cmd_help)
+ {
+ 	test_shell_execute_cmd("help", 0);
+@@ -145,6 +205,106 @@ ZTEST(sh, test_cmd_history)
+ 	test_shell_execute_cmd("history dummy dummy", -EINVAL);
+ }
+ 
++#if defined(CONFIG_SHELL_ALIASES)
++#if CONFIG_SHELL_ALIASES_HAS_FILE
++#define SHELL_ALIASES_FILE 1
++#else
++#define SHELL_ALIASES_FILE 0
++#endif
++#else
++#define SHELL_ALIASES_FILE 0
++#endif
++
++ZTEST(sh, test_alias_root_tab_completion)
++{
++	const struct shell *sh = shell_backend_dummy_get_ptr();
++
++	if (!IS_ENABLED(CONFIG_SHELL_ALIASES) || !SHELL_ALIASES_FILE) {
++		ztest_test_skip();
++	}
++
++	test_shell_reset_state(sh);
++	test_shell_push_input(sh, "zz\t");
++	test_shell_wait_for_cmd(sh, "zzcmd ");
++}
++
++ZTEST(sh, test_builtin_alias_tab_completion)
++{
++	const struct shell *sh = shell_backend_dummy_get_ptr();
++
++	if (!IS_ENABLED(CONFIG_SHELL_ALIASES) || !SHELL_ALIASES_FILE) {
++		ztest_test_skip();
++	}
++
++	test_shell_reset_state(sh);
++	test_shell_push_input(sh, "?\t");
++	test_shell_wait_for_cmd(sh, "? ");
++}
++
++ZTEST(sh, test_alias_subcommand_tab_completion)
++{
++	const struct shell *sh = shell_backend_dummy_get_ptr();
++
++	if (!IS_ENABLED(CONFIG_SHELL_ALIASES) || !SHELL_ALIASES_FILE) {
++		ztest_test_skip();
++	}
++
++	test_shell_reset_state(sh);
++	test_shell_push_input(sh, "colorset \t");
++	test_shell_wait_for_cmd(sh, "colorset o");
++	test_shell_wait_for_output(sh, "off");
++	test_shell_wait_for_output(sh, "on");
++}
++
++ZTEST(sh, test_alias_partial_subcommand_tab_completion)
++{
++	const struct shell *sh = shell_backend_dummy_get_ptr();
++
++	if (!IS_ENABLED(CONFIG_SHELL_ALIASES) || !SHELL_ALIASES_FILE) {
++		ztest_test_skip();
++	}
++
++	test_shell_reset_state(sh);
++	test_shell_push_input(sh, "statscmd sh\t");
++	test_shell_wait_for_cmd(sh, "statscmd show ");
++}
++
++ZTEST(sh, test_alias_collision_prefers_command)
++{
++	const struct shell *sh = shell_backend_dummy_get_ptr();
++
++	if (!IS_ENABLED(CONFIG_SHELL_ALIASES) || !SHELL_ALIASES_FILE) {
++		ztest_test_skip();
++	}
++
++	shell_backend_dummy_clear_output(sh);
++	test_shell_execute_cmd("shell", 1);
++	test_shell_wait_for_output(sh,
++				   "Alias 'shell' ignored because command exists "
++				   "in current context");
++}
++
++ZTEST(sh, test_alias_collision_prefers_selected_command)
++{
++	const struct shell *sh = shell_backend_dummy_get_ptr();
++	int ret;
++
++	if (!IS_ENABLED(CONFIG_SHELL_ALIASES) || !SHELL_ALIASES_FILE) {
++		ztest_test_skip();
++	}
++
++	test_shell_execute_cmd("select section_cmd", 0);
++
++	shell_backend_dummy_clear_output(sh);
++	test_shell_execute_cmd("cmd1", 10);
++	test_shell_wait_for_output(sh,
++				   "Alias 'cmd1' ignored because command "
++				   "exists in current context");
++
++	ret = shell_set_root_cmd(NULL);
++	zassert_equal(ret, 0, "Unexpected error %d", ret);
++}
++
+ ZTEST(sh, test_cmd_resize)
+ {
+ 	test_shell_execute_cmd("resize -h", 1);
+diff --git a/tests/subsys/shell/shell/testcase.yaml b/tests/subsys/shell/shell/testcase.yaml
+index 3af00fcac22..3cf08ce4aa5 100644
+--- a/tests/subsys/shell/shell/testcase.yaml
++++ b/tests/subsys/shell/shell/testcase.yaml
+@@ -112,3 +112,24 @@ tests:
+     build_only: true
+     platform_allow:
+       - mps2/an385
++
++  shell.core.no_aliases:
++    min_flash: 32
++    extra_configs:
++      - CONFIG_SHELL_ALIASES=n
++    build_only: true
++    platform_allow:
++      - mps2/an385
++
++  shell.core.aliases:
++    min_flash: 32
++    extra_configs:
++      - CONFIG_SHELL_ALIASES=y
++      - CONFIG_SHELL_TAB=y
++      - CONFIG_SHELL_TAB_AUTOCOMPLETION=y
++      - CONFIG_SHELL_ALIASES_FILE="shell_aliases.txt"
++    platform_allow:
++      - native_sim
++      - mps2/an385
++    integration_platforms:
++      - native_sim

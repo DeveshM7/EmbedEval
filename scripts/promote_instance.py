@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Promote validated Zephyr, NuttX and Mynewt instances from generated/ to
-apptainer/instances/ (NuttX: apptainer/instances/nuttx/, Mynewt:
-apptainer/instances/mynewt/).
+Promote validated Zephyr and Mynewt instances from generated/ to apptainer/instances/.
+Mynewt recipes are placed under apptainer/instances/mynewt/.
 
     python scripts/promote_instance.py zephyr__zephyr-65697
     python scripts/promote_instance.py --all            # every valid one in generated/
-    python scripts/promote_instance.py --host-arch x86_64 nuttx__nuttx-14152-a2725
 
 apptainer/instances/ is the committed Apptainer benchmark: the instances the
 harness runs agents on. Only an instance that passed validation gets there,
@@ -14,13 +12,9 @@ and only as validated: its recipe files must still match the fingerprint
 validate_instance.py recorded in validation.json. A recipe regenerated or
 edited after validation is refused until it is validated again.
 
---host-arch records in the promoted metadata that the instance must build,
-validate and run on that architecture, for one found to validate on it only.
-
 Copies the recipe and its record -- instance.def, instance.json,
-run_tests.py, test_patch.diff (NuttX: instance.def, run_tests.sh,
-test_patch.diff; Mynewt: those and bench.json, sim_arm64.patch), metadata.json, validation.json. Images are not in git;
-build_instances.py rebuilds them from the recipe.
+run_tests.py, test_patch.diff, metadata.json, validation.json. Images are not
+in git; build_instances.py rebuilds them from the recipe.
 """
 
 from __future__ import annotations
@@ -46,8 +40,7 @@ def promote(instance_id: str, source: Path = GENERATED,
             host_arch: str | None = None) -> tuple[bool, str]:
     src = source / instance_id
     project = instances.split_instance(instance_id)[0]
-    recipe = (au.nuttx_recipe_files(src) if project == "nuttx"
-              else au.mynewt_recipe_files(src) if project == "mynewt" else au.RECIPE_FILES)
+    recipe = au.mynewt_recipe_files(src) if project == "mynewt" else au.RECIPE_FILES
     report_path = src / "validation.json"
     if not report_path.exists():
         return False, "not validated (no validation.json)"
@@ -63,7 +56,7 @@ def promote(instance_id: str, source: Path = GENERATED,
     missing = [f for f in files if not (src / f).exists()]
     if missing:
         return False, f"missing {', '.join(missing)}"
-    dst = (DEST / project if project in ("nuttx", "mynewt") else DEST) / instance_id
+    dst = (DEST / "mynewt" if project == "mynewt" else DEST) / instance_id
     dst.mkdir(parents=True, exist_ok=True)
     for f in files:
         shutil.copy2(src / f, dst / f)
@@ -80,7 +73,7 @@ def main() -> None:
     p.add_argument("instance", nargs="*")
     p.add_argument("--all", action="store_true", help="every valid instance in generated/")
     p.add_argument("--host-arch", choices=("x86_64", "aarch64"),
-                   help="the architecture the instances validate on only")
+                   help="record the validated worker architecture in promoted metadata")
     args = p.parse_args()
     ids = (sorted(d.name for d in GENERATED.iterdir() if (d / "validation.json").exists())
            if args.all else args.instance)

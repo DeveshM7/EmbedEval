@@ -1,0 +1,353 @@
+diff --git a/tests/cmake/constants_library/CMakeLists.txt b/tests/cmake/constants_library/CMakeLists.txt
+new file mode 100644
+index 00000000000..fb3cd311918
+--- /dev/null
++++ b/tests/cmake/constants_library/CMakeLists.txt
+@@ -0,0 +1,40 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++
++# Register constants libraries while still in Zephyr's project scope
++# so that generated headers land under build/zephyr/include/generated/.
++#
++# Dependency graph:
++#   B: standalone
++#   A -> B
++#   C -> B
++#   D -> A, B
++
++zephyr_constants_library(
++  NAME test_constants_a
++  SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/constants_a.c
++  DEPENDS test_constants_b
++)
++
++zephyr_constants_library(
++  NAME test_constants_b
++  SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/constants_b.c
++)
++
++zephyr_constants_library(
++  NAME test_constants_c
++  SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/constants_c.c
++  DEPENDS test_constants_b
++)
++
++zephyr_constants_library(
++  NAME test_constants_d
++  SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/constants_d.c
++  DEPENDS test_constants_a test_constants_b
++)
++
++project(constants_library)
++
++target_sources(app PRIVATE src/main.c)
+diff --git a/tests/cmake/constants_library/prj.conf b/tests/cmake/constants_library/prj.conf
+new file mode 100644
+index 00000000000..9467c292689
+--- /dev/null
++++ b/tests/cmake/constants_library/prj.conf
+@@ -0,0 +1 @@
++CONFIG_ZTEST=y
+diff --git a/tests/cmake/constants_library/src/constants_a.c b/tests/cmake/constants_library/src/constants_a.c
+new file mode 100644
+index 00000000000..65f5cc8e953
+--- /dev/null
++++ b/tests/cmake/constants_library/src/constants_a.c
+@@ -0,0 +1,16 @@
++/*
++ * Copyright (c) 2026 BayLibre SAS
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Constants library A: depends on B.
++ */
++
++#include <gen_offset.h>
++#include <zephyr/test_constants_b.h>
++
++GEN_ABS_SYM_BEGIN(_TestConstantsA)
++
++GEN_ABSOLUTE_SYM(TEST_CONST_A_SIZEOF, TEST_CONST_B_SIZEOF + 1);
++
++GEN_ABS_SYM_END
+diff --git a/tests/cmake/constants_library/src/constants_b.c b/tests/cmake/constants_library/src/constants_b.c
+new file mode 100644
+index 00000000000..63908b845a6
+--- /dev/null
++++ b/tests/cmake/constants_library/src/constants_b.c
+@@ -0,0 +1,15 @@
++/*
++ * Copyright (c) 2026 BayLibre SAS
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Constants library B: standalone, no dependencies on other constants.
++ */
++
++#include <gen_offset.h>
++
++GEN_ABS_SYM_BEGIN(_TestConstantsB)
++
++GEN_ABSOLUTE_SYM(TEST_CONST_B_SIZEOF, 10);
++
++GEN_ABS_SYM_END
+diff --git a/tests/cmake/constants_library/src/constants_c.c b/tests/cmake/constants_library/src/constants_c.c
+new file mode 100644
+index 00000000000..7b0e13aad73
+--- /dev/null
++++ b/tests/cmake/constants_library/src/constants_c.c
+@@ -0,0 +1,16 @@
++/*
++ * Copyright (c) 2026 BayLibre SAS
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Constants library C: depends on B.
++ */
++
++#include <gen_offset.h>
++#include <zephyr/test_constants_b.h>
++
++GEN_ABS_SYM_BEGIN(_TestConstantsC)
++
++GEN_ABSOLUTE_SYM(TEST_CONST_C_SIZEOF, TEST_CONST_B_SIZEOF + 100);
++
++GEN_ABS_SYM_END
+diff --git a/tests/cmake/constants_library/src/constants_d.c b/tests/cmake/constants_library/src/constants_d.c
+new file mode 100644
+index 00000000000..9fe2c3bd1fd
+--- /dev/null
++++ b/tests/cmake/constants_library/src/constants_d.c
+@@ -0,0 +1,17 @@
++/*
++ * Copyright (c) 2026 BayLibre SAS
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Constants library D: depends on both A and B.
++ */
++
++#include <gen_offset.h>
++#include <zephyr/test_constants_a.h>
++#include <zephyr/test_constants_b.h>
++
++GEN_ABS_SYM_BEGIN(_TestConstantsD)
++
++GEN_ABSOLUTE_SYM(TEST_CONST_D_SIZEOF, TEST_CONST_A_SIZEOF + TEST_CONST_B_SIZEOF);
++
++GEN_ABS_SYM_END
+diff --git a/tests/cmake/constants_library/src/main.c b/tests/cmake/constants_library/src/main.c
+new file mode 100644
+index 00000000000..3d5d34e0c23
+--- /dev/null
++++ b/tests/cmake/constants_library/src/main.c
+@@ -0,0 +1,29 @@
++/*
++ * Copyright (c) 2026 BayLibre SAS
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++#include <zephyr/test_constants_a.h>
++#include <zephyr/test_constants_b.h>
++#include <zephyr/test_constants_c.h>
++#include <zephyr/test_constants_d.h>
++
++/*
++ * Dependency graph:
++ *   B: standalone
++ *   A -> B
++ *   C -> B
++ *   D -> A, B
++ */
++
++ZTEST(constants_library, test_constants)
++{
++	zassert_equal(TEST_CONST_B_SIZEOF, 10);
++	zassert_equal(TEST_CONST_A_SIZEOF, 11);  /* B + 1 */
++	zassert_equal(TEST_CONST_C_SIZEOF, 110); /* B + 100 */
++	zassert_equal(TEST_CONST_D_SIZEOF, 21);  /* A + B = 11 + 10 */
++}
++
++ZTEST_SUITE(constants_library, NULL, NULL, NULL, NULL, NULL);
+diff --git a/tests/cmake/constants_library/testcase.yaml b/tests/cmake/constants_library/testcase.yaml
+new file mode 100644
+index 00000000000..edf990358e5
+--- /dev/null
++++ b/tests/cmake/constants_library/testcase.yaml
+@@ -0,0 +1,5 @@
++tests:
++  buildsystem.constants_library:
++    tags: build_system
++    integration_platforms:
++      - native_sim
+diff --git a/tests/lib/heap/src/main.c b/tests/lib/heap/src/main.c
+index c8f38dc2f1d..8804fb13cea 100644
+--- a/tests/lib/heap/src/main.c
++++ b/tests/lib/heap/src/main.c
+@@ -41,15 +41,6 @@
+ #define BIG_HEAP_SZ MIN(256 * 1024, MEMSZ / 3)
+ #define SMALL_HEAP_SZ MIN(BIG_HEAP_SZ, 2048)
+ 
+-/* With enabling SYS_HEAP_RUNTIME_STATS, the size of struct z_heap
+- * will increase 16 bytes on 64 bit CPU.
+- */
+-#ifdef CONFIG_SYS_HEAP_RUNTIME_STATS
+-#define SOLO_FREE_HEADER_HEAP_SZ (80)
+-#else
+-#define SOLO_FREE_HEADER_HEAP_SZ (64)
+-#endif
+-
+ #define SCRATCH_SZ (sizeof(heapmem) / 2)
+ 
+ /* The test memory.  Make them pointer arrays for robust alignment
+@@ -240,36 +231,6 @@ ZTEST(lib_heap, test_big_heap)
+ 	log_result(BIG_HEAP_SZ, &result);
+ }
+ 
+-/* Test a heap with a solo free header.  A solo free header can exist
+- * only on a heap with 64 bit CPU (or chunk_header_bytes() == 8).
+- * With 64 bytes heap and 1 byte allocation on a big heap, we get:
+- *
+- *   0   1   2   3   4   5   6   7
+- * | h | h | b | b | c | 1 | s | f |
+- *
+- * where
+- * - h: chunk0 header
+- * - b: buckets in chunk0
+- * - c: chunk header for the first allocation
+- * - 1: chunk mem
+- * - s: solo free header
+- * - f: end marker / footer
+- */
+-ZTEST(lib_heap, test_solo_free_header)
+-{
+-	struct sys_heap heap;
+-
+-	TC_PRINT("Testing solo free header in a heap\n");
+-
+-	sys_heap_init(&heap, heapmem, SOLO_FREE_HEADER_HEAP_SZ);
+-	if (sizeof(void *) > 4U) {
+-		sys_heap_alloc(&heap, 1);
+-		zassert_true(sys_heap_validate(&heap), "");
+-	} else {
+-		ztest_test_skip();
+-	}
+-}
+-
+ /* Simple clobber detection */
+ void realloc_fill_block(uint8_t *p, size_t sz)
+ {
+diff --git a/tests/lib/heap/testcase.yaml b/tests/lib/heap/testcase.yaml
+index d522fd4a59a..02f64dc0be4 100644
+--- a/tests/lib/heap/testcase.yaml
++++ b/tests/lib/heap/testcase.yaml
+@@ -5,15 +5,22 @@
+ # coverage of the RISC-V architectures via qemu platforms already.
+ # Excludes qemu_xtensa/dc233c due to pathological runtimes which cannot be
+ # reproduced on real hardware.
++common:
++  tags: heap
++  platform_exclude:
++    - m2gl025_miv
++    - qemu_xtensa/dc233c
++    - esp32s2_saola
++    - esp32s2_lolin_mini
++  timeout: 480
++  integration_platforms:
++    - native_sim
++    - qemu_x86
+ tests:
+-  libraries.heap:
+-    tags: heap
+-    platform_exclude:
+-      - m2gl025_miv
+-      - qemu_xtensa/dc233c
+-      - esp32s2_saola
+-      - esp32s2_lolin_mini
+-    timeout: 480
+-    integration_platforms:
+-      - native_sim
+-      - qemu_x86
++  libraries.heap: {}
++  libraries.heap.hardening_none:
++    extra_configs:
++      - CONFIG_SYS_HEAP_HARDENING_NONE=y
++  libraries.heap.hardening_full:
++    extra_configs:
++      - CONFIG_SYS_HEAP_HARDENING_FULL=y
+diff --git a/tests/lib/heap_align/src/main.c b/tests/lib/heap_align/src/main.c
+index 330e8a3635b..11ffa2f394b 100644
+--- a/tests/lib/heap_align/src/main.c
++++ b/tests/lib/heap_align/src/main.c
+@@ -49,7 +49,8 @@ static void check_heap_align(struct sys_heap *h,
+ 			     size_t prefix, size_t align, size_t size)
+ {
+ 	void *p, *q, *r, *s;
+-	size_t suffix;
++	uint8_t *r_end;
++	ptrdiff_t suffix;
+ 
+ 	p = sys_heap_alloc(h, prefix);
+ 	zassert_true(prefix == 0 || p != NULL, "prefix allocation failed");
+@@ -65,8 +66,10 @@ static void check_heap_align(struct sys_heap *h,
+ 	/* Make sure ALL the split memory goes back into the heap and
+ 	 * we can allocate the full remaining suffix
+ 	 */
+-	suffix = (heap_end - (uint8_t *)ROUND_UP((uintptr_t)r + size, CHUNK_UNIT))
+-		- heap_chunk_header_size;
++	r_end = (uint8_t *)ROUND_UP((uintptr_t)r + size + CHUNK_TRAILER_SIZE * CHUNK_UNIT,
++				    CHUNK_UNIT);
++	suffix = (heap_end - r_end) - heap_chunk_header_size - CHUNK_TRAILER_SIZE * CHUNK_UNIT;
++	zassert_true(suffix > 0, "bad suffix size: %td", suffix);
+ 	s = sys_heap_alloc(h, suffix);
+ 	zassert_true(s != NULL, "suffix allocation failed (%zd/%zd/%zd)",
+ 				prefix, align, size);
+@@ -79,7 +82,7 @@ static void check_heap_align(struct sys_heap *h,
+ 
+ 	/* Make sure it's still valid, and empty */
+ 	zassert_true(sys_heap_validate(h), "heap invalid");
+-	p = sys_heap_alloc(h, heap_end - heap_start);
++	p = sys_heap_alloc(h, heap_end - heap_start - CHUNK_TRAILER_SIZE * CHUNK_UNIT);
+ 	zassert_true(p != NULL, "heap not empty");
+ 	q = sys_heap_alloc(h, 1);
+ 	zassert_true(q == NULL, "heap not full");
+diff --git a/tests/lib/heap_align/testcase.yaml b/tests/lib/heap_align/testcase.yaml
+index f9b499b6d5f..4347efea356 100644
+--- a/tests/lib/heap_align/testcase.yaml
++++ b/tests/lib/heap_align/testcase.yaml
+@@ -1,8 +1,12 @@
++common:
++  tags:
++    - heap
++    - heap_align
++  integration_platforms:
++    - native_sim
++    - mps2/an521/cpu0
+ tests:
+-  libraries.heap_align:
+-    tags:
+-      - heap
+-      - heap_align
+-    integration_platforms:
+-      - native_sim
+-      - mps2/an521/cpu0
++  libraries.heap_align: {}
++  libraries.heap_align.hardening_full:
++    extra_configs:
++      - CONFIG_SYS_HEAP_HARDENING_FULL=y
+diff --git a/tests/lib/heap_min/testcase.yaml b/tests/lib/heap_min/testcase.yaml
+index dd77b1dfa01..778df2dbf7b 100644
+--- a/tests/lib/heap_min/testcase.yaml
++++ b/tests/lib/heap_min/testcase.yaml
+@@ -8,3 +8,6 @@ tests:
+   libraries.heap_min.runtime_stats:
+     extra_configs:
+       - CONFIG_SYS_HEAP_RUNTIME_STATS=y
++  libraries.heap_min.hardening_full:
++    extra_configs:
++      - CONFIG_SYS_HEAP_HARDENING_FULL=y

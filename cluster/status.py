@@ -53,17 +53,28 @@ def manifest(run: Path) -> dict:
     return json.loads((Path(run) / "manifest.json").read_text())
 
 
+def triage_needed(run: Path, pr: int) -> bool:
+    """No triage outcome yet. "server failed" was written by workers before
+    the queue (claims.py): a node whose server fails now just takes no PRs."""
+    t = read(run, pr).get("triage")
+    return not t or t["state"] == "server failed"
+
+
+def validate_needed(run: Path, pr: int) -> bool:
+    """No validation outcome yet ("skipped" was the disk guard's, before the
+    queue: workers now wait for space instead). A PR that ran out of time
+    ("... hit the cap", "no time left") has none either: the next job tries
+    it again, as do jobs with longer caps or fewer builds per node."""
+    v = read(run, pr).get("validate")
+    return (not v or v["state"] == "skipped"
+            or (v["state"] == "failed" and ("hit the cap" in v.get("note", "")
+                                            or "no time left" in v.get("note", ""))))
+
+
 def triage_todo(run: Path) -> list[int]:
-    """PRs that reached triage and have no triage outcome yet. A PR whose
-    model server failed is tried again on a resubmit."""
-    out = []
-    for e in manifest(run)["prs"]:
-        if e["stage"] != "to triage":
-            continue
-        t = read(run, e["pr"]).get("triage")
-        if not t or t["state"] == "server failed":
-            out.append(e["pr"])
-    return out
+    """PRs that reached triage and have no triage outcome yet."""
+    return [e["pr"] for e in manifest(run)["prs"]
+            if e["stage"] == "to triage" and triage_needed(run, e["pr"])]
 
 
 def accepted(run: Path) -> list[int]:
@@ -71,12 +82,19 @@ def accepted(run: Path) -> list[int]:
             if (read(run, e["pr"]).get("triage") or {}).get("verdict") == "accept"]
 
 
-def validate_todo(run: Path) -> list[int]:
-    """Accepted PRs with no validation outcome yet. One skipped (by the disk
-    guard, say) is tried again on a resubmit."""
-    out = []
-    for pr in accepted(run):
-        v = read(run, pr).get("validate")
-        if not v or v["state"] == "skipped":
-            out.append(pr)
+def unfinished(runs: Path, but: Path | None = None) -> dict[int, str]:
+    """PRs some run has taken and not finished -- what a resubmit of that run
+    would still do -- and the run's name. Every run under `runs` but `but`."""
+    out = {}
+    for m in sorted(Path(runs).glob("*/manifest.json")):
+        other = m.parent
+        if but and other.resolve() == Path(but).resolve():
+            continue
+        for pr in triage_todo(other) + validate_todo(other):
+            out.setdefault(pr, other.name)
     return out
+
+
+def validate_todo(run: Path) -> list[int]:
+    """Accepted PRs with no validation outcome yet."""
+    return [pr for pr in accepted(run) if validate_needed(run, pr)]

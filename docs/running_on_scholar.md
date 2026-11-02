@@ -185,6 +185,7 @@ most likely to change:
 | `slurm.nodes_max` | 16 | you want to leave nodes for others |
 | `slurm.time_limit` | 3 h | never above 4 h |
 | `model.profile` | `qwen38-nvfp4` | you use another model (pipeline_internals.md, 7.3) |
+| `registry` | `null` (images not kept) | you want every VALID image pushed to a registry (3.5) |
 
 All settings are explained in [pipeline_internals.md](pipeline_internals.md), section 7.
 
@@ -230,6 +231,30 @@ Each `FAIL` line says what to do. The usual ones:
 | model weights / vLLM image | download them (3.2), or point `paths.*` at them |
 | Zephyr clone: left from an interrupted clone | delete the `.partial` folder it names, run again |
 
+### 3.5 The image registry (optional, recommended)
+
+An instance image is about 2.7 GB and takes about 18 minutes to build.
+With a registry, every VALID image is pushed right after validation, and
+evaluation downloads it (about a minute) instead of rebuilding it, checked
+against the sha256 recorded at validation, so it is exactly the validated
+image. GitHub's registry is free for public packages. Once:
+
+```bash
+gh auth refresh -h github.com -s write:packages,read:packages   # lets the token push
+```
+
+and in `cluster/config.yaml`:
+
+```yaml
+registry: oras://ghcr.io/<your-github-user>/embedeval-zephyr
+```
+
+After the first push, open the package on GitHub (your profile ->
+Packages -> embedeval-zephyr -> Package settings -> Change visibility) and
+make it **public**: new packages are private, and private storage is
+small. Later pushes go to the same package. The token is read from `gh`
+when a push runs and is never written into a job.
+
 ---
 
 ## 4. What a run is
@@ -247,8 +272,8 @@ A run goes through these steps, each a command:
  ─────────────────────────────────────────  ───────────────────────────────────────────
  prepare.py  ──►  manifest.json
  (fetch, filter, enrich, dry run)
- submit.py   ──►  jobs/pipeline-*.sbatch ──► phase 1  triage       (each node its share)
-                                             phase 2  validation   (each node its share)
+ submit.py   ──►  jobs/pipeline-*.sbatch ──► phase 1  triage       (nodes take PRs from a queue)
+                                             phase 2  validation   (only once triage is complete)
                                              phase 3  report.md
  report.py   ◄──  (any time, even while the job runs)
  review, then promote_instance.py  ──►  apptainer/instances/ in the repository
@@ -258,9 +283,11 @@ A run goes through these steps, each a command:
   `manifest.json`: every PR, and where it stopped if it stopped early.
 - **submit** starts one job for whatever is still to do. Running it again
   later resumes the run.
-- **The job** splits the PRs over its nodes. In phase 1 every node starts
-  its own model server and triages its share; in phase 2 every node builds
-  and validates its share of the accepted PRs; phase 3 writes the report.
+- **The job** runs its nodes on a shared queue: each node takes the next
+  PR no one has, so fast nodes do more, and a node that dies leaves its PRs
+  to the others. In phase 1 every node starts its own model server and
+  triages; phase 2 starts only once all of the run's triage is done, and
+  every node builds and validates accepted PRs; phase 3 writes the report.
 - Each PR's outcome is written to `status/<pr>.json` as soon as it is
   known; the report is made from those files.
 
@@ -287,13 +314,21 @@ Pick a name and the PRs:
 ```
 
 PRs an earlier run already settled are skipped: `prepare.py` looks them up
-in the ledger, `shared/ledger.jsonl`, which `report.py` fills at the end of
-every run. A PR is settled once it is VALID, INVALID, rejected by triage,
-dropped by a hard filter, or has no runnable pair. Everything else (a
-server that failed, a cap, an environment problem, a run cut short) is
-tried again by the next run that includes the PR. Skipped PRs show as
-`in ledger`, with the outcome and the run that settled it. Use `--redo`
-after changing the pipeline, to take them again.
+in the ledger, `shared/ledger.jsonl`, where each PR's outcome is written the
+moment it settles (so a job cut short loses nothing). A PR is settled once it
+is VALID, INVALID, rejected by triage, dropped by a hard filter, or has no
+runnable pair. Everything else (a fetch or server that failed, a cap, an
+environment problem, a run cut short) is tried again by the next run that
+includes the PR. Skipped PRs show as `in ledger`, with the outcome and the
+run that settled it. Use `--redo` after changing the pipeline, to take them
+again.
+
+PRs another run has taken and not finished are skipped too, even with
+`--redo`, so two runs never work on the same PR. They show as
+`in another run`, naming that run: resubmit it to finish them, or delete it.
+
+What GitHub says about a PR is fetched once and kept in `shared/github/`,
+so later runs over the same PRs do not ask GitHub again.
 
 It prints its progress and ends with a count of where the PRs stand:
 
@@ -329,7 +364,7 @@ Look at the plan first, then submit:
 ```
 run 2025-09: 15 PRs to triage, 0 to validate
   nodes: 2-4 (work needs 4; 20 idle; max 16)
-  limit: 03:00:00; phase caps: triage 95 min, validation 75 min
+  limit: 03:00:00; triage may use all of it, validation what is left (if 30+ min), less 8 min for the report
   job script: /scratch/scholar/you/embedeval/runs/2025-09/jobs/pipeline-20261014-110728.sbatch
   forecast: sbatch: Job 475313 to start at 2026-10-14T11:25:30 ...
   submitted: job 475314; log /scratch/scholar/you/embedeval/runs/2025-09/jobs/job-475314.out
@@ -377,8 +412,9 @@ $SCRATCH/embedeval/runs/<name>/
 │                            (and whether it had uncommitted changes), a copy of the config
 ├── report.md, report.json   the results (section 7)
 ├── status/<pr>.json         each PR's outcome, per phase: the single source of truth
+├── claims/                  the queue: who has which PR (triage.json, validate.json)
 │
-├── candidates/              fetched PRs (cache/); with --since also the hard filter's list
+├── candidates/              fetched.json (this run's PRs); with --since also the hard filter's list
 ├── enriched/<pr>.json       the full record triage reads
 ├── dryrun/<pr>.json         every scenario/board pair: selected, or filtered and why
 ├── triage/<pr>.json         the verdict: accept/reject, the pair, problem statement, tests
@@ -437,6 +473,8 @@ minutes spent in triage and validation.
 
 | Outcome | Meaning | What to do |
 |---|---|---|
+| `in another run` | taken by another run that has not finished it | resubmit that run, or delete it |
+| `fetch failed` | GitHub did not answer for it | see `logs/prepare/fetch.log`; prepare again |
 | `in ledger` | settled by an earlier run (the detail says how and which run); not done again | nothing, or `--redo` to take it again |
 | `hard filter` | dropped by a hard filter; the detail says which (`revert`, `touches no tests/`, ...) | nothing, or `--pr ... --no-filter` to force it |
 | `enrich failed` | GitHub or the clone could not give its record | see `logs/prepare/enrich.log`; prepare again |
@@ -445,10 +483,10 @@ minutes spent in triage and validation.
 | `triage: reject` | the model judged it unsuitable | read `triage/<pr>.json` -> `reason` if you doubt it |
 | `triage: cap` | no verdict within the 30-min cap | rare; raise `caps.triage_pr` and resubmit if it matters |
 | `triage: failed` | the triage step ended without a verdict | see `logs/node<N>/triage-<pr>.log` |
-| `triage: server failed` | that node's model server never started | see `logs/node<N>/server.log`; **retried by a resubmit** |
+| `triage: server failed` | (runs before the queue) that node's model server never started | **retried by a resubmit**; now a node whose server fails just takes no PRs |
 | `triage: not yet` | not reached (the job ended or was cancelled first) | resubmit |
 | `accepted, validation not yet` | accepted, not validated yet | resubmit |
-| `validation: skipped` | not started, because of the disk guard | **retried by a resubmit** |
+| `validation: skipped` | (runs before the queue) not started because of the disk guard | **retried by a resubmit**; now nodes wait for room instead |
 | `validation: failed` | generate or build failed, or a cap was hit | see `logs/node<N>/validate-<pr>.log` |
 | `INVALID` | built, but the tests did not fail-then-pass; the detail says how | not an instance; nothing to promote |
 | `VALID` | fails as built, passes with the fix | review it and promote it (section 9) |
@@ -500,8 +538,15 @@ It reads `status/` and does only what is left:
 - a PR with an outcome is never done again (its files are not touched);
 - a PR that was cut short has no outcome, so it is done again from the
   start of its step (a half-built image is cleaned up first);
-- `triage: server failed` and `validation: skipped` are tried again;
-- every other outcome is final.
+- `triage: server failed` and `validation: skipped` (from runs before the
+  queue) are tried again;
+- every other outcome is final;
+- if the job's triage phase ended with PRs left, the next job finishes
+  triage before any validation starts.
+
+A run has one job at a time: `submit.py` refuses while one is queued or
+running. A node that dies mid-job does not need a resubmit: the other
+nodes take over its PRs after 5 minutes.
 
 When nothing is left, submit says so and points at the report.
 
@@ -541,7 +586,8 @@ R=$SCRATCH/embedeval/runs/2025-09
 ```
 
 Promotion copies the recipe files, `metadata.json` and `validation.json`
-into `apptainer/instances/<id>/` (NuttX: `apptainer/instances/nuttx/<id>/`). It refuses an instance that is not VALID,
+into `apptainer/instances/<id>/`; `validation.json` carries `published`
+(where the image is in the registry, and its sha256) when it was pushed. It refuses an instance that is not VALID,
 or whose recipe -- `instance.def`, `instance.json`, `run_tests.py`,
 `test_patch.diff` -- changed after it was validated; that needs validating
 again. The problem statement in `metadata.json` is not part of the recipe,
@@ -551,8 +597,12 @@ Promoting an id that is already in `apptainer/instances/` replaces it
 (another run of the same PR, say); check `git diff` before committing.
 Commit the new folders yourself.
 
-A promoted instance is used like any other: build its image and run an
-agent on it, as in the [README](../README.md#quick-start).
+A promoted instance is used like any other: run an agent on it, as in the
+[README](../README.md#quick-start). If it was published, the harness pulls
+its image (and refuses one whose sha256 differs); otherwise build it first
+with `scripts/build_instances.py`. Instances validated before the registry
+existed can be published later: `scripts/registry.py publish <id>...`
+builds, validates again, and pushes only if still VALID.
 
 ---
 
@@ -577,6 +627,7 @@ On the network file systems, the same from every node:
     │   ├── venvs/                      dry-run Python environments, one per Zephyr era
     │   ├── vllm-cache/                 the model server's compiled kernels
     │   ├── ledger.jsonl                every PR's settled outcome, across runs (+ its .lock)
+    │   ├── github/                     what GitHub said about each PR: prs/ (fetch), enriched/
     │   ├── cache/                      Apptainer and uv download caches
     │   └── logs/                       how the shared images were built
     └── runs/<name>/                    one folder per run (section 6)
@@ -588,6 +639,7 @@ What you can delete:
 |---|---|
 | a folder in `runs/` | yes, when you no longer need its results (promote first); the ledger keeps its outcomes |
 | `shared/ledger.jsonl` | only to forget every past outcome: the next runs take all PRs again |
+| `shared/github/` | yes; fetched again from GitHub when needed |
 | `shared/vllm-cache/`, `shared/venvs/` | yes; rebuilt on the next run (about 8 min for the cache, a minute or two per venv) |
 | `shared/images/` | yes; rebuilt when needed (minutes per image) |
 | `shared/zephyr.git` | yes; `setup.py` clones it again |
@@ -600,123 +652,3 @@ they break if moved. Delete them instead.
 `scripts/` still work on their own, but without `--run-dir` they write next
 to the code (`candidates/`, `generated/`, `triage/runs/`) and into
 `$SCRATCH/embedeval-twister`, as they did before run folders existed.
-
----
-
-## 11. Mynewt
-
-Mynewt instances are Apptainer images too (no Docker on Scholar). The project
-is mynewt-core's native simulator: `hw/bsp/native` with `compiler/sim`, built
-and run by `newt test` as a host ELF, so there is no board and no QEMU. Run
-Mynewt on the **x86 `cpu` partition** (primary); ARM64 Spark nodes work as a
-cross-check.
-
-```
- reviewed verdict (triage/mynewt_reviewed/<pr>.json)
-   ▼ generate_instance.py --repo mynewt --runtime apptainer
-   │    (or render_mynewt_instance.py for an existing Docker instance)
-   ▼ build_instances.py        shared image (newt, gcc) -> instance .sif
-   ▼ validate_instance.py      baseline passes; exactly fail_to_pass fails; fix -> all pass
-   ▼ promote_instance.py       -> apptainer/instances/mynewt/<id>/
-```
-
-Recipes are in `templates/mynewt/apptainer/` (`base.def`, `instance.def.tmpl`).
-Keep a full mynewt-core clone and point `EMBEDEVAL_MYNEWT_CLONE` at it
-(default `candidates/mynewt.git`); the renderer, the image build and the
-validator read commits from it. On Scholar: `/scratch/scholar/zhan5136/repos/mynewt-core.git`.
-
-**Validate one instance** (inside an allocation, e.g. `sbatch -p cpu -c 16`):
-
-```bash
-export EMBEDEVAL_MYNEWT_CLONE=/scratch/scholar/$USER/repos/mynewt-core.git
-export EMBEDEVAL_SHARED=$SCRATCH/mynewt-shared      # the shared image
-python scripts/render_mynewt_instance.py --metadata docker/instances/mynewt__mynewt-3299/metadata.json \
-    --test-patch docker/instances/mynewt__mynewt-3299/test_patch.diff --out RUN/instances
-python scripts/build_instances.py   --instance mynewt__mynewt-3299 --run-dir RUN
-python scripts/validate_instance.py mynewt__mynewt-3299 --run-dir RUN
-```
-
-**Validate many in one allocation** (generate, build, validate, clean up each,
-one result file per instance):
-
-```bash
-python scripts/mynewt_batch.py --run-dir RUN --reviewed triage/mynewt_reviewed --parallel 4
-python scripts/mynewt_batch.py --run-dir RUN --from-docker mynewt__mynewt-2809 mynewt__mynewt-3680
-srun --ntasks-per-node=1 python scripts/mynewt_batch.py --run-dir RUN --reviewed ...   # several nodes
-```
-
-`RUN/results/<id>.json` has `status` (`valid`, `invalid`, `generate_error`,
-`build_env`, `timeout`), `stage`, `reason`, the validator's before/after test
-lists, minutes and host. Instances with a result are skipped on a rerun;
-`--force` redoes them.
-
-**Architectures and eras.** Upstream's simulator is x86 only. Before
-2024-04-09 `compiler/sim` forced `-m32` (x86 images have gcc-multilib; a
-base from that era builds 32-bit), and the kernel assumed 32-bit pointers.
-For ARM64 the renderer writes `sim_arm64.patch`, applied on aarch64 hosts
-only and committed into the base: an aarch64 port of the simulator's context
-switch for every base, plus the upstream 64-bit series of 2024-04-09 for older
-bases. The era is read from the base commit's date and recorded as
-`arm64_sim_port` (`asm` or `asm+64bit`) in the metadata. Validated so far: the
-2022 (2809), 2024-08 (3299) and 2026-06 (3680) bases, on both architectures.
-Bases from after 2026-06-24 need the `mbedtls` repository (native BSP);
-not handled yet.
-
-**Old trees (2016 to April 2019).** Before the March 2019 rename the unit
-tests are `test/` packages (`pkg.type: unittest`), and a tree builds only with
-the newt of its time. The shared image therefore holds newt 1.0.0-b1, -b2,
-1.0.0, 1.2.0, 1.4.0 and 1.6.0 under `/opt/newt/<version>/` besides the pinned
-modern one, and the renderer links the right one from the newest core release
-committed before the base commit (recorded as `newt_version` and
-`core_release`; the table is `NEWT_FOR_LAST_RELEASE` in
-`scripts/render_mynewt_instance.py`). Such instances build `-m32` with
-`-Wno-error -fcommon`, are x86 only (`host_arch: x86_64`, no ARM64 patch), and
-are judged by their `[pass]`/`[FAIL]` lines: old test mains can return 0 after
-failures, and a failing `assert()` aborts the whole binary, which `run_tests`
-counts as failing every case that had not reported. Checked: #251
-(`encoding/cborattr/test`) and #176 (`fs/fcb/test`). Pre-2024 bases on x86
-use the same recipe; newt for 2019-2021 bases is untried.
-
-**ARM64 speed.** Compiling inside a `.sif` on an ARM64 node took about 3
-minutes per `newt test` instead of 7 seconds. The validator therefore unpacks
-the image to a sandbox on node-local disk (`EMBEDEVAL_SANDBOX_DIR`, default
-`/tmp`) and runs in that; x86 uses the same path.
-
-### Agent runs and grading (Mynewt)
-
-`harness/run.py` and `harness/evaluate_patches.py` handle Mynewt instances
-(`"runtime": "apptainer"`) the way they handle NuttX ones, with one difference:
-both unpack the image to a node-local sandbox (`EMBEDEVAL_SANDBOX_DIR`, default
-`/tmp`) and work in that instead of an overlay on the `.sif` (about 25x faster
-to compile on ARM64). The image already holds the PR's selftest changes as a
-commit, so the patch the runner captures is the agent's edits alone.
-
-Grading applies `patch.diff` to a fresh sandbox, runs `run_tests` and judges
-`/tmp/mynewt-result.json`: exit 0 and a passed set that is exactly
-`fail_to_pass + pass_to_pass`, nothing missing or unexpected. A patch that touches
-a protected path (the instance's `protected_paths`, the selftest package) is not
-run: it is graded `fail` with `tampering: true` and `protected_touched`. An empty
-patch fails with `patch_empty`. The agent run itself records the same paths in
-`protected_touched`.
-
-```bash
-sbatch scripts/mynewt_agent_job.sbatch <spark node> <code dir> <out dir> mynewt__mynewt-2809 ...
-```
-
-The job (x86 `cpu` partition) tunnels to a `serve_triage_model.sh qwen38-nvfp4`
-job on a Spark node, builds each image once, runs the agent (50 steps, 40 min)
-and grades the patch; `<out dir>/logs`, `<out dir>/grades`.
-
-Checks of 2026-10-23, x86 (`cpu`), model `qwen38-nvfp4`, code snapshot of branch
-`mynewt-harness`. Scripts used for the grading check are on Scholar in
-`/scratch/scholar/zhan5136/mynewt-harness/` (`grade_check.sbatch`, `make_patches.py`);
-outputs in `grade-x86_64-480000/` and `agent-run-1/`.
-
-| Instance | gold fix | empty patch | edits the selftest | qwen38 agent (job 480001) |
-|---|---|---|---|---|
-| mynewt__mynewt-2809 (fcb2) | pass | fail, empty | fail, tampering | fail: time limit after 23 steps, empty patch (50 min) |
-| mynewt__mynewt-3299 (os) | pass | fail, empty | fail, tampering | pass: 16 steps, 18 min |
-| mynewt__mynewt-3680 (json) | pass | fail, empty | fail, tampering | pass: 24 steps, 21 min |
-
-Grading check is job 480000; each gold or agent grade takes 3 to 8 s (unpacking
-and `newt test` together). ARM64 grading and agent runs are not checked yet.

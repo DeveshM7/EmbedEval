@@ -1,0 +1,270 @@
+diff --git a/tests/posix/multi_process/CMakeLists.txt b/tests/posix/multi_process/CMakeLists.txt
+new file mode 100644
+index 00000000000..c7ddea3ab71
+--- /dev/null
++++ b/tests/posix/multi_process/CMakeLists.txt
+@@ -0,0 +1,10 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(posix_multi_process)
++
++FILE(GLOB app_sources src/*.c)
++target_sources(app PRIVATE ${app_sources})
++
++target_compile_options(app PRIVATE -U_POSIX_C_SOURCE -D_POSIX_C_SOURCE=200809L)
+diff --git a/tests/posix/multi_process/prj.conf b/tests/posix/multi_process/prj.conf
+new file mode 100644
+index 00000000000..73dcd46b059
+--- /dev/null
++++ b/tests/posix/multi_process/prj.conf
+@@ -0,0 +1,5 @@
++CONFIG_POSIX_API=y
++CONFIG_ZTEST=y
++
++CONFIG_POSIX_AEP_CHOICE_BASE=y
++CONFIG_POSIX_MULTI_PROCESS=y
+diff --git a/tests/posix/multi_process/src/_main.c b/tests/posix/multi_process/src/_main.c
+new file mode 100644
+index 00000000000..365afda2b1f
+--- /dev/null
++++ b/tests/posix/multi_process/src/_main.c
+@@ -0,0 +1,9 @@
++/*
++ * Copyright (c) 2025 Tenstorrent AI ULC
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/ztest.h>
++
++ZTEST_SUITE(posix_multi_process, NULL, NULL, NULL, NULL, NULL);
+diff --git a/tests/posix/multi_process/src/getpid.c b/tests/posix/multi_process/src/getpid.c
+new file mode 100644
+index 00000000000..6082bdac901
+--- /dev/null
++++ b/tests/posix/multi_process/src/getpid.c
+@@ -0,0 +1,16 @@
++/*
++ * Copyright (c) 2025 Tenstorrent AI ULC
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <unistd.h>
++
++#include <zephyr/ztest.h>
++
++ZTEST(posix_multi_process, test_getpid)
++{
++	pid_t pid = getpid();
++
++	zexpect_true(pid > 0, "invalid pid: %d", pid);
++}
+diff --git a/tests/posix/multi_process/src/sleep.c b/tests/posix/multi_process/src/sleep.c
+new file mode 100644
+index 00000000000..527e33c60f6
+--- /dev/null
++++ b/tests/posix/multi_process/src/sleep.c
+@@ -0,0 +1,56 @@
++/*
++ * Copyright (c) 2022, Meta
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <unistd.h>
++
++#include <zephyr/ztest.h>
++
++struct waker_work {
++	k_tid_t tid;
++	struct k_work_delayable dwork;
++};
++static struct waker_work wake_work;
++
++static void waker_func(struct k_work *work)
++{
++	struct waker_work *ww;
++	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
++
++	ww = CONTAINER_OF(dwork, struct waker_work, dwork);
++	k_wakeup(ww->tid);
++}
++K_WORK_DELAYABLE_DEFINE(waker, waker_func);
++
++ZTEST(posix_multi_process, test_sleep)
++{
++	uint32_t then;
++	uint32_t now;
++	/* call sleep(10), wakeup after 1s, expect >= 8s left */
++	const uint32_t sleep_min_s = 1;
++	const uint32_t sleep_max_s = 10;
++	const uint32_t sleep_rem_s = 8;
++
++	/* sleeping for 0s should return 0 */
++	zassert_ok(sleep(0));
++
++	/* test that sleeping for 1s sleeps for at least 1s */
++	then = k_uptime_get();
++	zassert_equal(0, sleep(1));
++	now = k_uptime_get();
++	zassert_true((now - then) >= 1 * MSEC_PER_SEC);
++
++	/* test that sleeping for 2s sleeps for at least 2s */
++	then = k_uptime_get();
++	zassert_equal(0, sleep(2));
++	now = k_uptime_get();
++	zassert_true((now - then) >= 2 * MSEC_PER_SEC);
++
++	/* test that sleep reports the remainder */
++	wake_work.tid = k_current_get();
++	k_work_init_delayable(&wake_work.dwork, waker_func);
++	zassert_equal(1, k_work_schedule(&wake_work.dwork, K_SECONDS(sleep_min_s)));
++	zassert_true(sleep(sleep_max_s) >= sleep_rem_s);
++}
+diff --git a/tests/posix/multi_process/src/times.c b/tests/posix/multi_process/src/times.c
+new file mode 100644
+index 00000000000..dd1ccdb6be0
+--- /dev/null
++++ b/tests/posix/multi_process/src/times.c
+@@ -0,0 +1,63 @@
++/*
++ * Copyright (c) 2025 Tenstorrent AI ULC
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <sys/times.h>
++
++#include <zephyr/kernel.h>
++#include <zephyr/sys/util.h>
++#include <zephyr/ztest.h>
++
++ZTEST(posix_multi_process, test_times)
++{
++	static const struct {
++		const char *name;
++		size_t offset;
++	} fields[] = {
++		{
++			.name = "utime",
++			.offset = offsetof(struct tms, tms_utime),
++		},
++		{
++			.name = "stime",
++			.offset = offsetof(struct tms, tms_stime),
++		},
++		{
++			.name = "cutime",
++			.offset = offsetof(struct tms, tms_cutime),
++		},
++		{
++			.name = "cstime",
++			.offset = offsetof(struct tms, tms_cstime),
++		},
++	};
++	struct tms test_tms[2] = {};
++	clock_t rtime[2];
++
++	rtime[0] = times(&test_tms[0]);
++	k_msleep(MSEC_PER_SEC);
++	rtime[1] = times(&test_tms[1]);
++
++	zexpect_not_equal(rtime[0], -1);
++	zexpect_not_equal(rtime[1], -1);
++
++	printk("t0: rtime: %ld utime: %ld stime: %ld cutime: %ld cstime: %ld\n", rtime[0],
++	       test_tms[0].tms_utime, test_tms[0].tms_stime, test_tms[0].tms_cutime,
++	       test_tms[0].tms_cstime);
++	printk("t1: rtime: %ld utime: %ld stime: %ld cutime: %ld cstime: %ld\n", rtime[1],
++	       test_tms[1].tms_utime, test_tms[1].tms_stime, test_tms[1].tms_cutime,
++	       test_tms[1].tms_cstime);
++
++	ARRAY_FOR_EACH(fields, i) {
++		const char *name = fields[i].name;
++		size_t offset = fields[i].offset;
++
++		clock_t t0 = *(clock_t *)((uint8_t *)&test_tms[0] + offset);
++		clock_t t1 = *(clock_t *)((uint8_t *)&test_tms[1] + offset);
++
++		zexpect_true(t1 >= t0, "time moved backward for tms_%s: t0: %d t1: %d", name, t0,
++			     t1);
++	}
++}
+diff --git a/tests/posix/multi_process/testcase.yaml b/tests/posix/multi_process/testcase.yaml
+new file mode 100644
+index 00000000000..c3d77f932d6
+--- /dev/null
++++ b/tests/posix/multi_process/testcase.yaml
+@@ -0,0 +1,27 @@
++common:
++  filter: not CONFIG_NATIVE_LIBC
++  tags:
++    - posix
++    - multi_process
++  # 1 tier0 platform per supported architecture
++  platform_key:
++    - arch
++    - simulation
++  integration_platforms:
++    - qemu_riscv64
++  min_flash: 64
++  min_ram: 32
++tests:
++  portability.posix.muti_process: {}
++  portability.posix.muti_process.minimal:
++    extra_configs:
++      - CONFIG_MINIMAL_LIBC=y
++  portability.posix.muti_process.newlib:
++    filter: TOOLCHAIN_HAS_NEWLIB == 1
++    extra_configs:
++      - CONFIG_NEWLIB_LIBC=y
++  portability.posix.muti_process.picolibc:
++    tags: picolibc
++    filter: CONFIG_PICOLIBC_SUPPORTED
++    extra_configs:
++      - CONFIG_PICOLIBC=y
+diff --git a/tests/posix/timers/src/sleep.c b/tests/posix/timers/src/sleep.c
+index f8a04d36edb..bf5ffaa07f9 100644
+--- a/tests/posix/timers/src/sleep.c
++++ b/tests/posix/timers/src/sleep.c
+@@ -24,37 +24,6 @@ static void waker_func(struct k_work *work)
+ }
+ K_WORK_DELAYABLE_DEFINE(waker, waker_func);
+ 
+-ZTEST(posix_timers, test_sleep)
+-{
+-	uint32_t then;
+-	uint32_t now;
+-	/* call sleep(10), wakeup after 1s, expect >= 8s left */
+-	const uint32_t sleep_min_s = 1;
+-	const uint32_t sleep_max_s = 10;
+-	const uint32_t sleep_rem_s = 8;
+-
+-	/* sleeping for 0s should return 0 */
+-	zassert_ok(sleep(0));
+-
+-	/* test that sleeping for 1s sleeps for at least 1s */
+-	then = k_uptime_get();
+-	zassert_equal(0, sleep(1));
+-	now = k_uptime_get();
+-	zassert_true((now - then) >= 1 * MSEC_PER_SEC);
+-
+-	/* test that sleeping for 2s sleeps for at least 2s */
+-	then = k_uptime_get();
+-	zassert_equal(0, sleep(2));
+-	now = k_uptime_get();
+-	zassert_true((now - then) >= 2 * MSEC_PER_SEC);
+-
+-	/* test that sleep reports the remainder */
+-	wake_work.tid = k_current_get();
+-	k_work_init_delayable(&wake_work.dwork, waker_func);
+-	zassert_equal(1, k_work_schedule(&wake_work.dwork, K_SECONDS(sleep_min_s)));
+-	zassert_true(sleep(sleep_max_s) >= sleep_rem_s);
+-}
+-
+ ZTEST(posix_timers, test_usleep)
+ {
+ 	uint32_t then;

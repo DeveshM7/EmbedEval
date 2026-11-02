@@ -2,8 +2,8 @@
 An agent environment that runs commands in an Apptainer instance image.
 
 The Apptainer counterpart of mini-swe-agent's DockerEnvironment, for the
-twister-pipeline Zephyr instances and NuttX instances rendered for Apptainer
-(scripts/build_instances.py builds them as .sif images under the work root). Same interface -- execute(), cleanup(),
+twister-pipeline Zephyr instances (scripts/build_instances.py builds them as
+.sif images under the work root). Same interface -- execute(), cleanup(),
 get_template_vars(), serialize() -- so DefaultAgent uses it unchanged.
 
 Every command runs in its own `apptainer exec` over one writable overlay
@@ -43,16 +43,15 @@ SUBMIT = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 class ApptainerEnvironment:
     def __init__(self, *, image: str | Path, name: str, cwd: str = "/testbed",
                  timeout: int = 900, setup_commands: list[str] | None = None,
-                 sandbox: bool = False, network_fixture: str | None = None, logger: logging.Logger | None = None):
+                 sandbox: bool = False, network_fixture: str | None = None,
+                 logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
         if not self.image.exists():
             raise FileNotFoundError(f"instance image not built: {self.image}")
         self.cwd, self.timeout = cwd, timeout
         self.network_fixture = network_fixture
-        # Mynewt: unpack the image to a node-local sandbox and run in that, as
-        # the validator and grader do (compiling in a .sif is ~25x slower on
-        # ARM64). The sandbox is the agent's writable state, instead of an overlay.
+        # Mynewt's native builds are much faster in a writable sandbox than in a .sif.
         self.sandbox = au.unpack_sandbox(self.image) if sandbox else None
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = au.path("runs", f"agent-{name}-{stamp}", "x").parent
@@ -104,7 +103,7 @@ class ApptainerEnvironment:
                              "extra": {"exit_status": "Submitted", "submission": submission}})
 
     def cleanup(self) -> None:
-        """Remove the overlay (or sandbox) -- the only state the run created."""
+        """Remove the overlay or sandbox -- the only state the run created."""
         if getattr(self, "sandbox", None):
             au.remove_sandbox(self.sandbox)
             self.sandbox = None

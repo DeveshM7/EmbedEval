@@ -1,0 +1,280 @@
+diff --git a/tests/arch/riscv/fatal/CMakeLists.txt b/tests/arch/riscv/fatal/CMakeLists.txt
+index 366f13f660d..271564066a2 100644
+--- a/tests/arch/riscv/fatal/CMakeLists.txt
++++ b/tests/arch/riscv/fatal/CMakeLists.txt
+@@ -4,5 +4,5 @@ cmake_minimum_required(VERSION 3.20.0)
+ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+ project(riscv_fatal)
+ 
+-FILE(GLOB app_sources src/*.c)
++FILE(GLOB app_sources src/*.S)
+ target_sources(app PRIVATE ${app_sources})
+diff --git a/tests/arch/riscv/fatal/Kconfig b/tests/arch/riscv/fatal/Kconfig
+new file mode 100644
+index 00000000000..49873029b52
+--- /dev/null
++++ b/tests/arch/riscv/fatal/Kconfig
+@@ -0,0 +1,20 @@
++# Copyright (c) 2024 Meta Platforms
++# SPDX-License-Identifier: Apache-2.0
++
++choice
++	prompt "Fatal type"
++	default TEST_RISCV_FATAL_PANIC
++
++config TEST_RISCV_FATAL_PANIC
++	bool "Panic induced fault"
++	help
++	  Tests the error handling via `z_riscv_fatal_error()`
++
++config TEST_RISCV_FATAL_ILLEGAL_INSTRUCTION
++	bool "Illegal instruction induced fault"
++	help
++	  Tests the error handling via `_Fault()`
++
++endchoice
++
++source "Kconfig.zephyr"
+diff --git a/tests/arch/riscv/fatal/src/main.S b/tests/arch/riscv/fatal/src/main.S
+new file mode 100644
+index 00000000000..304c409d690
+--- /dev/null
++++ b/tests/arch/riscv/fatal/src/main.S
+@@ -0,0 +1,83 @@
++/*
++ * Copyright (c) 2025 Meta Platforms.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/toolchain.h>
++#include <zephyr/linker/sections.h>
++
++/**
++ * Load up a bunch of known values into registers
++ * and expect them to show up in the core dump.
++ * Value is register ABI name kinda spelled out,
++ * followed by zeros to pad to 32 bits,
++ * followed by FF00, followed by hex number of the register,
++ * follwed by the "hex-coded-decimal" number of the register.
++ */
++
++GTEXT(main)
++SECTION_FUNC(TEXT, main)
++
++	li ra, 0xDADA0000FF000101
++
++	/* SP is skipped because it can messes stuff up */
++
++#ifndef CONFIG_RISCV_GP
++	li gp, 0xDADA0000FF000101
++#endif
++
++#ifndef CONFIG_THREAD_LOCAL_STORAGE
++	li tp, 0xE2E20000FF000404
++#endif /* CONFIG_THREAD_LOCAL_STORAGE */
++
++#ifndef CONFIG_TEST_RISCV_FATAL_PANIC
++	/* We will load `0` (RV_ECALL_RUNTIME_EXCEPT) to `t0` */
++	li t0, 0xD0FF0000FF000505
++#endif /* CONFIG_TEST_RISCV_FATAL_PANIC */
++	li t1, 0xD1FF0000FF000606
++	li t2, 0xD2FF0000FF000707
++
++#ifndef CONFIG_FRAME_POINTER
++	li s0, 0xC0FF0000FF000808
++#endif /* CONFIG_FRAME_POINTER */
++
++	li s1, 0xC1FF0000FF000909
++
++	li a0, 0xA0FF0000FF000A10
++	li a1, 0xA1FF0000FF000B11
++	li a2, 0xA2FF0000FF000C12
++	li a3, 0xA3FF0000FF000D13
++	li a4, 0xA4FF0000FF000E14
++	li a5, 0xA5FF0000FF000F15
++
++#ifndef CONFIG_RISCV_ISA_RV32E
++	li a6, 0xA6FF0000FF001016
++	li a7, 0xA7FF0000FF001117
++
++	li s2, 0xC2FF0000FF001218
++	li s3, 0xC3FF0000FF001319
++	li s4, 0xC4FF0000FF001420
++	li s5, 0xC5FF0000FF001521
++	li s6, 0xC6FF0000FF001622
++	li s7, 0xC7FF0000FF001723
++	li s8, 0xC8FF0000FF001824
++	li s9, 0xC9FF0000FF001925
++	li s10, 0xC10FF000FF001A26
++	li s11, 0xC11FF000FF001B27
++
++	li t3, 0xD3FF0000FF001C28
++	li t4, 0xD4FF0000FF001D29
++	li t5, 0xD5FF0000FF001E30
++	li t6, 0xD6FF0000FF001F31
++#endif /* CONFIG_RISCV_ISA_RV32E */
++
++#ifdef CONFIG_TEST_RISCV_FATAL_PANIC
++	li a0, 4 /* K_ERR_KERNEL_PANIC */
++	li t0, 0 /* RV_ECALL_RUNTIME_EXCEPT */
++	ecall
++
++#else /* CONFIG_TEST_RISCV_FATAL_ILLEGAL_INSTRUCTION */
++	.insn 2, 0
++	.insn 2, 0
++#endif /* CONFIG_TEST_RISCV_FATAL_PANIC */
+diff --git a/tests/arch/riscv/fatal/src/main.c b/tests/arch/riscv/fatal/src/main.c
+deleted file mode 100644
+index fc75192a22d..00000000000
+--- a/tests/arch/riscv/fatal/src/main.c
++++ /dev/null
+@@ -1,62 +0,0 @@
+-/*
+- * Copyright (c) 2024 Meta Platforms
+- *
+- * SPDX-License-Identifier: Apache-2.0
+- */
+-
+-int main(void)
+-{
+-	__asm__(
+-		/**
+-		 * Load up a bunch of known values into registers
+-		 * and expect them to show up in the core dump.
+-		 * Value is register ABI name kinda spelled out,
+-		 * followed by zeros to pad to 32 bits,
+-		 * followed by FF00, followed by hex number of the register,
+-		 * follwed by the "hex-coded-decismal" number of the register.
+-		 */
+-
+-		/* "RA" -> "DA".  Kind of a stretch, but okay. */
+-		"li x1, 0xDADA0000FF000101\n\t"
+-
+-		/* Skip stack pointer because it can mess stuff up. */
+-		/* "li x2, 0\n\t" */
+-
+-		/* T0 -> D0.  Kinda close in pronunciation. */
+-		"li x5, 0xD0FF0000FF000505\n\t"
+-		"li x6, 0xD1FF0000FF000606\n\t"
+-		"li x7, 0xD2FF0000FF000707\n\t"
+-		/* S0 -> C0.  Kinda close in pronunciation. */
+-		"li x8, 0xC0FF0000FF000808\n\t"
+-		"li x9, 0xC1FF0000FF000909\n\t"
+-		/* A0 -> A0.  Actual match! */
+-		"li x10, 0xA0FF0000FF000A10\n\t"
+-		"li x11, 0xA1FF0000FF000B11\n\t"
+-		"li x12, 0xA2FF0000FF000C12\n\t"
+-		"li x13, 0xA3FF0000FF000D13\n\t"
+-		"li x14, 0xA4FF0000FF000E14\n\t"
+-		"li x15, 0xA5FF0000FF000F15\n\t"
+-		"li x16, 0xA6FF0000FF001016\n\t"
+-		"li x17, 0xA7FF0000FF001117\n\t"
+-		"li x18, 0xC2FF0000FF001218\n\t"
+-		"li x19, 0xC3FF0000FF001319\n\t"
+-		"li x20, 0xC4FF0000FF001420\n\t"
+-		"li x21, 0xC5FF0000FF001521\n\t"
+-		"li x22, 0xC6FF0000FF001622\n\t"
+-		"li x23, 0xC7FF0000FF001723\n\t"
+-		"li x24, 0xC8FF0000FF001824\n\t"
+-		"li x25, 0xC9FF0000FF001925\n\t"
+-		"li x26, 0xC10FF000FF001A26\n\t"
+-		"li x27, 0xC11FF000FF001B27\n\t"
+-		"li x28, 0xD3FF0000FF001C28\n\t"
+-		"li x29, 0xD4FF0000FF001D29\n\t"
+-		"li x30, 0xD5FF0000FF001E30\n\t"
+-		"li x31, 0xD6FF0000FF001F31\n\t"
+-		/* K_ERR_KERNEL_PANIC */
+-		"li a0, 4\n\t"
+-		/* RV_ECALL_RUNTIME_EXCEPT */
+-		"li t0, 0\n\t"
+-		"ecall\n");
+-
+-	return 0;
+-}
+diff --git a/tests/arch/riscv/fatal/testcase.yaml b/tests/arch/riscv/fatal/testcase.yaml
+index d2c265419e5..f84c614578d 100644
+--- a/tests/arch/riscv/fatal/testcase.yaml
++++ b/tests/arch/riscv/fatal/testcase.yaml
+@@ -8,7 +8,10 @@ common:
+   platform_allow:
+     - qemu_riscv64
+ tests:
+-  arch.riscv64.fatal:
++  arch.riscv64.fatal.panic_sp:
++    extra_configs:
++      - CONFIG_FRAME_POINTER=n
++      - CONFIG_TEST_RISCV_FATAL_PANIC=y
+     harness_config:
+       type: multi_line
+       regex:
+@@ -27,3 +30,69 @@ tests:
+         - "E:      s3: c3ff0000ff001319    s9: c9ff0000ff001925"
+         - "E:      s4: c4ff0000ff001420   s10: c10ff000ff001a26"
+         - "E:      s5: c5ff0000ff001521   s11: c11ff000ff001b27"
++  arch.riscv64.fatal.fault_sp:
++    extra_configs:
++      - CONFIG_FRAME_POINTER=n
++      - CONFIG_TEST_RISCV_FATAL_ILLEGAL_INSTRUCTION=y
++    harness_config:
++      type: multi_line
++      regex:
++        - "E:      a0: a0ff0000ff000a10    t0: d0ff0000ff000505"
++        - "E:      a1: a1ff0000ff000b11    t1: d1ff0000ff000606"
++        - "E:      a2: a2ff0000ff000c12    t2: d2ff0000ff000707"
++        - "E:      a3: a3ff0000ff000d13    t3: d3ff0000ff001c28"
++        - "E:      a4: a4ff0000ff000e14    t4: d4ff0000ff001d29"
++        - "E:      a5: a5ff0000ff000f15    t5: d5ff0000ff001e30"
++        - "E:      a6: a6ff0000ff001016    t6: d6ff0000ff001f31"
++        - "E:      a7: a7ff0000ff001117"
++        - "E:      ra: dada0000ff000101"
++        - "E:      s0: c0ff0000ff000808    s6: c6ff0000ff001622"
++        - "E:      s1: c1ff0000ff000909    s7: c7ff0000ff001723"
++        - "E:      s2: c2ff0000ff001218    s8: c8ff0000ff001824"
++        - "E:      s3: c3ff0000ff001319    s9: c9ff0000ff001925"
++        - "E:      s4: c4ff0000ff001420   s10: c10ff000ff001a26"
++        - "E:      s5: c5ff0000ff001521   s11: c11ff000ff001b27"
++  arch.riscv64.fatal.panic_fp:
++    extra_configs:
++      - CONFIG_FRAME_POINTER=y
++      - CONFIG_TEST_RISCV_FATAL_PANIC=y
++    harness_config:
++      type: multi_line
++      regex:
++        - "E:      a0: 0000000000000004    t0: 0000000000000000"
++        - "E:      a1: a1ff0000ff000b11    t1: d1ff0000ff000606"
++        - "E:      a2: a2ff0000ff000c12    t2: d2ff0000ff000707"
++        - "E:      a3: a3ff0000ff000d13    t3: d3ff0000ff001c28"
++        - "E:      a4: a4ff0000ff000e14    t4: d4ff0000ff001d29"
++        - "E:      a5: a5ff0000ff000f15    t5: d5ff0000ff001e30"
++        - "E:      a6: a6ff0000ff001016    t6: d6ff0000ff001f31"
++        - "E:      a7: a7ff0000ff001117"
++        - "E:      ra: dada0000ff000101"
++        - "E:      s0: \\w+    s6: c6ff0000ff001622"
++        - "E:      s1: c1ff0000ff000909    s7: c7ff0000ff001723"
++        - "E:      s2: c2ff0000ff001218    s8: c8ff0000ff001824"
++        - "E:      s3: c3ff0000ff001319    s9: c9ff0000ff001925"
++        - "E:      s4: c4ff0000ff001420   s10: c10ff000ff001a26"
++        - "E:      s5: c5ff0000ff001521   s11: c11ff000ff001b27"
++  arch.riscv64.fatal.fault_fp:
++    extra_configs:
++      - CONFIG_FRAME_POINTER=y
++      - CONFIG_TEST_RISCV_FATAL_ILLEGAL_INSTRUCTION=y
++    harness_config:
++      type: multi_line
++      regex:
++        - "E:      a0: a0ff0000ff000a10    t0: d0ff0000ff000505"
++        - "E:      a1: a1ff0000ff000b11    t1: d1ff0000ff000606"
++        - "E:      a2: a2ff0000ff000c12    t2: d2ff0000ff000707"
++        - "E:      a3: a3ff0000ff000d13    t3: d3ff0000ff001c28"
++        - "E:      a4: a4ff0000ff000e14    t4: d4ff0000ff001d29"
++        - "E:      a5: a5ff0000ff000f15    t5: d5ff0000ff001e30"
++        - "E:      a6: a6ff0000ff001016    t6: d6ff0000ff001f31"
++        - "E:      a7: a7ff0000ff001117"
++        - "E:      ra: dada0000ff000101"
++        - "E:      s0: \\w+    s6: c6ff0000ff001622"
++        - "E:      s1: c1ff0000ff000909    s7: c7ff0000ff001723"
++        - "E:      s2: c2ff0000ff001218    s8: c8ff0000ff001824"
++        - "E:      s3: c3ff0000ff001319    s9: c9ff0000ff001925"
++        - "E:      s4: c4ff0000ff001420   s10: c10ff000ff001a26"
++        - "E:      s5: c5ff0000ff001521   s11: c11ff000ff001b27"

@@ -22,8 +22,7 @@ import layout  # noqa: E402  (first: reads --run-dir; see scripts/layout.py)
 from layout import show  # noqa: E402,F401
 
 # Where instance directories are read from: the validated twister-pipeline
-# Zephyr instances in apptainer/instances/ and NuttX ones in
-# apptainer/instances/nuttx/ (written there only by
+# Zephyr instances in apptainer/instances/ (written there only by
 # scripts/promote_instance.py), then the Docker instances in docker/instances/.
 # EMBEDEVAL_INSTANCES_DIR replaces both -- e.g. generated/, so a freshly
 # generated instance can be built and validated before it is promoted, and
@@ -33,7 +32,7 @@ from layout import show  # noqa: E402,F401
 _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
                   if _override else [layout.generated()] if layout.run_dir()
-                  else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "apptainer" / "instances" / "nuttx",
+                  else [REPO_ROOT / "apptainer" / "instances",
                         REPO_ROOT / "apptainer" / "instances" / "mynewt",
                         REPO_ROOT / "docker" / "instances"])
 OUTPUTS_DIR = layout.outputs()
@@ -60,7 +59,7 @@ MODEL_DIRS: dict[str, str] = {
 MODEL_ALIASES: dict[str, str] = {short: full for full, short in MODEL_DIRS.items()}
 
 _INSTANCE_RE = re.compile(
-    r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+(?:-a\d+|-t\d+|-c[0-9a-f]{8})?)$"
+    r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+(?:-t\d+|-c[0-9a-f]{8})?)$"
 )
 
 
@@ -69,13 +68,11 @@ class UnknownModelError(ValueError):
 
 
 def split_instance(instance_id: str) -> tuple[str, str]:
-    """'zephyr__zephyr-65697' -> ('zephyr', '65697');
-    'nuttx__nuttx-3299-a651' -> ('nuttx', '3299-a651')."""
+    """Split standard and Mynewt test/fix instance IDs."""
     m = _INSTANCE_RE.match(instance_id)
     if not m:
         raise ValueError(
-            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR>"
-            " with optional -a<apps PR>, -t<test PR>, or -c<fix SHA>"
+            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR> with optional -t<test PR> or -c<fix SHA>"
         )
     return m.group("project"), m.group("pr")
 

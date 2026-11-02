@@ -1,0 +1,343 @@
+diff --git a/tests/application_development/ram_context_for_isr/sections-rom.ld b/tests/application_development/ram_context_for_isr/sections-rom.ld
+index eb4193b3433..cbd1f1e8fad 100644
+--- a/tests/application_development/ram_context_for_isr/sections-rom.ld
++++ b/tests/application_development/ram_context_for_isr/sections-rom.ld
+@@ -7,4 +7,8 @@
+ #include <zephyr/linker/iterable_sections.h>
+ 
+ /* Only needed because the driver is defined in tests folder */
+-ITERABLE_SECTION_ROM(fake_driver_api, Z_LINK_ITERABLE_SUBALIGN)
++SECTION_PROLOGUE(custom_api_area,,SUBALIGN(Z_LINK_ITERABLE_SUBALIGN))
++{
++	Z_LINK_ITERABLE(fake_driver_api);
++	PLACE_SYMBOL_HERE(_fake_driver_api_ext_end);
++} GROUP_ROM_LINK_IN(RAMABLE_REGION, ROMABLE_REGION)
+diff --git a/tests/kernel/device/src/abstract_driver.c b/tests/kernel/device/src/abstract_driver.c
+index 5086fbaf24f..79dad45a22d 100644
+--- a/tests/kernel/device/src/abstract_driver.c
++++ b/tests/kernel/device/src/abstract_driver.c
+@@ -8,8 +8,11 @@
+ #include <zephyr/device.h>
+ #include "abstract_driver.h"
+ 
+-#define MY_DRIVER_A	"my_driver_A"
+-#define MY_DRIVER_B	"my_driver_B"
++#define MY_DRIVER_A		"my_driver_A"
++#define MY_DRIVER_B		"my_driver_B"
++#define MY_CHILD_DRIVER		"my_child_driver"
++#define MY_GRANDCHILD_DRIVER	"my_grandchild_driver"
++#define MY_SIBLING_DRIVER	"my_sibling_driver"
+ 
+ /* define individual driver A */
+ static int my_driver_A_do_this(const struct device *dev, int foo, int bar)
+@@ -48,6 +51,96 @@ static DEVICE_API(abstract, my_driver_B_api_funcs) = {
+ 	.do_that = my_driver_B_do_that,
+ };
+ 
++/* define child driver */
++static int child_driver_do_this(const struct device *dev, int foo, int bar)
++{
++	return foo * bar;
++}
++
++static void child_driver_do_that(const struct device *dev, unsigned int *baz)
++{
++	*baz = 3;
++}
++
++static int child_driver_do_these(const struct device *dev)
++{
++	unsigned int baz;
++
++	/* Make it full-circle and call parent APIs */
++	abstract_do_that(dev, &baz);
++	return abstract_do_this(dev, (int)baz, (int)baz);
++}
++
++static DEVICE_API(abstract_child, child_driver_api_funcs) = {
++	.abstract_api = {
++		.do_this = child_driver_do_this,
++		.do_that = child_driver_do_that,
++	},
++	.do_these = child_driver_do_these,
++};
++
++/* define grandchild driver (extends child, which extends abstract) */
++static int grandchild_driver_do_this(const struct device *dev, int foo, int bar)
++{
++	return foo + bar + 1;
++}
++
++static void grandchild_driver_do_that(const struct device *dev, unsigned int *baz)
++{
++	*baz = 4;
++}
++
++static int grandchild_driver_do_these(const struct device *dev)
++{
++	unsigned int baz;
++
++	abstract_do_that(dev, &baz);
++	return abstract_do_this(dev, (int)baz, (int)baz);
++}
++
++static int grandchild_driver_do_all(const struct device *dev, int val)
++{
++	/* Combine all levels: call parent APIs and add own contribution */
++	int ret = abstract_child_do_these(dev);
++
++	return ret + val;
++}
++
++static DEVICE_API(abstract_grandchild, grandchild_driver_api_funcs) = {
++	.abstract_child_api = {
++		.abstract_api = {
++			.do_this = grandchild_driver_do_this,
++			.do_that = grandchild_driver_do_that,
++		},
++		.do_these = grandchild_driver_do_these,
++	},
++	.do_all = grandchild_driver_do_all,
++};
++
++/* define sibling driver (extends abstract, sibling of child) */
++static int sibling_driver_do_this(const struct device *dev, int foo, int bar)
++{
++	return foo % bar;
++}
++
++static void sibling_driver_do_that(const struct device *dev, unsigned int *baz)
++{
++	*baz = 5;
++}
++
++static int sibling_driver_do_other(const struct device *dev, int val)
++{
++	return val * 10;
++}
++
++static DEVICE_API(abstract_sibling, sibling_driver_api_funcs) = {
++	.abstract_api = {
++		.do_this = sibling_driver_do_this,
++		.do_that = sibling_driver_do_that,
++	},
++	.do_other = sibling_driver_do_other,
++};
++
+ /**
+  * @cond INTERNAL_HIDDEN
+  */
+@@ -61,6 +154,20 @@ DEVICE_DEFINE(my_driver_B, MY_DRIVER_B, &common_driver_init,
+ 		POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
+ 		&my_driver_B_api_funcs);
+ 
++DEVICE_DEFINE(my_child_driver, MY_CHILD_DRIVER, &common_driver_init,
++		NULL, NULL, NULL,
++		POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
++		&child_driver_api_funcs);
++
++DEVICE_DEFINE(my_grandchild_driver, MY_GRANDCHILD_DRIVER, &common_driver_init,
++		NULL, NULL, NULL,
++		POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
++		&grandchild_driver_api_funcs);
++
++DEVICE_DEFINE(my_sibling_driver, MY_SIBLING_DRIVER, &common_driver_init,
++		NULL, NULL, NULL,
++		POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
++		&sibling_driver_api_funcs);
+ /**
+  * @endcond
+  */
+diff --git a/tests/kernel/device/src/abstract_driver.h b/tests/kernel/device/src/abstract_driver.h
+index fc06b1db970..9f8422543a0 100644
+--- a/tests/kernel/device/src/abstract_driver.h
++++ b/tests/kernel/device/src/abstract_driver.h
+@@ -38,6 +38,63 @@ static inline void z_impl_abstract_do_that(const struct device *dev, unsigned in
+ 	DEVICE_API_GET(abstract, dev)->do_that(dev, baz);
+ }
+ 
++typedef int (*abstract_child_do_these_t)(const struct device *dev);
++
++__subsystem struct abstract_child_driver_api {
++	/* Embed parent API */
++	struct abstract_driver_api abstract_api;
++
++	abstract_child_do_these_t do_these;
++};
++
++/* Declare relation */
++DEVICE_API_EXTENDS(abstract_child, abstract, abstract_api);
++
++static inline int z_impl_abstract_child_do_these(const struct device *dev)
++{
++	return DEVICE_API_GET(abstract_child, dev)->do_these(dev);
++}
++
++__syscall int abstract_child_do_these(const struct device *dev);
++
++/* Grandchild API: extends abstract_child (3-level inheritance) */
++typedef int (*abstract_grandchild_do_all_t)(const struct device *dev, int val);
++
++__subsystem struct abstract_grandchild_driver_api {
++	/* Embed parent (child) API */
++	struct abstract_child_driver_api abstract_child_api;
++
++	abstract_grandchild_do_all_t do_all;
++};
++
++DEVICE_API_EXTENDS(abstract_grandchild, abstract_child, abstract_child_api);
++
++static inline int z_impl_abstract_grandchild_do_all(const struct device *dev, int val)
++{
++	return DEVICE_API_GET(abstract_grandchild, dev)->do_all(dev, val);
++}
++
++__syscall int abstract_grandchild_do_all(const struct device *dev, int val);
++
++/* Sibling API: also extends abstract (sibling of abstract_child) */
++typedef int (*abstract_sibling_do_other_t)(const struct device *dev, int val);
++
++__subsystem struct abstract_sibling_driver_api {
++	/* Embed parent API */
++	struct abstract_driver_api abstract_api;
++
++	abstract_sibling_do_other_t do_other;
++};
++
++DEVICE_API_EXTENDS(abstract_sibling, abstract, abstract_api);
++
++static inline int z_impl_abstract_sibling_do_other(const struct device *dev, int val)
++{
++	return DEVICE_API_GET(abstract_sibling, dev)->do_other(dev, val);
++}
++
++__syscall int abstract_sibling_do_other(const struct device *dev, int val);
++
+ #include <syscalls/abstract_driver.h>
+ 
+ #endif /* _ABSTRACT_DRIVER_H_ */
+diff --git a/tests/kernel/device/src/main.c b/tests/kernel/device/src/main.c
+index 2cdf8cac37e..e08906c260c 100644
+--- a/tests/kernel/device/src/main.c
++++ b/tests/kernel/device/src/main.c
+@@ -20,8 +20,11 @@
+ #define BAD_DRIVER	"bad_driver"
+ #define DUMMY_DEINIT    "dummy_deinit"
+ 
+-#define MY_DRIVER_A     "my_driver_A"
+-#define MY_DRIVER_B     "my_driver_B"
++#define MY_DRIVER_A        "my_driver_A"
++#define MY_DRIVER_B        "my_driver_B"
++#define CHILD_DRIVER       "my_child_driver"
++#define GRANDCHILD_DRIVER  "my_grandchild_driver"
++#define SIBLING_DRIVER     "my_sibling_driver"
+ 
+ #define FAKEDEFERDRIVER0	DEVICE_DT_GET(DT_PATH(fakedeferdriver_e7000000))
+ #define FAKEDEFERDRIVER1	DEVICE_DT_GET(DT_PATH(fakedeferdriver_e8000000))
+@@ -479,10 +482,106 @@ ZTEST(device, test_device_api)
+ 	dev = device_get_binding(MY_DRIVER_B);
+ 	zexpect_true(DEVICE_API_IS(abstract, dev));
+ 
++	/* Child, grandchild, and sibling all extend abstract */
++	dev = device_get_binding(CHILD_DRIVER);
++	zexpect_true(DEVICE_API_IS(abstract, dev));
++
++	dev = device_get_binding(GRANDCHILD_DRIVER);
++	zexpect_true(DEVICE_API_IS(abstract, dev));
++
++	dev = device_get_binding(SIBLING_DRIVER);
++	zexpect_true(DEVICE_API_IS(abstract, dev));
++
+ 	dev = device_get_binding(DUMMY_NOINIT);
+ 	zexpect_false(DEVICE_API_IS(abstract, dev));
+ }
+ 
++ZTEST(device, test_device_api_extends)
++{
++	const struct device *dev;
++	unsigned int baz;
++	int ret;
++
++	dev = device_get_binding(CHILD_DRIVER);
++
++	/* Both APIs should return true */
++	zassert_true(DEVICE_API_IS(abstract, dev));
++	zassert_true(DEVICE_API_IS(abstract_child, dev));
++
++	/* Child is not a grandchild or sibling */
++	zassert_false(DEVICE_API_IS(abstract_grandchild, dev));
++	zassert_false(DEVICE_API_IS(abstract_sibling, dev));
++
++	ret = abstract_do_this(dev, 2, 3);
++	zexpect_equal(ret, 6);
++
++	abstract_do_that(dev, &baz);
++	zexpect_equal(baz, 3);
++
++	ret = abstract_child_do_these(dev);
++	zexpect_equal(ret, 9);
++}
++
++ZTEST(device, test_device_api_extends_grandchild)
++{
++	const struct device *dev;
++	unsigned int baz;
++	int ret;
++
++	dev = device_get_binding(GRANDCHILD_DRIVER);
++
++	/* All three levels should return true */
++	zassert_true(DEVICE_API_IS(abstract, dev));
++	zassert_true(DEVICE_API_IS(abstract_child, dev));
++	zassert_true(DEVICE_API_IS(abstract_grandchild, dev));
++
++	/* Should not match sibling */
++	zassert_false(DEVICE_API_IS(abstract_sibling, dev));
++
++	/* Parent (abstract) API works: 2 + 3 + 1 = 6 */
++	ret = abstract_do_this(dev, 2, 3);
++	zexpect_equal(ret, 6);
++
++	abstract_do_that(dev, &baz);
++	zexpect_equal(baz, 4);
++
++	/* Child API works: do_that(4) then do_this(4,4) = 4+4+1 = 9 */
++	ret = abstract_child_do_these(dev);
++	zexpect_equal(ret, 9);
++
++	/* Grandchild API: do_these(9) + val(10) = 19 */
++	ret = abstract_grandchild_do_all(dev, 10);
++	zexpect_equal(ret, 19);
++}
++
++ZTEST(device, test_device_api_extends_sibling)
++{
++	const struct device *dev;
++	unsigned int baz;
++	int ret;
++
++	dev = device_get_binding(SIBLING_DRIVER);
++
++	/* Sibling is an abstract device */
++	zassert_true(DEVICE_API_IS(abstract, dev));
++	zassert_true(DEVICE_API_IS(abstract_sibling, dev));
++
++	/* Sibling is NOT a child or grandchild */
++	zassert_false(DEVICE_API_IS(abstract_child, dev));
++	zassert_false(DEVICE_API_IS(abstract_grandchild, dev));
++
++	/* Parent API works: 7 % 3 = 1 */
++	ret = abstract_do_this(dev, 7, 3);
++	zexpect_equal(ret, 1);
++
++	abstract_do_that(dev, &baz);
++	zexpect_equal(baz, 5);
++
++	/* Sibling-specific API: 5 * 10 = 50 */
++	ret = abstract_sibling_do_other(dev, 5);
++	zexpect_equal(ret, 50);
++}
++
+ ZTEST_USER(device, test_deferred_init_user)
+ {
+ 	int ret;

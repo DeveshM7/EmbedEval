@@ -1,6 +1,6 @@
 #!/bin/bash
-# Drive NuttX or Mynewt triage on Scholar's Spark nodes from your own machine
-# over SSH. TRIAGE_PROJECT=mynewt selects Mynewt (default nuttx).
+# Drive Mynewt triage on Scholar's Spark nodes from your own machine
+# over SSH. Uses the Mynewt prompt, records and local model profile.
 #
 #     scripts/scholar_triage_remote.sh serve            # submit a model-server job
 #     scripts/scholar_triage_remote.sh status           # your jobs, and which servers answer
@@ -9,7 +9,7 @@
 #     scripts/scholar_triage_remote.sh wait             # block until no run is active
 #     scripts/scholar_triage_remote.sh pull             # copy triage/<project>_runs back
 #
-# Needs key-based SSH to Scholar (see docs/spark_triage_setup.md, "Driving it
+# Needs key-based SSH to Scholar (see docs/running_on_scholar.md, "Driving it
 # from your laptop") and the one-time setup there done on a Spark node.
 #
 # Two things here are not obvious:
@@ -24,9 +24,8 @@ set -u
 HOST="${SCHOLAR_HOST:-scholar.rcac.purdue.edu}"
 REMOTE_REPO="${SCHOLAR_REPO:-EmbedEval}"          # relative to the remote home
 PROFILE="${TRIAGE_PROFILE:-qwen38-nvfp4}"
-PROJECT="${TRIAGE_PROJECT:-nuttx}"
-PROMPT="docs/${PROJECT}_pr_triage.md"
-if [ "$PROJECT" = mynewt ]; then PROMPT="docs/mynewt_triage.md"; fi
+PROJECT=mynewt
+PROMPT="docs/mynewt_triage.md"
 SCRIPT="scripts/triage_${PROJECT}_prs.py"
 RUNS="triage/${PROJECT}_runs"
 LOCAL_REPO="$(cd "$(dirname "$0")/.." && pwd)"

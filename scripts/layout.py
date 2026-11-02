@@ -7,7 +7,9 @@ outputs/ in the repository. With it, everything a run produces goes into that
 one folder, so one code checkout can serve many nodes at once and the
 repository is only written when an instance is promoted:
 
-    DIR/candidates/         fetched PRs (cache/) and the hard filter's candidates.jsonl
+    DIR/candidates/         this run's PR list (fetched.json), the hard filter's
+                            candidates.jsonl, and, with no shared folder, the
+                            fetch cache (cache/)
     DIR/enriched/           enriched records
     DIR/dryrun/             dry runs
     DIR/triage/             verdicts and traces, one file per PR
@@ -19,13 +21,10 @@ repository is only written when an instance is promoted:
 
 Shared between runs, set by environment variable:
 
-    EMBEDEVAL_SHARED        Python and SDK images, dry-run venvs, the uv cache
+    EMBEDEVAL_SHARED        Python and SDK images, dry-run venvs, the uv cache,
+                            and what GitHub said about each PR (github/)
                             (scripts/apptainer_util.py)
     EMBEDEVAL_ZEPHYR_CLONE  the full Zephyr clone; default candidates/zephyr.git
-    EMBEDEVAL_NUTTX_CLONE, EMBEDEVAL_NUTTX_APPS_CLONE
-                            full NuttX kernel and apps clones, if any: NuttX
-                            Apptainer images check out from them instead of
-                            GitHub, and the validator diffs the fix there
 
 Imported before any module computes a path, so it reads `--run-dir` from the
 command line itself and removes it, before argparse sees the arguments.
@@ -109,12 +108,6 @@ def lookup_overlay() -> Path | None:
 def zephyr_clone() -> Path:
     value = os.environ.get("EMBEDEVAL_ZEPHYR_CLONE")
     return Path(value) if value else REPO_ROOT / "candidates" / "zephyr.git"
-
-
-def nuttx_clones() -> tuple[Path | None, Path | None]:
-    """The local NuttX kernel and apps clones; None for one not given."""
-    return tuple(Path(os.environ[v]) if os.environ.get(v) else None
-                 for v in ("EMBEDEVAL_NUTTX_CLONE", "EMBEDEVAL_NUTTX_APPS_CLONE"))
 
 
 def show(p: Path) -> str:

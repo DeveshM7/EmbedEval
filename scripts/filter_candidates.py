@@ -1,24 +1,15 @@
 #!/usr/bin/env python3
 """
-Hard filters for Zephyr and NuttX PR candidates.
+Hard filters for Zephyr and Mynewt PR candidates.
+
+Use `--repo mynewt` with selftest, fetch, filter or enrich to dispatch to
+scripts/mynewt_candidates.py; Zephyr remains the default.
 
     python scripts/filter_candidates.py selftest
     python scripts/filter_candidates.py fetch --since 2024-01-01 --until 2024-06-30
     python scripts/filter_candidates.py filter
     python scripts/filter_candidates.py enrich
     python scripts/filter_candidates.py enrich-twister
-
-    python scripts/filter_candidates.py selftest --repo nuttx
-    python scripts/filter_candidates.py fetch --repo nuttx --since 2024-01-01 --until 2024-03-31
-    python scripts/filter_candidates.py filter --repo nuttx
-    python scripts/filter_candidates.py enrich --repo nuttx
-
-    python scripts/filter_candidates.py selftest --repo mynewt
-    python scripts/filter_candidates.py fetch --repo mynewt
-    python scripts/filter_candidates.py filter --repo mynewt
-    python scripts/filter_candidates.py enrich --repo mynewt
-    (Mynewt runs scripts/mynewt_candidates.py: a candidate is a merged PR that
-    changes a pkg.type: unittest package; see its docstring.)
 
 Three stages, deliberately separate:
 
@@ -66,12 +57,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -80,9 +73,27 @@ import zephyr_env  # noqa: E402
 
 REPO = "zephyrproject-rtos/zephyr"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CACHE = layout.candidates() / "cache"
+# With a shared folder (EMBEDEVAL_SHARED, set for every cluster/ run), what
+# GitHub says about a merged PR is fetched once for all runs: the fetch cache
+# and the enriched records live there, and each run copies the enriched
+# records it uses into its own enriched/.
+_SHARED = os.environ.get("EMBEDEVAL_SHARED")
+CACHE = Path(_SHARED) / "github" / "prs" if _SHARED else layout.candidates() / "cache"
+SHARED_ENRICHED = Path(_SHARED) / "github" / "enriched" if _SHARED else None
+FETCHED = layout.candidates() / "fetched.json"   # the PRs of this run's fetch
 OUT = layout.candidates() / "candidates.jsonl"
 ENRICHED = layout.enriched()
+# Raise this whenever fetch_full's record changes, so that enriched records
+# cached by older code are made again instead of reused.
+ENRICH_VERSION = 1
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Readers never see half a file, even with several writers on NFS."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
+    tmp.write_text(text)
+    tmp.replace(path)
 
 # Paths that are never the fix itself. A PR touching only these has nothing
 # for an agent to repair.
@@ -96,22 +107,48 @@ KNOWN_GOOD = [33690, 43405, 62109, 65697, 74435, 82272, 85079, 89534]
 # ---------------------------------------------------------------- github
 
 
+def _rate_reset(path: str) -> float:
+    """Seconds until the rate limit of `path` resets: search has its own,
+    of 30 calls a minute (asking costs no quota)."""
+    which = "search" if path.startswith("search/") else "core"
+    proc = subprocess.run(["gh", "api", "rate_limit", "--jq", f".resources.{which}.reset"],
+                          capture_output=True, text=True, timeout=60)
+    try:
+        return max(0.0, int(proc.stdout.strip()) - time.time())
+    except ValueError:
+        return 300.0
+
+
 def gh(path: str, retries: int = 3):
-    """GET a GitHub API path via the gh CLI. Returns parsed JSON or None."""
-    for attempt in range(retries):
+    """GET a GitHub API path via the gh CLI. Returns parsed JSON or None.
+
+    Out of quota (5000 calls an hour), it waits for the reset and carries
+    on, however long that is: a large fetch or enrich spans several hours
+    of quota, and giving up would record thousands of PRs as failed. Search
+    quota resets every minute. The
+    secondary limit (too many calls too fast) is waited out `retries` times.
+    """
+    attempt = 0
+    while True:
         proc = subprocess.run(
-            ["gh", "api", path], capture_output=True, text=True
+            ["gh", "api", path], capture_output=True, text=True, timeout=300
         )
         if proc.returncode == 0:
             return json.loads(proc.stdout)
         err = proc.stderr.lower()
-        if "rate limit" in err or "was submitted too quickly" in err:
-            wait = 20 * (attempt + 1)
-            print(f"  rate limited, sleeping {wait}s ...", file=sys.stderr)
+        if "api rate limit exceeded" in err and "secondary" not in err:
+            wait = _rate_reset(path) + 5
+            print(f"  out of GitHub quota, waiting {wait:.0f}s for the reset ...",
+                  file=sys.stderr, flush=True)
+            time.sleep(wait)
+            continue
+        if ("rate limit" in err or "was submitted too quickly" in err) and attempt < retries:
+            attempt += 1
+            wait = 60 * attempt
+            print(f"  rate limited, sleeping {wait}s ...", file=sys.stderr, flush=True)
             time.sleep(wait)
             continue
         return None
-    return None
 
 
 def fetch_pr(number: int) -> dict | None:
@@ -153,31 +190,38 @@ def fetch_pr(number: int) -> dict | None:
         # is incomplete and nothing we do can complete it.
         "files_truncated": len(files) >= 3000,
     }
-    CACHE.mkdir(parents=True, exist_ok=True)
-    cached.write_text(json.dumps(record, indent=2))
+    write_atomic(cached, json.dumps(record, indent=2))
     return record
 
 
 def search_merged_prs(since: str, until: str) -> list[int]:
-    """PR numbers merged in a date window. Windows must stay under 1000
-    results -- that is a hard cap in GitHub's search API, and exceeding it
-    silently truncates rather than erroring."""
-    numbers, page = [], 1
+    """PR numbers merged in a date window. GitHub's search returns at most
+    1000 results and silently drops the rest, so a window with more is
+    split in two, as often as it takes."""
     q = f"repo:{REPO}+is:pr+is:merged+merged:{since}..{until}"
-    while True:
-        data = gh(f"search/issues?q={q}&per_page=100&page={page}")
-        if not data or not data.get("items"):
-            break
+    first = gh(f"search/issues?q={q}&per_page=100&page=1")
+    if first is None:
+        sys.exit(f"search failed for {since}..{until}")
+    total = first.get("total_count", 0)
+    a, b = date.fromisoformat(since), date.fromisoformat(until)
+    if total > 1000 and a < b:
+        mid = a + (b - a) // 2
+        print(f"  {total} PRs merged {since}..{until}: splitting at {mid}", flush=True)
+        return (search_merged_prs(since, mid.isoformat())
+                + search_merged_prs((mid + timedelta(days=1)).isoformat(), until))
+    if total > 1000:
+        print(f"  WARNING: {total} PRs merged on {since} alone; search returns only "
+              f"1000 of them.", file=sys.stderr)
+    numbers, data, page = [], first, 1
+    while data and data.get("items"):
         numbers += [i["number"] for i in data["items"]]
         if len(data["items"]) < 100 or page >= 10:
-            if data.get("total_count", 0) > 1000:
-                print(f"  WARNING: {data['total_count']} results in "
-                      f"{since}..{until}; search caps at 1000. Narrow the "
-                      f"window or candidates are being silently dropped.",
-                      file=sys.stderr)
             break
         page += 1
-    return numbers
+        data = gh(f"search/issues?q={q}&per_page=100&page={page}")
+        if data is None:
+            sys.exit(f"search failed for {since}..{until}, page {page}")
+    return sorted(set(numbers))
 
 
 # ---------------------------------------------------------------- filters
@@ -406,6 +450,12 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
     out = ENRICHED / f"{number}.json"
     if out.exists() and not refresh:
         return json.loads(out.read_text())
+    shared = SHARED_ENRICHED / f"{number}.json" if SHARED_ENRICHED else None
+    if shared and shared.exists() and not refresh:
+        rec = json.loads(shared.read_text())
+        if rec.get("enrich_version") == ENRICH_VERSION:
+            write_atomic(out, json.dumps(rec, indent=2))
+            return rec
 
     pr = gh(f"repos/{REPO}/pulls/{number}")
     if not pr:
@@ -544,8 +594,12 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
         # the local clone (the twister block) and from scripts/dry_run.py.
         add_twister_facts(record)
 
-    ENRICHED.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(record, indent=2))
+    record["enrich_version"] = ENRICH_VERSION
+    text = json.dumps(record, indent=2)
+    write_atomic(out, text)
+    # Not shared when something failed along the way: the next run tries again.
+    if shared and base_commit and "error" not in record.get("twister", {}):
+        write_atomic(shared, text)
     return record
 
 
@@ -580,6 +634,7 @@ def cmd_selftest(_args) -> None:
 
 def cmd_fetch(args) -> None:
     numbers = args.pr or search_merged_prs(args.since, args.until)
+    write_atomic(FETCHED, json.dumps(numbers))      # what `filter` reads
     print(f"{len(numbers)} merged PRs to fetch\n")
     for i, n in enumerate(numbers, 1):
         got = fetch_pr(n)
@@ -589,7 +644,11 @@ def cmd_fetch(args) -> None:
 
 
 def cmd_filter(_args) -> None:
-    files = sorted(CACHE.glob("*.json"))
+    if FETCHED.exists():        # the cache can hold other runs' PRs too
+        files = [CACHE / f"{n}.json" for n in sorted(json.loads(FETCHED.read_text()))]
+        files = [f for f in files if f.exists()]
+    else:
+        files = sorted(CACHE.glob("*.json"))
     if not files:
         sys.exit("No cached PRs. Run `fetch` first.")
 
@@ -703,7 +762,7 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add_repo(command) -> None:
-        command.add_argument("--repo", choices=("zephyr", "nuttx", "mynewt"), default="zephyr")
+        command.add_argument("--repo", choices=("zephyr", "mynewt"), default="zephyr")
 
     check = sub.add_parser("selftest", help="check known-good PRs survive")
     add_repo(check)
@@ -733,10 +792,6 @@ def main() -> None:
     t.add_argument("--refresh", action="store_true", help="recompute existing blocks")
 
     args = p.parse_args()
-    if getattr(args, "repo", "zephyr") == "nuttx":
-        import nuttx_candidates
-        nuttx_candidates.dispatch(args)
-        return
     if getattr(args, "repo", "zephyr") == "mynewt":
         import mynewt_candidates
         mynewt_candidates.dispatch(args)

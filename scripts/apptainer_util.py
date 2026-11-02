@@ -1,7 +1,6 @@
 """
-Apptainer plumbing shared by the Zephyr twister pipeline and the NuttX
-Apptainer instances: where large files live, how images are built, and the
-only way anything gets deleted.
+Apptainer plumbing shared by the Zephyr twister pipeline: where large files
+live, how images are built, and the only way anything gets deleted.
 
 Images are layered, each built FROM the previous one (Bootstrap: localimage):
 
@@ -14,21 +13,6 @@ Images are layered, each built FROM the previous one (Bootstrap: localimage):
                                  commit, modules, requirements, test patch,
                                  pre-build. One per instance; deleted once the
                                  instance has been validated.
-
-NuttX has one shared layer, from templates/nuttx/apptainer/:
-
-    nuttx-sim-<hash>.sif         Ubuntu 24.04 and the tools sim:nsh builds
-                                 with, plus compatibility patches for old
-                                 kernels.
-    instances/<id>.sif           + the kernel and apps at their base commits,
-                                 configured, with the test patch.
-
-Mynewt has one shared layer, from templates/mynewt/apptainer/:
-
-    mynewt-sim-<hash>.sif        Ubuntu 24.04, newt and gcc (plus multilib on
-                                 x86_64, for kernels that build -m32).
-    instances/<id>.sif           + mynewt-core at the base commit with the
-                                 test patch, and the newt project.
 
 All of it lives under the work root -- $EMBEDEVAL_WORK, else <run dir>/work
 with --run-dir (scripts/layout.py), else $SCRATCH/embedeval-twister, else
@@ -47,12 +31,9 @@ import time
 from pathlib import Path
 
 import layout
-import nuttx_platforms
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
-NUTTX_TEMPLATES = REPO_ROOT / "templates" / "nuttx" / "apptainer"
-MYNEWT_TEMPLATES = REPO_ROOT / "templates" / "mynewt" / "apptainer"
 
 
 def _default_root() -> Path:
@@ -206,16 +187,13 @@ def sdk_image(sdk: str, py: str) -> Path:
 
 
 def host_tag() -> str:
-    """Empty on an ARM64 host, "-x86_64" on an x86 one: an image is built for
-    the host's own architecture, and one shared folder can hold both."""
+    """Return an architecture suffix for host-specific shared images."""
     import platform
     return "" if platform.machine() == "aarch64" else f"-{platform.machine()}"
 
 
 def require_host_arch(meta: dict) -> None:
-    """An instance whose metadata names a host architecture (host_arch, set
-    for NuttX pairs of eras the ARM64 simulator cannot run, or that validate
-    on one architecture only) is built, validated and evaluated there only."""
+    """Reject an instance on a host architecture it cannot validate on."""
     import platform
     want = meta.get("host_arch")
     if want and want != platform.machine():
@@ -223,35 +201,18 @@ def require_host_arch(meta: dict) -> None:
                            f"(this is {platform.machine()}): it validates there only")
 
 
-def nuttx_base_image(sim_config: str = "sim:nsh") -> Path:
-    """The shared NuttX image. Named by a fingerprint of its recipe and of
-    the patch it carries, for the same reason as recipe_tag."""
-    import hashlib
-    h = hashlib.sha256()
-    if sim_config != "sim:nsh":
-        if not nuttx_platforms.is_qemu(sim_config):
-            raise ValueError(f"unsupported NuttX config: {sim_config}")
-        recipe = nuttx_platforms.image_recipe(nuttx_platforms.canonical(sim_config))
-        h.update(recipe.read_bytes())
-        name = "nuttx-qemu-armv8a" if recipe.stem == "nuttx-qemu" else recipe.stem   # the first image's name
-        return shared_path("images", f"{name}-{h.hexdigest()[:8]}{host_tag()}.sif")
-    for name in ("base.def", "sim_tcbinfo_arm64.patch"):
-        h.update((NUTTX_TEMPLATES / name).read_bytes())
-    return shared_path("images", f"nuttx-sim-{h.hexdigest()[:8]}{host_tag()}.sif")
+MYNEWT_TEMPLATES = REPO_ROOT / "templates" / "mynewt" / "apptainer"
 
 
 def mynewt_clone() -> Path | None:
-    """A local mynewt-core clone (bare or not): EMBEDEVAL_MYNEWT_CLONE, else
-    candidates/mynewt.git. Instance builds check out from it instead of GitHub
-    and the renderer and validator read commit dates and the fix from it."""
+    """Local mynewt-core clone, if configured or available in candidates/."""
     value = os.environ.get("EMBEDEVAL_MYNEWT_CLONE")
     clone = Path(value) if value else REPO_ROOT / "candidates" / "mynewt.git"
     return clone if clone.is_dir() else None
 
 
 def mynewt_base_image() -> Path:
-    """The shared Mynewt image (newt, gcc, and gcc-multilib on x86_64), named
-    by a fingerprint of its recipe like the NuttX one."""
+    """Return the shared Mynewt base image, fingerprinted by its recipe."""
     import hashlib
     h = hashlib.sha256((MYNEWT_TEMPLATES / "base.def").read_bytes())
     return shared_path("images", f"mynewt-sim-{h.hexdigest()[:8]}{host_tag()}.sif")
@@ -268,11 +229,7 @@ def ensure_mynewt_base_image(logdir: Path) -> Path:
 
 
 def unpack_sandbox(image: Path, parent: Path | None = None) -> Path:
-    """Unpack an image to a writable sandbox directory on node-local disk.
-    Mynewt's `newt test` compiles hundreds of files from /testbed; inside a
-    .sif on an ARM64 node that took about 3 minutes, from a sandbox 7 seconds.
-    The caller removes it with remove_sandbox. /embedeval-run is created for
-    the bind of the validator's run folder (--writable cannot make one)."""
+    """Unpack an image to a writable sandbox for fast Mynewt builds."""
     import tempfile
     base = Path(tempfile.mkdtemp(prefix="embedeval-sbx-",
                                  dir=parent or os.environ.get("EMBEDEVAL_SANDBOX_DIR") or None))
@@ -287,8 +244,7 @@ def unpack_sandbox(image: Path, parent: Path | None = None) -> Path:
 
 
 def remove_sandbox(root: Path) -> None:
-    """Delete a sandbox from unpack_sandbox (its parent folder too). It lies
-    outside the work root, so remove() does not apply."""
+    """Remove a sandbox created by unpack_sandbox."""
     base = Path(root).parent
     if not base.name.startswith("embedeval-sbx-"):
         raise ValueError(f"refusing to delete {base}: not a sandbox folder")
@@ -303,8 +259,7 @@ def instance_image(instance_id: str) -> Path:
 def build(image: Path, definition: Path, build_args: dict, log: Path,
           timeout_min: int = 60, attempts: int = 2,
           binds: dict[Path, str] | None = None) -> bool:
-    """apptainer build --fakeroot, with a time limit and a retry. `binds`
-    are host paths %post can read, such as a local clone to check out from.
+    """apptainer build --fakeroot, with a time limit and a retry.
 
     The retry is for the network, not for broken recipes: an image build once
     hung for 21 minutes inside `apt-get update`. A recipe that fails the same
@@ -368,52 +323,6 @@ def ensure_base_images(py: str, sdk: str, sdk_archive: str, logdir: Path) -> Pat
     return simg
 
 
-def ensure_nuttx_base_image(logdir: Path, sim_config: str = "sim:nsh") -> Path:
-    """Build the shared NuttX image if it does not exist yet."""
-    img = nuttx_base_image(sim_config)
-    if not img.exists():
-        print(f"  building shared image {img.name} ...")
-        if not build(img, nuttx_platforms.image_recipe(nuttx_platforms.canonical(sim_config)), {},
-                     logdir / f"build-{img.stem}.log"):
-            raise RuntimeError(f"could not build {img.name}")
-    return img
-
-
-def nuttx_reconfigure(overrides: dict) -> str:
-    """Shell that re-applies a NuttX pair's config overrides after the kernel fix
-    (in validation) or a patch (in evaluation).
-
-    An override whose symbol only exists once the fix is applied does not survive
-    the pre-fix configure and build, so append each one again, let olddefconfig
-    resolve its dependencies, and fail if one was still dropped. An option that
-    no Kconfig file in the tree defines (one the kernel has since removed, e.g.
-    when the feature became unconditional) is ignored with a note.
-    """
-    cmds = []
-    for name, value in sorted(overrides.items()):
-        cmds.append(f"sed -i '/^{name}=/d; /^# {name} is not set/d' .config")
-        cmds.append(f"printf '%s\\n' '{name}={value}' >> .config")
-    cmds.append("make olddefconfig")
-    for name, value in sorted(overrides.items()):
-        kept = f"! grep -q '^{name}=' .config" if value == "n" else f"grep -qx '{name}={value}' .config"
-        defined = (f"grep -rqsE --include='Kconfig*' "
-                   f"'^[[:space:]]*(menu)?config[[:space:]]+{name[len('CONFIG_'):]}[[:space:]]*$' .")
-        cmds.append(f"{{ {kept} || {{ {defined} && {{ echo 'config override dropped: {name}={value}'; "
-                    f"exit 3; }}; }} || echo 'config override ignored: {name} (no Kconfig defines it)'; }}")
-    return " && ".join(cmds)
-
-
-def sandbox_exec_args(sandbox: Path, binds: dict[Path, str] | None = None,
-                      env: dict | None = None) -> list[str]:
-    """exec_args for a sandbox from unpack_sandbox, which is itself writable."""
-    cmd = ["apptainer", "exec", "--containall", "--cleanenv", "--writable"]
-    for src, dst in (binds or {}).items():
-        cmd += ["--bind", f"{src}:{dst}"]
-    for k, v in (env or {}).items():
-        cmd += ["--env", f"{k}={v}"]
-    return cmd + [str(sandbox)]
-
-
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
               overlay: Path | None = None, env: dict | None = None) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
@@ -429,26 +338,27 @@ def exec_args(image: Path, binds: dict[Path, str] | None = None,
     return cmd + [str(image)]
 
 
+def sandbox_exec_args(sandbox: Path, binds: dict[Path, str] | None = None,
+                      env: dict | None = None) -> list[str]:
+    """Build exec_args for a writable sandbox."""
+    cmd = ["apptainer", "exec", "--containall", "--cleanenv", "--writable"]
+    for src, dst in (binds or {}).items():
+        cmd += ["--bind", f"{src}:{dst}"]
+    for k, v in (env or {}).items():
+        cmd += ["--env", f"{k}={v}"]
+    return cmd + [str(sandbox)]
+
+
 # The files an instance image is built from. Their fingerprint is recorded in
 # validation.json, so a recipe changed after validation is never promoted.
 RECIPE_FILES = ("instance.def", "instance.json", "run_tests.py", "test_patch.diff")
-NUTTX_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff")
-
-
-def nuttx_recipe_files(instance_dir: Path) -> tuple[str, ...]:
-    """A NuttX recipe's files, with base_patch.diff where its base carries
-    prerequisite kernel PRs."""
-    return NUTTX_RECIPE_FILES + (("base_patch.diff",)
-                                 if (Path(instance_dir) / "base_patch.diff").exists() else ())
-
-
 MYNEWT_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff", "bench.json")
 
 
 def mynewt_recipe_files(instance_dir: Path) -> tuple[str, ...]:
-    """A Mynewt recipe's files, with sim_arm64.patch where it has one."""
+    """Recipe files for a Mynewt instance, including optional compatibility patches."""
     return MYNEWT_RECIPE_FILES + tuple(name for name in ("sim_arm64.patch", "simulator_compat.diff")
-                                     if (Path(instance_dir) / name).exists())
+                                      if (Path(instance_dir) / name).exists())
 
 
 def recipe_fingerprint(instance_dir: Path, files: tuple[str, ...] = RECIPE_FILES) -> str:

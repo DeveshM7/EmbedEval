@@ -28,12 +28,7 @@ image itself is never changed:
 "nothing ran": a scenario filtered on the board (exit 3) is invalid, never a
 failure to fix. A report is written to <instance>/validation.json.
 
-NuttX instances rendered for Apptainer (metadata "runtime": "apptainer";
-scripts/render_nuttx_instance.py --runtime apptainer) are validated the same
-way in their image, with the NuttX steps of the Docker validator and the same
-validation.json report.
-
-So are Mynewt instances (scripts/render_mynewt_instance.py): the image is
+Mynewt instances (scripts/render_mynewt_instance.py): the image is
 unpacked to a writable sandbox on node-local disk (a .sif is very slow to
 compile in on ARM64), and in it
 
@@ -68,10 +63,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au
-from apptainer_util import nuttx_reconfigure
 import build_config
 import instances
-import nuttx_config_probe as probe
 
 
 def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
@@ -369,7 +362,6 @@ def baseline_proof(meta: dict, git) -> tuple[str | None, dict | None, str]:
         return None, None, str(e)
 
 # GitHub lists at most this many files of a pull request.
-GITHUB_PR_FILES_CAP = 3000
 
 
 def gold_patch(meta: dict, workdir: Path) -> str:
@@ -377,23 +369,17 @@ def gold_patch(meta: dict, workdir: Path) -> str:
     Fetch the upstream fix as a diff, restricted to the files the fix should
     touch so test changes never leak in.
 
-    Zephyr, RIOT, and Mynewt are single-repo. Their fix range starts at
-    gold_base_commit when test-only support landed before the production fix,
-    otherwise at base_commit. NuttX is two repos and the fix lives in the
-    kernel one, between kernel_base_commit and kernel_merge_commit. With a
-    local kernel clone (EMBEDEVAL_NUTTX_CLONE) the diff is taken there,
-    fetching only a commit it lacks.
+    Zephyr and RIOT are single-repo (base_commit..fix_commit). NuttX is two
+    repos and the fix lives in the kernel one, between kernel_base_commit and
+    kernel_merge_commit.
     """
     project = meta["project"]
     if project == "nuttx":
         repo, base, fix = meta["kernel_repo"], meta["kernel_base_commit"], meta["kernel_merge_commit"]
     else:
-        repo = meta["repo"]
-        base = meta.get("gold_base_commit", meta["base_commit"])
-        fix = meta["fix_commit"]
+        repo, base, fix = meta["repo"], meta.get("gold_base_commit", meta["base_commit"]), meta["fix_commit"]
 
-    local = (layout.nuttx_clones()[0] if project == "nuttx"
-             else au.mynewt_clone() if project == "mynewt" else None)
+    local = au.mynewt_clone() if project == "mynewt" else None
     if local:
         clone = local
         for sha in (base, fix):
@@ -406,77 +392,18 @@ def gold_patch(meta: dict, workdir: Path) -> str:
         sh(["git", "-C", str(clone), "fetch", "origin", base, fix], timeout=900)
 
     files = meta.get("files_changed_by_fix", [])
-    if len(files) >= GITHUB_PR_FILES_CAP:
-        files = []  # GitHub truncated the PR's file list: take the whole diff
-    cmd = ["git", "-C", str(clone), "diff"]
-    if project == "nuttx":
-        cmd.append("--binary")
-    cmd += [f"{base}..{fix}", "--"]
+    cmd = ["git", "-C", str(clone), "diff", f"{base}..{fix}", "--"]
     cmd += files if files else [".", ":(exclude)tests/"]
-    # Git patch context can contain CRLF; text mode would silently normalize it.
-    r = subprocess.run(cmd, capture_output=True, timeout=300)
+    r = sh(cmd, timeout=300)
     if r.returncode != 0 or not r.stdout.strip():
-        raise RuntimeError(f"could not produce a gold patch: {r.stderr.decode(errors='replace').strip()[:200]}")
-    return r.stdout.decode()
+        raise RuntimeError(f"could not produce a gold patch: {r.stderr.strip()[:200]}")
+    return r.stdout
 
 
-def nuttx_fix_patches(meta: dict, workdir: Path,
-                      primary_override: Path | None = None) -> list[tuple[str, str]]:
-    """Primary NuttX fix followed by the merged PRs it needs, in merge order."""
-    patches = [("primary", primary_override.read_text() if primary_override
-                else gold_patch(meta, workdir))]
-    extras = meta.get("extra_fix_prs") or []
-    if not extras:
-        return patches
-    clone = layout.nuttx_clones()[0] or workdir / "repo"
-    for extra in extras:
-        base, head = extra["base_commit"], extra["head_commit"]
-        for sha in (base, head):
-            if sh(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:
-                fetched = sh(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
-                if fetched.returncode:
-                    raise RuntimeError(f"could not fetch follow-up commit {sha}: {fetched.stderr[:200]}")
-        files = extra["files_changed"]
-        r = sh(["git", "-C", str(clone), "diff", "--binary", f"{base}..{head}", "--",
-                *(files if len(files) < GITHUB_PR_FILES_CAP else ["."])], timeout=300)
-        if r.returncode or not r.stdout.strip():
-            raise RuntimeError(f"could not produce follow-up patch for #{extra['kernel_pr']}: "
-                               f"{r.stderr[:200]}")
-        patches.append((f"follow-up-{extra['kernel_pr']}", r.stdout))
-    # In merge order: a needed PR that merged before the primary one (a
-    # prerequisite) goes first.
-    if meta.get("kernel_merged_at") and not primary_override:
-        merged = {"primary": meta["kernel_merged_at"],
-                  **{f"follow-up-{e['kernel_pr']}": e.get("merged_at", "") for e in extras}}
-        patches.sort(key=lambda p: merged[p[0]])
-    return patches
 
 
-def config_fallbacks(makefile: str, kconfig: str, test_paths: list[str]) -> list[dict]:
-    """Config sets that should build the changed ostest sources: the options the
-    ostest Makefile tests before adding each source, plus one alternative of
-    each such option's Kconfig "depends on" (at most three sets)."""
-    required = {}
-    for path in test_paths:
-        if path.startswith("testing/ostest/") and path.endswith(".c"):
-            for condition in probe.makefile_conditions(makefile, Path(path).name):
-                if condition:
-                    required.update(probe.requirements(condition.split(" && "))["required"])
-    depends = probe.kconfig_depends(kconfig)
-    sets = [dict(required)]
-    for name, value in required.items():
-        dep = re.match(r"depends on ([^;]+)", depends.get(name, ""))
-        if value != "y" or not dep:
-            continue
-        alternatives = []
-        for alternative in probe.split_top(probe.strip_parens(dep[1]), "||"):
-            terms = [re.fullmatch(r"(!?)\s*(\w+)", probe.strip_parens(term))
-                     for term in probe.split_top(probe.strip_parens(alternative), "&&")]
-            if all(terms):
-                alternatives.append({f"CONFIG_{t[2]}": "n" if t[1] else "y" for t in terms})
-        if alternatives:
-            sets = [{**s, **a} for s in sets for a in alternatives]
-    return [s for s in sets if s][:3]
+
+
 
 
 def local_fix_patch(meta: dict) -> str:
@@ -672,186 +599,10 @@ def test_build_error(meta: dict, output: str):
 NUTTX_RUN_TESTS_MEANING = {0: "passed", 1: "failed", 2: "timed out"}
 
 
-def nuttx_summary(output: str) -> list[str]:
-    """run_tests' verdict lines, and the lines of ostest's output that say
-    what went wrong."""
-    return [l for l in output.splitlines()
-            if l.startswith(("run_tests:", "ostest_main: Exiting"))
-            or "ERROR" in l or re.search(r"assert", l, re.IGNORECASE)][-20:]
 
 
-def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
-                             verbose: bool) -> bool:
-    """A NuttX instance in its Apptainer image (metadata "runtime":
-    "apptainer"). The steps of the Docker validator below, in one writable
-    overlay on the image, and a validation.json report as for Zephyr:
 
-        1. build                -> fails with an error in a changed test source
-                                   (compile_error: naming missing_api in
-                                   compile_test_source, if it can), or builds and
-                                   run_tests must FAIL (exit 1) or hang (exit 2); if the
-                                   changed test did not run, retry with config_fallbacks()
-        2. apply the kernel fix (kernel_base_commit..kernel_merge_commit,
-           files_changed_by_fix only), re-apply config_overrides; make clean if
-           clean_after_patch
-        3. build, run_tests     -> must PASS (exit 0)
-    """
-    meta = instances.load_metadata(instance_id)
-    au.require_host_arch(meta)
-    image = au.instance_image(instance_id)
-    build_cmd = meta["build_command"]
-    compile_case = meta.get("fail_type") == "compile_error"
-    print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
-    report = {"instance_id": instance_id, "image": str(image), "host": platform.machine(),
-              "fail_type": meta.get("fail_type"), "valid": False,
-              "recipe_sha256": au.recipe_fingerprint(
-                  instances.instance_dir(instance_id),
-                  au.nuttx_recipe_files(instances.instance_dir(instance_id))),
-              "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    if not image.exists():
-        print(f"  ERROR: image not built: {image}")
-        report["reason"] = "image not built"
-        return _finish(instance_id, report)
 
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    run_dir = au.path("runs", f"{instance_id}-{stamp}", "x").parent
-    overlay = run_dir / "overlay"
-    overlay.mkdir(parents=True)
-    logdir = au.path("logs", instance_id, f"validate-{stamp}", "x").parent
-    logdir.mkdir(parents=True, exist_ok=True)
-    report["logs"] = str(logdir)
-    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay)
-
-    def step(label: str, cmd: str, log: str, t: int):
-        print(f"    {label} ...", end="", flush=True)
-        t0 = time.time()
-        try:
-            r = subprocess.run(container + ["bash", "-c", f"cd /testbed && {cmd}"],
-                               capture_output=True, text=True, timeout=t)
-            rc, out = r.returncode, (r.stdout or "") + (r.stderr or "")
-        except subprocess.TimeoutExpired as e:
-            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            rc = "timeout"
-        (logdir / log).write_text(out)
-        secs = time.time() - t0
-        print(f" {secs:.0f}s (rc={rc})")
-        if verbose:
-            print(out)
-        return rc, out, secs
-
-    def invalid(why: str, detail: str = "") -> bool:
-        print(f"  INVALID: {why}")
-        if detail:
-            print(detail)
-        report["reason"] = why
-        return _finish(instance_id, report)
-
-    def run_tests(when: str):
-        rc, out, secs = step("run_tests", "run_tests", f"{when}.log", timeout)
-        report[when].update(rc=rc, meaning=NUTTX_RUN_TESTS_MEANING.get(rc, str(rc)),
-                            seconds=round(secs), summary=nuttx_summary(out))
-        for line in report[when]["summary"]:
-            print(f"      {line}")
-        return rc
-
-    try:
-        print("\n  Step 1: expecting the tests to FAIL at the base commit")
-        rc, out, secs = step("build", build_cmd, "build-before.log", 900)
-        report["before"] = {"build_rc": rc, "build_seconds": round(secs)}
-        overrides = meta.get("config_overrides") or {}
-
-        def did_not_run() -> bool:
-            return any("run_tests: changed test did not run:" in line
-                       for line in report["before"].get("summary", []))
-
-        def config_fallback(rc: int):
-            """Retry the pre-fix run with config sets that build the changed tests;
-            the run's rc and the overrides that ran them, or None."""
-            _, makefile, _ = step("read Makefile", "cat apps/testing/ostest/Makefile",
-                                  "fallback-makefile.log", 60)
-            _, kconfig, _ = step("read Kconfig", "cat apps/testing/ostest/Kconfig",
-                                 "fallback-kconfig.log", 60)
-            tried = report["before"]["config_fallback"] = []
-            sets = config_fallbacks(makefile, kconfig, meta.get("files_changed_by_test_patch", []))
-            for n, extra in enumerate(sets, 1):
-                tried.append(extra)
-                trial = {**overrides, **extra}
-                if step(f"fallback config {n}", nuttx_reconfigure(trial),
-                        f"config-fallback{n}.log", 300)[0] != 0:
-                    continue
-                if step("build", build_cmd, f"build-fallback{n}.log", 900)[0] != 0:
-                    continue
-                rc = run_tests("before")
-                if not did_not_run():
-                    return rc, trial
-            return rc, None
-
-        # The predicted fail_type only picks the expected diagnostic; what the
-        # pre-fix build does decides: a build error in a changed test source is a
-        # compile failure, and a clean build is judged by its ostest run.
-        if rc != 0:
-            diagnostic = (compile_case and compile_diagnostic(meta, out)) or \
-                test_build_error(meta, out)
-            if not diagnostic:
-                return invalid("expected a compile or link error in the changed test source "
-                               "naming the missing API" if compile_case else
-                               f"the runtime test did not build (rc={rc})", error_lines(out))
-            report["before"]["diagnostic"] = diagnostic.group(0).strip()
-            print(f"  ok: expected test-side build error: {report['before']['diagnostic']}")
-        else:
-            rc = run_tests("before")
-            if did_not_run():
-                rc, found = config_fallback(rc)
-                if not found:
-                    return invalid("changed test did not run before the fix")
-                overrides = report["config_overrides_used"] = found
-            # A crash or ERROR line gives rc=1, a hang rc=2 (or "timeout" when the
-            # runner outlasted this step).
-            if rc not in (1, 2, "timeout"):
-                return invalid({0: "tests PASSED before the fix -- the instance does not "
-                                   "isolate the bug"}.get(rc, f"expected a test failure (rc=1), "
-                                                              f"got rc={rc}"))
-
-        print("\n  Step 2: applying the upstream fix, expecting the tests to PASS")
-        patches = nuttx_fix_patches(meta, run_dir, patch_override)
-        for label, patch_text in patches:
-            (run_dir / "fix.diff").write_text(patch_text)
-            rc, out, _ = step(f"git apply {label}", "git apply /embedeval-run/fix.diff",
-                              f"apply-{label}.log", 300)
-            if rc != 0:
-                return invalid(f"the {label} fix does not apply", "  " + out.strip()[:300])
-        # The fix can introduce Kconfig defaults required by its new source files,
-        # and the overrides it introduces could not be set before it.
-        rc, out, _ = step("reconfigure", nuttx_reconfigure(overrides), "config-after.log", 300)
-        dropped = re.search(r"config override dropped: \S+", out)
-        if dropped:
-            return invalid(f"{dropped.group(0)} after the fix (unmet dependency?)")
-        if rc != 0:
-            return invalid(f"reconfigure failed (rc={rc})", error_lines(out))
-        if meta.get("clean_after_patch"):
-            rc, out, _ = step("make clean", "make clean", "clean.log", 300)
-            if rc != 0:
-                return invalid(f"make clean failed (rc={rc})", error_lines(out))
-        rc, out, secs = step("rebuild", build_cmd, "build-after.log", 900)
-        report["after"] = {"build_rc": rc, "build_seconds": round(secs)}
-        if rc != 0:
-            return invalid(f"the build failed with the fix (rc={rc})", error_lines(out))
-        rc = run_tests("after")
-        if rc != 0:
-            return invalid({1: "tests still fail with the fix",
-                            2: "run_tests timed out with the fix"}.get(rc, f"run_tests ended "
-                                                                           f"with {rc}"))
-
-        print("\n  VALID: fails before the fix, passes after")
-        report["valid"] = True
-        report["reason"] = "fails before the fix, passes after"
-        return _finish(instance_id, report)
-    except Exception as e:
-        print(f"  ERROR: {type(e).__name__}: {e}")
-        report["reason"] = f"error: {type(e).__name__}: {e}"
-        return _finish(instance_id, report)
-    finally:
-        au.remove(run_dir)
 
 
 def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
@@ -1027,8 +778,6 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
     meta = instances.load_metadata(instance_id)
     if meta.get("pipeline") == "twister":
         return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
-    if meta["project"] == "nuttx" and meta.get("runtime") == "apptainer":
-        return validate_nuttx_apptainer(instance_id, patch_override, timeout, verbose)
     if meta["project"] == "mynewt" and meta.get("runtime") == "apptainer":
         return validate_mynewt_apptainer(instance_id, patch_override, timeout, verbose)
     if meta["project"] == "zephyr":
@@ -1152,33 +901,13 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
                 return False
             print(f"  ok: run_tests exited {r1.returncode} as expected")
         else:
-            compile_before = meta["project"] == "nuttx" and meta.get("fail_type") == "compile_error"
-            before_build = dexec(f"cd /testbed && {build_cmd}", 900, "build",
-                                 capture=compile_before)
-            if compile_before:
-                output = (before_build.stdout or "") + (before_build.stderr or "")
-                diagnostic = compile_diagnostic(meta, output)
-                if before_build.returncode == 0 or not diagnostic:
-                    print("  FAIL: expected a compile or link error in the changed test "
-                          "source naming the missing API")
-                    if before_build.returncode != 0:
-                        print(build_errors(before_build))
-                    return False
-                print(f"  ok: expected test-side build error: {diagnostic.group(0).strip()}")
-            else:
-                if meta["project"] == "nuttx" and before_build.returncode != 0:
-                    print(f"  FAIL: runtime test did not build (rc={before_build.returncode})")
-                    print(build_errors(before_build))
-                    return False
-                r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
-                if r1.returncode == 0:
-                    print("  FAIL: tests PASSED before the fix -- the instance does not "
-                          "isolate the bug (test patch may not apply, or the bug is absent)")
-                    return False
-                if meta["project"] == "nuttx" and r1.returncode != 1:
-                    print(f"  FAIL: expected a test failure (rc=1), got rc={r1.returncode}")
-                    return False
-                print(f"  ok: run_tests exited {r1.returncode} as expected")
+            dexec(f"cd /testbed && {build_cmd}", 900, "build")
+            r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
+            if r1.returncode == 0:
+                print("  FAIL: tests PASSED before the fix -- the instance does not "
+                      "isolate the bug (test patch may not apply, or the bug is absent)")
+                return False
+            print(f"  ok: run_tests exited {r1.returncode} as expected")
 
         # --- Step 2: tests must PASS with the fix applied ------------------
         print("\n  Step 2: applying the fix, expecting tests to PASS")
@@ -1197,21 +926,6 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             print(f"  FAIL: git apply failed: {step_output(ra).strip()[:300]}")
             return False
 
-        if meta["project"] == "nuttx":
-            configured = dexec("cd /testbed && "
-                               + nuttx_reconfigure(meta.get("config_overrides") or {}),
-                               300, "reconfigure")
-            if configured.returncode != 0:
-                print(f"  FAIL: reconfigure failed (rc={configured.returncode})")
-                print(build_errors(configured))
-                return False
-
-        if meta["project"] == "nuttx" and meta.get("clean_after_patch"):
-            clean = dexec("cd /testbed && make clean", 300, "make clean")
-            if clean.returncode != 0:
-                print(f"  FAIL: make clean failed (rc={clean.returncode})")
-                print(build_errors(clean))
-                return False
         cleaned = cfg["clean_paths"]
         if cleaned:
             dexec("rm -rf " + " ".join(cleaned), 60, f"clean {' '.join(cleaned)}")

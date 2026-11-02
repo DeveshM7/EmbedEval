@@ -14,18 +14,14 @@ and the tests actually run.
   On Purdue Scholar the pipeline runs as one Slurm job over many nodes:
   [docs/running_on_scholar.md](docs/running_on_scholar.md) (how to use it) and
   [docs/pipeline_internals.md](docs/pipeline_internals.md) (how it works).
-- **NuttX and RIOT** have **Docker** images in `docker/instances/`.
-  The NuttX ones are generated from reviewed PR pairs — see
-  [docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md). A NuttX instance
-  can also be rendered as an Apptainer recipe, for hosts without Docker such
-  as Scholar's ARM64 nodes — see [NuttX in Apptainer](#nuttx-in-apptainer).
+- **NuttX and RIOT** instances are hand-built **Docker** images in
+  `docker/instances/`.
 
-- **Mynewt** has 54 validated **Apptainer** instances in
-  `apptainer/instances/mynewt/`, built and run on Linux x86_64 with the native BSP.
-  See the [Mynewt triage guide](docs/mynewt_triage.md).
+- **Mynewt** has 54 validated Apptainer instances under
+  `apptainer/instances/mynewt/`, built and run on Linux x86_64 with
+  `hw/bsp/native` and `compiler/sim`.
 
-**Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 37 NuttX (30
-Apptainer ones in `apptainer/instances/nuttx/`, 7 Docker ones), 3 RIOT, 54 Apache Mynewt (Apptainer).
+**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT, plus 54 Apache Mynewt.
 
 ---
 
@@ -81,9 +77,6 @@ These are deliberately separate and share no code:
 You only need `scripts/` when adding or repairing instances. Day to day, you use
 `harness/`.
 
-For NuttX PR discovery and instance generation, see
-[`docs/nuttx_pr_workflow.md`](docs/nuttx_pr_workflow.md).
-
 ---
 
 ## Quick start
@@ -123,12 +116,11 @@ Every command takes the same three selection flags:
 ```bash
 --instance zephyr__zephyr-65697    # one or more, space separated
 --repo nuttx                       # every instance in one project
---all                              # all 61
+--all                              # all 17
 ```
 
 Instance ids are `<project>__<project>-<PR>`, matching the directory names under
-`apptainer/instances/` (Zephyr), `apptainer/instances/nuttx/` (NuttX, Apptainer;
-ids `nuttx__nuttx-<kernel PR>-a<apps PR>`) and `docker/instances/` (NuttX, RIOT). Use
+`apptainer/instances/` (Zephyr) and `docker/instances/` (NuttX, RIOT). Use
 lowercase. `EMBEDEVAL_INSTANCES_DIR` points every command at another folder
 instead -- `generated/`, say, to work on instances before they are promoted.
 
@@ -208,74 +200,6 @@ broken — it means the test cannot detect the bug, and every agent will score a
 free pass on it. This is not theoretical; see the `CONFIG_NDEBUG` note in
 `docker/instances/nuttx__nuttx-11889/Dockerfile` for a case where it happened.
 
-### Apache Mynewt
-
-Build and validate the 54 promoted Mynewt instances on Linux x86_64. The
-Apptainer builder creates its shared base on demand:
-
-```bash
-python scripts/build_instances.py --repo mynewt
-python scripts/validate_instance.py --repo mynewt --verbose
-```
-
-Run and grade an individual task through the unified harness:
-
-```bash
-python harness/run.py --instance mynewt__mynewt-3680 --model <configured-model> -v
-python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <configured-model>
-```
-
-Mynewt tests compile to host-native executables using `hw/bsp/native` and
-`compiler/sim`, without QEMU. Historical builds require x86 multilib support.
-The validator records baseline diagnostics, then requires an attributable
-failure without the production fix and a pass with it. Supported runtime,
-compile, configuration and dependency oracles have separate evidence requirements;
-a generic build failure or timeout does not qualify. Tests remain protected.
-
-Promoted recipes and validation receipts are in `apptainer/instances/mynewt/`.
-The fuller local catalog, staging copies and sample evidence remain under
-`generated/mynewt-evidence/` (ignored by Git). See the
-[Mynewt triage guide](docs/mynewt_triage.md) for execution requirements and
-source-grounded triage rules.
-
-### Finding and generating PR instances
-
-The candidate workflow currently supports Zephyr and Apache Mynewt. Zephyr is
-the default; pass `--repo mynewt` for the native-only Mynewt path:
-
-```bash
-# Confirm the hard filters retain every hand-validated instance.
-python scripts/filter_candidates.py selftest --repo mynewt
-
-# Fetch a date range, apply free hard filters, then collect full context only
-# for the surviving PRs.
-python scripts/filter_candidates.py fetch --repo mynewt --since 2024-01-01 --until 2024-12-31
-python scripts/filter_candidates.py filter --repo mynewt
-python scripts/filter_candidates.py enrich --repo mynewt
-```
-
-Give each JSON record under `candidates/mynewt/enriched/` to the triage model
-with [`docs/mynewt_triage.md`](docs/mynewt_triage.md). Save an accepted
-verdict as JSON, then generate the four instance files:
-
-```bash
-python scripts/generate_instance.py \
-    --repo mynewt \
-    --pr 3299 \
-    --triage triage/mynewt_reviewed/3299.json \
-    --tag-suffix=-gen
-```
-
-Generated instances go under `generated/`, never directly into
-`docker/instances/`. Build and validate one in isolation before promoting it:
-
-```bash
-EMBEDEVAL_INSTANCES_DIR="$PWD/generated" \
-    python scripts/build_instances.py --instance mynewt__mynewt-3299
-EMBEDEVAL_INSTANCES_DIR="$PWD/generated" \
-    python scripts/validate_instance.py mynewt__mynewt-3299 --verbose
-```
-
 ---
 
 ## Zephyr: the twister pipeline
@@ -316,54 +240,34 @@ together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 
 ---
 
-## NuttX in Apptainer
+## Apache Mynewt
 
-The same NuttX instance can be an Apptainer recipe instead of a Dockerfile,
-for hosts with no Docker -- on Scholar, the ARM64 Spark nodes, where sim:nsh
-builds natively. Render it with `--runtime apptainer`; the recipe goes to
-`generated/` and its metadata says `"runtime": "apptainer"`, which is what
-every tool below checks:
+The 54 promoted instances use the existing build, validation, and agent commands.
+Run builds and tests on Linux x86_64; historical native builds require multilib.
+The Apptainer shared base is built on demand:
 
 ```bash
-python scripts/render_nuttx_instance.py --runtime apptainer \
-    --metadata docker/instances/nuttx__nuttx-11889/metadata.json \
-    --test-patch docker/instances/nuttx__nuttx-11889/test_patch.diff
-
-# inside a spark-batch job; local clones instead of GitHub, if you have them
-export EMBEDEVAL_INSTANCES_DIR=generated
-export EMBEDEVAL_NUTTX_CLONE=/scratch/scholar/$USER/repos/nuttx.git
-export EMBEDEVAL_NUTTX_APPS_CLONE=/scratch/scholar/$USER/repos/nuttx-apps.git
-python scripts/build_instances.py --instance nuttx__nuttx-11889
-python scripts/validate_instance.py nuttx__nuttx-11889
-python harness/run.py --instance nuttx__nuttx-11889 --model <model>
-python harness/evaluate_patches.py --instance nuttx__nuttx-11889 --model <model>
+python scripts/build_instances.py --repo mynewt
+python scripts/validate_instance.py --repo mynewt --verbose
+python harness/run.py --instance mynewt__mynewt-3680 --model <model> -v
+python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <model>
 ```
 
-- **Images** (`templates/nuttx/apptainer/`): `base.def` is the shared layer
-  (Ubuntu 24.04 and sim:nsh's tools, built once, named by a hash of its
-  recipe); `instance.def` adds the kernel and apps at their base commits,
-  configured exactly as the Dockerfile does, with the test patch. Both go
-  under the work root (`scripts/apptainer_util.py`), as Zephyr's do.
-- **Validation** runs the Docker validator's NuttX steps in one overlay and
-  writes `validation.json`. Grading builds, then runs `run_tests`, in a fresh
-  overlay.
-- **apps/** is kept out of the kernel's git in the image, so the agent's patch
-  holds kernel changes only. (Under Docker, `git add -A` picks up the nested
-  apps repository as a submodule entry.)
-- **Old kernels on ARM64.** sim on an ARM64 host needs a kernel from
-  2022-02-02 on. Kernels from 2023-07-17 to 2023-11-17 lack the ARM64 table in
-  `sim_tcbinfo.c` and do not build; the image backports it from upstream
-  (`sim_tcbinfo_arm64.patch`) and commits it before the agent starts, so it is
-  never part of a patch.
-- **Not every instance carries over to ARM64**; validate each one there.
-  Of the seven, 11889, 11898, 12802 and 9923 are valid on Scholar's nodes.
-  14152's fix is in the x86 setjmp code, so on ARM64 its test passes before
-  the fix. 8832 and 8885 fail correctly at their base, but with the fix ostest
-  still dies (SIGBUS) later, in its vfork() test: the sim's ARM64 vfork crashes
-  on kernels from before the 2023-07 fork rework (c33d1c9c97).
-- **Speed.** Builds in an overlay on `/scratch` are slower than in a plain
-  directory: a full sim:nsh build takes about two minutes, an ostest run
-  about two.
+To discover new candidates, use `scripts/filter_candidates.py` with
+`--repo mynewt` for `fetch`, `filter`, and `enrich`, then run
+`scripts/triage_mynewt_prs.py` against a locally served model.
+The [Mynewt triage document](docs/mynewt_triage.md) covers package selection,
+dependencies, native execution, test/fix separation, and evidence requirements.
+Use `scripts/mynewt_batch.py --run-dir <run> --reviewed <verdict-directory>`
+to generate/build/validate accepted candidates. Promote only validated recipes
+with `scripts/promote_instance.py --run-dir <run> <instance-id>`.
+
+Validation records baseline diagnostics, then requires a failure attributable
+to the selected production change and a pass with that change applied. Runtime,
+compile, configuration and dependency failures have separate evidence rules;
+a generic build error or timeout is not a regression oracle. Test files remain
+protected. The complete local recovery and sample evidence is retained under
+`generated/mynewt-evidence/` (ignored by Git).
 
 ---
 
@@ -387,7 +291,7 @@ docker/bases/       Docker base images (NuttX, RIOT)
 docker/instances/   NuttX and RIOT instances; the hand-built Zephyr ones are
                     kept as reference metadata only and are not built
 apptainer/instances/  validated Zephyr instances: the benchmark (recipes; images
-                    are built from them); nuttx/ holds the validated NuttX ones
+                    are built from them)
 generated/          Zephyr instances being generated and validated (not in git)
 outputs/            agent runs and grades
 archive/            superseded work, kept for provenance
@@ -402,4 +306,4 @@ look when something behaves differently across RTOSes:
   platform (NuttX and RIOT).
 - **`templates/zephyr/apptainer/`** — the Zephyr image recipes and `run_tests`.
 
-Adding another RTOS means adding an entry to each, not writing a new harness.
+Adding a fourth RTOS means adding an entry to each, not writing a new runner.

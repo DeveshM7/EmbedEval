@@ -1,0 +1,241 @@
+diff --git a/tests/subsys/usb/uvc/CMakeLists.txt b/tests/subsys/usb/uvc/CMakeLists.txt
+new file mode 100644
+index 00000000000..89c320e46ab
+--- /dev/null
++++ b/tests/subsys/usb/uvc/CMakeLists.txt
+@@ -0,0 +1,11 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(uvc_uvb)
++
++include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
++
++FILE(GLOB app_sources src/*.c)
++target_sources(app PRIVATE ${app_sources})
++zephyr_include_directories(${ZEPHYR_BASE}/subsys/usb/host)
+diff --git a/tests/subsys/usb/uvc/Kconfig b/tests/subsys/usb/uvc/Kconfig
+new file mode 100644
+index 00000000000..2e0b55a5818
+--- /dev/null
++++ b/tests/subsys/usb/uvc/Kconfig
+@@ -0,0 +1,12 @@
++# SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
++# SPDX-License-Identifier: Apache-2.0
++
++config SYS_CLOCK_TICKS_PER_SEC
++	default 1000000 if BOARD_NATIVE_SIM
++
++# Source common USB sample options used to initialize new experimental USB
++# device stack. The scope of these options is limited to USB samples in project
++# tree, you cannot use them in your own application.
++source "samples/subsys/usb/common/Kconfig.sample_usbd"
++
++source "Kconfig.zephyr"
+diff --git a/tests/subsys/usb/uvc/boards/native_sim.overlay b/tests/subsys/usb/uvc/boards/native_sim.overlay
+new file mode 100644
+index 00000000000..09c922c3a7b
+--- /dev/null
++++ b/tests/subsys/usb/uvc/boards/native_sim.overlay
+@@ -0,0 +1,22 @@
++/*
++ * SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/delete-node/ &zephyr_udc0;
++
++/ {
++	zephyr_uhc0: uhc_vrt0 {
++		compatible = "zephyr,uhc-virtual";
++
++		zephyr_udc0: udc_vrt0 {
++			compatible = "zephyr,udc-virtual";
++			num-bidir-endpoints = <8>;
++			maximum-speed = "high-speed";
++		};
++	};
++
++	uvc_device: uvcd {
++		compatible = "zephyr,uvc-device";
++	};
++};
+diff --git a/tests/subsys/usb/uvc/boards/native_sim_64.overlay b/tests/subsys/usb/uvc/boards/native_sim_64.overlay
+new file mode 100644
+index 00000000000..95557a41be5
+--- /dev/null
++++ b/tests/subsys/usb/uvc/boards/native_sim_64.overlay
+@@ -0,0 +1,6 @@
++/*
++ * SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "native_sim.overlay"
+diff --git a/tests/subsys/usb/uvc/prj.conf b/tests/subsys/usb/uvc/prj.conf
+new file mode 100644
+index 00000000000..240b10b470a
+--- /dev/null
++++ b/tests/subsys/usb/uvc/prj.conf
+@@ -0,0 +1,18 @@
++# SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++# SPDX-License-Identifier: Apache-2.0
++
++CONFIG_LOG=y
++CONFIG_ZTEST=y
++CONFIG_VIDEO=y
++
++CONFIG_USB_DEVICE_STACK_NEXT=y
++CONFIG_USBD_VIDEO_CLASS=y
++CONFIG_UDC_BUF_POOL_SIZE=4096
++CONFIG_SAMPLE_USBD_PID=0xFFFF
++CONFIG_SAMPLE_USBD_REMOTE_WAKEUP=y
++CONFIG_SAMPLE_USBD_PRODUCT="Zephyr USB Test"
++CONFIG_UDC_BUF_POOL_SIZE=2048
++
++CONFIG_UHC_DRIVER=y
++CONFIG_USB_HOST_STACK=y
++CONFIG_USBH_VIDEO_CLASS=y
+diff --git a/tests/subsys/usb/uvc/src/main.c b/tests/subsys/usb/uvc/src/main.c
+new file mode 100644
+index 00000000000..cb6a47b2f17
+--- /dev/null
++++ b/tests/subsys/usb/uvc/src/main.c
+@@ -0,0 +1,117 @@
++/*
++ * SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/device.h>
++#include <zephyr/logging/log.h>
++#include <zephyr/usb/usbd.h>
++#include <zephyr/usb/usbh.h>
++#include <zephyr/usb/class/usbd_uvc.h>
++#include <zephyr/ztest.h>
++#include <sample_usbd.h>
++
++#include "../../../../../drivers/video/video_common.h"
++
++LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
++
++const struct video_format test_formats[] = {
++	{.pixelformat = VIDEO_PIX_FMT_YUYV, .width = 640, .height = 480},
++	{.pixelformat = VIDEO_PIX_FMT_YUYV, .width = 320, .height = 240},
++	{.pixelformat = VIDEO_PIX_FMT_YUYV, .width = 160, .height = 120},
++};
++
++const struct device *const uvc_dev = DEVICE_DT_GET(DT_NODELABEL(uvc_device));
++const struct device *const video_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_camera));
++
++ZTEST(uvc_test, test_virtual_device_virtual_host)
++{
++	const struct device *uvc_dev;
++
++	uvc_dev = device_get_binding("usbh_uvc_0");
++	zassert_not_null(uvc_dev, "No USB host UVC instance available");
++	LOG_INF("%s", uvc_dev->name);
++
++	/* TODO: test the video devices here. */
++}
++
++static struct usbd_context *test_usbd;
++
++USBH_CONTROLLER_DEFINE(test_uhs_ctx, DEVICE_DT_GET(DT_NODELABEL(zephyr_uhc0)));
++
++struct usbh_context *const uhs_ctx = &test_uhs_ctx;
++
++void *uvc_test_enable(void)
++{
++	int ret;
++
++	uvc_set_video_dev(uvc_dev, video_dev);
++
++	for (size_t i = 0; i < ARRAY_SIZE(test_formats); i++) {
++		struct video_format fmt = test_formats[i];
++
++		ret = video_estimate_fmt_size(&fmt);
++		zassert_ok(ret);
++
++		ret = uvc_add_format(uvc_dev, &fmt);
++		zassert_ok(ret);
++	}
++
++	k_sleep(K_MSEC(500));
++
++	ret = usbh_init(uhs_ctx);
++	zassert_ok(ret, "Failed to initialize USB host");
++
++	ret = usbh_enable(uhs_ctx);
++	zassert_ok(ret, "Failed to enable USB host");
++
++	ret = uhc_bus_reset(uhs_ctx->dev);
++	zassert_ok(ret, "Failed to signal bus reset");
++
++	ret = uhc_bus_resume(uhs_ctx->dev);
++	zassert_ok(ret, "Failed to signal bus resume");
++
++	ret = uhc_sof_enable(uhs_ctx->dev);
++	zassert_ok(ret, "Failed to enable SoF generator");
++
++	LOG_INF("Host controller enabled");
++
++	test_usbd = sample_usbd_setup_device(NULL);
++	zassert_not_null(test_usbd, "Failed to setup USB device");
++
++	ret = usbd_init(test_usbd);
++	zassert_ok(ret, "Failed to initialize device support");
++
++	ret = usbd_enable(test_usbd);
++	zassert_ok(ret, "Failed to enable device support");
++
++	LOG_INF("Device support enabled");
++
++	/* Allow the host time to reset the device. */
++	k_msleep(200);
++
++	return NULL;
++}
++
++void uvc_test_shutdown(void *f)
++{
++	int ret;
++
++	ret = usbd_disable(test_usbd);
++	zassert_ok(ret, "Failed to disable device support");
++
++	ret = usbd_shutdown(test_usbd);
++	zassert_ok(ret, "Failed to shutdown device support");
++
++	LOG_INF("Device support disabled");
++
++	ret = usbh_disable(uhs_ctx);
++	zassert_ok(ret, "Failed to disable USB host");
++
++	ret = usbh_shutdown(uhs_ctx);
++	zassert_ok(ret, "Failed to shutdown host support");
++
++	LOG_INF("Host controller disabled");
++}
++
++ZTEST_SUITE(uvc_test, NULL, uvc_test_enable, NULL, NULL, uvc_test_shutdown);
+diff --git a/tests/subsys/usb/uvc/testcase.yaml b/tests/subsys/usb/uvc/testcase.yaml
+new file mode 100644
+index 00000000000..d278e731999
+--- /dev/null
++++ b/tests/subsys/usb/uvc/testcase.yaml
+@@ -0,0 +1,13 @@
++tests:
++  usb.uvc:
++    tags:
++      - usb
++      - video
++    platform_allow:
++      - native_sim/native
++      - native_sim/native/64
++    integration_platforms:
++      - native_sim/native
++    extra_args:
++      - platform:native_sim/native:SNIPPET="video-sw-generator"
++      - platform:native_sim/native/64:SNIPPET="video-sw-generator"

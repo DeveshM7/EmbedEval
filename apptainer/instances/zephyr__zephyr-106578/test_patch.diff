@@ -1,0 +1,283 @@
+diff --git a/tests/boards/espressif/wifi/src/main.c b/tests/boards/espressif/wifi/src/main.c
+index d988ae428c4..0de115c23ed 100644
+--- a/tests/boards/espressif/wifi/src/main.c
++++ b/tests/boards/espressif/wifi/src/main.c
+@@ -125,8 +125,11 @@ static enum net_verdict icmp_event(struct net_icmp_ctx *ctx, struct net_pkt *pkt
+ 			    sizeof(struct net_icmp_hdr) + sizeof(struct net_icmpv4_echo_req);
+ 	size_t data_len = net_pkt_get_len(pkt) - hdr_offset;
+ 	char buf[50];
++	uint16_t chksum;
++	int ret;
+ 
+-	if (net_calc_chksum_icmpv4(pkt)) {
++	ret = net_calc_chksum_icmpv4(pkt, &chksum);
++	if (ret < 0 || chksum != 0U) {
+ 		/* checksum error */
+ 		wifi_ctx.result = -EIO;
+ 		goto sem_give;
+diff --git a/tests/net/checksum_offload/src/main.c b/tests/net/checksum_offload/src/main.c
+index 177eaa815af..c005ae991a8 100644
+--- a/tests/net/checksum_offload/src/main.c
++++ b/tests/net/checksum_offload/src/main.c
+@@ -918,6 +918,8 @@ ZTEST(net_chksum_offload, test_tx_chksum_offload_enabled_test_v4_icmp_frag)
+ static void test_fragment_rx_udp(struct net_pkt *pkt,
+ 				 union net_proto_header *proto_hdr)
+ {
++	uint16_t out_chksum;
++	int ret;
+ 	size_t hdr_offset = net_pkt_ip_hdr_len(pkt) +
+ 			    net_pkt_ip_opts_len(pkt) +
+ 			    sizeof(struct net_udp_hdr);
+@@ -927,7 +929,10 @@ static void test_fragment_rx_udp(struct net_pkt *pkt,
+ 	 * regardless.
+ 	 */
+ 	zassert_not_equal(proto_hdr->udp->chksum, 0, "Checksum is not set");
+-	zassert_equal(net_calc_verify_chksum_udp(pkt), 0, "Incorrect checksum");
++
++	ret = net_calc_verify_chksum_udp(pkt, &out_chksum);
++	zassert_equal(ret, 0, "Calculation failed");
++	zassert_equal(out_chksum, 0, "Incorrect checksum");
+ 
+ 	/* Verify that packet content has not been altered */
+ 	net_pkt_read(pkt, verify_buf, data_len);
+@@ -941,13 +946,18 @@ static void recv_cb_offload_disabled(struct net_context *context,
+ 				     int status,
+ 				     void *user_data)
+ {
++	uint16_t out_chksum;
++	int ret;
++
+ 	zassert_not_null(proto_hdr->udp, "UDP header missing");
+ 
+ 	if (verify_fragment) {
+ 		test_fragment_rx_udp(pkt, proto_hdr);
+ 	} else {
+ 		zassert_not_equal(proto_hdr->udp->chksum, 0, "Checksum is not set");
+-		zassert_equal(net_calc_verify_chksum_udp(pkt), 0, "Incorrect checksum");
++		ret = net_calc_verify_chksum_udp(pkt, &out_chksum);
++		zassert_equal(ret, 0, "Calculation failed");
++		zassert_equal(out_chksum, 0, "Incorrect checksum");
+ 	}
+ 
+ 	if (net_pkt_family(pkt) == NET_AF_INET) {
+@@ -1169,6 +1179,8 @@ static enum net_verdict icmp_handler(struct net_icmp_ctx *ctx,
+ 				     void *user_data)
+ {
+ 	struct k_sem *wait_data = user_data;
++	uint16_t chksum;
++	int ret;
+ 
+ 	size_t hdr_offset = net_pkt_ip_hdr_len(pkt) +
+ 			    net_pkt_ip_opts_len(pkt) +
+@@ -1182,9 +1194,13 @@ static enum net_verdict icmp_handler(struct net_icmp_ctx *ctx,
+ 	zassert_not_equal(icmp_hdr->chksum, 0, "Checksum is not set");
+ 
+ 	if (test_proto == NET_IPPROTO_ICMPV6) {
+-		zassert_equal(net_calc_chksum_icmpv6(pkt), 0, "Incorrect checksum");
++		ret = net_calc_chksum_icmpv6(pkt, &chksum);
++		zassert_equal(ret, 0, "Calculation failed");
++		zassert_equal(chksum, 0, "Incorrect checksum");
+ 	} else {
+-		zassert_equal(net_calc_chksum_icmpv4(pkt), 0, "Incorrect checksum");
++		ret = net_calc_chksum_icmpv4(pkt, &chksum);
++		zassert_equal(ret, 0, "Calculation failed");
++		zassert_equal(chksum, 0, "Incorrect checksum");
+ 	}
+ 
+ 	/* Verify that packet content has not been altered */
+diff --git a/tests/net/ipv4_fragment/src/main.c b/tests/net/ipv4_fragment/src/main.c
+index 97e15de6ac0..69e69eb0c73 100644
+--- a/tests/net/ipv4_fragment/src/main.c
++++ b/tests/net/ipv4_fragment/src/main.c
+@@ -204,6 +204,8 @@ static void check_ipv4_fragment_header(struct net_pkt *pkt, const uint8_t *orig_
+ 	uint16_t pkt_offset;
+ 	uint8_t pkt_flags;
+ 	const struct net_ipv4_hdr *hdr = NET_IPV4_HDR(pkt);
++	uint16_t chksum;
++	int ret;
+ 
+ 	zassert_equal(hdr->vhl, orig_hdr[offsetof(struct net_ipv4_hdr, vhl)],
+ 		      "IPv4 header vhl mismatch");
+@@ -233,7 +235,10 @@ static void check_ipv4_fragment_header(struct net_pkt *pkt, const uint8_t *orig_
+ 
+ 	zassert_equal(net_pkt_get_len(pkt), pkt_len, "IPv4 header length mismatch");
+ 	zassert_equal(pkt_offset, current_length, "IPv4 header length mismatch");
+-	zassert_equal(net_calc_chksum_ipv4(pkt), 0, "IPv4 header checksum mismatch");
++
++	ret = net_calc_chksum_ipv4(pkt, &chksum);
++	zassert_equal(ret, 0, "Calculation failed");
++	zassert_equal(chksum, 0, "IPv4 header checksum mismatch");
+ }
+ 
+ static int sender_iface(const struct device *dev, struct net_pkt *pkt)
+@@ -368,6 +373,8 @@ static enum net_verdict udp_data_received(struct net_conn *conn, struct net_pkt
+ 	uint16_t udp_dst_port;
+ 	uint16_t udp_len;
+ 	uint16_t udp_checksum;
++	int ret_chksum;
++	uint16_t chksum;
+ 
+ 	/* Update counts */
+ 	++upper_layer_packet_count;
+@@ -400,7 +407,10 @@ static enum net_verdict udp_data_received(struct net_conn *conn, struct net_pkt
+ 	zassert_equal(pkt_flags, 0, "IPv4 header fragment flags mismatch");
+ 	zassert_equal(net_pkt_get_len(pkt), pkt_len, "IPv4 header length mismatch");
+ 	zassert_equal(pkt_offset, 0, "IPv4 header length mismatch");
+-	zassert_equal(net_calc_chksum_ipv4(pkt), 0, "IPv4 header checksum mismatch");
++
++	ret_chksum = net_calc_chksum_ipv4(pkt, &chksum);
++	zassert_equal(ret_chksum, 0, "Calculation failed");
++	zassert_equal(chksum, 0, "IPv4 header checksum mismatch");
+ 
+ 	/* Verify IPv4 UDP header is valid */
+ 	net_pkt_cursor_init(pkt);
+@@ -449,6 +459,8 @@ static enum net_verdict tcp_data_received(struct net_conn *conn, struct net_pkt
+ 	uint16_t tcp_window_size;
+ 	uint16_t tcp_checksum;
+ 	uint16_t tcp_urgent;
++	int ret_chksum;
++	uint16_t chksum;
+ 
+ 	/* Update counts */
+ 	++upper_layer_packet_count;
+@@ -481,7 +493,10 @@ static enum net_verdict tcp_data_received(struct net_conn *conn, struct net_pkt
+ 	zassert_equal(pkt_flags, 0, "IPv4 header fragment flags mismatch");
+ 	zassert_equal(net_pkt_get_len(pkt), pkt_len, "IPv4 header length mismatch");
+ 	zassert_equal(pkt_offset, 0, "IPv4 header length mismatch");
+-	zassert_equal(net_calc_chksum_ipv4(pkt), 0, "IPv4 header checksum mismatch");
++
++	ret_chksum = net_calc_chksum_ipv4(pkt, &chksum);
++	zassert_equal(ret_chksum, 0, "Calculation failed");
++	zassert_equal(chksum, 0, "IPv4 header checksum mismatch");
+ 
+ 	/* Verify IPv4 UDP header is valid */
+ 	net_pkt_cursor_init(pkt);
+@@ -602,6 +617,7 @@ ZTEST(net_ipv4_fragment, test_udp)
+ 	int ret;
+ 	uint16_t i;
+ 	uint16_t packet_len;
++	uint16_t chksum;
+ 
+ 	/* Setup test variables */
+ 	active_test = TEST_UDP;
+@@ -632,7 +648,10 @@ ZTEST(net_ipv4_fragment, test_udp)
+ 	/* Update IPv4 headers */
+ 	packet_len = net_pkt_get_len(pkt);
+ 	NET_IPV4_HDR(pkt)->len = net_htons(packet_len);
+-	NET_IPV4_HDR(pkt)->chksum = net_calc_chksum_ipv4(pkt);
++
++	ret = net_calc_chksum_ipv4(pkt, &chksum);
++	zassert_equal(ret, 0, "Calculation failed");
++	NET_IPV4_HDR(pkt)->chksum = chksum;
+ 
+ 	net_pkt_cursor_init(pkt);
+ 	net_pkt_set_overwrite(pkt, true);
+@@ -669,6 +688,7 @@ ZTEST(net_ipv4_fragment, test_tcp)
+ 	uint8_t tmp_buf[256];
+ 	uint16_t i;
+ 	uint16_t packet_len;
++	uint16_t chksum;
+ 
+ 	/* Setup test variables */
+ 	active_test = TEST_TCP;
+@@ -701,7 +721,10 @@ ZTEST(net_ipv4_fragment, test_tcp)
+ 	packet_len = net_pkt_get_len(pkt);
+ 
+ 	NET_IPV4_HDR(pkt)->len = net_htons(packet_len);
+-	NET_IPV4_HDR(pkt)->chksum = net_calc_chksum_ipv4(pkt);
++
++	ret = net_calc_chksum_ipv4(pkt, &chksum);
++	zassert_equal(ret, 0, "Calculation failed");
++	NET_IPV4_HDR(pkt)->chksum = chksum;
+ 
+ 	net_pkt_cursor_init(pkt);
+ 	net_pkt_set_overwrite(pkt, true);
+@@ -739,6 +762,7 @@ ZTEST(net_ipv4_fragment, test_fragment_timeout)
+ 	int ret;
+ 	uint8_t packets;
+ 	int sem_count;
++	uint16_t chksum;
+ 
+ 	/* Setup test variables */
+ 	active_test = TEST_SINGLE_FRAGMENT;
+@@ -760,7 +784,11 @@ ZTEST(net_ipv4_fragment, test_fragment_timeout)
+ 	/* Generate valid checksum for frame */
+ 	net_pkt_cursor_init(pkt);
+ 	net_pkt_set_overwrite(pkt, true);
+-	NET_IPV4_HDR(pkt)->chksum = net_calc_chksum_ipv4(pkt);
++
++	ret = net_calc_chksum_ipv4(pkt, &chksum);
++	zassert_equal(ret, 0, "Calculation failed");
++
++	NET_IPV4_HDR(pkt)->chksum = chksum;
+ 	net_pkt_set_overwrite(pkt, false);
+ 
+ 	pkt_recv_expected_size = sizeof(ipv4_icmp_reassembly_time);
+@@ -811,6 +839,7 @@ ZTEST(net_ipv4_fragment, test_do_not_fragment)
+ 	uint8_t tmp_buf[256];
+ 	uint16_t i;
+ 	uint16_t packet_len;
++	uint16_t chksum;
+ 
+ 	/* Setup test variables */
+ 	active_test = TEST_NO_FRAGMENT;
+@@ -845,7 +874,10 @@ ZTEST(net_ipv4_fragment, test_do_not_fragment)
+ 	/* Update IPv4 headers */
+ 	packet_len = net_pkt_get_len(pkt);
+ 	NET_IPV4_HDR(pkt)->len = net_htons(packet_len);
+-	NET_IPV4_HDR(pkt)->chksum = net_calc_chksum_ipv4(pkt);
++
++	ret = net_calc_chksum_ipv4(pkt, &chksum);
++	zassert_equal(ret, 0, "Calculation failed");
++	NET_IPV4_HDR(pkt)->chksum = chksum;
+ 
+ 	net_pkt_cursor_init(pkt);
+ 	net_pkt_set_overwrite(pkt, true);
+diff --git a/tests/net/ipv6_fragment/src/main.c b/tests/net/ipv6_fragment/src/main.c
+index 8c76d9000ef..68a1f264609 100644
+--- a/tests/net/ipv6_fragment/src/main.c
++++ b/tests/net/ipv6_fragment/src/main.c
+@@ -1493,6 +1493,8 @@ static enum net_verdict udp_data_received(struct net_conn *conn,
+ 	static const char expected_data[] = "123456789.";
+ 	const size_t expected_data_len = sizeof(expected_data) - 1;
+ 	uint16_t i;
++	uint16_t out_chksum;
++	int ret;
+ 
+ 	NET_DBG("Data %p received", pkt);
+ 
+@@ -1527,8 +1529,10 @@ static enum net_verdict udp_data_received(struct net_conn *conn,
+ 			  "UDP header destination port mismatch");
+ 	zassert_mem_equal(verify_buf + 4, &expected_udp_length, 2,
+ 			  "UDP header length mismatch");
+-	zassert_equal(net_calc_verify_chksum_udp(pkt), 0,
+-		      "UDP header invalid checksum");
++
++	ret = net_calc_verify_chksum_udp(pkt, &out_chksum);
++	zassert_equal(ret, 0, "Calculation failed");
++	zassert_equal(out_chksum, 0, "UDP header invalid checksum");
+ 
+ 	/* Verify data is valid */
+ 	i = NET_IPV6H_LEN + NET_UDPH_LEN;
+@@ -2230,6 +2234,8 @@ static enum net_verdict handle_ipv6_echo_reply(struct net_icmp_ctx *ctx,
+ 	uint16_t expected_icmpv6_length = net_htons(test_recv_payload_len + ECHO_REPLY_H_LEN);
+ 	uint16_t i;
+ 	uint8_t expected_data = 0;
++	uint16_t chksum;
++	int ret;
+ 
+ 	ARG_UNUSED(ctx);
+ 	ARG_UNUSED(ip_hdr);
+@@ -2264,8 +2270,10 @@ static enum net_verdict handle_ipv6_echo_reply(struct net_icmp_ctx *ctx,
+ 	zassert_equal(verify_buf[0], NET_ICMPV6_ECHO_REPLY,
+ 		      "Echo reply header invalid type");
+ 	zassert_equal(verify_buf[1], 0, "Echo reply header invalid code");
+-	zassert_equal(net_calc_chksum_icmpv6(pkt), 0,
+-		      "Echo reply header invalid checksum");
++
++	ret = net_calc_chksum_icmpv6(pkt, &chksum);
++	zassert_equal(ret, 0, "Calculation failed");
++	zassert_equal(chksum, 0, "Echo reply header invalid checksum");
+ 	zassert_mem_equal(verify_buf + 4, ipv6_reass_frag1 + ECHO_REPLY_ID_OFFSET, 2,
+ 			  "Echo reply header invalid identifier");
+ 	zassert_mem_equal(verify_buf + 6, ipv6_reass_frag1 + ECHO_REPLY_SEQ_OFFSET, 2,

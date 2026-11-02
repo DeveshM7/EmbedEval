@@ -11,9 +11,6 @@ an Apptainer environment instead of Docker, e.g. with the local Qwen server:
     EMBEDEVAL_INSTANCES_DIR=generated python harness/run.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
 
-So do NuttX instances whose metadata says "runtime": "apptainer", and Mynewt
-ones (run in an unpacked node-local sandbox of the image).
-
 Replaces run_instance.py, run_nuttx_instance.py, run_riot_instance.py and
 run_all.py, which were ~50% duplicated and disagreed on prompt format, .env
 handling and the API-key check.
@@ -83,7 +80,12 @@ Please solve this issue:
 
 ## Running Tests
 
-{test_help}
+Use the `run_tests` command to build and run the tests. It handles all setup and
+teardown, waits for results, and exits as soon as pass/fail is known.
+Exit codes: 0 = all tests passed, 1 = tests failed, 2 = timed out.
+
+If `run_tests` times out (exit code 2) with no test results, your change has
+introduced a hang or an infinite loop. Do NOT submit -- investigate further.
 {extra_warnings}
 Mandatory workflow:
 1. Explore the code and understand the bug
@@ -168,9 +170,7 @@ def check_api_key(model_name: str) -> None:
 
 def build_prompts(meta: dict) -> tuple[str, str]:
     cfg = projects.config_for(meta)
-    protected = " or ".join(
-        f"`{p}`" for p in projects.setting(meta, "protected_paths")
-    )
+    protected = " or ".join(f"`{p}`" for p in projects.setting(meta, "protected_paths"))
     warn = cfg["extra_warnings"]
     system = SYSTEM_TEMPLATE.format(
         label=cfg["label"], orientation=cfg["orientation"]
@@ -179,41 +179,13 @@ def build_prompts(meta: dict) -> tuple[str, str]:
         protected=protected,
         extra_warnings=f"\n{warn}\n" if warn else "",
         build_and_test=_build_and_test(meta),
-        test_help=TEST_HELP.get(meta["project"], TEST_HELP["default"]),
     )
+    if meta["project"] == "mynewt":
+        instance = instance.replace(
+            "Use the `run_tests` command to build and run the tests. It handles all setup and\nteardown, waits for results, and exits as soon as pass/fail is known.\nExit codes: 0 = all tests passed, 1 = tests failed, 2 = timed out.\n\nIf `run_tests` times out (exit code 2) with no test results, your change has\nintroduced a hang or an infinite loop. Do NOT submit -- investigate further.",
+            "Use `run_tests` to build and run the selftest package. Exit codes: 0 = every test case passed, 1 = a test case failed, 2 = timed out, 3 = the build failed or results were incomplete.",
+        )
     return system, instance
-
-
-_HANG = ("If `run_tests` times out{code} with no test results, your change has\n"
-         "introduced a hang or an infinite loop. Do NOT submit -- investigate further.")
-
-# What run_tests' exit codes mean, per project; they must match the runner.
-# Zephyr's codes are in its extra warning (projects.py), and a Zephyr timeout
-# is the environment's command limit, not an exit code.
-TEST_HELP = {
-    "nuttx": (
-        "Use `run_tests` after building. It runs the whole ostest suite and "
-        "waits for results. Exit codes: 0 = ostest finished cleanly and every "
-        "changed test ran, 1 = any other completed run (a test failed, or a "
-        "changed test did not run), 2 = timed out.\n\n" + _HANG.format(code=" (exit code 2)")
-    ),
-    "zephyr": (
-        "Use the `run_tests` command to build and run the tests. It handles "
-        "all setup and teardown and waits for results.\n\n" + _HANG.format(code="")
-    ),
-    "mynewt": (
-        "Use `run_tests` to build and run the selftest package; it takes a minute or "
-        "two. Exit codes: 0 = every test case passed, 1 = a test case failed, "
-        "2 = timed out, 3 = the build failed or the results were incomplete "
-        "(a test did not run or crashed).\n\n" + _HANG.format(code=" (exit code 2)")
-    ),
-    "default": (
-        "Use the `run_tests` command to build and run the tests. It handles "
-        "all setup and teardown, waits for results, and exits as soon as "
-        "pass/fail is known. Exit codes: 0 = all tests passed, "
-        "1 = tests failed, 2 = timed out.\n\n" + _HANG.format(code=" (exit code 2)")
-    ),
-}
 
 
 def _build_and_test(meta: dict) -> str:
@@ -258,37 +230,37 @@ def build_task(meta: dict) -> str:
 
 
 def make_environment(meta: dict):
-    cfg = projects.config_for(meta)
+    projects.config_for(meta)
     if projects.setting(meta, "runtime") == "apptainer":
-        # Zephyr, and NuttX instances rendered for Apptainer: an Apptainer
-        # image built by scripts/build_instances.py.
+        # Zephyr uses the validated registry image; Mynewt uses its local image.
         sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
         import apptainer_util
         from apptainer_env import ApptainerEnvironment
 
-        apptainer_util.require_host_arch(meta)
+        if meta["project"] == "mynewt":
+            apptainer_util.require_host_arch(meta)
 
         # The image carries the PR's test changes as uncommitted edits.
         # Committing them in this run's overlay before the agent starts makes
         # `git diff` show the agent's changes alone, so capture_patch's check
         # for edits to protected paths means what it says. Graded patches still
         # apply to the image as built: the same files, the same content.
-        # NuttX needs no such commit: its test changes are in apps/, a
-        # repository of its own that the image keeps out of the kernel's git.
         commit_tests = ("cd /testbed && git add -A -- tests/ && git -c user.name=EmbedEval "
                         "-c user.email=embedeval@localhost commit -q -m "
                         "'The PR test changes, without its fix'")
-        return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
-                                    name=meta["instance_id"], cwd="/testbed",
-                                    timeout=cfg.get("command_timeout", 900),
-                                    setup_commands=[commit_tests] if meta["project"] == "zephyr"
-                                    else [],
+        if meta["project"] == "zephyr":
+            import registry   # the validated image: pulled from the registry if published
+            image = registry.image_for(meta["instance_id"])
+        else:
+            image = apptainer_util.instance_image(meta["instance_id"])
+        return ApptainerEnvironment(image=image, name=meta["instance_id"], cwd="/testbed",
+                                    timeout=projects.setting(meta, "command_timeout", 900),
+                                    setup_commands=[commit_tests] if meta["project"] == "zephyr" else [],
                                     sandbox=meta["project"] == "mynewt",
                                     network_fixture=meta.get("network_fixture"))
 
     # NuttX, RIOT: Docker.
-    kwargs = dict(image=meta["docker_image"], cwd="/testbed",
-                  timeout=projects.setting(meta, "command_timeout", 180))
+    kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
     platform = projects.setting(meta, "docker_platform")
     if platform:
         kwargs["run_args"] = ["--rm", "--platform", platform]
@@ -367,8 +339,7 @@ def capture_patch(env, meta: dict, start: str = "HEAD") -> tuple[str, list[str]]
         {"command": f"cd /testbed && git diff --cached --name-only {start} -- "
                     + " ".join(f"'{p}'" for p in protected)}
     ).get("output", "")
-    return patch, sorted(set([t for t in touched.splitlines() if t.strip()]
-                             + protected_ranges_touched(patch, meta)))
+    return patch, sorted(set([t for t in touched.splitlines() if t.strip()] + protected_ranges_touched(patch, meta)))
 
 
 # The run in progress, for the SIGTERM handler: {"save": callable, "env": env}.
