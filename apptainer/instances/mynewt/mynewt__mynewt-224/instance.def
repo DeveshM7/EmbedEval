@@ -1,0 +1,72 @@
+Bootstrap: localimage
+From: {{ BASE_IMAGE }}
+
+# EmbedEval instance mynewt__mynewt-224 -- rendered by scripts/render_mynewt_instance.py.
+#
+# Built FROM the shared Mynewt image (base.def), whose path is passed at build
+# time, as is the mynewt-core repository (GitHub unless scripts/build_instances.py
+# binds a local clone to /embedeval-src/mynewt-core.git):
+#
+#   apptainer build --fakeroot --build-arg BASE_IMAGE=<mynewt-sim.sif> \
+#       mynewt__mynewt-224.sif instance.def
+#
+# The Apptainer counterpart of templates/mynewt/Dockerfile.tmpl: mynewt-core at
+# the base commit in /testbed with the PR's selftest changes committed, and a
+# newt project (native BSP, compiler/sim) in /project.
+
+%arguments
+    BASE_IMAGE=mynewt-sim.sif
+    CORE_REPO=https://github.com/apache/mynewt-core.git
+
+%files
+    test_patch.diff /opt/benchmark/test_patch.diff
+    bench.json /opt/benchmark/metadata.json
+    run_tests.sh /usr/local/bin/run_tests
+
+
+%post
+    set -e
+    retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i: $*"; sleep 20; done; return 1; }
+    # The newt of this base's era (see render_mynewt_instance.py).
+    ln -sf /opt/newt/1.0.0/newt /usr/local/bin/newt
+    newt version
+    git init -q /testbed
+    cd /testbed
+    git remote add origin https://github.com/apache/mynewt-core.git
+    SRC={{ CORE_REPO }}
+    [ -d /embedeval-src/mynewt-core.git/objects ] && SRC=/embedeval-src/mynewt-core.git
+    retry git fetch -q --depth 1 $SRC 646b35dfa19d9f7a65fdc6e32cb4fe4de1af4de5
+    git checkout -q --detach FETCH_HEAD
+
+    git apply /opt/benchmark/test_patch.diff
+    git add -A
+    git -c user.name=EmbedEval -c user.email=benchmark@localhost \
+        commit -q -m "Benchmark starting snapshot with regression tests"
+
+    mkdir -p /project/repos /project/targets/unittest
+    ln -s /testbed /project/repos/apache-mynewt-core
+    printf '%s\n' \
+        'project.name: benchmark' \
+        'project.repositories:' \
+        '    - apache-mynewt-core' \
+        'repository.apache-mynewt-core:' \
+        '    type: github' \
+        '    vers: 0.0.0' \
+        '    user: apache' \
+        '    repo: mynewt-core' \
+        > /project/project.yml
+    printf '%s\n' \
+        'target.bsp: "@apache-mynewt-core/hw/bsp/native"' \
+        'target.build_profile: "debug"' \
+        'target.compiler: "@apache-mynewt-core/compiler/sim"' \
+        > /project/targets/unittest/target.yml
+    printf '%s\n' 'pkg.name: targets/unittest' 'pkg.type: target' 'pkg.cflags:' '    - -Wno-error' '    - -fcommon' > /project/targets/unittest/pkg.yml
+    chmod 755 /usr/local/bin/run_tests
+    run_tests --install-deps
+
+%environment
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.instance mynewt__mynewt-224
+    embedeval.base_commit 646b35dfa19d9f7a65fdc6e32cb4fe4de1af4de5

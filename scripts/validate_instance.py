@@ -37,7 +37,10 @@ So are Mynewt instances (scripts/render_mynewt_instance.py): the image is
 unpacked to a writable sandbox on node-local disk (a .sif is very slow to
 compile in on ARM64), and in it
 
-    0. baseline: the commit before the test patch, run_tests --baseline passes
+    0. baseline: record the original tests as diagnostic evidence, not an acceptance gate
+       (recorded not_applicable when the selected package is added by the test
+       patch and baseline_tests is []; run at metadata baseline_test_path when
+       the package was renamed or split from an older unittest: baseline_proof)
     1. run_tests -> exactly fail_to_pass fail, pass_to_pass pass (exit 1)
     2. apply the upstream fix (gold_base_commit|base_commit..fix_commit)
     3. run_tests -> everything passes (exit 0)
@@ -49,9 +52,11 @@ Docker. A mynewt-core clone (EMBEDEVAL_MYNEWT_CLONE) supplies the fix.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -71,6 +76,96 @@ import nuttx_config_probe as probe
 
 def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
     return subprocess.run(cmd, capture_output=quiet, text=True, timeout=timeout)
+
+
+def compile_line_matches(source: str, api: str, diagnostic) -> bool:
+    match = (re.fullmatch(r"(.+?):\d+(?::\d+)?:\s*(?:fatal )?error:\s*(.*)", diagnostic)
+             if isinstance(diagnostic, str) else None)
+    if match is None and isinstance(diagnostic, str):
+        match = re.fullmatch(
+            r"(?:/[^:]+/ld:\s*)?(.+?):\d+:\([^\n]+\): undefined reference to [`‘]([^'’]+)['’]",
+            diagnostic,
+        )
+    return bool(match and (match[1] == source or match[1].endswith("/" + source))
+                and re.search(rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", match[2]))
+
+
+def compile_note_matches(meta: dict, source: str, api: str, item: dict) -> bool:
+    """Re-check an error plus its attached note against rows attested at generation."""
+    entry = meta.get("compile_notes", {}).get(source, {}).get(item.get("line"))
+    parts = item["diagnostic"].split("\n")
+    error = re.fullmatch(r"(.+?):(\d+):(\d+): error: (.*)", parts[0])
+    if not entry or entry["api"] != api or len(parts) != 2 or not error:
+        return False
+    at = lambda file, wanted: file == wanted or file.endswith("/" + wanted)
+    if item["kind"] == "initializer_note":
+        return bool(entry["kind"] == "initializer" and at(error[1], source) and error[2] == item["line"]
+                    and re.fullmatch(r"initialization of ['‘][^’']+['’] from incompatible pointer type "
+                                     r"['‘][^’']+['’] \[-Werror=incompatible-pointer-types\]", error[4])
+                    and parts[1] == (f"{error[1]}:{error[2]}:{error[3]}: note: (near initialization for "
+                                     f"‘{entry['object']}.{api}’)")
+                    and entry["text"][int(error[3]) - 1:].startswith(entry["value"]))
+    if item["kind"] == "preprocessor_macro":
+        use = re.match(rf"\s*#\s*(?:if|elif)\s+({re.escape(entry.get('macro', ''))})\(", entry["text"])
+        return bool(entry["kind"] == "preprocessor" and entry.get("macro") and use and at(error[1], source)
+                    and error[2] == item["line"] and error[4] == 'missing binary operator before token "("'
+                    and int(error[3]) == use.end(1) + 1 and parts[1].endswith("| " + entry["text"]))
+    note = re.fullmatch(r"(.+?):(\d+):(\d+): note: in expansion of macro ['‘]([A-Za-z_]\w*)['’]", parts[1])
+    definition = entry.get("definition", {})
+    return bool(entry["kind"] == "macro" and note and at(note[1], source) and note[2] == item["line"]
+                and note[4] == api and at(error[1], definition.get("path", "")) and error[2] == str(definition.get("line"))
+                and error[4].endswith("[-Werror=overflow]")
+                and re.match(rf"{re.escape(api)}(?![A-Za-z0-9_])", entry["text"][int(note[3]) - 1:]))
+
+
+def compile_profile_matches(meta: dict, report: dict) -> bool:
+    observed = report.get("compile_diagnostics")
+    if not isinstance(observed, list) or not observed:
+        return False
+    incomplete = set()
+    lines = []
+    for item in observed:
+        if not isinstance(item, dict):
+            return False
+        source, api, diagnostic = item.get("source"), item.get("api"), item.get("diagnostic")
+        if (source not in meta["compile_expectations"] or api not in meta["compile_expectations"][source]
+                or not isinstance(diagnostic, str)):
+            return False
+        if "kind" not in item:
+            if any(text in diagnostic for text in (": error: storage size of ",
+                    ": error: array type has incomplete element type ", "[-Werror=unused-variable]")):
+                return False
+            if not compile_line_matches(source, api, diagnostic):
+                return False
+        elif item["kind"] in ("initializer_note", "macro_note", "preprocessor_macro"):
+            if not compile_note_matches(meta, source, api, item):
+                return False
+        else:
+            error = re.fullmatch(r"(.+?):(\d+)(?::\d+)?:\s*(?:fatal )?error:\s*(.*)", diagnostic)
+            declaration = meta.get("compile_declarations", {}).get(source, {}).get(item.get("line"))
+            if (not error or not declaration or declaration["api"] != api
+                    or item.get("declaration") != declaration["text"] or error[2] != item.get("line")
+                    or not (error[1] == source or error[1].endswith("/" + source))):
+                return False
+            variable = declaration["variable"]
+            key = source, error[2], variable
+            if item["kind"] == "incomplete_type":
+                if not re.fullmatch(rf"storage size of ['‘]{re.escape(variable)}['’] isn['’]t known", error[3]):
+                    return False
+                incomplete.add(key)
+            elif item["kind"] == "incomplete_array_type":
+                if not declaration.get("array") or not re.fullmatch(
+                        rf"array type has incomplete element type ['‘]struct {re.escape(api)}['’]", error[3]):
+                    return False
+                incomplete.add(key)
+            elif item["kind"] == "unused_after_incomplete_type":
+                if key not in incomplete or not re.fullmatch(
+                        rf"(?:unused variable ['‘]{re.escape(variable)}['’]|['‘]{re.escape(variable)}['’] defined but not used) \[-Werror=unused-variable\]", error[3]):
+                    return False
+            else:
+                return False
+        lines.append(diagnostic)
+    return report.get("diagnostic") == "\n".join(lines)
 
 
 def verify_structured_results(meta: dict, report: dict, phase: str) -> tuple[bool, str]:
@@ -100,17 +195,23 @@ def verify_structured_results(meta: dict, report: dict, phase: str) -> tuple[boo
         valid = (inventory_valid and report.get("failure_mode", "runtime") == "runtime"
                  and report.get("compile_failure", False) is False
                  and not report.get("diagnostic"))
+    elif mode in ("config", "dependency") and phase == "before":
+        diagnostic = report.get("diagnostic")
+        valid = (report.get("failure_mode") == mode
+                 and report.get("build_ok") is False and report.get(mode + "_failure") is True
+                 and report.get("compile_failure", False) is False
+                 and isinstance(diagnostic, str)
+                 and hashlib.sha256(diagnostic.encode()).hexdigest() == meta[mode + "_output_sha256"]
+                 and report.get(mode + "_output_sha256") == meta[mode + "_output_sha256"]
+                 and not actual_pass and not actual_fail and not report.get("error")
+                 and not report.get("missing") and not report.get("unexpected")
+                 and report.get("exit_code") == 1)
     elif mode == "compile" and phase == "before":
         source = meta["compile_test_source"]
         api = meta["missing_api"]
         diagnostic = report.get("diagnostic")
-        match = (re.fullmatch(r"(.+?):\d+(?::\d+)?:\s*(?:fatal )?error:\s*(.*)", diagnostic)
-                 if isinstance(diagnostic, str) else None)
-        matched_diagnostic = bool(
-            match
-            and (match.group(1) == source or match.group(1).endswith("/" + source))
-            and re.search(rf"(?<![A-Za-z0-9_]){re.escape(api)}(?![A-Za-z0-9_])", match.group(2))
-        )
+        matched_diagnostic = (compile_profile_matches(meta, report) if meta.get("compile_expectations")
+                              else compile_line_matches(source, api, diagnostic))
         valid = (
             report.get("failure_mode") == "compile"
             and report.get("build_ok") is False
@@ -137,6 +238,135 @@ def verify_structured_results(meta: dict, report: dict, phase: str) -> tuple[boo
         f"(expected {expected_exit_code})"
     )
     return valid, detail
+
+def baseline_proof(meta: dict, git) -> tuple[str | None, dict | None, str]:
+    """(kind, proof, why) for a selected Mynewt test package that is new in the
+    test patch, so `run_tests --baseline` cannot use meta["test_path"].
+    git(*args) runs git in the benchmark checkout and returns (returncode, stdout).
+
+    kind "not_applicable": baseline_tests == [], pkg.yml is *added* (not renamed)
+    by the test patch, and the closest existing ancestor package at the base is
+    not a unittest (so no old suite was split out of it).
+    kind "relocated": baseline_tests is nonempty and meta["baseline_test_path"]
+    names an existing pkg.type unittest at the base and the commit before the test
+    patch, which the new package was renamed from (R) or split from (the closest
+    existing ancestor package of an added package).
+    (None, None, why) otherwise, and always when the selected package already exists
+    at the baseline: the caller then runs the strict baseline unchanged. Every git
+    call must exit 0; an unreadable object or bad ref is never taken as absence."""
+    if meta.get("project") != "mynewt":
+        return None, None, "not a Mynewt instance"
+    declared = meta.get("baseline_tests")
+    old = meta.get("baseline_test_path")
+    if declared == [] and old is None:
+        kind = "not_applicable"
+    elif isinstance(declared, list) and declared and isinstance(old, str):
+        kind = "relocated"
+    else:
+        return None, None, "no baseline_test_path for a nonempty baseline_tests, or one with none"
+    base = meta.get("base_commit", "")
+    path = str(meta.get("test_path", "")).strip("/")
+    old = old.strip("/") if old else None
+    if not re.fullmatch(r"[0-9a-f]{40}", base) or not path or old == path:
+        return None, None, "no full base_commit or test_path, or baseline_test_path is test_path"
+    pkg = f"{path}/pkg.yml"
+
+    def run(*args):
+        rc, out = git(*args)
+        if rc != 0:
+            raise ValueError(f"git {' '.join(args)[:80]} exited {rc}")
+        return out.strip()
+
+    def entry(commit: str, package: str) -> str:
+        return run("ls-tree", commit, "--", package)
+
+    def is_unittest(commit: str, package: str) -> bool:
+        return re.search(r"(?m)^pkg\.type:\s*[\"']?unittest[\"']?\s*(#.*)?$",
+                         run("show", f"{commit}:{package}")) is not None
+
+    try:
+        run("cat-file", "-e", f"{base}^{{commit}}")
+        snapshot = run("rev-parse", "HEAD^{commit}")
+        parent = run("rev-parse", "HEAD~1^{commit}")
+        proof = {"kind": kind, "base_commit": base, "baseline_commit": parent,
+                 "snapshot_commit": snapshot, "upstream_test_commit": meta.get("test_commit"),
+                 "arm_port_commit": None, "package": pkg}
+        if parent != base:
+            # The aarch64 recipe commits a simulator port between the base and the
+            # snapshot commit; it must touch neither package.
+            if run("rev-parse", "HEAD~2^{commit}") != base:
+                return None, None, "HEAD^ is neither the recorded base nor its simulator port"
+            if run("diff", "--name-only", base, parent, "--", path, *([old] if old else [])):
+                return None, None, "the commit before the test patch changes a test package"
+            proof["arm_port_commit"] = parent
+        proof["tree_entries"] = {"selected_at_base": entry(base, pkg),
+                                 "selected_at_baseline": entry(parent, pkg)}
+        if proof["tree_entries"]["selected_at_base"] or proof["tree_entries"]["selected_at_baseline"]:
+            return None, None, f"{pkg} exists at the baseline"
+        proof["tree_entries"]["selected_at_snapshot"] = entry("HEAD", pkg)
+        if not re.fullmatch(r"100(?:644|755) blob [0-9a-f]{40}\t" + re.escape(pkg),
+                            proof["tree_entries"]["selected_at_snapshot"]):
+            return None, None, f"{pkg} is not a file at the snapshot commit"
+        change = None
+        renames = []
+        for line in run("diff-tree", "-r", "-M", "--name-status", "--no-commit-id",
+                        parent, "HEAD").splitlines():
+            cols = line.split("\t")
+            if cols[0].startswith("R"):
+                renames.append(cols)
+            if cols[-1] == pkg and (cols[0] == "A" or cols[0].startswith("R")):
+                change = cols
+        if change is None:
+            return None, None, f"the test patch does not add {pkg}"
+        proof["change_status"] = change[0]
+        if change[0] != "A":
+            proof["renamed_from"] = change[1]
+        # The closest existing package above the selected one at the base.
+        ancestor = None
+        for parent_dir in Path(path).parents:
+            if str(parent_dir) != "." and entry(base, f"{parent_dir}/pkg.yml"):
+                ancestor = str(parent_dir)
+                break
+        proof["closest_ancestor_package"] = ancestor
+        if kind == "not_applicable":
+            if change[0] != "A":
+                return None, None, f"{pkg} was renamed from {change[1]}: its old tests are the baseline"
+            if ancestor and is_unittest(base, f"{ancestor}/pkg.yml"):
+                return None, None, f"{pkg} is split from the unittest package {ancestor}"
+            for moved in renames:
+                if (moved[1].endswith("/pkg.yml")
+                        and Path(moved[1]).parent.parent == Path(path).parent
+                        and Path(moved[-1]).parent.parent == Path(path).parent
+                        and is_unittest(base, moved[1])):
+                    return None, None, "a sibling unittest was renamed; declare its baseline path and tests"
+            return kind, proof, ""
+        old_pkg = f"{old}/pkg.yml"
+        proof["baseline_test_path"] = old
+        proof["tree_entries"]["baseline_package_at_base"] = entry(base, old_pkg)
+        proof["tree_entries"]["baseline_package_at_baseline"] = entry(parent, old_pkg)
+        for where, commit in (("base", base), ("baseline", parent)):
+            if not re.fullmatch(r"100(?:644|755) blob [0-9a-f]{40}\t" + re.escape(old_pkg),
+                                proof["tree_entries"][f"baseline_package_at_{where}"]):
+                return None, None, f"{old_pkg} is not a file at the {where} commit"
+            if not is_unittest(commit, old_pkg):
+                return None, None, f"{old_pkg} is not pkg.type unittest at the {where} commit"
+        if change[0] != "A":
+            if change[1] != old_pkg:
+                return None, None, f"{pkg} was renamed from {change[1]}, not {old_pkg}"
+            proof["relation"] = "renamed"
+        elif ancestor == old:
+            proof["relation"] = "split from the closest existing ancestor package"
+        elif any(cols[1] == old_pkg and Path(cols[-1]).parent.parent == Path(path).parent
+                 and Path(old).parent == Path(path).parent for cols in renames):
+            # A test backend can split into sibling packages while the original
+            # package is renamed. The original suite must still actually run.
+            proof["relation"] = "split alongside a renamed sibling package"
+            proof["sibling_renames"] = [cols for cols in renames if cols[1] == old_pkg]
+        else:
+            return None, None, f"{old} is not the closest existing ancestor package of {path}"
+        return kind, proof, ""
+    except ValueError as e:
+        return None, None, str(e)
 
 # GitHub lists at most this many files of a pull request.
 GITHUB_PR_FILES_CAP = 3000
@@ -183,10 +413,11 @@ def gold_patch(meta: dict, workdir: Path) -> str:
         cmd.append("--binary")
     cmd += [f"{base}..{fix}", "--"]
     cmd += files if files else [".", ":(exclude)tests/"]
-    r = sh(cmd, timeout=300)
+    # Git patch context can contain CRLF; text mode would silently normalize it.
+    r = subprocess.run(cmd, capture_output=True, timeout=300)
     if r.returncode != 0 or not r.stdout.strip():
-        raise RuntimeError(f"could not produce a gold patch: {r.stderr.strip()[:200]}")
-    return r.stdout
+        raise RuntimeError(f"could not produce a gold patch: {r.stderr.decode(errors='replace').strip()[:200]}")
+    return r.stdout.decode()
 
 
 def nuttx_fix_patches(meta: dict, workdir: Path,
@@ -633,6 +864,7 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
     idir = instances.instance_dir(instance_id)
     report = {"instance_id": instance_id, "image": str(image), "host": platform.machine(),
               "failure_mode": meta.get("failure_mode", "runtime"), "valid": False,
+              "acceptance_policy": "attributable-fail-before-pass-after-v1",
               "recipe_sha256": au.recipe_fingerprint(idir, au.mynewt_recipe_files(idir)),
               "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     if not image.exists():
@@ -651,7 +883,8 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
         """Run cmd in the sandbox; returns (rc, output, structured result)."""
         print(f"    {label} ...", end="", flush=True)
         t0 = time.time()
-        full = (f"cd /testbed && {cmd}; rc=$?; echo ==MYNEWT-RESULT==; "
+        full = (f"cd /testbed && rm -f /tmp/mynewt-result.json && {cmd}; "
+                "rc=$?; echo ==MYNEWT-RESULT==; "
                 "cat /tmp/mynewt-result.json 2>/dev/null; exit $rc")
         try:
             r = subprocess.run(au.sandbox_exec_args(sandbox, binds={run_dir: "/embedeval-run"})
@@ -690,6 +923,10 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
                          "failed": result.get("failed", []), "error": result.get("error"),
                          "missing": result.get("missing", []),
                          "unexpected": result.get("unexpected", [])}
+        if meta.get("failure_mode") in ("config", "dependency"):
+            mode = meta["failure_mode"]
+            report[phase].update({mode + "_failure": result.get(mode + "_failure", False),
+                                  mode + "_output_sha256": result.get(mode + "_output_sha256")})
         if not ok or rc != want_rc:
             return f"{phase}: {detail}"
         return None
@@ -701,15 +938,54 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
         if meta["project"] != "mynewt":
             return invalid("not a Mynewt instance")
 
-        print("\n  Baseline: expecting the existing tests to PASS before the test patch")
-        rc, out, result = step(
-            "run_tests --baseline",
-            "ORIG=$(git rev-parse HEAD) && git checkout -q --detach HEAD^ && "
-            "{ run_tests --baseline; r=$?; git checkout -q --detach $ORIG; (exit $r); }",
-            "baseline.log", timeout + 300)
-        why = judge("baseline", rc, result, 0)
-        if why:
-            return invalid(why, error_lines(out))
+        def sandbox_git(*args):
+            r = subprocess.run(au.sandbox_exec_args(sandbox) + ["git", "-C", "/testbed", *args],
+                               capture_output=True, text=True, timeout=120)
+            return r.returncode, r.stdout
+
+        kind, proof, not_proven = baseline_proof(meta, sandbox_git)
+        if meta.get("baseline_test_path") is not None and kind != "relocated":
+            return invalid(f"baseline_test_path is not proven: {not_proven}")
+        if kind == "not_applicable":
+            print("\n  Baseline: not applicable, baseline_tests is [] and "
+                  f"{proof['package']} is added by the test patch")
+            report["baseline"] = {
+                "status": "not_applicable", "tests_run": False, "passed": [], "failed": [],
+                "reason": "the selected test package is added by the test patch; "
+                          "it does not exist at the baseline commit",
+                "proof": proof}
+            (logdir / "baseline.log").write_text(
+                "baseline NOT APPLICABLE: no baseline tests were run.\n"
+                + json.dumps(proof, indent=2) + "\n")
+        else:
+            print("\n  Baseline: recording original-test health (diagnostic only)")
+            old = ""
+            if kind == "relocated":
+                print(f"    (at {proof['baseline_test_path']}, the package "
+                      f"{proof['package']} was {proof['relation']})")
+                old = " --baseline-test-path " + shlex.quote(proof["baseline_test_path"])
+            snapshot_rc, snapshot = sandbox_git("rev-parse", "HEAD")
+            if snapshot_rc != 0:
+                return invalid("cannot identify the test-patched snapshot")
+            rc, out, result = step(
+                "run_tests --baseline",
+                "ORIG=$(git rev-parse HEAD) && git checkout -q --detach HEAD^ && "
+                f"{{ run_tests --baseline{old}; r=$?; git checkout -q --detach $ORIG; (exit $r); }}",
+                "baseline.log", timeout + 300)
+            # A timeout can kill the shell before its checkout-back command.
+            # Restore independently before evaluating the PR's tests.
+            restore_rc, _ = sandbox_git("checkout", "-q", "--detach", snapshot.strip())
+            if restore_rc != 0:
+                return invalid("cannot restore the test-patched snapshot after baseline")
+            why = judge("baseline", rc, result, 0)
+            report.setdefault("baseline", {"rc": rc, "tests_run": True})
+            report["baseline"].update({"diagnostic_only": True,
+                                       "status": "failed" if why else "passed",
+                                       "reason": why})
+            if kind == "relocated" and "baseline" in report:
+                report["baseline"]["relocated_proof"] = proof
+            if why:
+                print(f"  Baseline diagnostic: {why}; continuing to before/after")
 
         print("\n  Step 1: expecting exactly fail_to_pass to FAIL at the base commit")
         rc, out, result = step("run_tests", "run_tests", "before.log", timeout + 300)
@@ -732,7 +1008,9 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
 
         print("\n  VALID: fails before the fix, passes after")
         report["valid"] = True
-        report["reason"] = "fails before the fix, passes after"
+        report["reason"] = "fails before the fix, passes after" + (
+            " (baseline not applicable: the package is added by the test patch)"
+            if kind == "not_applicable" else "")
         return _finish(instance_id, report)
     except Exception as e:
         print(f"  ERROR: {type(e).__name__}: {e}")
@@ -838,30 +1116,28 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
 
     try:
         if meta["project"] == "mynewt":
-            print("\n  Baseline: expecting existing tests to PASS before test patch")
+            print("\n  Baseline: recording original-test health (diagnostic only)")
             baseline_run = sh(run_args, timeout=120)
             if baseline_run.returncode != 0:
-                print(f"  FAIL: baseline docker run failed: {baseline_run.stderr.strip()[:200]}")
-                return False
-            baseline_cid = baseline_run.stdout.strip()
-            try:
-                checkout = sh(["docker", "exec", baseline_cid, "bash", "-c",
-                               "cd /testbed && git checkout --detach HEAD^"], timeout=120,
-                              quiet=not verbose)
-                if checkout.returncode != 0:
-                    print(f"  FAIL: baseline checkout failed (rc={checkout.returncode})")
-                    return False
-                baseline = sh(["docker", "exec", baseline_cid, "bash", "-c",
-                               "cd /testbed && run_tests --baseline"], timeout=timeout,
-                              quiet=not verbose)
-                if not structured_results_match("baseline", baseline_cid):
-                    return False
-                if baseline.returncode != 0:
-                    print(f"  FAIL: expected baseline run_tests exit 0, got {baseline.returncode}")
-                    return False
-                print("  ok: baseline tests passed")
-            finally:
-                sh(["docker", "rm", "-f", baseline_cid], timeout=60)
+                print(f"  Baseline unavailable: {baseline_run.stderr.strip()[:200]}")
+            else:
+                baseline_cid = baseline_run.stdout.strip()
+                try:
+                    checkout = sh(["docker", "exec", baseline_cid, "bash", "-c",
+                                   "cd /testbed && git checkout --detach HEAD^"], timeout=120,
+                                  quiet=not verbose)
+                    if checkout.returncode != 0:
+                        print(f"  Baseline checkout failed (rc={checkout.returncode}); "
+                              "continuing in the separate before/after container")
+                    else:
+                        baseline = sh(["docker", "exec", baseline_cid, "bash", "-c",
+                                       "cd /testbed && run_tests --baseline"], timeout=timeout,
+                                      quiet=not verbose)
+                        matched = structured_results_match("baseline", baseline_cid)
+                        print("  Baseline passed" if matched and baseline.returncode == 0
+                              else "  Baseline failed; continuing to before/after")
+                finally:
+                    sh(["docker", "rm", "-f", baseline_cid], timeout=60)
 
         # --- Step 1: tests must FAIL on the unfixed code -------------------
         print("\n  Step 1: expecting tests to FAIL at the base commit")

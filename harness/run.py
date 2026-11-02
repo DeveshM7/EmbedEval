@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import paths
 import projects
+from patch_checks import protected_ranges_touched
 
 try:
     from dotenv import load_dotenv
@@ -282,7 +283,8 @@ def make_environment(meta: dict):
                                     timeout=cfg.get("command_timeout", 900),
                                     setup_commands=[commit_tests] if meta["project"] == "zephyr"
                                     else [],
-                                    sandbox=meta["project"] == "mynewt")
+                                    sandbox=meta["project"] == "mynewt",
+                                    network_fixture=meta.get("network_fixture"))
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed",
@@ -365,7 +367,8 @@ def capture_patch(env, meta: dict, start: str = "HEAD") -> tuple[str, list[str]]
         {"command": f"cd /testbed && git diff --cached --name-only {start} -- "
                     + " ".join(f"'{p}'" for p in protected)}
     ).get("output", "")
-    return patch, [t for t in touched.splitlines() if t.strip()]
+    return patch, sorted(set([t for t in touched.splitlines() if t.strip()]
+                             + protected_ranges_touched(patch, meta)))
 
 
 # The run in progress, for the SIGTERM handler: {"save": callable, "env": env}.

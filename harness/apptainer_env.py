@@ -32,6 +32,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import apptainer_util as au  # noqa: E402
+from mynewt_network import isolated_command  # noqa: E402
 
 from minisweagent.exceptions import Submitted  # noqa: E402
 from minisweagent.utils.serialize import recursive_merge  # noqa: E402
@@ -42,12 +43,13 @@ SUBMIT = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 class ApptainerEnvironment:
     def __init__(self, *, image: str | Path, name: str, cwd: str = "/testbed",
                  timeout: int = 900, setup_commands: list[str] | None = None,
-                 sandbox: bool = False, logger: logging.Logger | None = None):
+                 sandbox: bool = False, network_fixture: str | None = None, logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
         if not self.image.exists():
             raise FileNotFoundError(f"instance image not built: {self.image}")
         self.cwd, self.timeout = cwd, timeout
+        self.network_fixture = network_fixture
         # Mynewt: unpack the image to a node-local sandbox and run in that, as
         # the validator and grader do (compiling in a .sif is ~25x slower on
         # ARM64). The sandbox is the agent's writable state, instead of an overlay.
@@ -79,6 +81,7 @@ class ApptainerEnvironment:
                else au.exec_args(self.image, overlay=self.overlay))
         cmd[2:2] = ["--pwd", cwd or self.cwd]
         cmd += ["bash", "-c", command]
+        cmd = isolated_command(cmd, self.network_fixture)
         try:
             r = subprocess.run(cmd, text=True, encoding="utf-8", errors="replace",
                                timeout=timeout or self.timeout,

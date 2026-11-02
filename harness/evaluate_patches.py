@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import paths
 import projects
+from patch_checks import protected_ranges_touched
 
 
 RUN_TESTS_ERRORS = {1: "tests failed (a test, the build or the configuration)",
@@ -188,6 +189,7 @@ def evaluate_mynewt(instance_id: str, model_name: str, meta: dict, timeout: int)
         return result
     protected = projects.setting(meta, "protected_paths")
     touched = [f for f in patch_files(patch) if any(f.startswith(p) for p in protected)]
+    touched = sorted(set(touched + protected_ranges_touched(patch, meta)))
     if touched:
         result.update(tampering=True, protected_touched=touched,
                       error="tampering: patch modifies protected test files: " + ", ".join(touched))
@@ -205,10 +207,13 @@ def evaluate_mynewt(instance_id: str, model_name: str, meta: dict, timeout: int)
     sandbox = None
     try:
         sandbox = au.unpack_sandbox(image)
+        from mynewt_network import isolated_command
         container = au.sandbox_exec_args(sandbox, binds={run_dir: "/embedeval-run"})
+        def container_command(args):
+            return isolated_command(container + args, meta.get("network_fixture"))
         print("  applying patch ...")
-        ap = subprocess.run(container + ["git", "-C", "/testbed", "apply",
-                                         "/embedeval-run/agent.patch"],
+        ap = subprocess.run(container_command(["git", "-C", "/testbed", "apply",
+                                         "/embedeval-run/agent.patch"]),
                             capture_output=True, text=True, timeout=120)
         if ap.returncode != 0:
             result["error"] = f"git apply failed: {(ap.stdout + ap.stderr).strip()[:300]}"
@@ -217,7 +222,7 @@ def evaluate_mynewt(instance_id: str, model_name: str, meta: dict, timeout: int)
         print("  run_tests (newt test) ...")
         full = ("cd /testbed && run_tests; rc=$?; echo ==MYNEWT-RESULT==; "
                 "cat /tmp/mynewt-result.json 2>/dev/null; exit $rc")
-        tp = subprocess.run(container + ["bash", "-c", full], capture_output=True, text=True,
+        tp = subprocess.run(container_command(["bash", "-c", full]), capture_output=True, text=True,
                             timeout=max(timeout, 600) + 300)
         out = (tp.stdout or "") + (tp.stderr or "")
         result["test_output_tail"] = out.split("==MYNEWT-RESULT==")[0][-2000:]

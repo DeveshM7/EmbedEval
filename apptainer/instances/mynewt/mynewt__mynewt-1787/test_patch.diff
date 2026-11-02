@@ -1,0 +1,379 @@
+diff --git a/encoding/cborattr/selftest/src/test_cborattr.c b/encoding/cborattr/selftest/src/test_cborattr.c
+index 4d745fe0f..87b23c81d 100644
+--- a/encoding/cborattr/selftest/src/test_cborattr.c
++++ b/encoding/cborattr/selftest/src/test_cborattr.c
+@@ -33,6 +33,8 @@ TEST_SUITE(test_cborattr_suite)
+     test_cborattr_decode_object_array();
+     test_cborattr_decode_unnamed_array();
+     test_cborattr_decode_substring_key();
++    test_cborattr_encode_simple();
++    test_cborattr_encode_omit();
+ }
+ 
+ int
+diff --git a/encoding/cborattr/selftest/src/test_cborattr.h b/encoding/cborattr/selftest/src/test_cborattr.h
+index 2ffe515ff..a51610098 100644
+--- a/encoding/cborattr/selftest/src/test_cborattr.h
++++ b/encoding/cborattr/selftest/src/test_cborattr.h
+@@ -35,6 +35,8 @@ extern "C" {
+  */
+ const uint8_t *test_str1(int *len);
+ 
++void cborattr_test_util_encode(const struct cbor_out_attr_t *attrs,
++                               const uint8_t *expected, int len);
+ /*
+  * Testcases
+  */
+@@ -48,7 +50,8 @@ TEST_CASE_DECL(test_cborattr_decode_string_array);
+ TEST_CASE_DECL(test_cborattr_decode_object_array);
+ TEST_CASE_DECL(test_cborattr_decode_unnamed_array);
+ TEST_CASE_DECL(test_cborattr_decode_substring_key);
+-
++TEST_CASE_DECL(test_cborattr_encode_simple);
++TEST_CASE_DECL(test_cborattr_encode_omit);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/encoding/cborattr/selftest/src/test_cborattr_utils.c b/encoding/cborattr/selftest/src/test_cborattr_utils.c
+index 0a43766b1..d520e069c 100644
+--- a/encoding/cborattr/selftest/src/test_cborattr_utils.c
++++ b/encoding/cborattr/selftest/src/test_cborattr_utils.c
+@@ -33,3 +33,18 @@ test_str1(int *len)
+     *len = sizeof(test_data1);
+     return (test_data1);
+ }
++
++void
++cborattr_test_util_encode(const struct cbor_out_attr_t *attrs,
++                          const uint8_t *expected, int len)
++{
++    struct os_mbuf *om;
++    int rc;
++
++    rc = cbor_write_object_msys(attrs, &om);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    TEST_ASSERT(os_mbuf_cmpf(om, 0, expected, len) == 0);
++
++    os_mbuf_free_chain(om);
++}
+diff --git a/encoding/cborattr/selftest/src/testcases/cborattr_encode_omit.c b/encoding/cborattr/selftest/src/testcases/cborattr_encode_omit.c
+new file mode 100644
+index 000000000..4b31c6aa3
+--- /dev/null
++++ b/encoding/cborattr/selftest/src/testcases/cborattr_encode_omit.c
+@@ -0,0 +1,140 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "test_cborattr.h"
++
++TEST_CASE_SELF(test_cborattr_encode_omit)
++{
++    /* Omit everything except the "str" value. */
++    const struct cbor_out_attr_t attrs[] = {
++        {
++            .attribute = "null",
++            .val = {
++                .type = CborAttrNullType,
++            },
++            .omit = true,
++        },
++        {
++            .attribute = "bool",
++            .val = {
++                .type = CborAttrBooleanType,
++                .boolean = true,
++            },
++            .omit = true,
++        },
++        {
++            .attribute = "int",
++            .val = {
++                .type = CborAttrIntegerType,
++                .integer = -99,
++            },
++            .omit = true,
++        },
++        {
++            .attribute = "uint",
++            .val = {
++                .type = CborAttrUnsignedIntegerType,
++                .integer = 8442,
++            },
++            .omit = true,
++        },
++        {
++            .attribute = "float",
++            .val = {
++                .type = CborAttrFloatType,
++                .fval = 8.0,
++            },
++            .omit = true,
++        },
++        {
++            .attribute = "double",
++            .val = {
++                .type = CborAttrDoubleType,
++                .real = 16.0,
++            },
++            .omit = true,
++        },
++        {
++            .attribute = "bytes",
++            .val = {
++                .type = CborAttrByteStringType,
++                .bytestring.data = (uint8_t[]) {1, 2, 3},
++                .bytestring.len = 3,
++            },
++            .omit = true,
++        },
++        {
++            .attribute = "str",
++            .val = {
++                .type = CborAttrTextStringType,
++                .string = "mystr",
++            },
++        },
++        {
++            .attribute = "arr",
++            .val = {
++                .type = CborAttrArrayType,
++                .array = {
++                    .elems = (struct cbor_out_val_t[]) {
++                        [0] = {
++                            .type = CborAttrUnsignedIntegerType,
++                            .integer = 4355,
++                        },
++                        [1] = {
++                            .type = CborAttrBooleanType,
++                            .integer = false,
++                        },
++                    },
++                    .len = 2,
++                },
++            },
++            .omit = true,
++        },
++        {
++            .attribute = "obj",
++            .val = {
++                .type = CborAttrObjectType,
++                .obj = (struct cbor_out_attr_t[]) {
++                    {
++                        .attribute = "inner_str",
++                        .val = {
++                            .type = CborAttrTextStringType,
++                            .string = "mystr2",
++                        },
++                    },
++                    {
++                        .attribute = "inner_int",
++                        .val = {
++                            .type = CborAttrIntegerType,
++                            .integer = 123,
++                        },
++                    },
++                    { 0 }
++                },
++            },
++            .omit = true,
++        },
++        { 0 }
++    };
++    const uint8_t exp[] = {
++        0xbf, 0x63, 0x73, 0x74, 0x72, 0x65, 0x6d, 0x79,
++        0x73, 0x74, 0x72, 0xff,
++    };
++
++    cborattr_test_util_encode(attrs, exp, sizeof exp);
++}
+diff --git a/encoding/cborattr/selftest/src/testcases/cborattr_encode_simple.c b/encoding/cborattr/selftest/src/testcases/cborattr_encode_simple.c
+new file mode 100644
+index 000000000..1ddcf3cac
+--- /dev/null
++++ b/encoding/cborattr/selftest/src/testcases/cborattr_encode_simple.c
+@@ -0,0 +1,143 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "test_cborattr.h"
++
++TEST_CASE_SELF(test_cborattr_encode_simple)
++{
++    const struct cbor_out_attr_t attrs[] = {
++        {
++            .attribute = "null",
++            .val = {
++                .type = CborAttrNullType,
++            },
++        },
++        {
++            .attribute = "bool",
++            .val = {
++                .type = CborAttrBooleanType,
++                .boolean = true,
++            },
++        },
++        {
++            .attribute = "int",
++            .val = {
++                .type = CborAttrIntegerType,
++                .integer = -99,
++            },
++        },
++        {
++            .attribute = "uint",
++            .val = {
++                .type = CborAttrUnsignedIntegerType,
++                .integer = 8442,
++            },
++        },
++        {
++            .attribute = "float",
++            .val = {
++                .type = CborAttrFloatType,
++                .fval = 8.0,
++            },
++        },
++        {
++            .attribute = "double",
++            .val = {
++                .type = CborAttrDoubleType,
++                .real = 16.0,
++            },
++        },
++        {
++            .attribute = "bytes",
++            .val = {
++                .type = CborAttrByteStringType,
++                .bytestring.data = (uint8_t[]) {1, 2, 3},
++                .bytestring.len = 3,
++            },
++        },
++        {
++            .attribute = "str",
++            .val = {
++                .type = CborAttrTextStringType,
++                .string = "mystr",
++            },
++        },
++        {
++            .attribute = "arr",
++            .val = {
++                .type = CborAttrArrayType,
++                .array = {
++                    .elems = (struct cbor_out_val_t[]) {
++                        [0] = {
++                            .type = CborAttrUnsignedIntegerType,
++                            .integer = 4355,
++                        },
++                        [1] = {
++                            .type = CborAttrBooleanType,
++                            .integer = false,
++                        },
++                    },
++                    .len = 2,
++                },
++            },
++        },
++        {
++            .attribute = "obj",
++            .val = {
++                .type = CborAttrObjectType,
++                .obj = (struct cbor_out_attr_t[]) {
++                    {
++                        .attribute = "inner_str",
++                        .val = {
++                            .type = CborAttrTextStringType,
++                            .string = "mystr2",
++                        },
++                    },
++                    {
++                        .attribute = "inner_int",
++                        .val = {
++                            .type = CborAttrIntegerType,
++                            .integer = 123,
++                        },
++                    },
++                    { 0 }
++                },
++            },
++        },
++        { 0 }
++    };
++    const uint8_t exp[] = {
++        0xbf, 0x64, 0x6e, 0x75, 0x6c, 0x6c, 0xf6, 0x64,
++        0x62, 0x6f, 0x6f, 0x6c, 0xf5, 0x63, 0x69, 0x6e,
++        0x74, 0x38, 0x62, 0x64, 0x75, 0x69, 0x6e, 0x74,
++        0x19, 0x20, 0xfa, 0x65, 0x66, 0x6c, 0x6f, 0x61,
++        0x74, 0xfa, 0x41, 0x00, 0x00, 0x00, 0x66, 0x64,
++        0x6f, 0x75, 0x62, 0x6c, 0x65, 0xfb, 0x40, 0x30,
++        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x62,
++        0x79, 0x74, 0x65, 0x73, 0x43, 0x01, 0x02, 0x03,
++        0x63, 0x73, 0x74, 0x72, 0x65, 0x6d, 0x79, 0x73,
++        0x74, 0x72, 0x63, 0x61, 0x72, 0x72, 0x82, 0x19,
++        0x11, 0x03, 0xf4, 0x63, 0x6f, 0x62, 0x6a, 0xbf,
++        0x69, 0x69, 0x6e, 0x6e, 0x65, 0x72, 0x5f, 0x73,
++        0x74, 0x72, 0x66, 0x6d, 0x79, 0x73, 0x74, 0x72,
++        0x32, 0x69, 0x69, 0x6e, 0x6e, 0x65, 0x72, 0x5f,
++        0x69, 0x6e, 0x74, 0x18, 0x7b, 0xff, 0xff,
++    };
++
++    cborattr_test_util_encode(attrs, exp, sizeof exp);
++}
+diff --git a/encoding/cborattr/selftest/syscfg.yml b/encoding/cborattr/selftest/syscfg.yml
+new file mode 100644
+index 000000000..c043a7055
+--- /dev/null
++++ b/encoding/cborattr/selftest/syscfg.yml
+@@ -0,0 +1,19 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++
++syscfg.vals:
++    FLOAT_USER: 1

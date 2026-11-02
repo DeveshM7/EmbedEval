@@ -447,8 +447,8 @@ MYNEWT_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff", "bench
 
 def mynewt_recipe_files(instance_dir: Path) -> tuple[str, ...]:
     """A Mynewt recipe's files, with sim_arm64.patch where it has one."""
-    return MYNEWT_RECIPE_FILES + (("sim_arm64.patch",)
-                                  if (Path(instance_dir) / "sim_arm64.patch").exists() else ())
+    return MYNEWT_RECIPE_FILES + tuple(name for name in ("sim_arm64.patch", "simulator_compat.diff")
+                                     if (Path(instance_dir) / name).exists())
 
 
 def recipe_fingerprint(instance_dir: Path, files: tuple[str, ...] = RECIPE_FILES) -> str:

@@ -11,10 +11,22 @@ change is usually in the same PR, but a PR that only adds or changes tests can
 detect a fix merged earlier: then you find that fix yourself. Nobody has
 paired it for you.
 
+This is source-based triage, not a validation result. Passing the hard filters
+only establishes a merged, non-revert PR touching a unittest package or test
+support; it does not establish an executable regression. Do not emit an
+exploratory package with an invented `fail_to_pass` just to give every PR a run.
+Unresolved accepting kinds belong at `low` confidence with the missing proof in
+`reason` and `searched`; they are leads, not validated tasks.
+
+This document is the complete model-facing triage procedure. Inspect the exact
+candidate revisions; current upstream layout and previous successful candidates
+are navigation aids, not evidence that this candidate is runnable or detects a fix.
+
 PRs you accept at `high` or `medium` confidence are generated and run: the
 old code plus the new test must fail, the fixed code plus the same test must
-pass. That run, not you, decides validity, so accept every PR that plausibly
-fits, with the evidence. Accepts at `low` are only recorded.
+pass. That run, not you, decides validity. Accept plausible candidates only with
+a source-grounded detecting test and a concrete execution profile. Do not claim
+an unexecuted prediction was observed. Accepts at `low` are only recorded.
 
 There is no linked-issue requirement. An issue (GitHub or a `MYNEWT-nnn` id)
 is only evidence, and a good problem statement can come from the PR text and
@@ -49,6 +61,9 @@ the PR's diff of the test package adds no case and changes no setup, input or
 assertion that the old code violates (a reformatted helper, a renamed variable,
 initialized locals, a removed setting), the kind is `maintenance` even when the
 suite runs the fixed code path.
+If the old code already fails at an unchanged assertion before reaching the
+new test lines, those new lines do not detect the fix. Changing `main()` to
+return a failure status does not create a new failing testcase line.
 
 A fix without a detecting test cannot be graded. Test maintenance without a
 production behavior to implement is not a coding task. Judge by the changed
@@ -92,8 +107,10 @@ a full or short SHA from `open_ref`).
 
 ## 3. What we can run
 
-The runner builds one package on the host with `hw/bsp/native` and
-`compiler/sim`:
+Use the Linux x86_64 profile: `hw/bsp/native` with `compiler/sim`.
+The model-serving GPU architecture is unrelated to the test worker architecture.
+Do not propose an ARM MCU board, QEMU board, or an unvalidated aarch64 simulator
+port as an interchangeable target. The runner builds one package:
 
 ```bash
 newt test @apache-mynewt-core/<test_path>
@@ -102,9 +119,12 @@ newt test @apache-mynewt-core/<test_path>
 `test_path` is the directory of the unit-test package (it contains `pkg.yml`
 with `pkg.type: unittest`), not a file. The generated binary is executed
 directly and the runner reads the testutil lines `[pass] suite/testcase` and
-`[FAIL] suite/testcase`. A missing, unexpected or crashed testcase invalidates
-an instance, so the inventory below must be exact. Hosts are x86 Linux; before
-2024 the old native BSP is a 32-bit build. QEMU is not available. Old
+`[FAIL] suite/testcase`. The complete inventory must be accounted for. A crash
+is not proof that every remaining case executed and failed. If a crash oracle needs a reviewed debugger
+observer, identify the active case and source attribution; keep unexecuted cases
+explicitly separate and leave confidence low until that observation is available.
+Hosts are x86 Linux; before the April 2024 simulator changes, old native builds
+use 32-bit x86. QEMU is not available. Old
 packages (2016-2019) live in `test/` or `test-*` directories instead of
 `selftest`; they are valid unit-test packages, and an old `main()` may return
 0 even when cases fail, so the inventory of `[pass]`/`[FAIL]` lines decides,
@@ -126,14 +146,95 @@ dependencies and the test's own source before deciding. Do not decide from a
   (the changed C source) and `missing_api` (the exact identifier or header as
   written in it). All other build failures are not a valid oracle.
 
-Determinism matters. A test that opens real host sockets or talks to a host
-network interface, or whose pass/fail depends on a wall-clock timeout, thread
-scheduling or a race (waiting on a semaphore or event with a tick timeout for
-another task or an external peer), is not a reliable oracle on a shared build
-host, even when the fix and the changed assertion look correct. For such a
-PR set `confidence` to `low` (a recorded lead), whatever the kind. If the PR
-is mainly about making that test synchronize or pass reliably, the kind is
-`maintenance`.
+### Repository and toolchain facts
+
+`kernel/` contains OS services; `hw/` contains BSPs, native/MCU support and
+drivers; `compiler/` contains toolchain definitions; `test/testutil` contains
+the test framework. Production and test packages also live under `sys/`,
+`util/`, `fs/`, `encoding/`, `libc/` and `net/`. Directory names do not establish
+hardware requirements or test runnability.
+
+For the selected revisions, inspect:
+
+- `pkg.yml`: actual package type, dependencies (including conditional keys),
+  required/provided APIs, and initialization requirements.
+- `syscfg.yml`: selected values, feature guards and restrictions. Read both
+  production defaults and test overrides; conditional APIs may disappear.
+- `repository.yml`: external repository/version mappings. An external package
+  needs a compatible pinned revision and builder support, not an arbitrary HEAD.
+- `hw/bsp/native/{pkg.yml,bsp.yml}`, `compiler/sim/compiler.yml`, and test
+  entry/registration sources: the executable target and active testcase set.
+
+Newt is the build tool from the separate `apache/mynewt-newt` repository;
+`test/testutil` is the framework inside `mynewt-core`. The builder selects a
+pinned historical Newt binary for the candidate base. Old trees may need
+32-bit libraries and reviewed modern-compiler compatibility flags. Missing
+multilib, an incompatible Newt, or an absent external package is not automatically
+the selected regression. Do not repair it by weakening assertions or importing
+the target production fix into the before state.
+
+Static testcase macros are an inventory lead, not proof of execution. Trace
+suite registration, preprocessor conditions and test configuration. Newt must
+resolve the actual dependency/configuration graph, and validation must establish
+the named runtime results. There is no Twister-style compatibility table in this
+workflow that makes those checks unnecessary.
+
+### Selection and execution readiness
+
+Before selecting a package, perform these checks and summarize evidence in
+`reason`, `searched`, and `detecting_test` (existing output fields):
+
+1. Read its `pkg.yml` at base and test revisions. It must be `pkg.type: unittest`.
+   A `lib` under `selftest/` is shared support, not a runnable target. Trace its
+   consumers to an actual unittest package. The current triage checker requires
+   `test_path` in the enriched roots; if the proven consumer is absent there,
+   do not emit an accepting verdict with that consumer, even at low confidence:
+   it cannot pass the current checker. Name the missing consumer/root evidence
+   in the JSON `reason`/`searched` explanation; any resulting checker failure
+   is retained for out-of-band input review, not scored as a semantic rejection. This needs enrichment or explicit manual
+   review before triage can continue; do not substitute the helper or mislabel
+   the PR as maintenance or hardware-dependent. A schema error is an unresolved
+   input/representation problem, not evidence the PR is unsuitable.
+2. Trace `pkg.deps` including conditional keys, `pkg.apis`, `syscfg.yml` values
+   and restrictions, test entry/registration, and external repository references.
+   Cite the actual dependency chain that makes native execution possible or
+   requires hardware. Newt resolves the configuration; a source read alone is
+   not a successful build. The native BSP includes simulated flash/TRNG and host
+   sockets: those subsystem names do not themselves imply physical hardware.
+3. Read the selected testcase's changed inputs/assertion and the old production
+   implementation. Explain the trigger and expected failure for each proposed
+   `fail_to_pass` case. A shared helper, newly added case, or missing function
+   name alone does not establish runtime failure. If the expected failure is
+   compilation, select compile mode and identify the source/API instead.
+4. Check that dependencies and the selected package exist at the appropriate
+   revisions. A new unittest package may legitimately be absent at baseline:
+   `baseline_tests` is then empty. It must exist after the test patch, without
+   importing the target production fix. Do not reject solely because old tests
+   fail for another reason; do not accept that unrelated failure as detection.
+5. Record host/tool requirements and blockers in `searched`. Use the Newt binary
+   selected for the exact base revision by the renderer; do not guess from the
+   PR date or use the newest binary for every historical tree. Missing compiler,
+   incompatible worker, and output-decoding errors are infrastructure failures.
+
+Network and scheduling require evidence, not a blanket path-based exclusion.
+A self-contained parser test may need no network despite depending on a socket
+package. A test requiring interfaces may use only a reviewed, reproducible local
+fixture: private network namespace, explicit interfaces/addresses, no external
+peer, DNS, credentials, or Internet access. EmbedEval's existing `mynewt-veth`
+fixture supplies `bench0`/`bench1`; do not assume that fixture fits a new PR just
+because it helped another. The normal generator does not propagate a
+`network_fixture` verdict field; fixture-dependent candidates need a separately
+reviewed validation wrapper/metadata handoff. They are not ready for the normal
+batch path merely because the agent harness supports that fixture. If the record does not establish a supported fixture,
+leave confidence low and name the requirement. Do not invent a JSON metadata key
+or silently enable network access. Timing/race tests need a source-grounded
+synchronization argument and repeated execution evidence before promotion; a
+longer timeout alone is not evidence of determinism.
+
+Do not add simulator compatibility fixes during triage. A separately reviewed
+fixture must be pinned, disjoint from the target fix/test changes, protected,
+and identical in baseline/before/after. If needed but unavailable, name it as a
+blocker. Never backport the target fix into the starting image to make it build.
 
 ## 4. Test and fix must separate
 
@@ -151,6 +252,14 @@ lines the test-only patch changes, `gold_patch_three_way` is `true`.
 needs to build with a current compiler (e.g. a warning that became an error).
 Usually `[]`. Never use them to hide a failure the missing change causes.
 
+`simulator_fixture: "taskpool-stack-2150"` applies the exact separate upstream
+taskpool stack-size correction for the old native simulator. It requires the
+source file to match the pinned upstream parent and be disjoint from the selected
+fix and test patch. The fixture is committed before the test snapshot, retained
+in baseline/before/after, protected from agent edits, and recorded with source
+commits and a patch hash in host metadata. It is not part of the target PR's gold
+patch.
+
 ## 5. Inventory
 
 Your input ends with the testcases computed from the package sources at the
@@ -167,19 +276,29 @@ PR's head, as `suite/testcase`, one list per package. Use these names exactly:
   trigger condition (the input, size, sequence or state that exposes the bug)
   must occur in that case's own body and parameters: an extra generic check
   added to a case whose own inputs never reach the bug does not make it fail.
+  When several cases reach the same new assertion with different inputs,
+  trace each case separately through the old code, including sizes and
+  boundary conditions. If you cannot show why the old code fails for a
+  modified case's own input sequence, put it in `pass_to_pass`; sharing an
+  assertion with a failing case is not enough.
   Cases added in the same PR as control or baseline scenarios (the simple
   configuration, the case where only one resource or path is involved, the
   case that exercises the behavior that already worked) pass on the old code
   too: they belong in `pass_to_pass` even though they are new.
+  For example, two fill tests can share a reinitialization assertion while
+  only the smaller-write sequence reaches the buggy metadata boundary. Trace
+  sizes and state for each; do not label both failing from a shared assertion.
   A wrong `fail_to_pass` entry invalidates the whole instance while an omitted
   one only loses a check, so be conservative. A case that only exists to exercise unchanged
   behavior, or only changed in an unrelated way, is not here.
 - `pass_to_pass`: every other testcase of the package: unchanged cases and
   added cases that do not detect the change. A case is in exactly one of the
   two lists.
-- `baseline_tests`: testcases present and passing before the test patch is
-  applied (usually `pass_to_pass` minus newly added cases; empty for a new
-  package).
+- `baseline_tests`: testcases present before the test patch is applied
+  (usually `pass_to_pass` minus newly added cases; empty for a new package).
+  Their results diagnose original-code health; a baseline failure alone does
+  not reject an instance. Acceptance requires a failure attributable to the
+  upstream production fix before that fix, followed by a pass afterward.
 
 If the PR changes several packages, pick the one containing the detecting
 test and use only its inventory.
@@ -199,14 +318,23 @@ the earlier fix's symptom, without the earlier fix's code.
 ## 7. Confidence
 
 - `high`: the production change and the detecting assertion are both
-  confirmed from the diffs, the package is host-runnable, and the test and
-  fix separate cleanly.
+  confirmed from the diffs, the runnable unittest and native dependency chain
+  are identified, the exact testcase trigger is explained, and the test and fix
+  separate cleanly. This remains a source prediction until validation runs.
 - `medium`: the change plausibly makes the changed test fail before and pass
-  after, but one thing is unconfirmed (an indirect link, how the test is
-  separated, a platform detail). Prefer `medium` over `low` when the fix
-  plausibly fits.
+  after with a runnable package and a concrete source-level causal argument,
+  but a bounded execution detail remains unconfirmed. State it explicitly.
+  An unknown runnable target, unknown external dependency, missing fixture, or
+  unproven detecting assertion requires `low`, not a speculative executable plan.
 - `low`: a lead only: weak link, unclear oracle, or you could not confirm the
   fix. Reject kinds carry a confidence too; use `high` when sure.
+
+Before returning an accept, check: exact revisions; real unittest root;
+base-compatible Newt/x86 profile; dependency/fixture requirements; protected
+upstream test patch separate from production fix; per-case causal argument;
+disjoint and complete fail/pass lists; baseline inventory; honest uncertainty.
+The JSON is a candidate specification. Only saved execution evidence can call
+it a validated instance.
 
 ## 8. Tools
 
@@ -279,3 +407,78 @@ Field rules:
   `fail_to_pass` then names the tests expected to pass once the interface
   exists.
 - Do not invent links, paths, names, target support, flags or results.
+
+### Optional fields and reviewed-only handoffs
+
+Keep the ordinary runtime/changed-C-source compile output above as the default.
+These optional fields are not interchangeable; use only existing source or saved
+observations, never invented logs, hashes, API names or fixture metadata:
+
+| Situation | Fields / handoff | Current boundary |
+|---|---|---|
+| New test package / renamed baseline package | `baseline_tests: []` when absent; optional `baseline_test_path` for a proven original package | Record the actual original inventory, not head names copied into baseline |
+| Supported debugger observer | `test_observer: "testutil-gdb"` | Generator checks upstream event symbols; it does not by itself prove crash attribution |
+| Configuration failure | `failure_mode: "config"`, `config_expectation` | Requires saved exact output and repository-relative `observed_log`, plus setting/path proof; source-only triage cannot invent these |
+| New production dependency | `failure_mode: "dependency"`, `change_type: "feature_with_test"`, `dependency_expectation` | Required in addition to the accepting `kind`; requires provider/kind and saved exact output/`observed_log` checked by generator |
+| Multiple compile diagnostics / test-helper include | `compile_expectations`, optional `compile_dependency_headers` | Reviewed generator path; unchanged helper/header evidence does not satisfy the ordinary triage checker's changed-C-source rule |
+| Existing API provider retained equally in states | `base_api_providers` | Reviewed generator proof, not permission to add the target fix as a dependency |
+| Pinned external repository | `mcumgr_commit` where supported | Exact compatible revision; generator checks upstream release mapping |
+| Simulator compatibility | `simulator_fixture` where supported | Reviewed renderer/metadata handoff, not a new model-invented fixture |
+| Local network topology | Separate reviewed validation wrapper and agent metadata | Normal verdict generation does not wire `network_fixture` through |
+
+Config/dependency profiles without saved execution evidence, helper consumers
+outside enriched roots, and compile cases outside the checker's source rule must
+remain unresolved/manual-review items. They cannot be made executable by adding
+a plausible-looking JSON object. The reviewer must save the evidence and correct
+the representation before the generator handoff.
+
+The current runner can label all unreported cases as failed after a signal.
+Those are crash-inferred labels, not individual observations. Require separate
+observer/trace evidence for the active detecting case and preserve the list of
+unexecuted cases. Do not promote a newly triaged crash task based on the apparent
+completeness of that inferred list; it needs a reviewed evidence/representation
+handoff. This prompt does not change the runner's classification algorithm.
+
+### Source-attributed configuration failures
+
+A reviewed `failure_mode: "config"` records a Newt restriction failure before
+compilation, separately from a runtime assertion failure. `config_expectation`
+contains the exact observed Newt output, `production_path`, `setting`,
+`test_config_path`, and `test_settings`. Generation verifies that the real PR
+changes that production setting's value or restrictions and that the protected
+upstream test configuration contains the specified inputs. The runner accepts
+only the fingerprint of the complete observed build output; other errors remain
+inconclusive. After applying the production fix, the entire named testcase
+inventory must execute and pass. No individual testcase is reported as having
+executed before a configuration failure. This does not accept generic
+missing-library errors.
+
+For a missing include in an unchanged protected test helper,
+`compile_dependency_headers` can identify its API header, existing provider,
+changed production package file, selector flag, and changed test configuration.
+Generation requires identical helper content at base/test, a direct include,
+an existing provider/header at base, a newly added conditional dependency in
+the production fix, and selector value 1 in the upstream test. This attributes
+an include-path failure without copying the dependency fix into the before
+state. All actual compiler errors must still match the expectation profile.
+
+A scoped production sub-fix can retain a legacy test dependency through
+`base_api_providers`. The provider must be listed in the original test package,
+provide an API required by the named base consumer, and both provider and
+consumer must remain outside the selected production/test patches. The builder
+adds that existing provider to the generated target in both phases; it never
+copies implementation code from the fixed revision into the before state.
+
+### New-module functionality additions
+
+`failure_mode: "dependency"` is reserved for `change_type: "feature_with_test"`.
+The exact observed Newt dependency-resolution output is fingerprinted. The
+provider package must be absent at base, selected in the upstream production
+patch, and directly required by the protected test package. In-repository short
+package names are equivalent to their `@apache-mynewt-core/` names. For a missing
+API provider, source checks instead require the test's base consumer to require
+that API and the upstream BSP change to select the newly added provider.
+These are build-failure-to-named-pass tasks: no testcase is claimed to execute
+before dependency resolution succeeds. The full named inventory must run and
+pass after the real upstream implementation is applied. Keep this label when
+exporting the tasks so they can be separated from existing-code bug fixes.

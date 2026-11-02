@@ -1,0 +1,237 @@
+diff --git a/sys/config/selftest-fcb/src/testcases/config_test_get_stored.c b/sys/config/selftest-fcb/src/testcases/config_test_get_stored.c
+index 73450808a..c1d6017df 100644
+--- a/sys/config/selftest-fcb/src/testcases/config_test_get_stored.c
++++ b/sys/config/selftest-fcb/src/testcases/config_test_get_stored.c
+@@ -73,5 +73,17 @@ TEST_CASE_SELF(config_test_get_stored_fcb)
+     rc = conf_get_stored_value("myfoo/mybar", stored_val, 1);
+     TEST_ASSERT(rc == OS_EINVAL);
+ 
++    /*
++     * Buffer without space for terminating NUL
++     */
++    memset(stored_val, 0xa5, sizeof(stored_val));
++    rc = conf_get_stored_value("myfoo/mybar", stored_val, 2);
++    TEST_ASSERT(rc == OS_EINVAL);
++    TEST_ASSERT((uint8_t)stored_val[2] == 0xa5);
++
++    rc = conf_get_stored_value("myfoo/mybar", stored_val, 3);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(!strcmp(stored_val, "31"));
++
+     test_export_block = 1;
+ }
+diff --git a/sys/config/selftest-fcb2/src/testcases/config_test_get_stored.c b/sys/config/selftest-fcb2/src/testcases/config_test_get_stored.c
+index 3be6c895f..2c4ed7bcb 100644
+--- a/sys/config/selftest-fcb2/src/testcases/config_test_get_stored.c
++++ b/sys/config/selftest-fcb2/src/testcases/config_test_get_stored.c
+@@ -74,5 +74,17 @@ TEST_CASE_SELF(config_test_get_stored_fcb)
+     rc = conf_get_stored_value("myfoo/mybar", stored_val, 1);
+     TEST_ASSERT(rc == OS_EINVAL);
+ 
++    /*
++     * Buffer without space for terminating NUL
++     */
++    memset(stored_val, 0xa5, sizeof(stored_val));
++    rc = conf_get_stored_value("myfoo/mybar", stored_val, 2);
++    TEST_ASSERT(rc == OS_EINVAL);
++    TEST_ASSERT((uint8_t)stored_val[2] == 0xa5);
++
++    rc = conf_get_stored_value("myfoo/mybar", stored_val, 3);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(!strcmp(stored_val, "31"));
++
+     test_export_block = 1;
+ }
+diff --git a/sys/config/selftest-nffs/src/testcases/config_test_get_stored.c b/sys/config/selftest-nffs/src/testcases/config_test_get_stored.c
+index 33b92606b..c6a9346a3 100644
+--- a/sys/config/selftest-nffs/src/testcases/config_test_get_stored.c
++++ b/sys/config/selftest-nffs/src/testcases/config_test_get_stored.c
+@@ -69,5 +69,17 @@ TEST_CASE_SELF(config_test_get_stored_file)
+     rc = conf_get_stored_value("myfoo/mybar", stored_val, 1);
+     TEST_ASSERT(rc == OS_EINVAL);
+ 
++    /*
++     * Buffer without space for terminating NUL
++     */
++    memset(stored_val, 0xa5, sizeof(stored_val));
++    rc = conf_get_stored_value("myfoo/mybar", stored_val, 2);
++    TEST_ASSERT(rc == OS_EINVAL);
++    TEST_ASSERT((uint8_t)stored_val[2] == 0xa5);
++
++    rc = conf_get_stored_value("myfoo/mybar", stored_val, 3);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(!strcmp(stored_val, "31"));
++
+     test_export_block = 1;
+ }
+diff --git a/sys/flash_map/selftest/src/flash_map_test.c b/sys/flash_map/selftest/src/flash_map_test.c
+index 1961a9277..ea82c0448 100644
+--- a/sys/flash_map/selftest/src/flash_map_test.c
++++ b/sys/flash_map/selftest/src/flash_map_test.c
+@@ -38,6 +38,7 @@ TEST_CASE_DECL(flash_map_test_case_1)
+ TEST_CASE_DECL(flash_map_test_case_2)
+ TEST_CASE_DECL(flash_map_test_case_3)
+ TEST_CASE_DECL(flash_map_test_case_new_areas)
++TEST_CASE_DECL(flash_map_test_case_bounds)
+ 
+ TEST_SUITE(flash_map_test_suite)
+ {
+@@ -45,6 +46,7 @@ TEST_SUITE(flash_map_test_suite)
+     flash_map_test_case_2();
+     flash_map_test_case_3();
+     flash_map_test_case_new_areas();
++    flash_map_test_case_bounds();
+ }
+ 
+ int
+diff --git a/sys/flash_map/selftest/src/testcases/flash_map_test_case_bounds.c b/sys/flash_map/selftest/src/testcases/flash_map_test_case_bounds.c
+new file mode 100644
+index 000000000..669075a3c
+--- /dev/null
++++ b/sys/flash_map/selftest/src/testcases/flash_map_test_case_bounds.c
+@@ -0,0 +1,58 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "flash_map_test.h"
++
++/*
++ * Test that accesses outside of flash area or flash device are rejected,
++ * including lengths that make offset + length wrap around.
++ */
++TEST_CASE_SELF(flash_map_test_case_bounds)
++{
++    const struct flash_area *fa;
++    uint8_t buf[16];
++    int rc;
++
++    rc = flash_area_open(FLASH_AREA_IMAGE_0, &fa);
++    TEST_ASSERT_FATAL(rc == 0, "flash_area_open() fail");
++
++    rc = flash_area_read(fa, 16, buf, UINT32_MAX - 8);
++    TEST_ASSERT(rc != 0);
++    rc = flash_area_write(fa, 16, buf, UINT32_MAX - 8);
++    TEST_ASSERT(rc != 0);
++    rc = flash_area_erase(fa, 16, UINT32_MAX - 8);
++    TEST_ASSERT(rc != 0);
++
++    rc = flash_area_read_is_empty(fa, fa->fa_size, buf, sizeof(buf));
++    TEST_ASSERT(rc < 0);
++    rc = flash_area_read_is_empty(fa, fa->fa_size - 8, buf, sizeof(buf));
++    TEST_ASSERT(rc < 0);
++    rc = flash_area_read_is_empty(fa, 16, buf, UINT32_MAX - 8);
++    TEST_ASSERT(rc < 0);
++    rc = flash_area_read_is_empty(fa, 0, buf, sizeof(buf));
++    TEST_ASSERT(rc >= 0);
++
++    rc = hal_flash_read(fa->fa_device_id, fa->fa_off + 16, buf, UINT32_MAX - 8);
++    TEST_ASSERT(rc != 0);
++    rc = hal_flash_write(fa->fa_device_id, fa->fa_off + 16, buf, UINT32_MAX - 8);
++    TEST_ASSERT(rc != 0);
++    rc = hal_flash_isempty(fa->fa_device_id, fa->fa_off + 16, buf, UINT32_MAX - 8);
++    TEST_ASSERT(rc < 0);
++
++    flash_area_close(fa);
++}
+diff --git a/util/cbmem/selftest/include/cbmem_test/cbmem_test.h b/util/cbmem/selftest/include/cbmem_test/cbmem_test.h
+index 8b2c97281..7b74451c7 100644
+--- a/util/cbmem/selftest/include/cbmem_test/cbmem_test.h
++++ b/util/cbmem/selftest/include/cbmem_test/cbmem_test.h
+@@ -43,6 +43,7 @@ extern "C" {
+ TEST_CASE_DECL(cbmem_test_case_1);
+ TEST_CASE_DECL(cbmem_test_case_2);
+ TEST_CASE_DECL(cbmem_test_case_3);
++TEST_CASE_DECL(cbmem_test_case_too_long);
+ TEST_SUITE_DECL(cbmem_test_suite);
+ 
+ int cbmem_test_case_1_walk(struct cbmem *cbmem,
+diff --git a/util/cbmem/selftest/src/cbmem_test.c b/util/cbmem/selftest/src/cbmem_test.c
+index 0886930d3..9a319c5c3 100644
+--- a/util/cbmem/selftest/src/cbmem_test.c
++++ b/util/cbmem/selftest/src/cbmem_test.c
+@@ -86,6 +86,7 @@ TEST_SUITE(cbmem_test_suite)
+     cbmem_test_case_1();
+     cbmem_test_case_2();
+     cbmem_test_case_3();
++    cbmem_test_case_too_long();
+ }
+ 
+ int
+diff --git a/util/cbmem/selftest/src/testcases/cbmem_test_case_too_long.c b/util/cbmem/selftest/src/testcases/cbmem_test_case_too_long.c
+new file mode 100644
+index 000000000..5906e8089
+--- /dev/null
++++ b/util/cbmem/selftest/src/testcases/cbmem_test_case_too_long.c
+@@ -0,0 +1,57 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "cbmem_test/cbmem_test.h"
++
++/*
++ * Entries that do not fit in buffer are rejected
++ */
++TEST_CASE_SELF(cbmem_test_case_too_long)
++{
++    struct cbmem_scat_gath_entry entries[2];
++    struct cbmem_scat_gath sg;
++    struct cbmem cbmem;
++    struct {
++        uint8_t buf[64];
++        uint8_t guard[16];
++    } mem;
++    uint8_t data[64];
++    int rc;
++
++    memset(&mem, 0xa5, sizeof(mem));
++    memset(data, 0x11, sizeof(data));
++    cbmem_init(&cbmem, mem.buf, sizeof(mem.buf));
++
++    rc = cbmem_append(&cbmem, data, sizeof(mem.buf));
++    TEST_ASSERT(rc != 0);
++
++    rc = cbmem_append(&cbmem, data, sizeof(mem.buf) - sizeof(struct cbmem_entry_hdr));
++    TEST_ASSERT(rc == 0);
++
++    /* Total length does not fit in 16 bits */
++    entries[0].om = NULL;
++    entries[0].flat_buf = data;
++    entries[0].flat_len = 0x8000;
++    entries[1] = entries[0];
++    sg.entries = entries;
++    sg.count = 2;
++    rc = cbmem_append_scat_gath(&cbmem, &sg);
++    TEST_ASSERT(rc != 0);
++
++    TEST_ASSERT(mem.guard[0] == 0xa5);
++}

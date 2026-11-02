@@ -7,6 +7,8 @@ RUN git init /testbed \
     && git fetch --depth 1 origin ${BASE_COMMIT} \
     && git checkout --detach FETCH_HEAD
 
+@@SIMULATOR_FIXTURE@@
+
 # Apply only the PR's native selftest changes, leaving production code at the
 # pre-PR commit that the coding agent must repair.
 COPY metadata.json test_patch.diff /opt/benchmark/
@@ -35,9 +37,13 @@ RUN mkdir -p /project/repos /project/targets/unittest \
         'target.build_profile: "debug"' \
         'target.compiler: "@apache-mynewt-core/compiler/sim"' \
         > /project/targets/unittest/target.yml \
-    && python3 -c 'import json; from pathlib import Path; p = Path("/opt/benchmark/metadata.json"); m = json.loads(p.read_text()); flags = m.get("compatibility_cflags", []); lines = ["pkg.name: targets/unittest", "pkg.type: target"]; lines += (["pkg.cflags:"] + ["    - " + flag for flag in flags]) if flags else []; Path("/project/targets/unittest/pkg.yml").write_text("\n".join(lines) + "\n"); p.write_text(json.dumps({k: m[k] for k in ("test_path", "baseline_tests", "fail_to_pass", "pass_to_pass", "failure_mode", "compile_test_source", "missing_api")}))'
+    && python3 -c 'import json; from pathlib import Path; p = Path("/opt/benchmark/metadata.json"); m = json.loads(p.read_text()); flags = m.get("compatibility_cflags", []); lines = ["pkg.name: targets/unittest", "pkg.type: target"]; deps = m.get("base_api_provider_packages", []); lines += (["pkg.deps:"] + ["    - \"@apache-mynewt-core/" + dep + "\"" for dep in deps]) if deps else []; lines += (["pkg.cflags:"] + ["    - " + flag for flag in flags]) if flags else []; Path("/project/targets/unittest/pkg.yml").write_text("\n".join(lines) + "\n"); p.write_text(json.dumps({k: m[k] for k in ("test_path", "baseline_tests", "fail_to_pass", "pass_to_pass", "failure_mode", "compile_test_source", "missing_api") + tuple(k for k in ("compile_expectations", "compile_declarations", "compile_notes", "test_observer", "mcumgr_commit", "config_output_sha256", "dependency_output_sha256") if k in m)}))'
 
 COPY run_tests.sh /usr/local/bin/run_tests
 RUN chmod +x /usr/local/bin/run_tests
+RUN if python3 -c 'import json,sys; sys.exit(json.load(open("/opt/benchmark/metadata.json")).get("test_observer") != "testutil-gdb")'; then \
+        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gdb \
+        && rm -rf /var/lib/apt/lists/*; fi
+RUN run_tests --install-deps
 
 WORKDIR /testbed

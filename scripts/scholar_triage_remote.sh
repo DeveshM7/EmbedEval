@@ -26,6 +26,7 @@ REMOTE_REPO="${SCHOLAR_REPO:-EmbedEval}"          # relative to the remote home
 PROFILE="${TRIAGE_PROFILE:-qwen38-nvfp4}"
 PROJECT="${TRIAGE_PROJECT:-nuttx}"
 PROMPT="docs/${PROJECT}_pr_triage.md"
+if [ "$PROJECT" = mynewt ]; then PROMPT="docs/mynewt_triage.md"; fi
 SCRIPT="scripts/triage_${PROJECT}_prs.py"
 RUNS="triage/${PROJECT}_runs"
 LOCAL_REPO="$(cd "$(dirname "$0")/.." && pwd)"

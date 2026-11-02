@@ -14,14 +14,18 @@ and the tests actually run.
   On Purdue Scholar the pipeline runs as one Slurm job over many nodes:
   [docs/running_on_scholar.md](docs/running_on_scholar.md) (how to use it) and
   [docs/pipeline_internals.md](docs/pipeline_internals.md) (how it works).
-- **NuttX, RIOT and Mynewt** instances are **Docker** images in `docker/instances/`.
+- **NuttX and RIOT** have **Docker** images in `docker/instances/`.
   The NuttX ones are generated from reviewed PR pairs — see
   [docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md). A NuttX instance
   can also be rendered as an Apptainer recipe, for hosts without Docker such
   as Scholar's ARM64 nodes — see [NuttX in Apptainer](#nuttx-in-apptainer).
 
+- **Mynewt** has 54 validated **Apptainer** instances in
+  `apptainer/instances/mynewt/`, built and run on Linux x86_64 with the native BSP.
+  See the [Mynewt triage guide](docs/mynewt_triage.md).
+
 **Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 37 NuttX (30
-Apptainer ones in `apptainer/instances/nuttx/`, 7 Docker ones), 3 RIOT, 3 Apache Mynewt (Docker).
+Apptainer ones in `apptainer/instances/nuttx/`, 7 Docker ones), 3 RIOT, 54 Apache Mynewt (Apptainer).
 
 ---
 
@@ -206,10 +210,10 @@ free pass on it. This is not theoretical; see the `CONFIG_NDEBUG` note in
 
 ### Apache Mynewt
 
-Build and validate all three Mynewt instances through the same commands:
+Build and validate the 54 promoted Mynewt instances on Linux x86_64. The
+Apptainer builder creates its shared base on demand:
 
 ```bash
-python scripts/build_bases.py --repo mynewt
 python scripts/build_instances.py --repo mynewt
 python scripts/validate_instance.py --repo mynewt --verbose
 ```
@@ -222,38 +226,17 @@ python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <confi
 ```
 
 Mynewt tests compile to host-native executables using `hw/bsp/native` and
-`compiler/sim`. They run on Docker's `linux/amd64` platform and do not use
-QEMU.
+`compiler/sim`, without QEMU. Historical builds require x86 multilib support.
+The validator records baseline diagnostics, then requires an attributable
+failure without the production fix and a pass with it. Supported runtime,
+compile, configuration and dependency oracles have separate evidence requirements;
+a generic build failure or timeout does not qualify. Tests remain protected.
 
-Mynewt validation first runs the unpatched baseline in a separate container
-at the parent of the benchmark test snapshot. Its exact `baseline_tests`
-inventory must pass with exit `0`. The test-patched snapshot must then fail
-with exit `1`, and the production fix must make the complete expected test
-inventory pass with exit `0`.
-
-The default `failure_mode: "runtime"` requires a successful build and the
-exact named `fail_to_pass` failures before the fix. For
-`failure_mode: "compile"`, declare `compile_test_source` (a changed selftest
-C/C++ source in the test patch) and `missing_api` (the API token used there).
-Every pre-fix compiler error must name that source and API, except GCC
-int-to-pointer assignment cascades following an implicit-function declaration:
-each cascade must include a matching source line and column showing a direct
-assignment from the missing API call. An unrelated error, compiler crash, or
-timeout is not regression evidence. After the fix, compile
-mode still requires every `fail_to_pass` and `pass_to_pass` testcase to execute
-and pass, with no missing or unexpected cases. Build/runtime timeouts return
-`2`; other unqualified build or inventory failures return `3`.
-
-Both modes retain the same eligibility requirements: an originating issue,
-a merged PR that changes an executable native selftest, and an exact test-only
-patch. If test support lives outside `selftest`, inspect both
-`base_commit..test_commit` and `test_commit..head_commit`, declare
-`test_support_paths`, and verify that the support does not contain the
-production fix. Reject candidates whose separation cannot be established.
-
-No additional compile-mode benchmark candidate has been verified. The three
-listed Mynewt instances remain runtime tasks; compile-mode support alone does
-not establish a new eligible benchmark instance.
+Promoted recipes and validation receipts are in `apptainer/instances/mynewt/`.
+The fuller local catalog, staging copies and sample evidence remain under
+`generated/mynewt-evidence/` (ignored by Git). See the
+[Mynewt triage guide](docs/mynewt_triage.md) for execution requirements and
+source-grounded triage rules.
 
 ### Finding and generating PR instances
 
@@ -272,14 +255,14 @@ python scripts/filter_candidates.py enrich --repo mynewt
 ```
 
 Give each JSON record under `candidates/mynewt/enriched/` to the triage model
-with [`docs/mynewt_pr_triage.md`](docs/mynewt_pr_triage.md). Save an accepted
+with [`docs/mynewt_triage.md`](docs/mynewt_triage.md). Save an accepted
 verdict as JSON, then generate the four instance files:
 
 ```bash
 python scripts/generate_instance.py \
     --repo mynewt \
     --pr 3299 \
-    --triage triage/mynewt-3299.json \
+    --triage triage/mynewt_reviewed/3299.json \
     --tag-suffix=-gen
 ```
 

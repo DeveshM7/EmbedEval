@@ -51,7 +51,7 @@ ACCEPT_KINDS = ("fix_with_test", "feature_with_test", "test_only_detects_earlier
 REJECT_KINDS = ("maintenance", "needs_hw")
 LEVELS = ("low", "medium", "high")
 MAX_TOOL_CALLS = 40
-MAX_TOOL_SECONDS = 1500        # tools are withdrawn after this much wall time
+MAX_TOOL_SECONDS = 2700        # tools are withdrawn after this much wall time
 FINAL_GRACE = 600
 CONTEXT_LIMIT = 190_000
 MAX_REPAIRS = 2
@@ -188,11 +188,26 @@ def render_record(case: str, record: dict, field_limit: int = 20000) -> str:
     keys = ("number", "url", "title", "body", "merged_at", "labels", "base_commit",
             "base_date", "head_commit", "commits", "files", "files_truncated", "linked_issues")
     view = {key: record[key] for key in keys if key in record}
+    files = record.get("files") or []
+    patch_limit = min(field_limit, 250000 // max(len(files), 1))
+    view["files"] = [{**item, "patch": (
+        item["patch"][:patch_limit] + "\n[Diff excerpt; use diff with this path for the full patch.]"
+        if isinstance(item.get("patch"), str) and len(item["patch"]) > patch_limit
+        else item.get("patch"))} for item in files]
     for key in ("comments", "reviews", "review_comments"):
         view[key] = [{field: item.get(field) for field in
                       ("body", "state", "path", "diff_hunk") if item.get(field)}
                      for item in record.get(key, [])[:30]]
-    view["test_suites"] = {root: {name: entry.get("content") for name, entry in
+    source_files = sum(len(suite.get("files", {}))
+                       for suite in (record.get("test_suites") or {}).values())
+    source_limit = min(field_limit, 120000 // max(source_files, 1))
+    def source_excerpt(content):
+        if not isinstance(content, str) or len(content) <= source_limit:
+            return content
+        return (content[:source_limit] +
+                "\n[Source excerpt; use read_file at head for the remaining lines.]")
+
+    view["test_suites"] = {root: {name: source_excerpt(entry.get("content")) for name, entry in
                                   suite.get("files", {}).items()}
                            for root, suite in (record.get("test_suites") or {}).items()}
     text = json.dumps({"case": case, **bounded(view)}, ensure_ascii=False,
@@ -312,7 +327,7 @@ def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
     if not isinstance(baseline, list) or not all(isinstance(n, str) and NAME.fullmatch(n)
                                                   for n in baseline):
         issues.append("baseline_tests must be a list (empty if none) of suite/testcase "
-                      "names that pass before the test patch is applied")
+                      "names present before the test patch is applied")
     f2p, p2p = verdict.get("fail_to_pass"), verdict.get("pass_to_pass")
     if isinstance(f2p, list) and isinstance(p2p, list):
         both = sorted(set(map(str, f2p)) & set(map(str, p2p)))
@@ -342,8 +357,13 @@ def check_verdict(verdict: dict | None, case: str, record: dict) -> list[str]:
         issues.append(f"fix_pr must be {case} (the fix is this PR's own production change)")
 
     mode = verdict.get("failure_mode", "runtime")
-    if mode not in ("runtime", "compile"):
-        issues.append("failure_mode must be \"runtime\" or \"compile\"")
+    if mode not in ("runtime", "compile", "config", "dependency"):
+        issues.append("failure_mode must be runtime, compile, config or dependency")
+    if mode == "config" and not isinstance(verdict.get("config_expectation"), dict):
+        issues.append("config mode requires an observed, source-attributed config_expectation")
+    if mode == "dependency" and (verdict.get("change_type") != "feature_with_test"
+                                  or not isinstance(verdict.get("dependency_expectation"), dict)):
+        issues.append("dependency mode requires a labeled functionality addition and source-attributed dependency expectation")
     changed = {f["filename"] for f in record.get("files", [])}
     if mode == "compile":
         source, api = verdict.get("compile_test_source"), verdict.get("missing_api")

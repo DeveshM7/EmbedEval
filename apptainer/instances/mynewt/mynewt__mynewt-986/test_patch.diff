@@ -1,0 +1,472 @@
+diff --git a/net/ip/mn_socket/test/src/mn_sock_test.c b/net/ip/mn_socket/test/src/mn_sock_test.c
+index b3c7845bf..0c775a594 100644
+--- a/net/ip/mn_socket/test/src/mn_sock_test.c
++++ b/net/ip/mn_socket/test/src/mn_sock_test.c
+@@ -26,11 +26,6 @@
+ #include "mn_socket/mn_socket.h"
+ #include "mn_sock_test.h"
+ 
+-#define TEST_STACK_SIZE 4096
+-#define TEST_PRIO 22
+-os_stack_t test_stack[OS_STACK_ALIGN(TEST_STACK_SIZE)];
+-struct os_task test_task;
+-
+ #define MB_CNT 10
+ #define MB_SZ  512
+ static uint8_t test_mbuf_area[MB_CNT * MB_SZ];
+diff --git a/net/ip/mn_socket/test/src/mn_sock_test.h b/net/ip/mn_socket/test/src/mn_sock_test.h
+index d8c6df339..e869b9690 100644
+--- a/net/ip/mn_socket/test/src/mn_sock_test.h
++++ b/net/ip/mn_socket/test/src/mn_sock_test.h
+@@ -27,13 +27,16 @@
+ 
+ #include "mn_socket/mn_socket.h"
+ 
+-#define TEST_STACK_SIZE 4096
+-#define TEST_PRIO 22
+-extern os_stack_t test_stack[];
+-struct os_task test_task;
++extern struct os_sem test_sem;
+ 
+-struct os_sem test_sem;
+-
+-void mn_socket_test_handler(void *arg);
++void sock_open_close(void);
++void sock_listen(void);
++void sock_tcp_connect(void);
++void sock_udp_data(void);
++void sock_tcp_data(void);
++void sock_itf_list(void);
++void sock_udp_ll(void);
++void sock_udp_mcast_v4(void);
++void sock_udp_mcast_v6(void);
+ 
+ #endif /* _MN_SOCK_TEST_H */
+diff --git a/net/ip/mn_socket/test/src/mn_sock_util.c b/net/ip/mn_socket/test/src/mn_sock_util.c
+index efc36dd8b..ac8ad7feb 100644
+--- a/net/ip/mn_socket/test/src/mn_sock_util.c
++++ b/net/ip/mn_socket/test/src/mn_sock_util.c
+@@ -546,7 +546,7 @@ sum4_readable(void *cb_arg, int err)
+     os_sem_release(&test_sem);
+ }
+ 
+-static void
++void
+ sock_udp_mcast_v4(void)
+ {
+     int loop_if_idx;
+@@ -646,7 +646,7 @@ sock_udp_mcast_v4(void)
+     mn_close(tx_sock);
+ }
+ 
+-static void
++void
+ sock_udp_mcast_v6(void)
+ {
+     int loop_if_idx;
+diff --git a/net/ip/mn_socket/test/src/testcases/inet_ntop_test.c b/net/ip/mn_socket/test/src/testcases/inet_ntop_test.c
+index d1a8a604e..88ee93106 100644
+--- a/net/ip/mn_socket/test/src/testcases/inet_ntop_test.c
++++ b/net/ip/mn_socket/test/src/testcases/inet_ntop_test.c
+@@ -16,6 +16,7 @@
+  * specific language governing permissions and limitations
+  * under the License.
+  */
++
+ #include "mn_sock_test.h"
+ 
+ TEST_CASE(inet_ntop_test)
+diff --git a/net/ip/mn_socket/test/src/testcases/inet_pton_test.c b/net/ip/mn_socket/test/src/testcases/inet_pton_test.c
+index 3c503f2cc..ff7013389 100644
+--- a/net/ip/mn_socket/test/src/testcases/inet_pton_test.c
++++ b/net/ip/mn_socket/test/src/testcases/inet_pton_test.c
+@@ -16,6 +16,7 @@
+  * specific language governing permissions and limitations
+  * under the License.
+  */
++
+ #include "mn_sock_test.h"
+ 
+ TEST_CASE(inet_pton_test)
+diff --git a/net/ip/mn_socket/test/src/testcases/socket_tests.c b/net/ip/mn_socket/test/src/testcases/socket_tests.c
+index a1668aa57..82b255065 100644
+--- a/net/ip/mn_socket/test/src/testcases/socket_tests.c
++++ b/net/ip/mn_socket/test/src/testcases/socket_tests.c
+@@ -16,16 +16,20 @@
+  * specific language governing permissions and limitations
+  * under the License.
+  */
++
+ #include "mn_sock_test.h"
+ 
+-TEST_CASE(socket_tests)
++TEST_CASE_TASK(socket_tests)
+ {
+-    os_init(NULL);
+-    sysinit();
+-
+     os_sem_init(&test_sem, 0);
+ 
+-    os_task_init(&test_task, "mn_socket_test", mn_socket_test_handler, NULL,
+-      TEST_PRIO, OS_WAIT_FOREVER, test_stack, TEST_STACK_SIZE);
+-    os_start();
++    sock_open_close();
++    sock_listen();
++    sock_tcp_connect();
++    sock_udp_data();
++    sock_tcp_data();
++    sock_itf_list();
++    sock_udp_ll();
++    sock_udp_mcast_v4();
++    sock_udp_mcast_v6();
+ }
+diff --git a/net/oic/test/src/test_discovery.c b/net/oic/test/src/test_discovery.c
+index acc32ee08..f9703cb1a 100644
+--- a/net/oic/test/src/test_discovery.c
++++ b/net/oic/test/src/test_discovery.c
+@@ -47,7 +47,7 @@ test_discovery_cb(const char *di, const char *uri, oc_string_array_t types,
+     case 1:
+         TEST_ASSERT(!strcmp(uri, "/oic/p"));
+         TEST_ASSERT(interfaces == (OC_IF_BASELINE | OC_IF_R));
+-        os_eventq_put(&oic_tapp_evq, &test_discovery_next_ev);
++        os_eventq_put(os_eventq_dflt_get(), &test_discovery_next_ev);
+         return OC_STOP_DISCOVERY;
+         break;
+     case 2: {
+@@ -62,7 +62,7 @@ test_discovery_cb(const char *di, const char *uri, oc_string_array_t types,
+             TEST_ASSERT(0);
+         }
+         if (seen_p && seen_d) {
+-            os_eventq_put(&oic_tapp_evq, &test_discovery_next_ev);
++            os_eventq_put(os_eventq_dflt_get(), &test_discovery_next_ev);
+             return OC_STOP_DISCOVERY;
+         } else {
+             return OC_CONTINUE_DISCOVERY;
+@@ -146,12 +146,9 @@ test_discovery_next_step(struct os_event *ev)
+ void
+ test_discovery(void)
+ {
+-    os_eventq_put(&oic_tapp_evq, &test_discovery_next_ev);
++    os_eventq_put(os_eventq_dflt_get(), &test_discovery_next_ev);
++    while (!test_discovery_done)
++        ;
+ 
+-    while (!test_discovery_done) {
+-        os_eventq_run(&oic_tapp_evq);
+-    }
+     oc_delete_resource(test_res_light);
+ }
+-
+-
+diff --git a/net/oic/test/src/test_getset.c b/net/oic/test/src/test_getset.c
+index 6c6c1a195..e2747cafc 100644
+--- a/net/oic/test/src/test_getset.c
++++ b/net/oic/test/src/test_getset.c
+@@ -70,7 +70,7 @@ test_getset_rsp1(struct oc_client_response *rsp)
+     default:
+         break;
+     }
+-    os_eventq_put(&oic_tapp_evq, &test_getset_next_ev);
++    os_eventq_put(os_eventq_dflt_get(), &test_getset_next_ev);
+ }
+ 
+ static void
+@@ -116,11 +116,10 @@ test_getset_next_step(struct os_event *ev)
+ void
+ test_getset(void)
+ {
+-    os_eventq_put(&oic_tapp_evq, &test_getset_next_ev);
++    os_eventq_put(os_eventq_dflt_get(), &test_getset_next_ev);
++    while (!test_getset_done)
++        ;
+ 
+-    while (!test_getset_done) {
+-        os_eventq_run(&oic_tapp_evq);
+-    }
+     oc_delete_resource(test_res_getset);
+ }
+ 
+diff --git a/net/oic/test/src/test_observe.c b/net/oic/test/src/test_observe.c
+index e0a71ef46..5cd1a5d8a 100644
+--- a/net/oic/test/src/test_observe.c
++++ b/net/oic/test/src/test_observe.c
+@@ -93,7 +93,7 @@ test_observe_rsp(struct oc_client_response *rsp)
+     default:
+         break;
+     }
+-    os_eventq_put(&oic_tapp_evq, &test_observe_next_ev);
++    os_eventq_put(os_eventq_dflt_get(), &test_observe_next_ev);
+ }
+ 
+ static void
+@@ -157,12 +157,9 @@ test_observe_next_step(struct os_event *ev)
+ void
+ test_observe(void)
+ {
+-    os_eventq_put(&oic_tapp_evq, &test_observe_next_ev);
++    os_eventq_put(os_eventq_dflt_get(), &test_observe_next_ev);
++    while (!test_observe_done)
++        ;
+ 
+-    while (!test_observe_done) {
+-        os_eventq_run(&oic_tapp_evq);
+-    }
+     oc_delete_resource(test_res_observe);
+ }
+-
+-
+diff --git a/net/oic/test/src/test_oic.c b/net/oic/test/src/test_oic.c
+index cd485bfb4..8135f48d9 100644
+--- a/net/oic/test/src/test_oic.c
++++ b/net/oic/test/src/test_oic.c
+@@ -26,20 +26,11 @@ TEST_SUITE(oic_test_all)
+     oic_tests();
+ }
+ 
+-void
+-oic_test_init(void)
+-{
+-}
+-
+ #if MYNEWT_VAL(SELFTEST)
+ int
+ main(int argc, char **argv)
+ {
+-    sysinit();
+-
+-    tu_suite_set_init_cb((void *)oic_test_init, NULL);
+     oic_test_all();
+-
+     return tu_any_failed;
+ }
+ #endif
+diff --git a/net/oic/test/src/testcases/oic_tests.c b/net/oic/test/src/testcases/oic_tests.c
+index 77d1bff38..a6ded6a89 100644
+--- a/net/oic/test/src/testcases/oic_tests.c
++++ b/net/oic/test/src/testcases/oic_tests.c
+@@ -22,18 +22,12 @@
+ #include <mn_socket/mn_socket.h>
+ #include "test_oic.h"
+ 
+-#define OIC_TAPP_PRIO       9
+-#define OIC_TAPP_STACK_SIZE OS_STACK_ALIGN(1024)
+-
+ /*
+  * How long to wait before declaring discovery process failure.
+  */
+ #define OIC_TEST_FAIL_DLY   (OS_TICKS_PER_SEC * 4)
+ 
+-static struct os_task oic_tapp;
+ static const char *oic_test_phase;
+-static os_stack_t oic_tapp_stack[OIC_TAPP_STACK_SIZE];
+-struct os_eventq oic_tapp_evq;
+ static struct os_callout oic_test_timer;
+ static struct oc_server_handle oic_tgt;
+ 
+@@ -79,39 +73,14 @@ oic_test_get_endpoint(struct oc_server_handle *ose)
+     memcpy(ose, &oic_tgt, sizeof(*ose));
+ }
+ 
+-static void
+-oic_test_handler(void *arg)
++TEST_CASE_TASK(oic_tests)
+ {
++    os_callout_init(&oic_test_timer, os_eventq_dflt_get(), oic_test_timer_cb, NULL);
++    oc_evq_set(os_eventq_dflt_get());
++
+     oc_main_init(&test_handler);
+     test_discovery();
+     test_getset();
+     test_observe();
+     oc_main_shutdown();
+-    tu_restart();
+-}
+-
+-static void
+-oic_test_init(void)
+-{
+-    int rc;
+-
+-    os_eventq_init(&oic_tapp_evq);
+-
+-    /*
+-     * Starts tests.
+-     */
+-    os_callout_init(&oic_test_timer, &oic_tapp_evq, oic_test_timer_cb, NULL);
+-
+-    rc = os_task_init(&oic_tapp, "oic_test", oic_test_handler, NULL,
+-                      OIC_TAPP_PRIO, OS_WAIT_FOREVER,
+-                      oic_tapp_stack, OIC_TAPP_STACK_SIZE);
+-    TEST_ASSERT_FATAL(rc == 0);
+-    oc_evq_set(&oic_tapp_evq);
+-
+-    os_start();
+-}
+-
+-TEST_CASE(oic_tests)
+-{
+-    oic_test_init();
+ }
+diff --git a/test/testutil/include/testutil/testutil.h b/test/testutil/include/testutil/testutil.h
+index 48e3db094..67f7fa17d 100644
+--- a/test/testutil/include/testutil/testutil.h
++++ b/test/testutil/include/testutil/testutil.h
+@@ -131,6 +131,7 @@ struct ts_config {
+ };
+ 
+ void tu_restart(void);
++void tu_start_os(const char *test_task_name, os_task_func_t test_task_handler);
+ 
+ /*
+  * Public declarations - test case configuration
+@@ -216,35 +217,50 @@ TEST_SUITE_##suite_name(void);                               \
+ #define TEST_CASE_DECL(case_name)                            \
+     int case_name(void);
+ 
+-/*
+- * Unit test definition.
++#define TEST_CASE_DEFN(case_name, body)                     \
++    int                                                     \
++    case_name(void)                                         \
++    {                                                       \
++        tu_suite_pre_test();                                \
++        tu_case_init(#case_name);                           \
++                                                            \
++        tu_case_pre_test();                                 \
++        if (setjmp(tu_case_jb) == 0) {                      \
++            /* Execute test body. */                        \
++            body;                                           \
++            tu_case_post_test();                            \
++            if (!tu_case_failed) {                          \
++                tu_case_pass();                             \
++            }                                               \
++        }                                                   \
++        tu_case_complete();                                 \
++        tu_suite_post_test();                               \
++                                                            \
++        return tu_case_failed;                              \
++    }                                                       \
++
++/**
++ * Defines a test case that runs without the OS.
+  */
+-#define TEST_CASE(case_name)                                  \
+-    void TEST_CASE_##case_name(void);                         \
+-                                                              \
+-    int                                                       \
+-    case_name(void)                                           \
+-    {                                                         \
+-        tu_suite_pre_test();                                  \
+-        tu_case_init(#case_name);                             \
+-                                                              \
+-        tu_case_pre_test();                                   \
+-        if (setjmp(tu_case_jb) == 0) {                        \
+-            TEST_CASE_##case_name();                          \
+-            tu_case_post_test();                              \
+-            if (!tu_case_failed) {                            \
+-                tu_case_pass();                               \
+-            }                                                 \
+-        }                                                     \
+-        tu_case_complete();                                   \
+-        tu_suite_post_test();                                 \
+-                                                              \
+-        return tu_case_failed;                                \
+-    }                                                         \
+-                                                              \
+-    void                                                      \
++#define TEST_CASE(case_name)                                \
++    void TEST_CASE_##case_name(void);                       \
++    TEST_CASE_DEFN(case_name, TEST_CASE_##case_name())      \
++                                                            \
++    void                                                    \
+     TEST_CASE_##case_name(void)
+ 
++/**
++ * Defines a test case that runs in a task in the OS.
++ */
++#define TEST_CASE_TASK(case_name)                           \
++    void TEST_CASE_##case_name(void *arg);                  \
++    TEST_CASE_DEFN(case_name,                               \
++                   tu_start_os(#case_name "_test_task",     \
++                               TEST_CASE_##case_name));     \
++                                                            \
++    void                                                    \
++    TEST_CASE_##case_name(void *TU_UNUSED_arg)
++
+ #define FIRST_AUX(first, ...) first
+ #define FIRST(...) FIRST_AUX(__VA_ARGS__, _)
+ 
+diff --git a/test/testutil/src/testutil.c b/test/testutil/src/testutil.c
+index 0358cca82..725dce416 100644
+--- a/test/testutil/src/testutil.c
++++ b/test/testutil/src/testutil.c
+@@ -26,6 +26,14 @@
+ #include "testutil/testutil.h"
+ #include "testutil_priv.h"
+ 
++/* The test task runs at a lower priority (greater number) than the default
++ * task.  This allows the test task to assume events get processed as soon as
++ * they are initiated.  The test code can then immediately assert the expected
++ * result of event processing.
++ */
++#define TU_TEST_TASK_PRIO   (MYNEWT_VAL(OS_MAIN_TASK_PRIO) + 1)
++#define TU_TEST_STACK_SIZE  1024
++
+ struct tc_config tc_config;
+ struct tc_config *tc_current_config = &tc_config;
+ 
+@@ -70,3 +78,54 @@ tu_restart(void)
+ 
+     tu_arch_restart();
+ }
++
++static void
++tu_dflt_task_handler(void *arg)
++{
++    while (1) {
++        os_eventq_run(os_eventq_dflt_get());
++    }
++}
++
++static void
++tu_create_dflt_task(void)
++{
++    static os_stack_t stack[OS_STACK_ALIGN(OS_MAIN_STACK_SIZE)];
++    static struct os_task task;
++
++    os_task_init(&task, "tu_dflt_task", tu_dflt_task_handler, NULL,
++                 OS_MAIN_TASK_PRIO, OS_WAIT_FOREVER, stack,
++                 OS_STACK_ALIGN(OS_MAIN_STACK_SIZE));
++}
++
++/**
++ * Creates the "test task."  For test cases running in the OS, this is the task
++ * that contains the actual test logic.
++ */
++static void
++tu_create_test_task(const char *task_name, os_task_func_t task_handler)
++{
++    static os_stack_t stack[OS_STACK_ALIGN(TU_TEST_STACK_SIZE)];
++    static struct os_task task;
++
++    os_task_init(&task, task_name, task_handler, NULL,
++                 TU_TEST_TASK_PRIO, OS_WAIT_FOREVER, stack,
++                 OS_STACK_ALIGN(TU_TEST_STACK_SIZE));
++
++    os_start();
++}
++
++/**
++ * Creates the default task, creates the test task to run a test case in, and
++ * starts the OS.
++ */
++void
++tu_start_os(const char *test_task_name, os_task_func_t test_task_handler)
++{
++    sysinit();
++
++    tu_create_dflt_task();
++    tu_create_test_task(test_task_name, test_task_handler);
++
++    os_start();
++}

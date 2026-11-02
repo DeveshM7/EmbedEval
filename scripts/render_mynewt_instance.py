@@ -17,8 +17,8 @@ Old trees. Before the March 2019 rename the unit tests are in test/ packages
 release tag that is an ancestor of the base commit picks the newt binary the
 shared image holds under /opt/newt/<version>/ (NEWT_FOR_LAST_RELEASE below:
 last release 0.9 -> newt 1.0.0-b1, 1.0 beta 1 -> b2, 1.0 beta 2 to 1.1 ->
-1.0.0, 1.2-1.3 -> 1.2.0, 1.4 -> 1.4.0, 1.5 -> 1.6.0, 1.6 and later -> the
-pinned modern newt). Their
+1.0.0, 1.2-1.3 -> 1.2.0, 1.4 -> 1.4.0, 1.5 -> 1.6.0, 1.6-1.14 -> the
+pinned modern newt, 1.15 -> 1.15.0). Their
 sources need `-Wno-error` and `-fcommon` under GCC 13, passed as target
 cflags. These instances build -m32 (x86 only), so they get no ARM64 patch and
 metadata says host_arch x86_64. Old test mains may return 0 on failures
@@ -43,6 +43,7 @@ the base are dropped; validate on an ARM64 host before relying on one.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -104,7 +105,7 @@ AARCH64_FRAME_INIT = """#if defined(__aarch64__)
 # 0.9.99, as repository.yml numbers them. A tree is built by the newt of the
 # release it is working towards, which is what these steps give (checked on
 # PRs 114-1594 of 2016-2019: tests/ in scratch codex_oldera/REPORT.md).
-NEWT_FOR_LAST_RELEASE = (((1, 6, 0), "modern"), ((1, 5, 0), "1.6.0"), ((1, 4, 0), "1.4.0"),
+NEWT_FOR_LAST_RELEASE = (((1, 15, 0), "1.15.0"), ((1, 6, 0), "modern"), ((1, 5, 0), "1.6.0"), ((1, 4, 0), "1.4.0"),
                          ((1, 2, 0), "1.2.0"), ((0, 9, 99), "1.0.0"), ((0, 9, 9), "1.0.0-b2"),
                          ((0, 0, 0), "1.0.0-b1"))
 OLD_CFLAGS = ["-Wno-error", "-fcommon"]
@@ -179,7 +180,10 @@ def arm64_patch(clone: Path, base: str) -> tuple[str, str]:
                 unmerged = git(clone, "diff", "--name-only", "--diff-filter=U",
                                cwd=tree).split()
                 for f in unmerged:            # not needed by the native selftests
-                    git(clone, "checkout", "HEAD", "--", f, cwd=tree)
+                    if git(clone, "ls-tree", "--name-only", "HEAD", "--", f, cwd=tree).strip():
+                        git(clone, "checkout", "HEAD", "--", f, cwd=tree)
+                    else:
+                        git(clone, "rm", "-f", "--", f, cwd=tree)
                 subprocess.run(["git", "-C", str(tree), "cherry-pick", "--quit"],
                                capture_output=True)
                 git(clone, *ident, "commit", "-q", "-a", "--allow-empty", "-m", sha, cwd=tree)
@@ -190,6 +194,26 @@ def arm64_patch(clone: Path, base: str) -> tuple[str, str]:
         subprocess.run(["git", "-C", str(clone), "worktree", "remove", "--force", str(tree)],
                        capture_output=True)
         shutil.rmtree(work, ignore_errors=True)
+
+
+def simulator_fixture(meta, clone, test_patch):
+    """One pinned upstream correction for old native simulator stack sizing."""
+    if not meta.get("simulator_fixture"):
+        return "", None
+    if meta["simulator_fixture"] != "taskpool-stack-2150" or clone is None:
+        raise ValueError("unsupported simulator fixture or missing source clone")
+    path = "util/taskpool/src/taskpool.c"
+    parent = "1cfa2d17c4a6da293bd7e134dfd5a8447f42c10a"
+    fixed = "9c5290d6cdfdfcc573e4c9590a051cd150aee730"
+    blob = git(clone, "rev-parse", f"{meta['base_commit']}:{path}").strip()
+    if (path in meta["files_changed_by_fix"] or f"diff --git a/{path} b/{path}" in test_patch
+            or blob != git(clone, "rev-parse", f"{parent}:{path}").strip()):
+        raise ValueError("simulator fixture must match its upstream base and be disjoint from fix/tests")
+    patch = git(clone, "diff", parent, fixed, "--", path)
+    proof = {"path": path, "source_parent": parent, "source_commit": fixed,
+             "base_blob": blob, "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+             "purpose": "Pass the already allocated native stack's scaled size to os_task_init; identical in all phases."}
+    return patch, proof
 
 
 def render(meta: dict, patch_file: Path, out_root: Path, arm64: bool = True) -> Path:
@@ -214,11 +238,19 @@ def render(meta: dict, patch_file: Path, out_root: Path, arm64: bool = True) -> 
     elif arm64:
         raise RuntimeError("no mynewt-core clone to read the base commit's era: set "
                            "EMBEDEVAL_MYNEWT_CLONE")
+    compatibility_patch, compatibility_proof = simulator_fixture(meta, clone, patch_file.read_text())
     old = newt != "modern"
     cflags = list(meta.get("compatibility_cflags", []))
     if old:
         cflags += [f for f in OLD_CFLAGS if f not in cflags]
+    elif clone and "strncat(sun->sun_path, msun->msun_path, sizeof sun->sun_path)" in git(
+            clone, "show", f"{meta['base_commit']}:net/ip/native_sockets/src/native_sock.c",
+            check=False):
+        # GCC 13 diagnoses this unchanged simulator support code as an error.
+        cflags += ["-Wno-error=stringop-overflow"]
     pkg = ["pkg.name: targets/unittest", "pkg.type: target"]
+    if meta.get("base_api_provider_packages"):
+        pkg += ["pkg.deps:"] + [f'    - "@apache-mynewt-core/{path}"' for path in meta["base_api_provider_packages"]]
     if cflags:
         pkg += ["pkg.cflags:"] + [f"    - {f}" for f in cflags]
 
@@ -227,6 +259,18 @@ def render(meta: dict, patch_file: Path, out_root: Path, arm64: bool = True) -> 
         arm_patch, arm_kind = arm64_patch(clone, meta["base_commit"])
 
     recipe = (TEMPLATES / "apptainer" / "instance.def.tmpl").read_text()
+    if meta.get("test_observer") not in (None, "testutil-gdb"):
+        raise ValueError("unsupported Mynewt test_observer")
+    recipe = recipe.replace("@@SIMULATOR_FILES@@", "    simulator_compat.diff /opt/benchmark/simulator_compat.diff" if compatibility_patch else "")
+    recipe = recipe.replace("@@SIMULATOR_STEP@@", (
+        "    git apply /opt/benchmark/simulator_compat.diff\n"
+        "    git -c user.name=EmbedEval -c user.email=benchmark@localhost commit -q -a -m \"sim: pinned upstream taskpool stack sizing\""
+    ) if compatibility_patch else "")
+    recipe = recipe.replace("@@OBSERVER_STEP@@\n", (
+        "    export DEBIAN_FRONTEND=noninteractive\n"
+        "    retry apt-get -o Acquire::Retries=3 update -qq\n"
+        "    retry apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends gdb\n"
+        "    rm -rf /var/lib/apt/lists/*\n") if meta.get("test_observer") else "")
     recipe = recipe.replace("@@NEWT_STEP@@\n", (
         "    # The newt of this base's era (see render_mynewt_instance.py).\n"
         f"    ln -sf /opt/newt/{newt}/newt /usr/local/bin/newt\n    newt version\n") if old else "")
@@ -248,14 +292,36 @@ def render(meta: dict, patch_file: Path, out_root: Path, arm64: bool = True) -> 
             ("PKG_YML", " ".join(f"'{line}'" for line in pkg))):
         recipe = recipe.replace(f"@@{key}@@", value)
 
+    observed = []
+    for key in ("config_attribution", "dependency_attribution"):
+        proof = meta.get(key, {})
+        if proof.get("observed_evidence_file"):
+            name = proof["observed_evidence_file"]
+            if name != "observed_before.log":
+                raise ValueError("unsupported observed build evidence file")
+            source = patch_file.parent / name
+            if hashlib.sha256(source.read_bytes()).hexdigest() != proof["observed_log_sha256"]:
+                raise ValueError("observed build evidence hash mismatch")
+            observed.append(source)
     inst.mkdir(parents=True)
+    for source in observed:
+        shutil.copy2(source, inst / source.name)
     (inst / "instance.def").write_text(recipe)
+    if compatibility_patch:
+        (inst / "simulator_compat.diff").write_text(compatibility_patch)
     shutil.copy(TEMPLATES / "run_tests.sh", inst / "run_tests.sh")
     (inst / "test_patch.diff").write_text(patch_file.read_text())
-    (inst / "bench.json").write_text(json.dumps({k: meta[k] for k in META_KEYS}))
+    bench = {k: meta[k] for k in META_KEYS}
+    for key in ("compile_expectations", "compile_declarations", "compile_notes", "test_observer", "mcumgr_commit", "config_output_sha256", "dependency_output_sha256"):
+        if key in meta:
+            bench[key] = meta[key]
+    (inst / "bench.json").write_text(json.dumps(bench))
     if arm_patch:
         (inst / "sim_arm64.patch").write_text(arm_patch)
     out = {k: v for k, v in meta.items() if k not in ("docker_image", "docker_platform")}
+    if compatibility_proof:
+        out["simulator_fixture_proof"] = compatibility_proof
+        out["protected_paths"] = list(dict.fromkeys([*out.get("protected_paths", []), compatibility_proof["path"]]))
     out.update(runtime="apptainer", apptainer_image=f"{instance_id}.sif", generated=True)
     out["newt_version"] = newt
     if core:

@@ -1,0 +1,402 @@
+diff --git a/encoding/cborattr/test/src/test_cborattr.c b/encoding/cborattr/test/src/test_cborattr.c
+index f349a6378..77f74f60e 100644
+--- a/encoding/cborattr/test/src/test_cborattr.c
++++ b/encoding/cborattr/test/src/test_cborattr.c
+@@ -38,6 +38,8 @@ TEST_SUITE(test_cborattr_suite)
+     test_cborattr_decode_string_bounds();
+     test_cborattr_decode_string_array_bounds();
+     test_cborattr_decode_mbuf();
++    test_cborattr_decode_array_default();
++    test_cborattr_decode_type_mismatch();
+ }
+ 
+ #if MYNEWT_VAL(SELFTEST)
+diff --git a/encoding/cborattr/test/src/test_cborattr.h b/encoding/cborattr/test/src/test_cborattr.h
+index a71b513df..7b3603203 100644
+--- a/encoding/cborattr/test/src/test_cborattr.h
++++ b/encoding/cborattr/test/src/test_cborattr.h
+@@ -54,6 +54,8 @@ TEST_CASE_DECL(test_cborattr_decode_nesting);
+ TEST_CASE_DECL(test_cborattr_decode_string_bounds);
+ TEST_CASE_DECL(test_cborattr_decode_string_array_bounds);
+ TEST_CASE_DECL(test_cborattr_decode_mbuf);
++TEST_CASE_DECL(test_cborattr_decode_array_default);
++TEST_CASE_DECL(test_cborattr_decode_type_mismatch);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/encoding/cborattr/test/src/testcases/cborattr_decode_array_default.c b/encoding/cborattr/test/src/testcases/cborattr_decode_array_default.c
+new file mode 100644
+index 000000000..1d5176aac
+--- /dev/null
++++ b/encoding/cborattr/test/src/testcases/cborattr_decode_array_default.c
+@@ -0,0 +1,90 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "test_cborattr.h"
++
++static uint8_t test_dflt_buf[32];
++static int test_dflt_len;
++
++static CborError
++test_dflt_wr(void *token, const void *data, size_t len, CborEncoderAppendType append)
++{
++    memcpy(test_dflt_buf + test_dflt_len, data, len);
++    test_dflt_len += len;
++    assert(test_dflt_len < sizeof(test_dflt_buf));
++    return CborNoError;
++}
++
++/* Encodes {key: 1} */
++static void
++test_dflt_encode(const char *key)
++{
++    CborEncoder enc;
++    CborEncoder map;
++
++    test_dflt_len = 0;
++    cbor_encoder_init_writer(&enc, test_dflt_wr, NULL);
++    cbor_encoder_create_map(&enc, &map, CborIndefiniteLength);
++    cbor_encode_text_stringz(&map, key);
++    cbor_encode_int(&map, 1);
++    cbor_encoder_close_container(&enc, &map);
++}
++
++TEST_CASE_SELF(test_cborattr_decode_array_default)
++{
++    char *ptrs[2];
++    char store[16];
++    int cnt;
++    int rc;
++
++    struct cbor_attr_t attrs[] = {
++        {
++         .attribute = "a",
++         .type = CborAttrArrayType,
++         .addr.array.element_type = CborAttrTextStringType,
++         .addr.array.arr.strings.ptrs = ptrs,
++         .addr.array.arr.strings.store = store,
++         .addr.array.arr.strings.storelen = sizeof(store),
++         .addr.array.count = &cnt,
++         .addr.array.maxlen = 2,
++         },
++        { 0 },
++    };
++
++    /* Array attribute missing */
++    test_dflt_encode("b");
++    cnt = 1234;
++    rc = cbor_read_flat_attrs(test_dflt_buf, test_dflt_len, attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 0);
++
++    /* Array attribute present, but not an array */
++    test_dflt_encode("a");
++    cnt = 1234;
++    rc = cbor_read_flat_attrs(test_dflt_buf, test_dflt_len, attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 0);
++
++    /* No default requested, count left untouched */
++    attrs[0].nodefault = true;
++    test_dflt_encode("b");
++    cnt = 1234;
++    rc = cbor_read_flat_attrs(test_dflt_buf, test_dflt_len, attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 1234);
++}
+diff --git a/encoding/cborattr/test/src/testcases/cborattr_decode_type_mismatch.c b/encoding/cborattr/test/src/testcases/cborattr_decode_type_mismatch.c
+new file mode 100644
+index 000000000..990dd25f4
+--- /dev/null
++++ b/encoding/cborattr/test/src/testcases/cborattr_decode_type_mismatch.c
+@@ -0,0 +1,165 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "test_cborattr.h"
++
++/*
++ * Values of unexpected type must be rejected with an error instead of
++ * being passed to tinycbor getters, which assert on type mismatch.
++ */
++TEST_CASE_SELF(test_cborattr_decode_type_mismatch)
++{
++    /* {"a": -1} */
++    static const uint8_t neg[] = { 0xa1, 0x61, 'a', 0x20 };
++    /* {"a": []} */
++    static const uint8_t empty[] = { 0xa1, 0x61, 'a', 0x80 };
++    /* {"a": [-1]} */
++    static const uint8_t neg_arr[] = { 0xa1, 0x61, 'a', 0x81, 0x20 };
++    /* {"a": [1]} */
++    static const uint8_t int_arr[] = { 0xa1, 0x61, 'a', 0x81, 0x01 };
++    /* {"a": [1, "x"]} */
++    static const uint8_t mixed_arr[] = { 0xa1, 0x61, 'a', 0x82, 0x01, 0x61, 'x' };
++    /* {"a": ["x"]} */
++    static const uint8_t str_arr[] = { 0xa1, 0x61, 'a', 0x81, 0x61, 'x' };
++#if MYNEWT_VAL(FLOAT_USER)
++    /* {"a": [1.5f]} */
++    static const uint8_t float_arr[] = { 0xa1, 0x61, 'a',  0x81, 0xfa,
++                                         0x3f, 0xc0, 0x00, 0x00 };
++    /* {"a": [1.5]} */
++    static const uint8_t double_arr[] = { 0xa1, 0x61, 'a',  0x81, 0xfb,
++                                          0x3f, 0xf8, 0x00, 0x00, 0x00,
++                                          0x00, 0x00, 0x00 };
++    double reals[2];
++#endif
++    long long unsigned int uval;
++    long long unsigned int uints[2];
++    long long int ints[2];
++    bool bools[2];
++    char *ptrs[2];
++    char store[8];
++    int cnt;
++    int rc;
++
++    struct cbor_attr_t uint_attrs[] = {
++        {
++         .attribute = "a",
++         .type = CborAttrUnsignedIntegerType,
++         .addr.uinteger = &uval,
++         },
++        { 0 },
++    };
++    struct cbor_attr_t arr_attrs[] = {
++        {
++         .attribute = "a",
++         .type = CborAttrArrayType,
++         .addr.array.count = &cnt,
++         .addr.array.maxlen = 2,
++         },
++        { 0 },
++    };
++    struct cbor_array_t *arr = &arr_attrs[0].addr.array;
++
++    /* Negative value for unsigned integer */
++    rc = cbor_read_flat_attrs(neg, sizeof(neg), uint_attrs);
++    TEST_ASSERT(rc == CborErrorIllegalType);
++
++    /* Empty arrays of all element types */
++    arr->element_type = CborAttrIntegerType;
++    arr->arr.integers.store = ints;
++    cnt = -1;
++    rc = cbor_read_flat_attrs(empty, sizeof(empty), arr_attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 0);
++
++    arr->element_type = CborAttrBooleanType;
++    arr->arr.booleans.store = bools;
++    cnt = -1;
++    rc = cbor_read_flat_attrs(empty, sizeof(empty), arr_attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 0);
++
++    arr->element_type = CborAttrTextStringType;
++    arr->arr.strings.ptrs = ptrs;
++    arr->arr.strings.store = store;
++    arr->arr.strings.storelen = sizeof(store);
++    cnt = -1;
++    rc = cbor_read_flat_attrs(empty, sizeof(empty), arr_attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 0);
++
++    /* Wrong element type for text string array */
++    rc = cbor_read_flat_attrs(int_arr, sizeof(int_arr), arr_attrs);
++    TEST_ASSERT(rc != 0);
++    TEST_ASSERT(cnt == 0);
++
++    /* Wrong element type for boolean array */
++    arr->element_type = CborAttrBooleanType;
++    arr->arr.booleans.store = bools;
++    rc = cbor_read_flat_attrs(int_arr, sizeof(int_arr), arr_attrs);
++    TEST_ASSERT(rc != 0);
++    TEST_ASSERT(cnt == 0);
++
++    /* Wrong element type for integer array */
++    arr->element_type = CborAttrIntegerType;
++    arr->arr.integers.store = ints;
++    rc = cbor_read_flat_attrs(str_arr, sizeof(str_arr), arr_attrs);
++    TEST_ASSERT(rc != 0);
++    TEST_ASSERT(cnt == 0);
++
++    /* Wrong type of second element, first one is decoded */
++    rc = cbor_read_flat_attrs(mixed_arr, sizeof(mixed_arr), arr_attrs);
++    TEST_ASSERT(rc != 0);
++    TEST_ASSERT(cnt == 1);
++    TEST_ASSERT(ints[0] == 1);
++
++    /* Negative value in unsigned integer array */
++    arr->element_type = CborAttrUnsignedIntegerType;
++    arr->arr.uintegers.store = uints;
++    rc = cbor_read_flat_attrs(neg_arr, sizeof(neg_arr), arr_attrs);
++    TEST_ASSERT(rc != 0);
++    TEST_ASSERT(cnt == 0);
++
++    rc = cbor_read_flat_attrs(int_arr, sizeof(int_arr), arr_attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 1);
++    TEST_ASSERT(uints[0] == 1);
++
++#if MYNEWT_VAL(FLOAT_USER)
++    /* Float and double arrays */
++    arr->element_type = CborAttrFloatType;
++    arr->arr.reals.store = reals;
++    rc = cbor_read_flat_attrs(float_arr, sizeof(float_arr), arr_attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 1);
++    TEST_ASSERT(reals[0] == 1.5);
++
++    rc = cbor_read_flat_attrs(double_arr, sizeof(double_arr), arr_attrs);
++    TEST_ASSERT(rc != 0);
++    TEST_ASSERT(cnt == 0);
++
++    arr->element_type = CborAttrDoubleType;
++    rc = cbor_read_flat_attrs(double_arr, sizeof(double_arr), arr_attrs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cnt == 1);
++    TEST_ASSERT(reals[0] == 1.5);
++
++    rc = cbor_read_flat_attrs(float_arr, sizeof(float_arr), arr_attrs);
++    TEST_ASSERT(rc != 0);
++    TEST_ASSERT(cnt == 0);
++#endif
++}
+diff --git a/sys/shell/selftest/src/shell_test.c b/sys/shell/selftest/src/shell_test.c
+index 5be0b15b1..ef6bb3044 100644
+--- a/sys/shell/selftest/src/shell_test.c
++++ b/sys/shell/selftest/src/shell_test.c
+@@ -51,35 +51,17 @@ test_dirty_stack(void)
+     memset((void *)buf, 0xa5, sizeof(buf));
+ }
+ 
+-/* Executes "shell exec" mgmt request with specified arguments. */
++/* Executes "shell exec" mgmt request with specified CBOR payload. */
+ static int
+-test_shell_exec(const char **args, int argc)
++test_shell_exec_raw(const uint8_t *req, size_t len)
+ {
+     const struct mgmt_handler *handler;
+     struct mgmt_ctxt ctxt;
+-    CborEncoder req_enc;
+-    CborEncoder map;
+-    CborEncoder arr;
+     CborEncoder payload;
+-    uint8_t req[256];
+     uint8_t rsp[512];
+     int rc;
+-    int i;
+-
+-    /* Encode request: {"argv": [args...]} */
+-    cbor_encoder_init(&req_enc, req, sizeof(req), 0);
+-    rc = cbor_encoder_create_map(&req_enc, &map, CborIndefiniteLength);
+-    rc |= cbor_encode_text_stringz(&map, "argv");
+-    rc |= cbor_encoder_create_array(&map, &arr, CborIndefiniteLength);
+-    for (i = 0; i < argc; i++) {
+-        rc |= cbor_encode_text_stringz(&arr, args[i]);
+-    }
+-    rc |= cbor_encoder_close_container(&map, &arr);
+-    rc |= cbor_encoder_close_container(&req_enc, &map);
+-    TEST_ASSERT_FATAL(rc == 0);
+ 
+-    rc = cbor_parser_init(req, cbor_encoder_get_buffer_size(&req_enc, req), 0,
+-                          &ctxt.parser, &ctxt.it);
++    rc = cbor_parser_init(req, len, 0, &ctxt.parser, &ctxt.it);
+     TEST_ASSERT_FATAL(rc == 0);
+ 
+     cbor_encoder_init(&ctxt.encoder, rsp, sizeof(rsp), 0);
+@@ -99,8 +81,43 @@ test_shell_exec(const char **args, int argc)
+     return handler->mh_write(&ctxt);
+ }
+ 
++/* Executes "shell exec" mgmt request with specified arguments. */
++static int
++test_shell_exec(const char **args, int argc)
++{
++    CborEncoder req_enc;
++    CborEncoder map;
++    CborEncoder arr;
++    uint8_t req[256];
++    int rc;
++    int i;
++
++    /* Encode request: {"argv": [args...]} */
++    cbor_encoder_init(&req_enc, req, sizeof(req), 0);
++    rc = cbor_encoder_create_map(&req_enc, &map, CborIndefiniteLength);
++    rc |= cbor_encode_text_stringz(&map, "argv");
++    rc |= cbor_encoder_create_array(&map, &arr, CborIndefiniteLength);
++    for (i = 0; i < argc; i++) {
++        rc |= cbor_encode_text_stringz(&arr, args[i]);
++    }
++    rc |= cbor_encoder_close_container(&map, &arr);
++    rc |= cbor_encoder_close_container(&req_enc, &map);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    return test_shell_exec_raw(req, cbor_encoder_get_buffer_size(&req_enc, req));
++}
++
+ TEST_CASE_SELF(shell_bridge_test_case_exec)
+ {
++    static const uint8_t req_no_argv[] = {
++        0xa0,
++    };
++    static const uint8_t req_argv_int[] = {
++        0xa1, 0x64, 'a', 'r', 'g', 'v', 0x01,
++    };
++    static const uint8_t req_argv_map[] = {
++        0xa1, 0x64, 'a', 'r', 'g', 'v', 0xa0,
++    };
+     const char *args[TEST_ARGC_MAX];
+     int rc;
+     int i;
+@@ -130,6 +147,21 @@ TEST_CASE_SELF(shell_bridge_test_case_exec)
+     TEST_ASSERT(rc == 0);
+     TEST_ASSERT(test_cmd_calls == 1);
+     TEST_ASSERT(test_cmd_argv_terminated);
++
++    /* No "argv" attribute: {} */
++    rc = test_shell_exec_raw(req_no_argv, sizeof(req_no_argv));
++    TEST_ASSERT(rc == MGMT_ERR_EINVAL);
++    TEST_ASSERT(test_cmd_calls == 0);
++
++    /* "argv" is not an array: {"argv": 1} */
++    rc = test_shell_exec_raw(req_argv_int, sizeof(req_argv_int));
++    TEST_ASSERT(rc == MGMT_ERR_EINVAL);
++    TEST_ASSERT(test_cmd_calls == 0);
++
++    /* "argv" is not an array: {"argv": {}} */
++    rc = test_shell_exec_raw(req_argv_map, sizeof(req_argv_map));
++    TEST_ASSERT(rc == MGMT_ERR_EINVAL);
++    TEST_ASSERT(test_cmd_calls == 0);
+ }
+ 
+ TEST_SUITE(shell_bridge_test_suite)
