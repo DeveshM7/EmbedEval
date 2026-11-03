@@ -70,6 +70,17 @@ def gtest_stdout(text: str) -> dict[str, str]:
     return out
 
 
+_FAILED_LINE = re.compile(r"^(FAILED |\[\s*FAILED\s*\])")
+
+
+def tail(text: str, n: int) -> str:
+    """The last n lines of text, preceded by any `FAILED ...` line (what
+    VerifyOrQuit/SuccessOrQuit print) or gtest `[  FAILED  ]` line the tail cut off."""
+    lines = text.splitlines()
+    cut = list(dict.fromkeys(l for l in lines[:-n] if _FAILED_LINE.match(l)))
+    return "\n".join((["[... failure lines before the tail ...]"] + cut if cut else []) + lines[-n:])
+
+
 def exit_code(statuses: list[str]) -> int:
     if any(s in ("failed", "error", "timeout") for s in statuses):
         return 1
@@ -153,7 +164,7 @@ def run_unit(names: list[str]) -> tuple[dict[str, str], str]:
                      else "timeout" if rc == "timeout" or "***Timeout" in text
                      else "failed")
         if out[name] != "passed":
-            shown.append(f"--- {name} ---\n" + "\n".join(text.splitlines()[-40:]))
+            shown.append(f"--- {name} ---\n" + tail(text, 40))
     return out, "\n".join(shown)
 
 
@@ -172,7 +183,7 @@ def observe(cfg: dict) -> int:
         detail.append(text)
     if any(s in ("failed", "error", "timeout") for s in statuses.values()):
         print("\n--- output of the failing run (last 60 lines) ---")
-        print("\n".join("\n".join(detail).splitlines()[-60:]))
+        print(tail("\n".join(detail), 60))
     print("\n--- openthread: results")
     for name, status in statuses.items():
         print(f"  {status} {name}")
@@ -203,7 +214,7 @@ def main() -> int:
     statuses = {n: observed.get(n, "not_run") for n in expected}
     if any(s in ("failed", "error", "timeout") for s in statuses.values()):
         print("\n--- output of the failing run (last 60 lines) ---")
-        print("\n".join(detail.splitlines()[-60:]))
+        print(tail(detail, 60))
     print("\n--- openthread: results")
     for name, status in statuses.items():
         print(f"  {status} {name}")

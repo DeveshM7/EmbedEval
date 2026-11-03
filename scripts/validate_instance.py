@@ -189,7 +189,7 @@ def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_overri
     report["before"] = {"rc": rc1, "seconds": round(s1), "log": str(Path(report["logs"]) / "before.log")}
     if rc1 == 2:
         return done(False, "test patch does not build against base")
-    before = openthread_cases(out1)
+    before = report["before"]["cases"] = openthread_cases(out1)
     if not any(s in FAILED for s in before.values()):
         return done(False, "no case failed before the fix")
 
@@ -206,7 +206,8 @@ def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_overri
     report["after"] = {"rc": rc2, "seconds": round(s2), "log": str(Path(report["logs"]) / "after.log")}
     if rc2 == 2:
         return done(False, "the fix does not build in our profile (infra or era issue)")
-    report.update(observe_lists(before, openthread_cases(out2)))
+    after = report["after"]["cases"] = openthread_cases(out2)
+    report.update(observe_lists(before, after))
     if not report["fail_to_pass"]:
         return done(False, "no case failed before and passed after")
     if report["regressed"]:

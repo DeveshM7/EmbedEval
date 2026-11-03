@@ -19,7 +19,9 @@ Writes <candidates>/openthread/candidates.jsonl and
 from __future__ import annotations
 
 import argparse
+import functools
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -30,7 +32,7 @@ import layout  # noqa: E402  (first: reads --run-dir)
 from generate_instance import OPENTHREAD_CMAKE_ARGS, OPENTHREAD_LAST_ARG  # noqa: E402
 
 URL = "https://github.com/openthread/openthread/pull/{}"
-ENRICH_VERSION = 2
+ENRICH_VERSION = 3
 DIFF_CAP = 120_000      # characters kept of each diff in a record
 
 # Not production code, by what the repository holds at the top level: tests/
@@ -83,13 +85,57 @@ def log_records(*args: str) -> list[dict]:
     return recs
 
 
+def group_records(recs: list[dict]) -> list[dict]:
+    """One record per PR. OpenThread squash-merges (one first-parent commit
+    ending `(#N)`), but a rebase-merged PR leaves several. Those become one
+    record: base = first parent of the earliest commit, fix = the latest
+    commit, files = the base..fix diff, `commits` = all of them, oldest first.
+    A PR whose commits are not consecutive on the first-parent chain, or that
+    continues before the oldest commit listed, gets a "split" reason instead
+    of a guessed range."""
+    def number(r):
+        m = PR_TITLE.search(r["title"])
+        return int(m.group(1)) if m and len(r["parents"]) == 1 else None
+
+    groups = {}
+    for i, r in enumerate(recs):
+        if number(r):
+            groups.setdefault(number(r), []).append(i)
+    edge = max((g[-1] for g in groups.values()), default=-1)
+    out = []
+    for i, r in enumerate(recs):
+        n = number(r)
+        if not n:
+            out.append(r)
+        elif groups[n][0] == i:
+            idx = groups[n]
+            chain = [recs[j] for j in reversed(idx)]
+            r = dict(r, number=n, commits=[c["fix_commit"] for c in chain],
+                     titles=[c["title"] for c in chain])
+            base = chain[0]["parents"][0]
+            if any(b["parents"][0] != a["fix_commit"] for a, b in zip(chain, chain[1:])):
+                r["split"] = f"commits of PR #{n} are interleaved with other PRs on the first-parent chain"
+            else:
+                if len(chain) > 1:
+                    r["parents"] = [base]
+                    r["files"] = [f for f in git("diff", "--name-only", "--no-renames",
+                                                 base, r["fix_commit"]).split("\n") if f]
+                m = PR_TITLE.search(git("log", "-1", "--format=%s", base)) if idx[-1] == edge else None
+                if m and int(m.group(1)) == n:
+                    r["split"] = f"PR #{n} continues before the discovery window"
+            out.append(r)
+    return out
+
+
 def classify(r: dict) -> str | None:
     """Why the hard filters drop this commit, or None for a candidate."""
     m = PR_TITLE.search(r["title"])
     if not m or len(r["parents"]) != 1:
         return "not a squash-merged PR"
     r["number"] = int(m.group(1))
-    if REVERT.match(r["title"]):
+    if r.get("split"):
+        return r["split"]
+    if any(REVERT.match(t) for t in r.get("titles", [r["title"]])):
         return "revert"
     if not any(f.startswith(TEST_ROOTS) for f in r["files"]):
         return "no change under tests/unit or tests/gtest"
@@ -100,7 +146,7 @@ def classify(r: dict) -> str | None:
 
 def discover(since: str) -> tuple[list[dict], dict]:
     found, dropped = [], {}
-    for r in log_records(f"--since={since}"):
+    for r in group_records(log_records(f"--since={since}")):
         why = classify(r)
         if why is None:
             found.append(r)
@@ -110,10 +156,11 @@ def discover(since: str) -> tuple[list[dict], dict]:
 
 
 def find_pr(pr: int) -> dict:
-    for r in log_records("-E", f"--grep=\\(#{pr}\\)$"):
-        m = PR_TITLE.search(r["title"])
-        if m and int(m.group(1)) == pr:
-            r["number"] = pr
+    # --grep also matches message bodies; only titles name the PR.
+    recs = [r for r in log_records("-E", f"--grep=\\(#{pr}\\)$")
+            if (m := PR_TITLE.search(r["title"])) and int(m.group(1)) == pr]
+    for r in group_records(recs):
+        if r.get("number") == pr:
             return r
     raise SystemExit(f"PR {pr}: no first-parent commit ending (#{pr}) in {clone()}")
 
@@ -171,16 +218,63 @@ def resolve(src: str, directory: str) -> str | None:
     return None if "${" in src else (src if "/" in src else f"{directory}/{src}")
 
 
+@functools.lru_cache(maxsize=None)
+def quoted_includes(rev: str, path: str) -> tuple[str, ...]:
+    """Test files `path` includes with #include "...", resolved against its directory."""
+    found = (posixpath.normpath(posixpath.join(posixpath.dirname(path), i)) for i in re.findall(
+        r'^\s*#\s*include\s*"([^"]+)"', show(rev, path) or "", re.M))
+    return tuple(f for f in found if f.startswith(TEST_ROOTS) and show(rev, f) is not None)
+
+
+def with_includes(rev: str, paths) -> set[str]:
+    """`paths` plus every test header they include, transitively."""
+    seen, todo = set(), list(paths)
+    while todo:
+        p = todo.pop()
+        if p not in seen:
+            seen.add(p)
+            todo += quoted_includes(rev, p)
+    return seen
+
+
+def cmake_libraries(cmds: list, directory: str) -> dict:
+    """{library: (sources, linked libraries)} for the add_library() commands."""
+    libs = {a[0]: [[], []] for n, a, _ in cmds if n == "add_library"}
+    for n, a, _ in cmds:
+        if n == "add_library":
+            libs[a[0]][0] = [s for s in (resolve(x, directory) for x in a[1:] if x.endswith((".c", ".cpp"))) if s]
+        elif n == "target_link_libraries" and a[0] in libs:
+            libs[a[0]][1] += a[1:]
+    return libs
+
+
+def linked_sources(libs: dict, deps) -> list[str]:
+    """Sources of the libraries `deps` name, and of the libraries those link."""
+    seen, todo, out = set(), list(deps), []
+    while todo:
+        d = todo.pop()
+        if d in libs and d not in seen:
+            seen.add(d)
+            out += libs[d][0]
+            todo += libs[d][1]
+    return out
+
+
 def unit_inventory(rev: str) -> list[dict]:
     """tests/unit/CMakeLists.txt registers a test through the ot_unit_test(name
     [extra sources]) macro (target and ctest name ot-test-<name>, source
     test_<name>.cpp), ot_unit_ncp_test(name) (ot-test-ncp-<name>, test_ncp_<name>.cpp),
-    or a plain add_executable(ot-test-...) with its own add_test()."""
+    or a plain add_executable(ot-test-...) with its own add_test().
+    `helper_sources` are the files an executable also compiles: the sources
+    of the add_library() targets (COMMON_LIBS links them all into every
+    test) and the test headers any of those include."""
     text = show(rev, "tests/unit/CMakeLists.txt")
     if text is None:
         return []
     tests, direct, ctest = [], {}, {}
-    for name, a, guards in cmake_commands(text):
+    cmds = list(cmake_commands(text))
+    libs = sum((v[0] for v in cmake_libraries(cmds, "tests/unit").values()), [])
+    for name, a, guards in cmds:
         if name in ("ot_unit_test", "ot_unit_ncp_test"):
             t = ("ot-test-" if name == "ot_unit_test" else "ot-test-ncp-") + a[0]
             srcs = [("test_" if name == "ot_unit_test" else "test_ncp_") + a[0] + ".cpp"] + a[1:]
@@ -190,9 +284,13 @@ def unit_inventory(rev: str) -> list[dict]:
         elif name == "add_test" and "NAME" in a and "COMMAND" in a:
             ctest[a[a.index("COMMAND") + 1]] = a[a.index("NAME") + 1]
     tests += [(ctest[t], t, srcs, g) for t, (srcs, g) in direct.items() if t in ctest]
-    return [{"ctest_name": c, "target": t,
-             "sources": [s for s in (resolve(x, "tests/unit") for x in srcs) if s],
-             "requires_options": g} for c, t, srcs, g in tests]
+    out = []
+    for c, t, srcs, g in tests:
+        sources = [s for s in (resolve(x, "tests/unit") for x in srcs) if s]
+        out.append({"ctest_name": c, "target": t, "sources": sources,
+                    "helper_sources": sorted(with_includes(rev, sources + libs) - set(sources)),
+                    "requires_options": g})
+    return out
 
 
 def gtest_cases(rev: str, path: str) -> list[str]:
@@ -208,17 +306,23 @@ def gtest_inventory(rev: str) -> list[dict]:
     text = show(rev, "tests/gtest/CMakeLists.txt")
     if text is None:
         return []
-    exes, discovered = {}, set()
-    for name, a, guards in cmake_commands(text):
+    exes, discovered, links = {}, set(), {}
+    cmds = list(cmake_commands(text))
+    libs = cmake_libraries(cmds, "tests/gtest")
+    for name, a, guards in cmds:
         if name == "add_executable":
             exes[a[0]] = (a[1:], guards)
         elif name == "gtest_discover_tests":
             discovered.add(a[0])
+        elif name == "target_link_libraries":
+            links.setdefault(a[0], []).extend(a[1:])
     out = []
     for t, (srcs, guards) in exes.items():
         if t in discovered:
             sources = [s for s in (resolve(x, "tests/gtest") for x in srcs) if s]
+            helpers = linked_sources(libs, links.get(t, []))
             out.append({"target": t, "sources": sources,
+                        "helper_sources": sorted(with_includes(rev, sources + helpers) - set(sources)),
                         "cases": [c for s in sources for c in gtest_cases(rev, s)],
                         "requires_options": guards})
     return out
@@ -328,13 +432,15 @@ def profile_options(base: str) -> list[str] | str:
 
 
 def select_tests(rec: dict) -> dict:
-    """The test executables whose sources the PR's test diff changed, from an
-    enriched record: {"unit": [inventory entries], "gtest": [inventory entries]}.
+    """The test executables that compile a file the PR's test diff changed
+    (their own sources, or the helper libraries and headers they pull in),
+    from an enriched record: {"unit": [inventory entries], "gtest": [...]}.
     Both empty means the changed test files (a CMakeLists, a helper no
     registered executable compiles) map to no runnable target."""
     changed = set(rec["test_files"])
     inv = rec["test_inventory"]
-    return {kind: [t for t in inv[kind] if changed & set(t["sources"])]
+    return {kind: [t for t in inv[kind]
+                   if changed & set(t["sources"] + t.get("helper_sources", []))]
             for kind in ("unit", "gtest")}
 
 
@@ -361,6 +467,7 @@ def enrich(r: dict) -> dict:
     tests = [f for f in r["files"] if f.startswith("tests/")]
     return {"number": r["number"], "title": r["title"], "url": URL.format(r["number"]),
             "merged_at": r["merged_at"], "fix_commit": fix, "base_commit": base,
+            "commits": r.get("commits", [fix]),
             "body": pr_body(r["number"]),
             "source_files": [f for f in r["files"] if not f.startswith("tests/")],
             "test_files": tests,
@@ -421,6 +528,21 @@ def cmd_selftest(args=None) -> None:
     check("revert titles are filtered", classify(
         {"title": "Revert \"[x] y\" (#1)", "parents": ["a"], "files": ["tests/unit/a.cpp", "src/a.cpp"]}
     ) == "revert")
+    r = find_pr(12913)
+    check("12913 (rebase-merged) is one record over all its commits",
+          len(r["commits"]) == 6 and r["parents"][0].startswith("c801d291b")
+          and r["fix_commit"].startswith("2d602dcd9") and classify(dict(r)) is None)
+    check("11239 (commits interleaved with 11240) is not guessed",
+          "interleaved" in (classify(dict(find_pr(11239))) or ""))
+    fix = find_pr(10982)["fix_commit"]
+    inv = {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)}
+    pick = lambda f: {k: len(v) for k, v in select_tests({"test_files": [f], "test_inventory": inv}).items()}
+    check("a shared unit helper header selects every unit executable",
+          pick("tests/unit/test_util.h") == {"unit": len(inv["unit"]), "gtest": 0})
+    check("the fake platform selects only the gtest executables that link it",
+          pick("tests/gtest/fake_platform.hpp") == {"unit": 0, "gtest": len(inv["gtest"])}
+          and pick("tests/gtest/fake_coprocessor_platform.cpp") == {"unit": 0, "gtest": 1})
+    check("a CMakeLists.txt maps to no target", pick("tests/unit/CMakeLists.txt") == {"unit": 0, "gtest": 0})
     sys.exit(0 if ok else 1)
 
 
