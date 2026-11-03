@@ -65,8 +65,9 @@ fails before the fix. That is your job.
   2026-10-23 that file had no `if(OT_FTD)`/`if(OT_RCP)` guards.
 - Build options: `etc/cmake/options.cmake` (`ot_option(OT_X OPENTHREAD_CONFIG_X_ENABLE ...)`
   maps a CMake option to the config macro the sources test). Option names change
-  over time; use the record's `ci_cmake_options`, which come from the base
-  commit's own `.github/workflows/unit.yml`.
+  over time; the record's `profile_cmake_options` list what the profile already
+  sets, and its `ci_cmake_options` come from the base commit's own
+  `.github/workflows/unit.yml`.
 - **Pool and eras** (226 candidates, merged 2024-11 to 2026-10; 4-13 per month
   in 2025, 6-20 per month in 2026). Unit-only 89%, gtest-only 6%, both
   5%. Layout changes that matter for selection:
@@ -107,12 +108,14 @@ Verified (one control run on the pinned revision above, both suites): Ubuntu
 packages, aarch64 host, no network during configure, build or test (network is
 used only to build the image and fetch the source and its recursive submodules).
 
-Configure is upstream's own `script/cmake-build simulation`, which sets a large
-common option list (border router, SRP client/server, DNS client/server, COAP,
-commissioner/joiner, ECDSA, history tracker, ... but not, for example, mDNS,
-NAT64, CSL receiver, backbone router, platform DNS-SD or OTNS) plus
-`-DOT_BUILD_GTEST=ON -DOT_BORDER_ROUTING=ON -DOT_BORDER_ROUTING_DHCP6_PD=ON
--DOT_WAKE_INITIATOR=ON -DOT_WAKE_LISTENER=ON`. Your `cmake_options` are added
+Configure is upstream's own `script/cmake-build simulation`. The profile's
+options are everything that script passes for `simulation` at the base commit
+(its built-in list, which grows slightly over time and includes integer-valued
+options) followed by `-DOT_BUILD_GTEST=ON -DOT_BORDER_ROUTING=ON
+-DOT_BORDER_ROUTING_DHCP6_PD=ON -DOT_WAKE_INITIATOR=ON -DOT_WAKE_LISTENER=ON`
+(later wins for the same option). The record's "Options already set in the
+execution profile" lists the result; it is the authority, and an option it does
+not list is not set by the profile. Your `cmake_options` are added
 to this list (replacing an entry that sets the same option), and
 `-DOT_COMPILE_WARNING_AS_ERROR=OFF` is always applied last, so compiler
 warnings are not the oracle. Only the one target being run is built. FTD, MTD and
@@ -133,8 +136,8 @@ CI); gtest targets other than the FTD one, including the radio-spinel RCP target
 (it configures by default but was not built); and every detection claim, since no
 baseline exists at triage time. For bases before 2025-03-25 say so in `reason` and
 use at most `medium` confidence. Targets that need `OT_FTD=OFF` or
-`OT_MULTIPAN_RCP` (see `requires_options`), or options absent from the base's
-`ci_cmake_options`, are not part of the profile: `hold`.
+`OT_MULTIPAN_RCP` (see `requires_options`), or whose needed option is neither in
+the profile list nor in `ci_cmake_options`, are not part of the profile: `hold`.
 
 ## 4. Selection rules
 
@@ -152,9 +155,11 @@ use at most `medium` confidence. Targets that need `OT_FTD=OFF` or
    `requires_options`. Separately, `#if OPENTHREAD_CONFIG_...` guards inside a
    changed test source are listed under "Preprocessor guards", mapped to the
    `OT_*` option that sets them: when such a guard is off, the test body is
-   compiled out and the executable passes before and after. Check from
-   `src/core/config/` whether the macro defaults to on. A needed option may be
-   added in `cmake_options` only if it appears verbatim in `ci_cmake_options`
+   compiled out and the executable passes before and after. Resolve the guarded
+   macro's value in section 12's order (profile list, then the simulation
+   platform's config header, then the default in the config header). A needed
+   option may be added in `cmake_options` only if the profile does not already
+   provide the value and it appears verbatim in `ci_cmake_options`
    (the base commit's own CI); otherwise hold. Never add an option to make a test
    behave differently from what CI builds. Note `ci_cmake_options` collects
    options of several CI builds, some of which conflict (`ON` versus `OFF`);
@@ -217,12 +222,24 @@ use at most `medium` confidence. Targets that need `OT_FTD=OFF` or
     fail or crash on the base for unrelated reasons. A new gtest `TEST` that
     drives an existing method through the fake platform and counts effects is the
     other common good shape.
-12. **Gating by the profile.** Before relying on a test, confirm its body is
-    compiled in: no `requires_options`, direct guards and any local `ENABLE_...`
-    macro conjunctions must all be satisfied by the profile's option list (section
-    3) or by options present in `ci_cmake_options`. Large feature tests
-    (mDNS, NAT64, CSL, backbone router, platform DNS-SD, ...) are usually compiled
-    out; when the needed option is absent from the base's CI, `hold` (the test is
+12. **Gating by the profile.** Before relying on a test or a production path,
+    confirm it is compiled in: no `requires_options`, and direct guards and any
+    local `ENABLE_...` macro conjunctions must all hold. Resolve each macro's
+    value in this order, and stop at the first source that sets it:
+    (a) the record's "Options already set in the execution profile" list, mapped
+    through `etc/cmake/options.cmake` (`ot_option`/`ot_int_option` give the
+    `OPENTHREAD_*` macro an `OT_*` option sets; a default-off macro whose option
+    the profile list sets is on);
+    (b) the simulation platform's core config header
+    (`examples/platforms/simulation/openthread-core-simulation-config.h`, or its
+    location at that base; check with the tools) and any project or core config
+    headers it includes;
+    (c) the default in the config header that defines the macro
+    (`src/core/config/`, `src/lib/spinel/openthread-spinel-config.h`, ...).
+    Never conclude "off" from a default alone, and never from an option's absence
+    from `ci_cmake_options`, before checking (a) and (b). Only when the profile
+    does not provide the needed value but an option in `ci_cmake_options` does,
+    request it in `cmake_options`. If neither provides it, `hold` (the test is
     legitimate but not runnable under policy); if the test also would pass before
     the fix, `reject`.
 

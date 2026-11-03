@@ -27,9 +27,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import layout  # noqa: E402  (first: reads --run-dir)
+from generate_instance import OPENTHREAD_CMAKE_ARGS, OPENTHREAD_LAST_ARG  # noqa: E402
 
 URL = "https://github.com/openthread/openthread/pull/{}"
-ENRICH_VERSION = 1
+ENRICH_VERSION = 2
 DIFF_CAP = 120_000      # characters kept of each diff in a record
 
 # Not production code, by what the repository holds at the top level: tests/
@@ -247,6 +248,85 @@ def ci_options(base: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"-DOT_\w+=\S+", text)))
 
 
+def _bash_arrays(text: str, platform: str) -> list[str]:
+    """The items script/cmake-build passes for `platform`: its `NAME=(...)` /
+    `NAME+=(...)` array statements, evaluated in order with the `case` branch
+    for the platform (else `*`) kept and the others dropped. Raises ValueError
+    when the script has no recognizable structure."""
+    text = re.sub(r"(?m)^\s*#.*$", "", text)
+    arrays: dict[str, list[str]] = {}
+    case_open = False
+    keep = True
+    stmt = re.compile(r"^\s*(?:local\s+|readonly\s+)?(\w+)(\+?)=\(", re.M)
+    # split the text into lines and walk them, tracking the platform case
+    lines = text.split("\n")
+    i = 0
+    branch_hit = False
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"\s*case\s+\"?\$\{?platform\}?\"?\s+in", line)
+        if m:
+            case_open, keep, branch_hit = True, False, False
+            i += 1
+            continue
+        if case_open:
+            if re.match(r"\s*esac\b", line):
+                case_open, keep = False, True
+                i += 1
+                continue
+            b = re.match(r"\s*([\w*|\"-]+)\)\s*$", line)
+            if b:
+                pats = [x.strip('"') for x in b.group(1).split("|")]
+                keep = platform in pats or ("*" in pats and not branch_hit)
+                branch_hit |= platform in pats
+                i += 1
+                continue
+        m = stmt.match(line)
+        if m:
+            body = line[m.end():]
+            while ")" not in body.split("#")[0] and i + 1 < len(lines):
+                i += 1
+                body += " " + lines[i]
+            body = body[:body.rindex(")")]
+            items = []
+            for tok in re.findall(r'"([^"]*)"|(\S+)', body):
+                t = tok[0] or tok[1]
+                ref = re.fullmatch(r"\$\{(\w+)\[@\]\}", t)
+                if ref:
+                    items += arrays.get(ref.group(1), [])
+                elif t != "$@":
+                    items.append(t.replace("${platform}", platform))
+            name = m.group(1)
+            # top-level (or kept-branch) statements only
+            if keep or not case_open:
+                arrays[name] = (arrays.get(name, []) if m.group(2) else []) + items
+        i += 1
+    if "options" not in arrays:
+        raise ValueError("no `options` array in script/cmake-build")
+    final = [x for x in arrays["options"] if x.startswith("-DOT_")]
+    if not final:
+        raise ValueError("no -DOT_ options parsed")
+    return final
+
+
+def profile_options(base: str) -> list[str] | str:
+    """The effective -D options of our execution profile at `base`: the -DOT_*
+    entries `script/cmake-build simulation` passes, then OPENTHREAD_CMAKE_ARGS
+    and OPENTHREAD_LAST_ARG (generate_instance.py); later wins per option.
+    A string (an error message) when the script cannot be parsed."""
+    text = show(base, "script/cmake-build")
+    if text is None:
+        return "ERROR: script/cmake-build missing at the base commit"
+    try:
+        upstream = _bash_arrays(text, "simulation")
+    except ValueError as e:
+        return f"ERROR: {e}"
+    out: list[str] = []
+    for a in upstream + OPENTHREAD_CMAKE_ARGS + [OPENTHREAD_LAST_ARG]:
+        out = [x for x in out if x.split("=")[0] != a.split("=")[0]] + [a]
+    return out
+
+
 def select_tests(rec: dict) -> dict:
     """The test executables whose sources the PR's test diff changed, from an
     enriched record: {"unit": [inventory entries], "gtest": [inventory entries]}.
@@ -289,6 +369,7 @@ def enrich(r: dict) -> dict:
             "test_inventory": {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)},
             "test_config_guards": config_guards(fix, tests),
             "ci_cmake_options": ci_options(base),
+            "profile_cmake_options": profile_options(base),
             "enrich_version": ENRICH_VERSION}
 
 

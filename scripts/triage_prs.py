@@ -489,7 +489,12 @@ def render_record_openthread(rec: dict) -> str:
     out += ["", "## Preprocessor guards in the changed test sources", ""]
     out += [f"- {p}: {', '.join(o)}" for p, o in rec.get("test_config_guards", {}).items()] \
         or ["(none)"]
-    out += ["", "## Configure options used by the base commit's own CI (.github/workflows/unit.yml)", "",
+    prof = rec.get("profile_cmake_options")
+    out += ["", "## Options already set in the execution profile (upstream script/cmake-build "
+            "simulation at the base commit, then the profile's own args; later wins)", "",
+            prof if isinstance(prof, str) else " ".join(prof or []) or "(not available)", ""]
+    out += ["## Additional options a verdict may request via cmake_options (the base commit's own CI, "
+            ".github/workflows/unit.yml)", "",
             " ".join(rec["ci_cmake_options"]) or "(none)", "",
             "## Test changes (git diff base fix -- tests/)", "", "```diff", rec["diffs"]["tests"], "```", "",
             "## Production changes (everything else)", "", "```diff", rec["diffs"]["source"], "```", ""]
