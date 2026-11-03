@@ -7,7 +7,9 @@ run_tests -- build and run this instance's OpenThread tests with CMake.
                                image is built
 
 The suite, target, configure arguments and the expected test names are fixed per
-instance in /opt/embedeval/instance.json. The build directory is /testbed/build,
+instance in /opt/embedeval/instance.json. With "observe": true there are no
+expected names: "targets" are built, and every case of the "gtest" binaries and
+every "unit" ctest name is reported. The build directory is /testbed/build,
 configured once and reused, so after an edit only what changed is rebuilt.
 
     gtest   the target's binary runs once with --gtest_output=json; every
@@ -96,9 +98,12 @@ def build(cfg: dict) -> bool:
     # a parallel rebuild of the core after a widely included header changes fills.
     tmp = BUILD / "tmp"
     tmp.mkdir(exist_ok=True)
-    targets = [cfg["target"]]
-    if cfg["suite"] == "unit":      # the other ctest names are separate executables
-        targets += [n for n in cfg["pass_to_pass"] if n not in targets]
+    if cfg.get("observe"):
+        targets = cfg["targets"]
+    else:
+        targets = [cfg["target"]]
+        if cfg["suite"] == "unit":      # the other ctest names are separate executables
+            targets += [n for n in cfg["fail_to_pass"] + cfg["pass_to_pass"] if n not in targets]
     steps = []
     if not (BUILD / "build.ninja").exists():
         env = {**os.environ, "TMPDIR": str(tmp), "OT_CMAKE_BUILD_DIR": str(BUILD),
@@ -152,6 +157,32 @@ def run_unit(names: list[str]) -> tuple[dict[str, str], str]:
     return out, "\n".join(shown)
 
 
+def observe(cfg: dict) -> int:
+    """Observe mode (instance.json "observe": true): no expected lists. Every
+    case of each selected gtest binary and every selected unit executable is
+    reported, in the same results block."""
+    statuses, detail = {}, []
+    for target in cfg["gtest"]:
+        cases, text = run_gtest({"target": target})
+        statuses.update(cases)
+        detail.append(text)
+    if cfg["unit"]:
+        cases, text = run_unit(cfg["unit"])
+        statuses.update(cases)
+        detail.append(text)
+    if any(s in ("failed", "error", "timeout") for s in statuses.values()):
+        print("\n--- output of the failing run (last 60 lines) ---")
+        print("\n".join("\n".join(detail).splitlines()[-60:]))
+    print("\n--- openthread: results")
+    for name, status in statuses.items():
+        print(f"  {status} {name}")
+    print("--- end ---")
+    rc = exit_code(list(statuses.values()))
+    print({0: "==> run_tests: PASSED", 1: "==> run_tests: FAILED",
+           3: "==> run_tests: NOTHING RAN"}[rc])
+    return rc
+
+
 def main() -> int:
     cfg = json.loads(CONFIG.read_text())
     os.chdir(TESTBED)
@@ -162,6 +193,8 @@ def main() -> int:
     if "--build-only" in sys.argv[1:]:
         return 0
 
+    if cfg.get("observe"):
+        return observe(cfg)
     expected = cfg["fail_to_pass"] + cfg["pass_to_pass"]
     if cfg["suite"] == "gtest":
         observed, detail = run_gtest(cfg)

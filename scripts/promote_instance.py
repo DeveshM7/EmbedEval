@@ -47,6 +47,8 @@ def promote(instance_id: str, source: Path = GENERATED) -> tuple[bool, str]:
         return False, "validation.json predates recipe fingerprints; validate it again"
     if au.recipe_fingerprint(src) != want:
         return False, "recipe changed since it was validated; validate it again"
+    if not (json.loads((src / "metadata.json").read_text()).get("problem_statement") or "").strip():
+        return False, "no problem statement (metadata.json problem_statement is empty)"
     missing = [f for f in FILES if not (src / f).exists()]
     if missing:
         return False, f"missing {', '.join(missing)}"

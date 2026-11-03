@@ -199,6 +199,8 @@ def build_task(meta: dict) -> str:
     def bullets(items):
         return "\n".join(f"  - {i}" for i in items) or "  (none)"
 
+    if not (meta.get("problem_statement") or "").strip():
+        sys.exit(f"ERROR: {meta['instance_id']} has no problem statement; write one first")
     return f"""\
 ## Bug Description
 

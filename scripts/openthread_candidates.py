@@ -247,6 +247,17 @@ def ci_options(base: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"-DOT_\w+=\S+", text)))
 
 
+def select_tests(rec: dict) -> dict:
+    """The test executables whose sources the PR's test diff changed, from an
+    enriched record: {"unit": [inventory entries], "gtest": [inventory entries]}.
+    Both empty means the changed test files (a CMakeLists, a helper no
+    registered executable compiles) map to no runnable target."""
+    changed = set(rec["test_files"])
+    inv = rec["test_inventory"]
+    return {kind: [t for t in inv[kind] if changed & set(t["sources"])]
+            for kind in ("unit", "gtest")}
+
+
 # ---------------------------------------------------------------- enrichment
 
 

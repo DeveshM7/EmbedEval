@@ -272,26 +272,75 @@ def merge_cmake_args(base: list[str], extra: list[str]) -> list[str]:
     return [a for a in base if key(a) not in {key(e) for e in extra}] + extra
 
 
-def generate_openthread(pr: int, verdict: dict, out_root: Path) -> Path:
+def observed_config(prior: dict, obs: dict) -> dict:
+    """instance.json fields of the verdict-style instance an observation
+    finalizes into. run_tests holds one gtest target or the unit tests, so a
+    selection of both (or of several binaries) is refused."""
+    f2p, p2p = obs["fail_to_pass"], obs["pass_to_pass"]
+    if prior["gtest"] and not prior["unit"] and len(prior["gtest"]) == 1:
+        return {"suite": "gtest", "target": prior["gtest"][0], "fail_to_pass": f2p,
+                "pass_to_pass": p2p}
+    if prior["unit"] and not prior["gtest"]:
+        return {"suite": "unit", "target": f2p[0], "fail_to_pass": f2p, "pass_to_pass": p2p}
+    sys.exit("ERROR: --from-observed handles one gtest target or unit tests only, not "
+             f"gtest {prior['gtest']} with unit {prior['unit']}")
+
+
+def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: bool = False,
+                        observed: Path | None = None) -> Path:
     """Build `openthread__openthread-<pr>` from an accepted verdict. The
-    verdict is checked again here, mechanically, so an unchecked one is refused."""
+    verdict is checked again here, mechanically, so an unchecked one is refused.
+
+    observe: no verdict; the executables are those whose sources the PR's test
+    diff changed (instance.json "observe": true, validate_instance.py observes
+    which cases flip). observed: the directory of an observed-valid instance,
+    regenerated as a normal instance from observed.json."""
     import openthread_candidates
     import triage_prs
     rec_path = openthread_candidates.enriched_dir() / f"{pr}.json"
     if not rec_path.exists():
         sys.exit(f"ERROR: no enriched record at {rec_path}. Run `openthread_candidates.py enrich` first.")
     rec = json.loads(rec_path.read_text())
-    if verdict.get("verdict") != "accept":
-        sys.exit(f"ERROR: verdict for {pr} is {verdict.get('verdict')!r}, not accept: "
-                 f"{verdict.get('reason', 'no reason given')}")
-    triage_prs.use_project("openthread")
-    issues = triage_prs.check_verdict_openthread(verdict, rec)
-    if issues:
-        sys.exit(f"ERROR: verdict for {pr} fails the check:\n  " + "\n  ".join(issues))
+    extra_meta = {}
+    if observed:
+        obs = json.loads((observed / "observed.json").read_text())
+        if not obs.get("valid"):
+            sys.exit(f"ERROR: {observed} is not observed-valid: {obs.get('reason')}")
+        prior = json.loads((observed / "instance.json").read_text())
+        old = json.loads((observed / "metadata.json").read_text())
+        cfg = observed_config(prior, obs)
+        cmake_args = prior["cmake_args"]
+        statement, change_type = old["problem_statement"], old["change_type"]
+        extra_meta = {"oracle": "observed", "oracle_note": "observed by validate_instance.py "
+                      "(fail before, pass after the fix); the unit oracle is per executable, "
+                      "so check attribution of the cases to the PR's change"}
+    elif observe:
+        sel = openthread_candidates.select_tests(rec)
+        if not sel["unit"] and not sel["gtest"]:
+            sys.exit(f"ERROR: no runnable target for {pr}: its changed test files "
+                     f"{rec['test_files']} are compiled into no unit or gtest executable")
+        cmake_args = OPENTHREAD_CMAKE_ARGS + [OPENTHREAD_LAST_ARG]
+        cfg = {"observe": True, "unit": [t["ctest_name"] for t in sel["unit"]],
+               "gtest": [t["target"] for t in sel["gtest"]],
+               "targets": [t["target"] for t in sel["unit"] + sel["gtest"]],
+               "fail_to_pass": [], "pass_to_pass": []}
+        statement = change_type = None
+    else:
+        if verdict.get("verdict") != "accept":
+            sys.exit(f"ERROR: verdict for {pr} is {verdict.get('verdict')!r}, not accept: "
+                     f"{verdict.get('reason', 'no reason given')}")
+        triage_prs.use_project("openthread")
+        issues = triage_prs.check_verdict_openthread(verdict, rec)
+        if issues:
+            sys.exit(f"ERROR: verdict for {pr} fails the check:\n  " + "\n  ".join(issues))
+        cmake_args = merge_cmake_args(OPENTHREAD_CMAKE_ARGS, verdict.get("cmake_options", [])
+                                      ) + [OPENTHREAD_LAST_ARG]
+        cfg = {"suite": verdict["suite"], "target": verdict["target"],
+               "fail_to_pass": verdict["fail_to_pass"],
+               "pass_to_pass": verdict.get("pass_to_pass", [])}
+        statement, change_type = verdict["problem_statement"], verdict["change_type"]
 
     base, fix = rec["base_commit"], rec["fix_commit"]
-    cmake_args = merge_cmake_args(OPENTHREAD_CMAKE_ARGS, verdict.get("cmake_options", [])
-                                  ) + [OPENTHREAD_LAST_ARG]
     instance_id = f"openthread__openthread-{pr}"
     inst = out_root / instance_id
     inst.mkdir(parents=True, exist_ok=True)
@@ -303,9 +352,9 @@ def generate_openthread(pr: int, verdict: dict, out_root: Path) -> Path:
     (inst / "test_patch.diff").write_text(patch)
     check_applies(patch, base, inst, clone)
 
-    f2p, p2p = verdict["fail_to_pass"], verdict.get("pass_to_pass", [])
+    f2p, p2p = cfg["fail_to_pass"], cfg["pass_to_pass"]
     (inst / "instance.json").write_text(json.dumps(
-        {"suite": verdict["suite"], "target": verdict["target"],
+        {**{k: v for k, v in cfg.items() if k not in ("fail_to_pass", "pass_to_pass")},
          "configure": OPENTHREAD_CONFIGURE, "cmake_args": cmake_args,
          "fail_to_pass": f2p, "pass_to_pass": p2p}, indent=2) + "\n")
     shutil.copy(OPENTHREAD_TEMPLATES / "run_tests.py", inst / "run_tests.py")
@@ -324,15 +373,16 @@ def generate_openthread(pr: int, verdict: dict, out_root: Path) -> Path:
         "base_commit": base,
         "fix_commit": fix,
         "test_commit": fix,
-        "problem_statement": verdict["problem_statement"],
+        "problem_statement": statement,
         "fail_to_pass": f2p,
         "pass_to_pass": p2p,
         "files_changed_by_fix": rec["source_files"],
         "pr_url": rec["url"],
-        "change_type": verdict["change_type"],
+        "change_type": change_type,
         "run_command": "run_tests",
         "apptainer_image": f"{instance_id}.sif",
         "generated": True,
+        **extra_meta,
     }
     (inst / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
     return inst
@@ -342,19 +392,31 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Generate an instance from a triage verdict.")
     p.add_argument("--project", choices=("zephyr", "openthread"), default="zephyr")
     p.add_argument("--pr", type=int, required=True)
-    p.add_argument("--triage", required=True, help="path to the triage verdict JSON")
+    p.add_argument("--triage", help="path to the triage verdict JSON")
+    p.add_argument("--observe", action="store_true",
+                   help="OpenThread: no verdict; run the test executables the PR changed and "
+                        "observe which cases flip (validate_instance.py writes observed.json)")
+    p.add_argument("--from-observed", type=Path, metavar="DIR",
+                   help="OpenThread: regenerate an observed-valid instance directory as a "
+                        "normal instance with the observed test lists")
     p.add_argument("--out", default=str(DEFAULT_OUT),
                    help="output root (default: generated/, never docker/instances/)")
     p.add_argument("--force", action="store_true",
                    help="generate even if the board/scenario check fails (for testing)")
     args = p.parse_args()
 
-    triage = json.loads(Path(args.triage).read_text())
-    if triage.get("verdict") == "reject":
-        sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
-
-    inst = (generate_openthread(args.pr, triage, Path(args.out)) if args.project == "openthread"
-            else generate(args.pr, triage, Path(args.out), args.force))
+    if args.observe or args.from_observed:
+        if args.project != "openthread" or args.triage:
+            p.error("--observe and --from-observed are OpenThread only and take no --triage")
+        inst = generate_openthread(args.pr, None, Path(args.out), args.observe, args.from_observed)
+    else:
+        if not args.triage:
+            p.error("--triage is required")
+        triage = json.loads(Path(args.triage).read_text())
+        if triage.get("verdict") == "reject":
+            sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
+        inst = (generate_openthread(args.pr, triage, Path(args.out)) if args.project == "openthread"
+                else generate(args.pr, triage, Path(args.out), args.force))
     print(f"  wrote {layout.show(inst)}")
     for f in sorted(inst.iterdir()):
         print(f"    {f.name:<20} {f.stat().st_size:>7} B")
