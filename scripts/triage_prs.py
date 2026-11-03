@@ -439,6 +439,19 @@ def check_verdict(v: dict | None, rec: dict) -> list[str]:
 
     if v.get("confidence") not in ("high", "medium", "low"):
         issues.append("`confidence` must be high, medium or low")
+    oracle = v.get("oracle", "runtime")
+    if oracle not in ("runtime", "compile"):
+        issues.append("`oracle` must be \"runtime\" or \"compile\" (or left out for runtime)")
+    elif oracle == "compile":
+        known = {e["symbol"] for e in rec.get("fix_symbols") or []}
+        syms = v.get("compile_symbols")
+        if not isinstance(syms, list) or not syms:
+            issues.append("a compile oracle needs a non-empty `compile_symbols` list")
+        elif [x for x in syms if x not in known]:
+            issues.append(f"`compile_symbols` {[x for x in syms if x not in known]} are not in the record's "
+                          f"symbols the test patch needs from the fix: {sorted(known)}")
+        if v.get("pass_to_pass"):
+            issues.append("a compile oracle has `pass_to_pass` [] (nothing runs before the fix)")
     if v.get("change_type") not in ("fix", "feature"):
         issues.append("`change_type` must be fix or feature")
     issues += check_pair(v, rec)
@@ -510,6 +523,24 @@ def render_profiles(rec: dict) -> list[str]:
     return out
 
 
+def render_fix_symbols(rec: dict) -> list[str]:
+    """The record's fix_symbols: what the changed tests use that the fix's
+    production diff adds (mechanical; judging whether it is the PR's purpose is
+    the verdict's job)."""
+    syms = rec.get("fix_symbols") or []
+    out = ["## Symbols the test patch needs from the fix", ""]
+    if not syms:
+        return out + ["none found: no identifier, header or source the new test lines use is added by the "
+                      "production diff, so the tests likely build at the base.", ""]
+    out += ["Identifiers on added test lines that also occur on added production lines, new headers the "
+            "tests #include and new sources their CMake references. `at_base` yes: the name occurs "
+            "somewhere in the base tree (often on another class), so it does not prove the test builds.", "",
+            "| symbol | kind | used at | added at | at_base |", "|---|---|---|---|---|"]
+    out += [f"| {e['symbol']} | {e['kind']} | {e['test']} | {e['fix']} | {'yes' if e['at_base'] else 'no'} |"
+            for e in syms]
+    return out + [""]
+
+
 def render_record_openthread(rec: dict) -> str:
     """The OpenThread enriched record (scripts/openthread_candidates.py) as
     markdown. There are no twister or dry-run facts; its diffs are capped when
@@ -558,6 +589,7 @@ def render_record_openthread(rec: dict) -> str:
             ".github/workflows/unit.yml)", "",
             f"(none: the {name} profile takes no `cmake_options`)" if not sim else
             " ".join(rec["ci_cmake_options"]) or "(none)", "",
+            *render_fix_symbols(rec),
             "## Test changes (git diff base fix -- tests/)", "", "```diff", rec["diffs"]["tests"], "```", "",
             "## Production changes (everything else)", "", "```diff", rec["diffs"]["source"], "```", ""]
     return "\n".join(out)
@@ -581,6 +613,19 @@ def check_verdict_openthread(v: dict | None, rec: dict) -> list[str]:
 
     if v.get("confidence") not in ("high", "medium", "low"):
         issues.append("`confidence` must be high, medium or low")
+    oracle = v.get("oracle", "runtime")
+    if oracle not in ("runtime", "compile"):
+        issues.append("`oracle` must be \"runtime\" or \"compile\" (or left out for runtime)")
+    elif oracle == "compile":
+        known = {e["symbol"] for e in rec.get("fix_symbols") or []}
+        syms = v.get("compile_symbols")
+        if not isinstance(syms, list) or not syms:
+            issues.append("a compile oracle needs a non-empty `compile_symbols` list")
+        elif [x for x in syms if x not in known]:
+            issues.append(f"`compile_symbols` {[x for x in syms if x not in known]} are not in the record's "
+                          f"symbols the test patch needs from the fix: {sorted(known)}")
+        if v.get("pass_to_pass"):
+            issues.append("a compile oracle has `pass_to_pass` [] (nothing runs before the fix)")
     if v.get("change_type") not in ("fix", "feature"):
         issues.append("`change_type` must be fix or feature")
     for field in ("problem_statement", "causal_chain"):

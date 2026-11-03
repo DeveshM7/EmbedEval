@@ -21,16 +21,20 @@ Policy for this port:
   tests are out of scope. Nothing is written for the benchmark: never edit an
   upstream assertion, never inject the fix into a test, never toggle unrelated
   options to manufacture a failure.
-- **Runtime oracles only.** A case must fail (or crash) when run against the
-  base production code with the new tests, and pass with the fix. If the only
-  difference is a compile error (the test uses an API that only the fix adds),
-  reject: "compile-only oracle".
-- Bug fixes and small features are both fine (`change_type`), provided the test
-  drives an interface that already exists at the base commit. Linked issues are
+- **Runtime oracles, or a compile oracle under the semantic rule.** Preferred: a
+  case fails (or crashes) when run against the base production code with the new
+  tests, and passes with the fix. If the new tests do not build against the base,
+  the task is valid only when the reason they do not build and the fix are the
+  same thing: the added test lines use symbols (function, method, overload, type,
+  enum value, constant, member, header, or a CMake source) that the fix's
+  production diff adds or changes, and providing that interface or behavior is
+  the purpose of the PR. Otherwise reject "incidental compile failure" (section
+  4, rule 4).
+- Bug fixes and small features are both fine (`change_type`). Linked issues are
   not required.
 - Most candidates are not tasks. In a source-read sample of the candidate pool
   (2024-11 to 2026-10) roughly one in five had a usable runtime oracle; the rest
-  were option-gated, compile-only, or did not detect anything (see section 4).
+  were option-gated, incidental compile failures, or did not detect anything (see section 4).
   Rejecting or holding is the normal outcome; accepting needs a traced chain.
 
 What the hard filters already prove (scripts/openthread_candidates.py): the
@@ -206,9 +210,20 @@ part of the profile: `hold`.
    behave differently from what CI builds. Note `ci_cmake_options` collects
    options of several CI builds, some of which conflict (`ON` versus `OFF`);
    choose consistently with what the target needs.
-4. **Compile-only oracle.** If the test change only calls an API, type or enum
-   that the production diff adds, and nothing it asserts could fail at run time
-   on the base code, reject with reason "compile-only oracle".
+4. **Compile oracle versus incidental compile failure.** If the new tests do
+   not build against the base (rule 10), decide whether the build break is what
+   the PR targets. Accept as `oracle` `compile` when the symbols the tests use
+   from the fix are the PR's purpose: a feature adding the API the tests
+   exercise, or a fix whose correction is the signature or type change the tests
+   rely on. Reject "incidental compile failure" when the build breaks for a reason
+   that is not what the PR targets: changes only to test helpers, fake platform
+   or test CMake plumbing, renamed include guards or headers, moved files, a test
+   mechanically adapted to a rename or refactor, or symbols the fix adds only as
+   plumbing. The test body must still be compiled in under the profile, the
+   target built by the profile, and the names taken from the inventory.
+   For a compile oracle `fail_to_pass` are the selected tests that exercise the
+   targeted interface and must pass with the fix (unit: the executable's ctest
+   name; gtest: the `Suite.Case` names that use it) and `pass_to_pass` is `[]`.
 5. **Unit tests are per executable.** Name the executable (`suite` `unit`,
    `target` `ot-test-<name>`); `fail_to_pass` is exactly that executable's ctest
    name, because it fails as a whole on the first failure. `pass_to_pass` may
@@ -247,14 +262,16 @@ part of the profile: `hold`.
    - *Helper-only or plumbing diffs*: stubs added to a shared test platform,
      CMake/flag plumbing, bulk mechanical edits (formatting, header guards,
      renames across many files) pass the hard filters but change no behaviour.
-10. **A symbol absent from the base is a build failure, not a runtime
-    oracle.** If any added test line references a function, overload, type,
-    enum value or constant that the production diff introduces (including a new
-    overload of an existing name or a renamed member), the base cannot build the
-    target. Reject as "compile-only oracle" even if the new API looks behavioural;
-    do not rely on the symbol's name being present elsewhere at the base (the same
-    name often exists on another class). Roughly a quarter of candidates are of
-    this kind, especially features and public API additions.
+10. **A symbol absent from the base means the base cannot build the target.**
+    If any added test line references a function, overload, type, enum value or
+    constant that the production diff introduces (including a new overload of an
+    existing name or a renamed member), the base cannot build the target; it is
+    not a runtime oracle. The record's "Symbols the test patch needs from the fix"
+    lists the candidates; `at_base` yes only means the name occurs somewhere in
+    the base (the same name often exists on another class), so check that the
+    tests' use really exists there. Then apply rule 4: compile oracle if the
+    symbols are the PR's purpose, otherwise "incidental compile failure". "none
+    found" means the tests likely build at the base.
 11. **What a good runtime oracle looks like.** A fix whose test (a) calls an
     interface that exists at the base, (b) feeds an input the old code mishandles
     (malformed or boundary encoding, repeated call, ordering, a table row whose
@@ -307,9 +324,8 @@ part of the profile: `hold`.
   B", "add a check in F", "reject ... in G()") -- restate the behavior instead.
   Do not mention test case names as the answer.
 - **Feature tasks.** State the new required behavior in terms of the interface the
-  test already calls. If the test would need a new function, type or constant
-  name, the task is compile-only and is rejected, so the statement never has to
-  introduce one.
+  test already calls. For a compile oracle you may name the interface exactly as
+  the new tests use it (the agent can read them), but never the implementation.
 - The agent separately sees the names of the failing tests and the list of files
   the fix changes. The statement must not add location hints beyond that: no
   subsystem file names, no function names, no hints about which layer is wrong.
@@ -321,7 +337,7 @@ part of the profile: `hold`.
 One JSON object, nothing else.
 
 - `accept`: all fields below. `reject`: `pr`, `verdict`, `reason` (the PR is not
-  a good instance: no detecting test, no behavior change, compile-only oracle,
+  a good instance: no detecting test, no behavior change, incidental compile failure,
   pass-before test, out of profile). `hold`: `pr`, `verdict`, `reason` (a
   legitimate candidate that cannot be run now: needs an option not in CI, an
   unsupported target, or missing facts); it is not a soft reject, and is for
@@ -337,8 +353,10 @@ One JSON object, nothing else.
   "target": "<CMake target from the inventory>",
   "cmake_options": [ ],                       # usually []; each must be in ci_cmake_options
   "profile": "<a profile of the record>",     # optional; default is the record's profile (cmake_options [] unless simulation)
-  "fail_to_pass": [ ... ],                    # unit: the target's ctest name; gtest: Suite.Case
-  "pass_to_pass": [ ... ],                    # may be []
+  "oracle": "runtime" | "compile",            # optional; default runtime
+  "compile_symbols": [ ... ],                 # required for compile: the record's symbols that break the base build and are the PR's target
+  "fail_to_pass": [ ... ],                    # unit: the target's ctest name; gtest: Suite.Case. Compile: the selected tests exercising the targeted interface
+  "pass_to_pass": [ ... ],                    # may be []; must be [] for compile (nothing runs before the fix)
   "problem_statement": "<observable behavior, no fix leakage>",
   "causal_chain": "<changed test input -> old production path -> expected failure -> fix -> pass>" }
 ```
@@ -362,7 +380,9 @@ accept, `confidence`, `change_type`, `suite`, a `target` that exists in the
 inventory for that suite, `fail_to_pass` non-empty and made only of names in
 that target's inventory (unit: exactly its ctest name), `pass_to_pass` names in
 the same inventory and disjoint from F2P, `cmake_options` each listed in
-`ci_cmake_options`, `profile` (when set) an available profile of the record that builds the target and does not compile out its test body, non-empty `problem_statement` and `causal_chain`, and a test
+`ci_cmake_options`, `profile` (when set) an available profile of the record that builds the target and does not compile out its test body, non-empty `problem_statement` and `causal_chain`, `oracle` (when set) runtime or
+compile, and for compile a non-empty `compile_symbols` each listed in the
+record's "Symbols the test patch needs from the fix" and `pass_to_pass` `[]`, and a test
 patch that applies to the base. Input or schema errors are sent back to you with
 the reason; do not repair them by inventing names.
 
@@ -380,8 +400,8 @@ the reason; do not repair them by inventing names.
   any one new assertion; attribution comes from where its output stops. Check
   that the PR's new assertion, not an older one, is what fails on the base.
 - No baseline run exists at triage time; you must not claim that any case
-  failed before. A diagnostic baseline is taken later; execution, not compile,
-  is the signal.
+  failed before. A diagnostic baseline is taken later; for a runtime oracle
+  execution is the signal, for a compile oracle the attributed build failure.
 - The tests as they will be run are those at the fix commit; nothing from other
   PRs or saved results is available to you.
 
@@ -397,8 +417,11 @@ the reason; do not repair them by inventing names.
 - Cap at `medium` when the base is older than 2025-03-25 (network GoogleTest),
   when the gtest target is not the FTD one, when a unit executable has several
   possible detecting hunks, or when the only evidence of a crash is memory layout.
+- Cap a compile oracle at `medium` when any `compile_symbols` entry has `at_base`
+  yes (the name exists elsewhere, so the attribution is less certain).
 - Do not accept when the test is gated off in the supported configuration, when
-  the detection is compile-only, or when you could not name why it fails before.
+  the compile failure is incidental, or when you could not name why it fails
+  before.
 - Tool use is bounded (the prompt states the number of rounds). The record
   already has both diffs and the inventory; use tools for the surrounding
   source, config defaults (`src/core/config/`) and `etc/cmake/options.cmake`.

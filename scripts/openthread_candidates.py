@@ -34,7 +34,7 @@ from generate_instance import (OPENTHREAD_CMAKE_ARGS, OPENTHREAD_CONFIGURE, OPEN
                                OPENTHREAD_TORANJ_CONFIGURE)
 
 URL = "https://github.com/openthread/openthread/pull/{}"
-ENRICH_VERSION = 8
+ENRICH_VERSION = 9
 DIFF_CAP = 120_000      # characters kept of each diff in a record
 
 # Not production code, by what the repository holds at the top level: tests/
@@ -1159,6 +1159,94 @@ def pr_body(pr: int) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+CODE_SUFFIXES = (".c", ".cc", ".cpp", ".h", ".hpp")
+KEYWORDS = frozenset("""alignas alignof and asm auto bool break case catch char class const constexpr
+const_cast continue decltype default delete do double dynamic_cast else enum explicit export extern false
+final float for friend goto if inline int long mutable namespace new noexcept not nullptr operator or
+override private protected public register reinterpret_cast return short signed sizeof static
+static_assert static_cast struct switch template this throw true try typedef typeid typename union
+unsigned using virtual void volatile while define defined elif endif error ifdef ifndef include line
+pragma undef std uint8_t uint16_t uint32_t uint64_t int8_t int16_t int32_t int64_t size_t""".split())
+SYMBOL_CAP = 40
+IDENT = re.compile(r"[A-Za-z_]\w*")
+INCLUDE = re.compile(r'#\s*include\s*[<"]([^>"]+)[>"]')
+
+
+def added_lines(base: str, fix: str, *pathspec: str) -> list[tuple[str, int, str]]:
+    """(path, new line number, text) of every line the base..fix diff adds."""
+    out, path, n = [], None, 0
+    for line in git("diff", "-U0", "--no-renames", base, fix, "--", *pathspec).split("\n"):
+        if line.startswith("+++ "):
+            path = line[6:] if line.startswith("+++ b/") else None
+        elif line.startswith("@@"):
+            n = int(re.match(r"@@ -\S+ \+(\d+)", line).group(1))
+        elif path and line.startswith("+"):
+            out.append((path, n, line[1:]))
+            n += 1
+    return out
+
+
+def code_idents(text: str) -> set[str]:
+    text = re.sub(r'"(\\.|[^"\\])*"|//.*', "", text)
+    return {i for i in IDENT.findall(text) if len(i) >= 3 and i not in KEYWORDS}
+
+
+def fix_symbols(base: str, fix: str, tests: list[str]) -> list[dict]:
+    """What the test patch uses that the fix's production diff adds: identifiers
+    on added lines of the changed tests/unit and tests/gtest sources that also
+    occur on added lines of the non-test diff, headers the tests newly #include
+    that exist only after the fix, and production sources the tests' CMake
+    changes reference that the fix adds. Each: {symbol, kind, test, fix,
+    at_base}. at_base: the identifier occurs (git grep -w) anywhere at the
+    base, often on another class, so it does not prove the test builds. The
+    result is capped: names absent at the base first, then those the fix's own files lacked at the base."""
+    tests = [t for t in tests if t.startswith(TEST_ROOTS)]
+    if not tests:
+        return []
+    prod = tuple(f":(exclude){d}" for d in NON_PRODUCTION if d != "tests/")
+    fix_added = {}
+    for path, n, text in added_lines(base, fix, ".", ":(exclude)tests/", *prod):
+        if not path.endswith(".md"):
+            for i in code_idents(text):
+                fix_added.setdefault(i, f"{path}:{n}")
+    new_files = [f for f in git("diff", "--name-only", "--no-renames", "--diff-filter=A",
+                                base, fix, "--", ".", ":(exclude)tests/").split("\n") if f]
+    found, tested = {}, {}
+    out = []
+    for path, n, text in added_lines(base, fix, *tests):
+        if path.endswith(CODE_SUFFIXES):
+            for i in code_idents(text) & fix_added.keys():
+                tested.setdefault(i, f"{path}:{n}")
+            m = INCLUDE.search(text)
+            if m:
+                hdr = [f for f in new_files if f.endswith("/" + m.group(1)) or f == m.group(1)]
+                if hdr:
+                    out.append({"symbol": hdr[0], "kind": "header", "test": f"{path}:{n}",
+                                "fix": hdr[0] + ":1", "at_base": False})
+        elif path.endswith(("CMakeLists.txt", ".cmake")):
+            for tok in re.findall(r"[\w$@{}./+-]+\.(?:cpp|cc|c|hpp|h)\b", text):
+                clean = re.sub(r"^(\$\{[^}]*\}/|\.\./|\./)*", "", tok)
+                src = [f for f in new_files if f == clean or f.endswith("/" + clean)]
+                if src:
+                    out.append({"symbol": src[0], "kind": "source", "test": f"{path}:{n}",
+                                "fix": src[0] + ":1", "at_base": False})
+    touched = set(git("diff", "--name-only", "--no-renames", base, fix, "--", ".", ":(exclude)tests/").split("\n"))
+    ids, known = [], {}
+    for i in tested:
+        files = set(git("grep", "-l", "-w", "-F", "-e", i, base, check=False).replace(f"{base}:", "").split("\n")) - {""}
+        known[i] = bool(files & touched)
+        ids.append({"symbol": i, "kind": "identifier", "test": tested[i], "fix": fix_added[i],
+                    "at_base": bool(files)})
+    # names the fix's own files already had at the base are the least likely to be new
+    ids.sort(key=lambda e: (e["at_base"], known[e["symbol"]], -len(e["symbol"]), e["symbol"]))
+    seen, res = set(), []
+    for e in out + ids:
+        if (e["symbol"], e["kind"]) not in seen:
+            seen.add((e["symbol"], e["kind"]))
+            res.append(e)
+    return res[:SYMBOL_CAP]
+
+
 def enrich(r: dict, fetch_body: bool = True) -> dict:
     base = r["parents"][0]
     fix = r["fix_commit"]
@@ -1174,6 +1262,7 @@ def enrich(r: dict, fetch_body: bool = True) -> dict:
                       "source": clip(git("diff", base, fix, "--", ".", ":(exclude)tests/"))},
             "test_inventory": {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)},
             "test_config_guards": config_guards(fix, tests),
+            "fix_symbols": fix_symbols(base, fix, tests),
             "ci_cmake_options": ci,
             "enrich_version": ENRICH_VERSION}
     return with_profiles(rec, profile_defs(base))
@@ -1238,7 +1327,8 @@ def reenrich_local(rec: dict) -> dict:
     fix, tests = rec["fix_commit"], rec["test_files"]
     rec = {k: v for k, v in rec.items() if k not in ("profiles", "profile", "profile_why", "test_guard_resolution")} | {
         "test_inventory": {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)},
-        "test_config_guards": config_guards(fix, tests), "enrich_version": ENRICH_VERSION}
+        "test_config_guards": config_guards(fix, tests),
+        "fix_symbols": fix_symbols(rec["base_commit"], fix, tests), "enrich_version": ENRICH_VERSION}
     return with_profiles(rec, profile_defs(rec["base_commit"]))
 
 
@@ -1370,6 +1460,17 @@ def cmd_selftest(args=None) -> None:
     check("a non-Linux-only CMake gate is false on Linux", cmake_if(gate, {}) == (False, []))
     check("a CMake condition with an unknown variable is not true", cmake_if("FOO AND OT_FTD", {})[0] is not True)
     check("a CMakeLists.txt maps to no target", pick("tests/unit/CMakeLists.txt") == {"unit": 0, "gtest": 0})
+    def syms(pr):
+        r = find_pr(pr)
+        return {e["symbol"]: e for e in fix_symbols(r["parents"][0], r["fix_commit"], r["files"])}
+    check("10899: a constant the fix adds and a test uses is a fix symbol (and exists elsewhere at base)",
+          syms(10899).get("kWithLinkSecurity", {}).get("at_base") is True)
+    check("10934: a header only the fix adds is a fix symbol that is not at base",
+          any(e["kind"] == "header" and e["symbol"].endswith("spinel_prop_codec.hpp") and not e["at_base"]
+              for e in syms(10934).values()))
+    check("13499 (runtime oracle) needs no symbols from the fix", syms(13499) == {})
+    check("code_idents skips keywords, short names, strings and comments",
+          code_idents('if (a == nullptr) { Foo("str Bar"); } // Baz') == {"Foo"})
     sys.exit(0 if ok else 1)
 
 

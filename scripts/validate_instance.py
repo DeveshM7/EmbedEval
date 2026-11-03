@@ -195,6 +195,47 @@ def build_failure(out: str, compiled: str) -> str:
     return compiled
 
 
+BUILD_ERROR = re.compile(r"\berror\b|undefined reference", re.I)
+
+
+def build_errors(out: str, limit: int = 20) -> list[str]:
+    """The first compiler `error:` / CMake Error lines of a build log, trimmed."""
+    return [l.strip()[:300] for l in out.splitlines()
+            if "error:" in l or l.startswith("CMake Error")][:limit]
+
+
+GCC_CONTEXT = re.compile(r"^\s*\d*\s*\||note:")
+
+
+def error_text(out: str) -> str:
+    """The lines of a build log that report an error: compiler and linker error
+    lines with the source echo and notes gcc prints under them (an error inside
+    a macro is reported at the macro; the call site is in the notes), and a
+    CMake Error line with the lines that name its subject."""
+    lines, keep = out.splitlines(), []
+    for i, l in enumerate(lines):
+        if l.startswith("CMake Error"):
+            keep += lines[i:i + 8]
+        elif BUILD_ERROR.search(l):
+            keep.append(l)
+            for c in lines[i + 1:i + 11]:
+                if not GCC_CONTEXT.search(c):
+                    break
+                keep.append(c)
+    return "\n".join(keep)
+
+
+def compile_attribution(out: str, symbols: list) -> str | None:
+    """The first compile_symbol (an identifier, or a path whose file name is
+    searched) the build log mentions on an error line, or None."""
+    text = error_text(out)
+    for sym in symbols:
+        needle = sym.rsplit("/", 1)[-1]
+        if re.search(rf"(?<![\w]){re.escape(needle)}(?![\w])", text):
+            return sym
+    return None
+
+
 def after_check(report: dict, step, run_dir: Path, patch_override, meta: dict, timeout: int) -> None:
     """Diagnostic only, after the base build failed: does the same profile build
     and pass the selected tests with the upstream fix? If so, the failure is the
@@ -233,6 +274,7 @@ def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_overri
     rc1, out1, s1 = step("run_tests", ["run_tests"], "before.log", timeout)
     report["before"] = {"rc": rc1, "seconds": round(s1), "log": str(Path(report["logs"]) / "before.log")}
     if rc1 == 2:
+        report["build_errors"] = build_errors(out1)
         done(False, build_failure(out1, "test patch does not build against base"))
         return after_check(report, step, run_dir, patch_override, meta, timeout)
     before = report["before"]["cases"] = openthread_cases(out1)
@@ -315,13 +357,30 @@ def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: i
         if observe:
             observe_instance(meta, report, step, run_dir, patch_override, timeout)
             return _finish(instance_id, report)
-        print("\n  Step 1: expecting run_tests to FAIL on the image as built")
+        want = json.loads((instances.instance_dir(instance_id) / "instance.json").read_text()) if cmake else {}
+        compile_oracle = want.get("oracle") == "compile"
+        print("\n  Step 1: expecting run_tests to " + ("fail to BUILD" if compile_oracle else "FAIL")
+              + " on the image as built")
         rc1, out1, s1 = step("run_tests", ["run_tests"], "before.log", timeout)
         report["before"] = {"rc": rc1, "meaning": meanings.get(rc1, str(rc1)),
                             "seconds": round(s1), "summary": summary(out1)}
         for line in summary(out1):
             print(f"      {line}")
-        if rc1 != 1:
+        if compile_oracle:
+            symbol = None
+            if rc1 != 2:
+                why = "the test target builds before the fix: not a compile oracle"
+            elif build_failure(out1, "build") != "build":
+                why = "the before run failed in setup, not in the build"
+            elif not (symbol := compile_attribution(out1, want.get("compile_symbols", []))):
+                why = "build fails before the fix for an unrelated reason"
+            report["before"]["build_errors"] = build_errors(out1)
+            if symbol is None:
+                print(f"  INVALID: {why}")
+                report["reason"] = why
+                return _finish(instance_id, report)
+            report["before"]["compile_symbol"] = symbol
+        elif rc1 != 1:
             why = {0: "tests PASSED before the fix -- the instance does not detect the bug",
                    3: "nothing ran: the scenario is filtered or skipped on this board",
                    2: ("the build or configure failed: not a valid before (no test ran)" if cmake
@@ -331,10 +390,9 @@ def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: i
             report["reason"] = why
             return _finish(instance_id, report)
 
-        if cmake:
+        if cmake and not compile_oracle:
             cases1 = openthread_cases(out1)
             report["before"]["cases"] = cases1
-            want = json.loads((instances.instance_dir(instance_id) / "instance.json").read_text())
             # Failing before the fix is not held against a pass_to_pass test;
             # it is recorded as the baseline's health.
             report["before"]["pass_to_pass_failing"] = [
@@ -380,9 +438,11 @@ def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: i
                 report["reason"] = why
                 return _finish(instance_id, report)
 
-        print("\n  VALID: fails before the fix, passes after")
+        reason = (f"fails to build before the fix ({symbol}), passes after" if compile_oracle
+                  else "fails before the fix, passes after")
+        print(f"\n  VALID: {reason}")
         report["valid"] = True
-        report["reason"] = "fails before the fix, passes after"
+        report["reason"] = reason
         return _finish(instance_id, report)
     except Exception as e:
         print(f"  ERROR: {type(e).__name__}: {e}")

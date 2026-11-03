@@ -371,6 +371,10 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
         cfg = {"suite": verdict["suite"], "target": verdict["target"],
                "fail_to_pass": verdict["fail_to_pass"],
                "pass_to_pass": verdict.get("pass_to_pass", [])}
+        if verdict.get("oracle") == "compile":
+            # the build failure before the fix is the oracle (validate_instance.py)
+            cfg |= {"oracle": "compile", "compile_symbols": verdict["compile_symbols"]}
+            extra_meta = {"oracle": "compile", "compile_symbols": verdict["compile_symbols"]}
         statement, change_type = verdict["problem_statement"], verdict["change_type"]
 
     base, fix = rec["base_commit"], rec["fix_commit"]
