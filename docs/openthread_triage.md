@@ -122,6 +122,33 @@ warnings are not the oracle. Only the one target being run is built. FTD, MTD an
 RCP are left at their defaults (all on per `etc/cmake/options.cmake`); OpenThread's simulation platform is used,
 not a hardware or `external` platform.
 
+**The toranj profile.** Under the profile above many unit tests compile their body
+out (they print "... not enabled" and pass). Upstream runs those in its
+`toranj-unittest` CI job (`./tests/toranj/build.sh all`, then `ninja test`), and
+the second execution profile, `toranj`, mirrors it. Its options are the `cmake`
+command of the `all | cmake)` case of `tests/toranj/build.sh` at the base commit
+(the script's defaults substituted for coverage, log level, platform key ref
+and CSL debug), then `-DOT_COMPILE_WARNING_AS_ERROR=OFF` last; nothing else is
+added and `cmake_options` do not apply. Configure is plain
+`cmake -GNinja -S <source> -B <build>`. Its `OT_PROJECT_CONFIG`,
+`tests/toranj/openthread-core-toranj-config-simulation.h` (which includes the
+common toranj header), is included before the simulation platform's config
+header, which is included before the defaults in `src/`. It builds
+`tests/unit` but no GoogleTest (`OT_BUILD_GTEST` is not set), so only unit
+executables run under it. A base without a usable `all | cmake)` case has no
+toranj profile.
+
+Which profile a record uses is mechanical: simulation, unless the body of every
+changed unit test source selected under simulation is disabled there and
+enabled under toranj (and no gtest executable is selected); then toranj. The
+record's "Execution profile" section says which and why, and its options and
+guard resolution are those of the selected profile. A verdict uses the record's
+profile unless it sets `profile`; it may set `"profile": "toranj"` only when the
+record shows toranj available, the suite is `unit`, `cmake_options` is `[]` and
+the target is built under toranj, and `"profile": "simulation"` to keep the
+simulation one. Request toranj when the detecting unit test's body is disabled
+under simulation but enabled under toranj.
+
 Run: a gtest target's binary is executed and results are read per case
 (`Suite.Case`); a unit test is executed through ctest by its `ot-test-<name>`
 name, and passes or fails as a whole executable (`FAILED` plus a non-zero exit at
@@ -236,7 +263,9 @@ the profile list nor in `ci_cmake_options`, are not part of the profile: `hold`.
     through `etc/cmake/options.cmake` (`ot_option`/`ot_int_option` give the
     `OPENTHREAD_*` macro an `OT_*` option sets; a default-off macro whose option
     the profile list sets is on);
-    (b) the simulation platform's core config header
+    (b) the profile's project config header, if it has one (toranj:
+    `tests/toranj/openthread-core-toranj-config-simulation.h` and the header it
+    includes), which takes precedence, then the simulation platform's core config header
     (`examples/platforms/simulation/openthread-core-simulation-config.h`, or its
     location at that base; check with the tools) and any project or core config
     headers it includes;
@@ -297,6 +326,7 @@ One JSON object, nothing else.
   "suite": "unit" | "gtest",
   "target": "<CMake target from the inventory>",
   "cmake_options": [ ],                       # usually []; each must be in ci_cmake_options
+  "profile": "simulation" | "toranj",         # optional; default is the record's profile (toranj: unit suite, cmake_options [])
   "fail_to_pass": [ ... ],                    # unit: the target's ctest name; gtest: Suite.Case
   "pass_to_pass": [ ... ],                    # may be []
   "problem_statement": "<observable behavior, no fix leakage>",
@@ -322,7 +352,7 @@ accept, `confidence`, `change_type`, `suite`, a `target` that exists in the
 inventory for that suite, `fail_to_pass` non-empty and made only of names in
 that target's inventory (unit: exactly its ctest name), `pass_to_pass` names in
 the same inventory and disjoint from F2P, `cmake_options` each listed in
-`ci_cmake_options`, non-empty `problem_statement` and `causal_chain`, and a test
+`ci_cmake_options`, `profile` (when set) simulation or an available toranj for a unit target, non-empty `problem_statement` and `causal_chain`, and a test
 patch that applies to the base. Input or schema errors are sent back to you with
 the reason; do not repair them by inventing names.
 

@@ -195,6 +195,32 @@ def build_failure(out: str, compiled: str) -> str:
     return compiled
 
 
+def after_check(report: dict, step, run_dir: Path, patch_override, meta: dict, timeout: int) -> None:
+    """Diagnostic only, after the base build failed: does the same profile build
+    and pass the selected tests with the upstream fix? If so, the failure is the
+    fix's own change (compile-only); if not, suspect the setup. The verdict
+    stays as recorded."""
+    print("\n  Diagnostic: the same profile with the upstream fix")
+    patch_text = Path(patch_override).read_text() if patch_override else local_fix_patch(meta)
+    (run_dir / "fix.diff").write_text(patch_text)
+    rca, outa, _ = step("git apply", ["git", "-C", "/testbed", "apply",
+                                      "/embedeval-run/fix.diff"], "apply.log", 300)
+    if rca != 0:
+        report["after_check"] = "the fix does not apply"
+        return
+    rc2, out2, s2 = step("run_tests", ["run_tests"], "after.log", timeout)
+    cases = openthread_cases(out2) if rc2 != 2 else {}
+    report["after"] = {"rc": rc2, "seconds": round(s2), "log": str(Path(report["logs"]) / "after.log"),
+                       **({"cases": cases} if cases else {})}
+    if rc2 == 2:
+        report["after_check"] = "does not build with the fix either (setup suspect)"
+    elif cases and all(s == "passed" for s in cases.values()):
+        report["after_check"] = "builds and passes with the fix (compile-only)"
+    else:
+        report["after_check"] = "builds with the fix, not all selected cases pass"
+    print(f"  after_check: {report['after_check']}")
+
+
 def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_override,
                      timeout: int) -> None:
     """Observe mode: run the selected executables as built and with the upstream
@@ -207,7 +233,8 @@ def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_overri
     rc1, out1, s1 = step("run_tests", ["run_tests"], "before.log", timeout)
     report["before"] = {"rc": rc1, "seconds": round(s1), "log": str(Path(report["logs"]) / "before.log")}
     if rc1 == 2:
-        return done(False, build_failure(out1, "test patch does not build against base"))
+        done(False, build_failure(out1, "test patch does not build against base"))
+        return after_check(report, step, run_dir, patch_override, meta, timeout)
     before = report["before"]["cases"] = openthread_cases(out1)
     if not any(s in FAILED for s in before.values()):
         return done(False, "no case failed before the fix")

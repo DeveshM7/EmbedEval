@@ -257,6 +257,10 @@ OPENTHREAD_CONFIGURE = "script/cmake-build simulation"
 OPENTHREAD_CMAKE_ARGS = ["-DOT_BUILD_GTEST=ON", "-DOT_BORDER_ROUTING=ON",
                          "-DOT_BORDER_ROUTING_DHCP6_PD=ON", "-DOT_WAKE_INITIATOR=ON",
                          "-DOT_WAKE_LISTENER=ON"]
+# The toranj profile (upstream's toranj-unittest CI job, tests/toranj/build.sh
+# `all`): run_tests runs plain `cmake -GNinja -S /testbed -B /testbed/build
+# <cmake_args>`; the arguments come from the record (openthread_candidates.toranj_options).
+OPENTHREAD_TORANJ_CONFIGURE = "cmake -GNinja"
 # Always last, after the verdict's: cmake-build passes -Werror, and a newer
 # compiler's warnings on older code are not the oracle.
 OPENTHREAD_LAST_ARG = "-DOT_COMPILE_WARNING_AS_ERROR=OFF"
@@ -318,6 +322,7 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
         old = json.loads((observed / "metadata.json").read_text())
         cfg = observed_config(prior, obs, rec["test_inventory"]["gtest"])
         cmake_args = prior["cmake_args"]
+        profile = prior.get("profile", "simulation")
         statement, change_type = old["problem_statement"], old["change_type"]
         extra_meta = {"oracle": "observed", "oracle_note": "observed by validate_instance.py "
                       "(fail before, pass after the fix); the unit oracle is per executable, "
@@ -332,7 +337,9 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
         if not sel["unit"] and not sel["gtest"]:
             sys.exit(f"ERROR: no runnable target for {pr}: its changed test files "
                      f"{rec['test_files']} are compiled into no unit or gtest executable")
-        cmake_args = OPENTHREAD_CMAKE_ARGS + [OPENTHREAD_LAST_ARG]
+        profile = rec.get("profile", "simulation")
+        cmake_args = (rec["profile_cmake_options"] if profile == "toranj"
+                      else OPENTHREAD_CMAKE_ARGS + [OPENTHREAD_LAST_ARG])
         cfg = {"observe": True, "unit": [t["ctest_name"] for t in sel["unit"]],
                "gtest": [t["target"] for t in sel["gtest"]],
                "targets": [t["target"] for t in sel["unit"] + sel["gtest"]],
@@ -346,8 +353,10 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
         issues = triage_prs.check_verdict_openthread(verdict, rec)
         if issues:
             sys.exit(f"ERROR: verdict for {pr} fails the check:\n  " + "\n  ".join(issues))
-        cmake_args = merge_cmake_args(OPENTHREAD_CMAKE_ARGS, verdict.get("cmake_options", [])
-                                      ) + [OPENTHREAD_LAST_ARG]
+        profile = verdict.get("profile") or rec.get("profile", "simulation")
+        cmake_args = (rec["profiles"]["toranj"]["cmake_options"] if profile == "toranj"
+                      else merge_cmake_args(OPENTHREAD_CMAKE_ARGS, verdict.get("cmake_options", [])
+                                            ) + [OPENTHREAD_LAST_ARG])
         cfg = {"suite": verdict["suite"], "target": verdict["target"],
                "fail_to_pass": verdict["fail_to_pass"],
                "pass_to_pass": verdict.get("pass_to_pass", [])}
@@ -368,7 +377,9 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
     f2p, p2p = cfg["fail_to_pass"], cfg["pass_to_pass"]
     (inst / "instance.json").write_text(json.dumps(
         {**{k: v for k, v in cfg.items() if k not in ("fail_to_pass", "pass_to_pass")},
-         "configure": OPENTHREAD_CONFIGURE, "cmake_args": cmake_args,
+         **({"profile": "toranj"} if profile == "toranj" else {}),
+         "configure": OPENTHREAD_TORANJ_CONFIGURE if profile == "toranj" else OPENTHREAD_CONFIGURE,
+         "cmake_args": cmake_args,
          "fail_to_pass": f2p, "pass_to_pass": p2p}, indent=2) + "\n")
     shutil.copy(OPENTHREAD_TEMPLATES / "run_tests.py", inst / "run_tests.py")
 

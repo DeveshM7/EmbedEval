@@ -475,7 +475,7 @@ def render_guard_resolution(res: dict, ci: list[str]) -> list[str]:
             g = by_expr[c["expr"]]
             out.append(f"  - around the test body: `{c['expr']}` ({c['branch']} branch) = "
                        f"{'unknown' if c['value'] is None else c['value']}: {fmt(g['macros'], True)}")
-        if r["body_enabled"] is False:
+        if r["body_enabled"] is False and "ci_flips" in r:
             if r["ci_flips"]:
                 out.append(f"  - a CI option could enable it: {', '.join(r['ci_flips'])}")
             elif r["ci_flips_combined"]:
@@ -486,6 +486,28 @@ def render_guard_resolution(res: dict, ci: list[str]) -> list[str]:
         rest = sorted((g for g in r["guards"] if g["expr"] not in shown), key=lambda g: g["value"] == 1)[:8]
         out += [f"  - other guard `{g['expr']}` = {'unknown' if g['value'] is None else g['value']}: "
                 f"{fmt(g['macros'], True)}" for g in rest]
+    return out
+
+
+def render_profiles(rec: dict) -> list[str]:
+    """Which execution profile the record's selection uses and why, the
+    profile's configure arguments, and the test bodies under both profiles."""
+    name = rec.get("profile", "simulation")
+    out = ["", "## Execution profile", "",
+           f"- Selected profile: {name} ({rec.get('profile_why', 'the default')})."]
+    if name == "toranj":
+        out.append("- toranj is upstream's toranj-unittest CI job: `cmake -GNinja -S <source> -B <build> "
+                   "<options below>`, then the unit tests (no GoogleTest). The options and guard "
+                   "resolution below are toranj's.")
+    tor = (rec.get("profiles") or {}).get("toranj")
+    if tor is not None:
+        out.append("- toranj is " + ("unavailable at the base commit." if isinstance(tor["cmake_options"], str)
+                                     else "available: a verdict may request it with `profile` (unit suite only)."))
+        state = {True: "YES", False: "NO", None: "unknown"}
+        for path in rec["profiles"]["simulation"]["guard_resolution"]:
+            sim_state, tor_state = (state[rec["profiles"][n]["guard_resolution"].get(path, {}).get("body_enabled")]
+                                    for n in ("simulation", "toranj"))
+            out.append(f"- {path}: test body enabled under simulation: {sim_state}; under toranj: {tor_state}")
     return out
 
 
@@ -517,17 +539,21 @@ def render_record_openthread(rec: dict) -> str:
     out += ["", "## Preprocessor guards in the changed test sources", ""]
     out += [f"- {p}: {', '.join(o)}" for p, o in rec.get("test_config_guards", {}).items()] \
         or ["(none)"]
+    out += render_profiles(rec)
     out += ["", "## Guards resolved under the execution profile (static; they take precedence over your own "
             "reading of headers)", "",
             "A test whose body is not enabled only prints a notice and passes without running anything, "
             "so it cannot fail before the fix.", ""]
     out += render_guard_resolution(rec.get("test_guard_resolution", {}), rec["ci_cmake_options"]) or ["(none)"]
     prof = rec.get("profile_cmake_options")
-    out += ["", "## Options already set in the execution profile (upstream script/cmake-build "
-            "simulation at the base commit, then the profile's own args; later wins)", "",
+    toranj = rec.get("profile") == "toranj"
+    out += ["", "## Options already set in the execution profile (" + (
+            "upstream tests/toranj/build.sh all at the base commit, then -DOT_COMPILE_WARNING_AS_ERROR=OFF" if toranj else
+            "upstream script/cmake-build simulation at the base commit, then the profile's own args; later wins") + ")", "",
             prof if isinstance(prof, str) else " ".join(prof or []) or "(not available)", ""]
     out += ["## Additional options a verdict may request via cmake_options (the base commit's own CI, "
             ".github/workflows/unit.yml)", "",
+            "(none: the toranj profile takes no `cmake_options`)" if toranj else
             " ".join(rec["ci_cmake_options"]) or "(none)", "",
             "## Test changes (git diff base fix -- tests/)", "", "```diff", rec["diffs"]["tests"], "```", "",
             "## Production changes (everything else)", "", "```diff", rec["diffs"]["source"], "```", ""]
@@ -583,6 +609,20 @@ def check_verdict_openthread(v: dict | None, rec: dict) -> list[str]:
             and set(v["fail_to_pass"]) & set(v["pass_to_pass"])):
         issues.append("a test cannot be in both `fail_to_pass` and `pass_to_pass`")
 
+    profile = v.get("profile") or rec.get("profile", "simulation")
+    if profile not in ("simulation", "toranj"):
+        return issues + ["`profile` must be simulation or toranj (or left out)"]
+    import openthread_candidates
+    if profile == "toranj":
+        if isinstance(rec.get("profiles", {}).get("toranj", {}).get("cmake_options", ""), str):
+            return issues + ["`profile` toranj is not available at the base commit; use the default or hold"]
+        if suite != "unit" or v.get("cmake_options"):
+            return issues + ["the toranj profile runs the unit suite only (toranj builds no GoogleTest) "
+                             "and takes no `cmake_options` (for a gtest target set `profile` to simulation)"]
+    if profile != rec.get("profile", "simulation"):
+        rec = openthread_candidates.profile_view(rec, profile)
+    if profile == "toranj" and (why := openthread_candidates.unbuilt_reasons(entry, rec)):
+        return issues + [f"{target} is not built under toranj: {'; '.join(why)}"]
     options = v.get("cmake_options", [])
     if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
         issues.append("`cmake_options` must be a list of strings (usually [])")
@@ -593,7 +633,6 @@ def check_verdict_openthread(v: dict | None, rec: dict) -> list[str]:
     if issues:
         return issues
 
-    import openthread_candidates
     states = {s: openthread_candidates.body_enabled(rec, s, options)
               for s in entry["sources"] if s in rec["test_files"]}
     if False in states.values() and True not in states.values():

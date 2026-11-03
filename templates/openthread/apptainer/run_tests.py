@@ -7,7 +7,10 @@ run_tests -- build and run this instance's OpenThread tests with CMake.
                                image is built
 
 The suite, target, configure arguments and the expected test names are fixed per
-instance in /opt/embedeval/instance.json. With "observe": true there are no
+instance in /opt/embedeval/instance.json. With "profile": "toranj" (upstream's
+toranj-unittest configuration) the configure step is plain `cmake -GNinja -S
+/testbed -B /testbed/build <cmake_args>` instead of script/cmake-build, and the
+build and test steps are the same. With "observe": true there are no
 expected names: "targets" are built, and every case of the "gtest" binaries and
 every "unit" ctest name is reported. The build directory is /testbed/build,
 configured once and reused, so after an edit only what changed is rebuilt.
@@ -101,7 +104,8 @@ def run(cmd: list[str], timeout: int | None = None, env: dict | None = None) -> 
 def build(cfg: dict) -> bool:
     """Configure (only when there is no configured build directory) and build.
     Configuring is upstream's own `cfg["configure"] <cmake_args>` (script/
-    cmake-build), which also builds the targets it is given.
+    cmake-build), which also builds the targets it is given; for the toranj
+    profile, plain cmake with -S and -B (the build step below builds them).
     The output goes to the log; the end of it is shown when this fails."""
     BUILD.mkdir(exist_ok=True)
     # The compiler's temporary files go on the build directory's disk: the
@@ -119,7 +123,10 @@ def build(cfg: dict) -> bool:
     if not (BUILD / "build.ninja").exists():
         env = {**os.environ, "TMPDIR": str(tmp), "OT_CMAKE_BUILD_DIR": str(BUILD),
                "OT_CMAKE_NINJA_TARGET": " ".join(targets)}
-        steps.append((cfg["configure"].split() + cfg["cmake_args"], env))
+        configure = cfg["configure"].split()
+        if cfg.get("profile") == "toranj":
+            configure += ["-S", str(TESTBED), "-B", str(BUILD)]
+        steps.append((configure + cfg["cmake_args"], env))
     steps.append((["cmake", "--build", "build", "--target", *targets],
                   {**os.environ, "TMPDIR": str(tmp)}))
     LOG.write_text("")
