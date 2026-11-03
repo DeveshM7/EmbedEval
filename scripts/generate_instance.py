@@ -257,9 +257,9 @@ OPENTHREAD_CONFIGURE = "script/cmake-build simulation"
 OPENTHREAD_CMAKE_ARGS = ["-DOT_BUILD_GTEST=ON", "-DOT_BORDER_ROUTING=ON",
                          "-DOT_BORDER_ROUTING_DHCP6_PD=ON", "-DOT_WAKE_INITIATOR=ON",
                          "-DOT_WAKE_LISTENER=ON"]
-# The toranj profile (upstream's toranj-unittest CI job, tests/toranj/build.sh
-# `all`): run_tests runs plain `cmake -GNinja -S /testbed -B /testbed/build
-# <cmake_args>`; the arguments come from the record (openthread_candidates.toranj_options).
+# The other profiles are upstream's own CI test jobs (openthread_candidates.profile_defs()): the
+# record holds their `configure` and `cmake_args`. The toranj one (toranj-unittest, tests/toranj/
+# build.sh `all`) is plain `cmake -GNinja`; run_tests adds `-S /testbed -B /testbed/build`.
 OPENTHREAD_TORANJ_CONFIGURE = "cmake -GNinja"
 # Always last, after the verdict's: cmake-build passes -Werror, and a newer
 # compiler's warnings on older code are not the oracle.
@@ -299,20 +299,26 @@ def observed_config(prior: dict, obs: dict, inventory: list | None = None) -> di
 
 
 def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: bool = False,
-                        observed: Path | None = None) -> Path:
+                        observed: Path | None = None, observe_profile: str | None = None) -> Path:
     """Build `openthread__openthread-<pr>` from an accepted verdict. The
     verdict is checked again here, mechanically, so an unchecked one is refused.
 
     observe: no verdict; the executables are those whose sources the PR's test
     diff changed (instance.json "observe": true, validate_instance.py observes
     which cases flip). observed: the directory of an observed-valid instance,
-    regenerated as a normal instance from observed.json."""
+    regenerated as a normal instance from observed.json (with the profile and
+    arguments of the observation). observe_profile: observe under this profile
+    instead of the record's, one of its `extra_observe` entries (only the
+    targets listed there, whose test bodies the chosen profile compiles out)."""
     import openthread_candidates
     import triage_prs
     rec_path = openthread_candidates.enriched_dir() / f"{pr}.json"
     if not rec_path.exists():
         sys.exit(f"ERROR: no enriched record at {rec_path}. Run `openthread_candidates.py enrich` first.")
     rec = json.loads(rec_path.read_text())
+    if openthread_candidates.stale_record(rec):
+        sys.exit(f"ERROR: the enriched record of {pr} is enrich_version {rec.get('enrich_version')}, not "
+                 f"{openthread_candidates.ENRICH_VERSION}. Run `python3 scripts/openthread_candidates.py enrich --local`.")
     extra_meta = {}
     if observed:
         obs = json.loads((observed / "observed.json").read_text())
@@ -321,14 +327,21 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
         prior = json.loads((observed / "instance.json").read_text())
         old = json.loads((observed / "metadata.json").read_text())
         cfg = observed_config(prior, obs, rec["test_inventory"]["gtest"])
-        cmake_args = prior["cmake_args"]
+        configure, cmake_args = prior["configure"], prior["cmake_args"]
         profile = prior.get("profile", "simulation")
         statement, change_type = old["problem_statement"], old["change_type"]
         extra_meta = {"oracle": "observed", "oracle_note": "observed by validate_instance.py "
                       "(fail before, pass after the fix); the unit oracle is per executable, "
                       "so check attribution of the cases to the PR's change"}
     elif observe:
+        profile = observe_profile or rec.get("profile", "simulation")
+        extra = {e["profile"]: e["targets"] for e in rec["extra_observe"]}
+        if profile != rec.get("profile", "simulation") and profile not in extra:
+            sys.exit(f"ERROR: {profile!r} is neither the chosen profile ({rec.get('profile', 'simulation')}) nor in "
+                     f"extra_observe of {pr} ({list(extra) or 'empty'})")
         sel = openthread_candidates.select_tests(rec)
+        if profile in extra:
+            sel = {k: [t for t in rec["test_inventory"][k] if t["target"] in extra[profile]] for k in ("unit", "gtest")}
         gated = openthread_candidates.gated_targets(rec)
         if not sel["unit"] and not sel["gtest"] and gated:
             opts = sorted({o for _, m in gated for o in m})
@@ -337,9 +350,7 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
         if not sel["unit"] and not sel["gtest"]:
             sys.exit(f"ERROR: no runnable target for {pr}: its changed test files "
                      f"{rec['test_files']} are compiled into no unit or gtest executable")
-        profile = rec.get("profile", "simulation")
-        cmake_args = (rec["profile_cmake_options"] if profile == "toranj"
-                      else OPENTHREAD_CMAKE_ARGS + [OPENTHREAD_LAST_ARG])
+        configure, cmake_args = rec["profiles"][profile]["configure"], rec["profiles"][profile]["cmake_args"]
         cfg = {"observe": True, "unit": [t["ctest_name"] for t in sel["unit"]],
                "gtest": [t["target"] for t in sel["gtest"]],
                "targets": [t["target"] for t in sel["unit"] + sel["gtest"]],
@@ -354,9 +365,9 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
         if issues:
             sys.exit(f"ERROR: verdict for {pr} fails the check:\n  " + "\n  ".join(issues))
         profile = verdict.get("profile") or rec.get("profile", "simulation")
-        cmake_args = (rec["profiles"]["toranj"]["cmake_options"] if profile == "toranj"
-                      else merge_cmake_args(OPENTHREAD_CMAKE_ARGS, verdict.get("cmake_options", [])
-                                            ) + [OPENTHREAD_LAST_ARG])
+        configure, cmake_args = rec["profiles"][profile]["configure"], rec["profiles"][profile]["cmake_args"]
+        if profile == "simulation":
+            cmake_args = merge_cmake_args(OPENTHREAD_CMAKE_ARGS, verdict.get("cmake_options", [])) + [OPENTHREAD_LAST_ARG]
         cfg = {"suite": verdict["suite"], "target": verdict["target"],
                "fail_to_pass": verdict["fail_to_pass"],
                "pass_to_pass": verdict.get("pass_to_pass", [])}
@@ -377,8 +388,8 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
     f2p, p2p = cfg["fail_to_pass"], cfg["pass_to_pass"]
     (inst / "instance.json").write_text(json.dumps(
         {**{k: v for k, v in cfg.items() if k not in ("fail_to_pass", "pass_to_pass")},
-         **({"profile": "toranj"} if profile == "toranj" else {}),
-         "configure": OPENTHREAD_TORANJ_CONFIGURE if profile == "toranj" else OPENTHREAD_CONFIGURE,
+         **({"profile": profile} if profile != "simulation" else {}),
+         "configure": configure,
          "cmake_args": cmake_args,
          "fail_to_pass": f2p, "pass_to_pass": p2p}, indent=2) + "\n")
     shutil.copy(OPENTHREAD_TEMPLATES / "run_tests.py", inst / "run_tests.py")
@@ -420,6 +431,8 @@ def main() -> None:
     p.add_argument("--observe", action="store_true",
                    help="OpenThread: no verdict; run the test executables the PR changed and "
                         "observe which cases flip (validate_instance.py writes observed.json)")
+    p.add_argument("--profile", help="with --observe: observe under this profile, one of the record's "
+                                     "extra_observe entries (default: the record's chosen profile)")
     p.add_argument("--from-observed", type=Path, metavar="DIR",
                    help="OpenThread: regenerate an observed-valid instance directory as a "
                         "normal instance with the observed test lists")
@@ -432,7 +445,9 @@ def main() -> None:
     if args.observe or args.from_observed:
         if args.project != "openthread" or args.triage:
             p.error("--observe and --from-observed are OpenThread only and take no --triage")
-        inst = generate_openthread(args.pr, None, Path(args.out), args.observe, args.from_observed)
+        if args.profile and not args.observe:
+            p.error("--profile goes with --observe")
+        inst = generate_openthread(args.pr, None, Path(args.out), args.observe, args.from_observed, args.profile)
     else:
         if not args.triage:
             p.error("--triage is required")

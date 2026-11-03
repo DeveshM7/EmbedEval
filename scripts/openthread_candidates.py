@@ -30,10 +30,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import layout  # noqa: E402  (first: reads --run-dir)
-from generate_instance import OPENTHREAD_CMAKE_ARGS, OPENTHREAD_LAST_ARG  # noqa: E402
+from generate_instance import (OPENTHREAD_CMAKE_ARGS, OPENTHREAD_CONFIGURE, OPENTHREAD_LAST_ARG,  # noqa: E402
+                               OPENTHREAD_TORANJ_CONFIGURE)
 
 URL = "https://github.com/openthread/openthread/pull/{}"
-ENRICH_VERSION = 6
+ENRICH_VERSION = 8
 DIFF_CAP = 120_000      # characters kept of each diff in a record
 
 # Not production code, by what the repository holds at the top level: tests/
@@ -273,6 +274,14 @@ def linked_sources(libs: dict, deps) -> list[str]:
     return out
 
 
+def subdir_conds(rev: str, name: str) -> list[str]:
+    """The if() conditions around add_subdirectory(<name>) in tests/CMakeLists.txt
+    (BUILD_TESTING, the platform, OT_FTD..., OT_BUILD_GTEST): what a target of
+    that directory needs besides the guards in its own CMakeLists.txt."""
+    text = show(rev, "tests/CMakeLists.txt") or ""
+    return next((g.conds for n, a, g in cmake_commands(text) if n == "add_subdirectory" and a[:1] == [name]), [])
+
+
 def unit_inventory(rev: str) -> list[dict]:
     """tests/unit/CMakeLists.txt registers a test through the ot_unit_test(name
     [extra sources]) macro (target and ctest name ot-test-<name>, source
@@ -302,7 +311,7 @@ def unit_inventory(rev: str) -> list[dict]:
         sources = [s for s in (resolve(x, "tests/unit") for x in srcs) if s]
         out.append({"ctest_name": c, "target": t, "sources": sources,
                     "helper_sources": sorted(with_includes(rev, sources + libs) - set(sources)),
-                    "requires_options": list(g), "if_conditions": g.conds})
+                    "requires_options": list(g), "if_conditions": subdir_conds(rev, "unit") + g.conds})
     return out
 
 
@@ -337,7 +346,8 @@ def gtest_inventory(rev: str) -> list[dict]:
             out.append({"target": t, "sources": sources,
                         "helper_sources": sorted(with_includes(rev, sources + helpers) - set(sources)),
                         "cases": [c for s in sources for c in gtest_cases(rev, s)],
-                        "requires_options": list(guards), "if_conditions": guards.conds})
+                        "requires_options": list(guards),
+                        "if_conditions": subdir_conds(rev, "gtest") + guards.conds})
     return out
 
 
@@ -484,6 +494,76 @@ def toranj_options(base: str) -> list[str] | str:
     return [x for x in out if x.split("=")[0] != OPENTHREAD_LAST_ARG.split("=")[0]] + [OPENTHREAD_LAST_ARG]
 
 
+def profile_name(step: str) -> str:
+    """The profile name of a unit.yml step named `Build <X>`: X lower-cased, a
+    trailing "Simulation" dropped unless it is all there is (Build Simulation:
+    simulation; Build NCP Simulation: ncp; Build POSIX: posix)."""
+    words = re.sub(r"(?i)^build\s+", "", step.strip()).lower().split()
+    return "-".join([w for w in words if w != "simulation"] or ["simulation"])
+
+
+def unit_steps(base: str) -> list[tuple[str, str, list[str] | str]]:
+    """(name, platform, args) of each test configuration in the `unit-tests`
+    job of .github/workflows/unit.yml at `base`, in job order: a step that runs
+    `script/cmake-build <platform> <args>` followed by a step that runs
+    `ninja test`. args are its -D tokens (continuation lines joined), or a
+    string (the reason) when one cannot be used verbatim."""
+    job = re.search(r"^  unit-tests:[ \t]*\n(.*?)(?=^  \S|\Z)", show(base, ".github/workflows/unit.yml") or "", re.M | re.S)
+    steps = re.split(r"(?m)^    - ", job.group(1))[1:] if job else []
+    out = []
+    for step, nxt in zip(steps, steps[1:]):
+        name, build = re.search(r"name:[ \t]*(.+)", step), re.search(r"cmake-build[ \t]+(\w+)((?:\\\n|[^\n])*)", step)
+        if name and build and "ninja test" in nxt:
+            try:
+                args = shlex.split(build.group(2).replace("\\\n", " "))
+            except ValueError as e:
+                args = [f"unparsable: {e}"]
+            bad = [a for a in args if not a.startswith("-D") or "$" in a]
+            out.append((profile_name(name.group(1)), build.group(1),
+                        f"ERROR: unit.yml step {name.group(1)!r} has an argument that cannot be used verbatim: {bad[0]!r}"
+                        if bad else args))
+    return out
+
+
+def profile_defs(base: str) -> dict[str, dict]:
+    """The execution profiles at `base`, in upstream job order (unit.yml's
+    `unit-tests` steps, then toranj.yml's toranj-unittest): {name: {"configure",
+    "cmake_args", "cmake_options"}}, where cmake_args are the arguments after
+    `configure` (upstream's, then -DOT_COMPILE_WARNING_AS_ERROR=OFF) and
+    cmake_options the effective -D options (what cmake-build adds, then the
+    arguments; later wins). The simulation profile is ours (profile_options()).
+    A profile that cannot be used has only a "cmake_options" string, the reason."""
+    defs = {"simulation": {"configure": OPENTHREAD_CONFIGURE, "cmake_args": OPENTHREAD_CMAKE_ARGS + [OPENTHREAD_LAST_ARG],
+                           "cmake_options": profile_options(base)}}
+    script = show(base, "script/cmake-build")
+    for name, platform, args in unit_steps(base):
+        if name == "simulation":
+            continue        # upstream's first step is our simulation profile
+        while name in defs:
+            name += "-2"
+        if isinstance(args, str):
+            defs[name] = {"cmake_options": args}
+            continue
+        try:
+            if platform not in ("simulation", "posix") or script is None:
+                raise ValueError(f"script/cmake-build builds the {platform} platform, which our container does not run")
+            options: list[str] = []
+            for a in _bash_arrays(script, platform) + args + [OPENTHREAD_LAST_ARG]:
+                options = [x for x in options if x.split("=")[0] != a.split("=")[0]] + [a]
+            defs[name] = {"configure": f"script/cmake-build {platform}", "cmake_args": args + [OPENTHREAD_LAST_ARG],
+                          "cmake_options": options}
+        except ValueError as e:
+            defs[name] = {"cmake_options": f"ERROR: {e}"}
+    yml = show(base, ".github/workflows/toranj.yml") or ""
+    job = re.search(r"^  toranj-unittest:[ \t]*\n(.*?)(?=^  \S|\Z)", yml, re.M | re.S)
+    options = toranj_options(base)
+    if not (job and "tests/toranj/build.sh all" in job.group(1) and "ninja test" in job.group(1)):
+        options = "ERROR: toranj.yml has no toranj-unittest job running `build.sh all` and `ninja test` at the base commit"
+    defs["toranj"] = ({"cmake_options": options} if isinstance(options, str) else
+                      {"configure": OPENTHREAD_TORANJ_CONFIGURE, "cmake_args": options, "cmake_options": options})
+    return defs
+
+
 def enabled_options(base: str, profile: list[str] | str) -> list[str] | None:
     """The OT_* options that are ON in our execution profile: those
     etc/cmake/options.cmake at `base` declares `option(OT_X "..." ON)` (OT_FTD,
@@ -519,6 +599,8 @@ def cmake_if(cond: str, rec: dict) -> tuple[bool | None, list[str]]:
             return tok[1:-1]
         if tok == "CMAKE_SYSTEM_NAME":
             return "Linux"
+        if tok == "BUILD_TESTING":      # include(CTest) default; no profile turns it off
+            return "ON"
         if tok.startswith("OT_"):
             return vals.get(tok, "ON" if tok in (rec.get("profile_enabled_options") or []) else "")
         if tok.upper() in ("ON", "OFF", "TRUE", "FALSE") or tok.isdigit():
@@ -614,7 +696,9 @@ def select_tests(rec: dict) -> dict:
 # ---------------------------------------------------------------- guard resolution
 
 SIM_CONFIG = "examples/platforms/simulation/openthread-core-simulation-config.h"
-# Macros the unit/gtest executables get from their build (FTD, no POSIX platform) or the host.
+POSIX_CONFIG = "src/posix/platform/openthread-core-posix-config.h"
+# Macros the unit/gtest executables get from their build (FTD, no POSIX platform) or the host;
+# Resolver.__init__ adjusts them for the POSIX platform and for FTD-off (RCP) builds.
 BUILD_FIXED = {"OPENTHREAD_FTD": 1, "OPENTHREAD_MTD": 0, "OPENTHREAD_RADIO": 0,
                "OPENTHREAD_PLATFORM_POSIX": 0, "OPENTHREAD_PLATFORM_NEXUS": 0,
                "__linux__": 1, "__GNUC__": 1, "__cplusplus": 201703}
@@ -810,6 +894,8 @@ class Resolver:
         self.rev, self.local, self.cache, self.stack = rev, {}, {}, []
         self.opts = dict(o[2:].split("=", 1) for o in options if o.startswith("-D") and "=" in o)
         self.project = project_headers(rev, options)
+        self.fixed = BUILD_FIXED | ({"OPENTHREAD_PLATFORM_POSIX": 1} if self.opts.get("OT_PLATFORM") == "posix" else {}) | (
+            {"OPENTHREAD_FTD": 0, "OPENTHREAD_RADIO": 1} if self.opts.get("OT_FTD") == "OFF" else {})   # only RCP tests are built
         text = show(rev, "etc/cmake/options.cmake") or ""
         self.mapped = {c: ("option", n, d) for n, c, d in re.findall(
             r'ot_option\((OT_\w+)\s+(OPENTHREAD_\w+)\s+"[^"]*"\s*(\w*)\s*\)', text)}
@@ -829,7 +915,7 @@ class Resolver:
     def defined(self, name: str) -> int | None:
         if name in self.local:
             return int(self.local[name] is not None)
-        if name in BUILD_FIXED or name in define_index(self.rev, self.project):
+        if name in self.fixed or name in define_index(self.rev, self.project):
             return 1
         if name in self.mapped and self.opts.get(self.mapped[name][1]):
             return 1
@@ -857,8 +943,9 @@ class Resolver:
         return self.cache[name]
 
     def _lookup(self, name: str) -> tuple[int | None, str, list]:
-        if name in BUILD_FIXED:
-            return BUILD_FIXED[name], "fixed by the unit-test build (FTD, no POSIX platform)", []
+        if name in self.fixed:
+            return self.fixed[name], "fixed by the unit-test build (FTD, no POSIX platform)" if self.fixed == BUILD_FIXED else (
+                "fixed by the unit-test build for this profile (platform, FTD/RCP)"), []
         kind, opt, extra = self.mapped.get(name, (None, None, None))
         val = self.opts.get(opt, "") if opt else ""
         if kind and val:
@@ -880,14 +967,15 @@ class Resolver:
             return None, "set by CMake logic that is not modelled" + note, []
         defs = define_index(self.rev, self.project).get(name, [])
         proj = [d for d in defs if d[0] in self.project]
-        sim = [d for d in defs if d[0] == SIM_CONFIG]
-        defs = proj or sim or [d for d in defs if not d[0].startswith("src/posix/")]
+        posix = self.opts.get("OT_PLATFORM") == "posix"
+        sim = [d for d in defs if d[0] == (POSIX_CONFIG if posix else SIM_CONFIG)]
+        defs = proj or sim or [d for d in defs if posix or not d[0].startswith("src/posix/")]
         if not defs:
             if OPAQUE.match(name) or name in define_index(self.rev, self.project):
                 return None, "defined outside the modelled sources" + note, []
             return 0, "not defined anywhere (0)" + note, []
         values = {self.value_of(v) if v else None for _, v in defs}
-        where = (f"project config header {defs[0][0]}" if proj else "simulation config header" if sim
+        where = (f"project config header {defs[0][0]}" if proj else ("posix" if posix else "simulation") + " config header" if sim
                  else f"default/derived in {defs[0][0]}")
         return (values.pop() if len(values) == 1 else None), where + note, [v for _, v in defs]
 
@@ -1004,47 +1092,42 @@ def guard_resolution(rev: str, paths: list[str], profile, ci: list[str] | None, 
     return out
 
 
-PROFILE_FIELDS = (("profile_cmake_options", "cmake_options"), ("profile_enabled_options", "enabled_options"),
-                  ("test_guard_resolution", "guard_resolution"))
-
-
-def profile_block(r: dict, options: list[str] | str, ci: list[str] | None) -> dict:
-    """What a record keeps per execution profile (`profiles` of an enriched
-    record): its cmake options (a string, the reason, when it cannot be
-    resolved), the OT_* options that are on, and the guard resolution."""
-    return {"cmake_options": options, "enabled_options": enabled_options(r["base"], options),
-            "guard_resolution": guard_resolution(r["fix"], r["test_files"], options, ci, r["base"])}
-
-
-def profile_view(rec: dict, name: str) -> dict:
+def profile_view(rec: dict, name: str, resolution: dict | None = None) -> dict:
     """The record with the top-level profile fields (the ones select_tests,
-    gated_targets and body_enabled read) taken from the profile `name`."""
+    gated_targets and body_enabled read) taken from the profile `name`: its
+    options, the options that are on and, failing the full `resolution`, the
+    body state of each changed test source."""
+    if rec.get("profile") == name:
+        return rec
     p = rec["profiles"][name]
-    return rec | {"profile": name} | {k: p[v] for k, v in PROFILE_FIELDS}
+    opts = p["cmake_options"]
+    return rec | {"profile": name, "profile_cmake_options": opts,
+                  "profile_enabled_options": enabled_options(rec["base_commit"], opts),
+                  "test_guard_resolution": resolution if resolution is not None else
+                  {s: {"body_enabled": b} for s, b in p.get("bodies", {}).items()}}
 
 
 def choose_profile(rec: dict) -> tuple[str, str]:
-    """(profile, why): `simulation`, unless the body of every changed test
-    source of the unit executables selected under simulation is disabled there
-    and enabled under toranj, and toranj then still selects unit executables
-    and no gtest one (toranj builds no gtest)."""
-    sim, tor = profile_view(rec, "simulation"), profile_view(rec, "toranj")
-    if isinstance(tor["profile_cmake_options"], str):
-        return "simulation", "toranj is unavailable at the base commit"
-    chosen, picked = select_tests(sim), select_tests(tor)
-    changed = set(rec["test_files"])
-    paths = sorted(changed & {s for t in chosen["unit"] for s in t["sources"] if s.endswith((".cpp", ".c"))})
-    state = lambda r, p: r["test_guard_resolution"].get(p, {}).get("body_enabled")
-    if chosen["gtest"] or not paths:
-        return "simulation", "no unit test body in the selection to enable"
-    if any(state(sim, p) is not False for p in paths):
-        return "simulation", "a selected unit test body is not disabled under simulation"
-    if any(state(tor, p) is not True for p in paths):
-        return "simulation", "a selected unit test body is not enabled under toranj"
-    if not picked["unit"] or picked["gtest"]:
-        return "simulation", "toranj does not select the unit executables"
-    return "toranj", ("the selected unit test body is disabled under simulation and enabled under toranj: "
-                      + ", ".join(paths))
+    """(profile, why), from each profile's `targets` (the selected executables
+    it builds) and `bodies` (whether each changed test source of them compiles
+    its body in). `simulation` if it builds a selected executable and not every
+    changed test source of those has its body compiled out there (a source that
+    is compiled in, or unknown, can still detect). Else the first profile, in
+    upstream job order, that builds every executable simulation does (any, if
+    simulation builds none) and compiles in the body of every changed test
+    source of them; else simulation, with the reason."""
+    profiles = rec["profiles"]
+    sim = profiles["simulation"].get("targets", [])
+    bodies = list(profiles["simulation"].get("bodies", {}).items())
+    if sim and (not bodies or any(b is not False for _, b in bodies)):
+        return "simulation", "a selected test body is compiled in under simulation, or there is none to check"
+    why = ("simulation builds no selected executable" if not sim
+           else "every selected test body is compiled out under simulation: " + ", ".join(s for s, _ in bodies))
+    for name, p in profiles.items():
+        if name != "simulation" and p.get("targets") and set(sim) <= set(p["targets"]) and all(
+                b is True for b in p["bodies"].values()):
+            return name, f"{why}; {name} is the first upstream profile that builds the selected targets with every test body compiled in"
+    return "simulation", f"{why}; no other upstream profile builds the selected targets with every test body compiled in"
 
 
 def body_enabled(rec: dict, path: str, extra_options=()) -> bool | None:
@@ -1080,7 +1163,6 @@ def enrich(r: dict, fetch_body: bool = True) -> dict:
     base = r["parents"][0]
     fix = r["fix_commit"]
     tests = [f for f in r["files"] if f.startswith("tests/")]
-    profile = profile_options(base)
     ci = ci_options(base)
     rec = {"number": r["number"], "title": r["title"], "url": URL.format(r["number"]),
             "merged_at": r["merged_at"], "fix_commit": fix, "base_commit": base,
@@ -1094,34 +1176,70 @@ def enrich(r: dict, fetch_body: bool = True) -> dict:
             "test_config_guards": config_guards(fix, tests),
             "ci_cmake_options": ci,
             "enrich_version": ENRICH_VERSION}
-    return with_profiles(rec, profile, toranj_options(base))
+    return with_profiles(rec, profile_defs(base))
 
 
-def with_profiles(rec: dict, simulation: list[str] | str, toranj: list[str] | str) -> dict:
-    """The record with `profiles` (both execution profiles resolved) and the
-    chosen one: `profile`, `profile_why` and the top-level profile fields
-    (see profile_view()). The simulation profile is used unless choose_profile()
-    picks toranj, whose guard resolution takes no CI options."""
-    r = {"base": rec["base_commit"], "fix": rec["fix_commit"], "test_files": rec["test_files"]}
-    rec = rec | {"profiles": {"simulation": profile_block(r, simulation, rec["ci_cmake_options"]),
-                              "toranj": profile_block(r, toranj, None)}}
+def extra_observe(rec: dict, chosen: str) -> list[dict]:
+    """[{profile, targets}] in upstream order: each other profile that compiles
+    in (definitively) a changed test source whose body is definitively compiled
+    out under the chosen profile, with the targets it builds for such sources.
+    Observing the chosen profile never runs those tests."""
+    profiles = rec["profiles"]
+    off = {s for s, b in profiles[chosen].get("bodies", {}).items() if b is False}
+    inv = {t["target"]: t for k in ("unit", "gtest") for t in rec["test_inventory"][k]}
+    out = []
+    for name, p in profiles.items():
+        flips = {s for s, b in p.get("bodies", {}).items() if b is True} & off
+        targets = [t for t in p.get("targets", []) if flips & set(inv[t]["sources"])]
+        if name != chosen and targets:
+            out.append({"profile": name, "targets": targets})
+    return out
+
+
+def with_profiles(rec: dict, defs: dict[str, dict]) -> dict:
+    """The record with `profiles` (each profile of profile_defs(): its configure
+    command, arguments and options, `targets`: the names of the selected
+    executables it builds, `bodies`: whether each changed test source's body is
+    compiled in) and the chosen one (choose_profile()): `profile`, `profile_why`
+    and the top-level profile fields in full (profile_view()), with the CI-option
+    flips of a disabled body for simulation only, the one profile that takes
+    `cmake_options`."""
+    profiles, full = {}, {}
+    for name, d in defs.items():
+        opts = d["cmake_options"]
+        if isinstance(opts, str):
+            profiles[name] = dict(d)
+            continue
+        view = rec | {"profile_cmake_options": opts, "profile_enabled_options": enabled_options(rec["base_commit"], opts)}
+        full[name] = guard_resolution(rec["fix_commit"], rec["test_files"], opts,
+                                      rec["ci_cmake_options"] if name == "simulation" else None, rec["base_commit"])
+        sel = select_tests(view)
+        built = [t for k in ("unit", "gtest") for t in sel[k]]
+        profiles[name] = d | {"targets": [t["target"] for t in built],
+                              "bodies": {s: full[name][s]["body_enabled"] for s in sorted(
+                                  set(rec["test_files"]) & {s for t in built for s in t["sources"]} & set(full[name]))}}
+    rec = rec | {"profiles": profiles}
     name, why = choose_profile(rec)
-    return profile_view(rec, name) | {"profile_why": why}
+    return profile_view(rec, name, full[name]) | {"profile_why": why, "extra_observe": extra_observe(rec, name)}
+
+
+def stale_record(rec: dict) -> bool:
+    """Whether an enriched record is from another ENRICH_VERSION (its layout differs)."""
+    return rec.get("enrich_version") != ENRICH_VERSION
 
 
 def reenrich_local(rec: dict) -> dict:
     """The clone-derived fields of an enriched record recomputed, keeping
-    what came from GitHub or the base commit (no network). A record from an
-    older version that lacks a base-derived field is enriched in full."""
+    what came from GitHub (no network). A record from an older version that
+    lacks a base-derived field is enriched in full."""
     if any(k not in rec for k in ("profile_enabled_options", "profile_cmake_options",
                                   "ci_cmake_options", "commits")):
         return enrich(find_pr(rec["number"]), fetch_body=False) | {"body": rec.get("body")}
     fix, tests = rec["fix_commit"], rec["test_files"]
-    simulation = rec["profiles"]["simulation"]["cmake_options"] if "profiles" in rec else rec["profile_cmake_options"]
-    rec = rec | {"test_inventory": {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)},
-                 "test_config_guards": config_guards(fix, tests),
-                 "enrich_version": ENRICH_VERSION}
-    return with_profiles(rec, simulation, toranj_options(rec["base_commit"]))
+    rec = {k: v for k, v in rec.items() if k not in ("profiles", "profile", "profile_why", "test_guard_resolution")} | {
+        "test_inventory": {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)},
+        "test_config_guards": config_guards(fix, tests), "enrich_version": ENRICH_VERSION}
+    return with_profiles(rec, profile_defs(rec["base_commit"]))
 
 
 def cmd_enrich(args) -> None:
@@ -1223,6 +1341,29 @@ def cmd_selftest(args=None) -> None:
           any(v["source"].startswith("project config header tests/toranj/") for g in chain for v in g["macros"].values()))
     check("a PR is toranj only when its selected unit test body flips: 13536 yes, 13499 no",
           enrich(r, fetch_body=False)["profile"] == "toranj" and enrich(find_pr(13499), fetch_body=False)["profile"] == "simulation")
+    old_base = git("rev-parse", "8b3e51276^").strip()      # before unit.yml gained the NCP step
+    check("unit.yml's unit-tests steps are parsed per base: no NCP step before it was added, FTD-off multipan after",
+          [n for n, _, _ in unit_steps(old_base)] == ["simulation", "multipan", "posix"]
+          and [n for n, _, _ in unit_steps(base)] == ["simulation", "multipan", "ncp", "posix"]
+          and dict((n, a) for n, _, a in unit_steps(old_base))["multipan"] == ["-DOT_BUILD_GTEST=ON", "-DOT_MULTIPAN_TEST=ON"]
+          and "-DOT_FTD=OFF" in dict((n, a) for n, _, a in unit_steps(base))["multipan"]
+          and "-DOT_NCP_DNSSD=ON" in dict((n, a) for n, _, a in unit_steps(base))["ncp"])
+    defs = profile_defs(base)
+    check("profiles keep upstream's arguments, -DOT_COMPILE_WARNING_AS_ERROR=OFF last, in job order with toranj last; "
+          "simulation is ours", list(defs) == ["simulation", "multipan", "ncp", "posix", "toranj"]
+          and defs["simulation"]["cmake_args"] == OPENTHREAD_CMAKE_ARGS + [OPENTHREAD_LAST_ARG]
+          and defs["ncp"]["cmake_args"][-1] == OPENTHREAD_LAST_ARG and "-DOT_NCP_INFRA_IF=ON" in defs["ncp"]["cmake_args"]
+          and defs["posix"]["configure"] == "script/cmake-build posix" and defs["toranj"]["configure"] == "cmake -GNinja"
+          and "-DOT_LOG_OUTPUT=PLATFORM_DEFINED" in defs["posix"]["cmake_options"])
+    ncp = enrich(find_pr(10893), fetch_body=False)
+    body = lambda n: ncp["profiles"][n]["bodies"].get("tests/unit/test_ncp_dnssd.cpp")
+    check("a PR whose only selected test is NCP-only (10893, test_ncp_dnssd) is chosen as ncp: its body is compiled "
+          "out under simulation, posix and toranj and in under ncp", ncp["profile"] == "ncp" and body("ncp") is True
+          and [body(n) for n in ("simulation", "posix", "toranj")] == [False] * 3)
+    mixed = enrich(find_pr(12068), fetch_body=False)
+    check("a mixed selection (12068) stays simulation and lists ncp as an extra observation profile with only the "
+          "target whose body it enables", mixed["profile"] == "simulation"
+          and mixed["extra_observe"] == [{"profile": "ncp", "targets": ["ot-test-ncp-dnssd"]}])
     check("#if expressions evaluate three-valued", c_eval("0 && X", lambda n: None, lambda n: None) == 0
           and c_eval("X || 1", lambda n: None, lambda n: None) == 1 and c_eval("X", lambda n: None, lambda n: None) is None)
     gate = 'NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND (OT_BACKBONE_ROUTER OR OT_BACKBONE_ROUTER STREQUAL "")'

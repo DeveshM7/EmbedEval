@@ -490,24 +490,23 @@ def render_guard_resolution(res: dict, ci: list[str]) -> list[str]:
 
 
 def render_profiles(rec: dict) -> list[str]:
-    """Which execution profile the record's selection uses and why, the
-    profile's configure arguments, and the test bodies under both profiles."""
+    """Which execution profile the record's selection uses and why, and for each
+    profile of the base commit (upstream's own CI test jobs) whether it builds
+    the selected executables and compiles in the body of each changed test
+    source."""
     name = rec.get("profile", "simulation")
     out = ["", "## Execution profile", "",
-           f"- Selected profile: {name} ({rec.get('profile_why', 'the default')})."]
-    if name == "toranj":
-        out.append("- toranj is upstream's toranj-unittest CI job: `cmake -GNinja -S <source> -B <build> "
-                   "<options below>`, then the unit tests (no GoogleTest). The options and guard "
-                   "resolution below are toranj's.")
-    tor = (rec.get("profiles") or {}).get("toranj")
-    if tor is not None:
-        out.append("- toranj is " + ("unavailable at the base commit." if isinstance(tor["cmake_options"], str)
-                                     else "available: a verdict may request it with `profile` (unit suite only)."))
-        state = {True: "YES", False: "NO", None: "unknown"}
-        for path in rec["profiles"]["simulation"]["guard_resolution"]:
-            sim_state, tor_state = (state[rec["profiles"][n]["guard_resolution"].get(path, {}).get("body_enabled")]
-                                    for n in ("simulation", "toranj"))
-            out.append(f"- {path}: test body enabled under simulation: {sim_state}; under toranj: {tor_state}")
+           f"- Selected profile: {name} ({rec.get('profile_why', 'the default')}). The options and the guard "
+           "resolution below are this profile's. A verdict may set `profile` to any profile below that builds "
+           "the target and does not compile out its test body.", "",
+           "| profile | targets built | test body enabled |", "|---|---|---|"]
+    state = {True: "YES", False: "NO", None: "unknown"}
+    for pname, p in (rec.get("profiles") or {}).items():
+        if isinstance(p["cmake_options"], str):
+            out.append(f"| {pname} | unavailable: {p['cmake_options'].removeprefix('ERROR: ')} | |")
+        else:
+            out.append(f"| {pname} | {', '.join(p['targets']) or 'none'} | "
+                       + ("; ".join(f"{s.rsplit('/', 1)[-1]} {state[b]}" for s, b in p["bodies"].items()) or "-") + " |")
     return out
 
 
@@ -546,14 +545,18 @@ def render_record_openthread(rec: dict) -> str:
             "so it cannot fail before the fix.", ""]
     out += render_guard_resolution(rec.get("test_guard_resolution", {}), rec["ci_cmake_options"]) or ["(none)"]
     prof = rec.get("profile_cmake_options")
-    toranj = rec.get("profile") == "toranj"
+    name = rec.get("profile", "simulation")
+    sim = name == "simulation"
     out += ["", "## Options already set in the execution profile (" + (
-            "upstream tests/toranj/build.sh all at the base commit, then -DOT_COMPILE_WARNING_AS_ERROR=OFF" if toranj else
-            "upstream script/cmake-build simulation at the base commit, then the profile's own args; later wins") + ")", "",
+            "upstream script/cmake-build simulation at the base commit, then the profile's own args; later wins" if sim else
+            f"upstream's `{name}` CI job at the base commit"
+            + (", then -DOT_COMPILE_WARNING_AS_ERROR=OFF" if name == "toranj" else
+               f": what `{rec['profiles'][name]['configure']}` passes, then the job's arguments and "
+               "-DOT_COMPILE_WARNING_AS_ERROR=OFF; later wins")) + ")", "",
             prof if isinstance(prof, str) else " ".join(prof or []) or "(not available)", ""]
     out += ["## Additional options a verdict may request via cmake_options (the base commit's own CI, "
             ".github/workflows/unit.yml)", "",
-            "(none: the toranj profile takes no `cmake_options`)" if toranj else
+            f"(none: the {name} profile takes no `cmake_options`)" if not sim else
             " ".join(rec["ci_cmake_options"]) or "(none)", "",
             "## Test changes (git diff base fix -- tests/)", "", "```diff", rec["diffs"]["tests"], "```", "",
             "## Production changes (everything else)", "", "```diff", rec["diffs"]["source"], "```", ""]
@@ -610,19 +613,19 @@ def check_verdict_openthread(v: dict | None, rec: dict) -> list[str]:
         issues.append("a test cannot be in both `fail_to_pass` and `pass_to_pass`")
 
     profile = v.get("profile") or rec.get("profile", "simulation")
-    if profile not in ("simulation", "toranj"):
-        return issues + ["`profile` must be simulation or toranj (or left out)"]
     import openthread_candidates
-    if profile == "toranj":
-        if isinstance(rec.get("profiles", {}).get("toranj", {}).get("cmake_options", ""), str):
-            return issues + ["`profile` toranj is not available at the base commit; use the default or hold"]
-        if suite != "unit" or v.get("cmake_options"):
-            return issues + ["the toranj profile runs the unit suite only (toranj builds no GoogleTest) "
-                             "and takes no `cmake_options` (for a gtest target set `profile` to simulation)"]
-    if profile != rec.get("profile", "simulation"):
-        rec = openthread_candidates.profile_view(rec, profile)
-    if profile == "toranj" and (why := openthread_candidates.unbuilt_reasons(entry, rec)):
-        return issues + [f"{target} is not built under toranj: {'; '.join(why)}"]
+    profiles = rec["profiles"]
+    if profile not in profiles:
+        return issues + [f"`profile` must be one of {list(profiles)} (or left out)"]
+    if isinstance(profiles[profile]["cmake_options"], str):
+        return issues + [f"`profile` {profile} is not available at the base commit "
+                         f"({profiles[profile]['cmake_options']}); use the default or hold"]
+    if profile != "simulation" and v.get("cmake_options"):
+        return issues + [f"the {profile} profile is upstream's own CI job and takes no `cmake_options` "
+                         "(only simulation does)"]
+    rec = openthread_candidates.profile_view(rec, profile)
+    if profile != "simulation" and (why := openthread_candidates.unbuilt_reasons(entry, rec)):
+        return issues + [f"{target} is not built under {profile}: {'; '.join(why)}"]
     options = v.get("cmake_options", [])
     if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
         issues.append("`cmake_options` must be a list of strings (usually [])")
@@ -895,6 +898,12 @@ def cmd_run(args) -> None:
     missing = [p for p in prs if not (ENRICHED / f"{p}.json").exists()]
     if missing:
         sys.exit(f"not enriched: {missing}. Run filter_candidates.py enrich --pr ...")
+    if PROJECT == "openthread":
+        import openthread_candidates
+        stale = [p for p in prs if openthread_candidates.stale_record(json.loads((ENRICHED / f"{p}.json").read_text()))]
+        if stale:
+            sys.exit(f"ERROR: enriched records {stale} are not enrich_version {openthread_candidates.ENRICH_VERSION}. "
+                     "Run `python3 scripts/openthread_candidates.py enrich --local`.")
     no_dry = [p for p in prs if PROJECT == "zephyr" and load_dry_run(p) is None]
     if no_dry:
         print(f"  WARNING: no dry run for {no_dry}; the model sees no board/scenario table "

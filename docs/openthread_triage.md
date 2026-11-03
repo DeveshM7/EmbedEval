@@ -122,32 +122,41 @@ warnings are not the oracle. Only the one target being run is built. FTD, MTD an
 RCP are left at their defaults (all on per `etc/cmake/options.cmake`); OpenThread's simulation platform is used,
 not a hardware or `external` platform.
 
-**The toranj profile.** Under the profile above many unit tests compile their body
-out (they print "... not enabled" and pass). Upstream runs those in its
-`toranj-unittest` CI job (`./tests/toranj/build.sh all`, then `ninja test`), and
-the second execution profile, `toranj`, mirrors it. Its options are the `cmake`
-command of the `all | cmake)` case of `tests/toranj/build.sh` at the base commit
-(the script's defaults substituted for coverage, log level, platform key ref
-and CSL debug), then `-DOT_COMPILE_WARNING_AS_ERROR=OFF` last; nothing else is
-added and `cmake_options` do not apply. Configure is plain
-`cmake -GNinja -S <source> -B <build>`. Its `OT_PROJECT_CONFIG`,
-`tests/toranj/openthread-core-toranj-config-simulation.h` (which includes the
-common toranj header), is included before the simulation platform's config
-header, which is included before the defaults in `src/`. It builds
-`tests/unit` but no GoogleTest (`OT_BUILD_GTEST` is not set), so only unit
-executables run under it. A base without a usable `all | cmake)` case has no
-toranj profile.
+**Other profiles are upstream's own CI test jobs.** Under the profile above many
+tests compile their body out (they print "... not enabled" and pass), or their
+executable is not built. Upstream runs more configurations, and the record lists
+each one the base commit has (`profiles`): every `Build X` step of the
+`unit-tests` job of `.github/workflows/unit.yml` that is followed by `ninja test`
+(`multipan`, `ncp`, `posix`; the first step is the `simulation` profile above),
+and `toranj`, the `toranj-unittest` job of `.github/workflows/toranj.yml`
+(`./tests/toranj/build.sh all`). Their order is upstream's job order, toranj
+last, and the steps differ between bases. A step's options are upstream's exact
+arguments on top of what `script/cmake-build <platform>` passes, then
+`-DOT_COMPILE_WARNING_AS_ERROR=OFF` last; nothing is added, and `cmake_options`
+do not apply to any profile but simulation. toranj's are the `cmake` command of
+the `all | cmake)` case of `tests/toranj/build.sh` (the script's defaults
+substituted), configured with plain `cmake -GNinja -S <source> -B <build>`; its
+`OT_PROJECT_CONFIG` header (`tests/toranj/openthread-core-toranj-config-simulation.h`,
+which includes the common toranj header) is included before the platform's config
+header, which is included before the defaults in `src/`. A profile changes what
+is built: FTD-off builds (`multipan`) have no FTD unit tests, a build without
+`-DOT_BUILD_GTEST=ON` (`ncp`, `posix`, `toranj`) has no gtest executables, and
+`ncp` builds the NCP unit tests (`test_ncp_*`) with their bodies enabled. A
+profile that cannot be used at the base is listed as unavailable with its reason.
 
-Which profile a record uses is mechanical: simulation, unless the body of every
-changed unit test source selected under simulation is disabled there and
-enabled under toranj (and no gtest executable is selected); then toranj. The
-record's "Execution profile" section says which and why, and its options and
-guard resolution are those of the selected profile. A verdict uses the record's
-profile unless it sets `profile`; it may set `"profile": "toranj"` only when the
-record shows toranj available, the suite is `unit`, `cmake_options` is `[]` and
-the target is built under toranj, and `"profile": "simulation"` to keep the
-simulation one. Request toranj when the detecting unit test's body is disabled
-under simulation but enabled under toranj.
+Which profile a record uses is mechanical: simulation, if it builds a selected
+executable and not every changed test source of it compiles its body out;
+otherwise the first profile, in that order, that builds the selected executables
+and compiles in the body of every changed test source of them; otherwise
+simulation. The record's "Execution profile" section gives the table (per
+profile, the selected executables it builds and whether each test body is
+enabled), the chosen profile and why; its options and guard resolution are the
+chosen profile's. A verdict
+uses the record's profile unless it sets `profile` to another listed one: the
+profile must be available, the target must be built under it, its test body must
+not be compiled out under it, and `cmake_options` must be `[]` for any profile
+but simulation. Request another profile when the detecting test's body is
+disabled, or its executable not built, under the chosen one.
 
 Run: a gtest target's binary is executed and results are read per case
 (`Suite.Case`); a unit test is executed through ctest by its `ot-test-<name>`
@@ -162,9 +171,9 @@ pinned revision (older eras were never built here: vendored mbedtls, the network
 CI); gtest targets other than the FTD one, including the radio-spinel RCP target
 (it configures by default but was not built); and every detection claim, since no
 baseline exists at triage time. For bases before 2025-03-25 say so in `reason` and
-use at most `medium` confidence. Targets that need `OT_FTD=OFF` or
-`OT_MULTIPAN_RCP` (see `requires_options`), or whose needed option is neither in
-the profile list nor in `ci_cmake_options`, are not part of the profile: `hold`.
+use at most `medium` confidence. Targets that no listed profile builds, or whose
+needed option is neither in the profile's list nor in `ci_cmake_options`, are not
+part of the profile: `hold`.
 
 ## 4. Selection rules
 
@@ -265,8 +274,9 @@ the profile list nor in `ci_cmake_options`, are not part of the profile: `hold`.
     the profile list sets is on);
     (b) the profile's project config header, if it has one (toranj:
     `tests/toranj/openthread-core-toranj-config-simulation.h` and the header it
-    includes), which takes precedence, then the simulation platform's core config header
-    (`examples/platforms/simulation/openthread-core-simulation-config.h`, or its
+    includes), which takes precedence, then the platform's core config header
+    (`examples/platforms/simulation/openthread-core-simulation-config.h`, or
+    `src/posix/platform/openthread-core-posix-config.h` for posix, or its
     location at that base; check with the tools) and any project or core config
     headers it includes;
     (c) the default in the config header that defines the macro
@@ -326,7 +336,7 @@ One JSON object, nothing else.
   "suite": "unit" | "gtest",
   "target": "<CMake target from the inventory>",
   "cmake_options": [ ],                       # usually []; each must be in ci_cmake_options
-  "profile": "simulation" | "toranj",         # optional; default is the record's profile (toranj: unit suite, cmake_options [])
+  "profile": "<a profile of the record>",     # optional; default is the record's profile (cmake_options [] unless simulation)
   "fail_to_pass": [ ... ],                    # unit: the target's ctest name; gtest: Suite.Case
   "pass_to_pass": [ ... ],                    # may be []
   "problem_statement": "<observable behavior, no fix leakage>",
@@ -352,7 +362,7 @@ accept, `confidence`, `change_type`, `suite`, a `target` that exists in the
 inventory for that suite, `fail_to_pass` non-empty and made only of names in
 that target's inventory (unit: exactly its ctest name), `pass_to_pass` names in
 the same inventory and disjoint from F2P, `cmake_options` each listed in
-`ci_cmake_options`, `profile` (when set) simulation or an available toranj for a unit target, non-empty `problem_statement` and `causal_chain`, and a test
+`ci_cmake_options`, `profile` (when set) an available profile of the record that builds the target and does not compile out its test body, non-empty `problem_statement` and `causal_chain`, and a test
 patch that applies to the base. Input or schema errors are sent back to you with
 the reason; do not repair them by inventing names.
 

@@ -7,12 +7,14 @@ run_tests -- build and run this instance's OpenThread tests with CMake.
                                image is built
 
 The suite, target, configure arguments and the expected test names are fixed per
-instance in /opt/embedeval/instance.json. With "profile": "toranj" (upstream's
-toranj-unittest configuration) the configure step is plain `cmake -GNinja -S
-/testbed -B /testbed/build <cmake_args>` instead of script/cmake-build, and the
-build and test steps are the same. With "observe": true there are no
-expected names: "targets" are built, and every case of the "gtest" binaries and
-every "unit" ctest name is reported. The build directory is /testbed/build,
+instance in /opt/embedeval/instance.json. The configure step is "configure"
+<cmake_args>: upstream's `script/cmake-build <platform>` (given OT_CMAKE_BUILD_DIR)
+or, when "configure" is plain `cmake -GNinja` (the toranj profile), that with
+`-S /testbed -B /testbed/build` added; the build and test steps are the same.
+With "observe": true there are no expected names: "targets" are built, and every
+case of the "gtest" binaries and every "unit" ctest name is reported; a gtest
+binary that crashes has each case it did not report rerun alone, so the cases
+are observed independently. The build directory is /testbed/build,
 configured once and reused, so after an edit only what changed is rebuilt.
 
     gtest   the target's binary runs once with --gtest_output=json; every
@@ -104,8 +106,8 @@ def run(cmd: list[str], timeout: int | None = None, env: dict | None = None) -> 
 def build(cfg: dict) -> bool:
     """Configure (only when there is no configured build directory) and build.
     Configuring is upstream's own `cfg["configure"] <cmake_args>` (script/
-    cmake-build), which also builds the targets it is given; for the toranj
-    profile, plain cmake with -S and -B (the build step below builds them).
+    cmake-build), which also builds the targets it is given; for plain cmake
+    (the toranj profile), with -S and -B (the build step below builds them).
     The output goes to the log; the end of it is shown when this fails."""
     BUILD.mkdir(exist_ok=True)
     # The compiler's temporary files go on the build directory's disk: the
@@ -124,7 +126,7 @@ def build(cfg: dict) -> bool:
         env = {**os.environ, "TMPDIR": str(tmp), "OT_CMAKE_BUILD_DIR": str(BUILD),
                "OT_CMAKE_NINJA_TARGET": " ".join(targets)}
         configure = cfg["configure"].split()
-        if cfg.get("profile") == "toranj":
+        if configure[0] == "cmake":
             configure += ["-S", str(TESTBED), "-B", str(BUILD)]
         steps.append((configure + cfg["cmake_args"], env))
     steps.append((["cmake", "--build", "build", "--target", *targets],
@@ -141,22 +143,52 @@ def build(cfg: dict) -> bool:
     return True
 
 
-def run_gtest(cfg: dict) -> tuple[dict[str, str], str]:
-    binaries = [p for p in BUILD.rglob(cfg["target"]) if p.is_file()]
-    if not binaries:
-        return {}, f"no binary named {cfg['target']} under build/"
-    report = BUILD / f"{cfg['target']}.gtest.json"
+def run_binary(binary: Path, extra: list[str] = ()) -> tuple[dict[str, str], str, bool]:
+    """(name -> status, output, ended abnormally): one run of a gtest binary."""
+    report = BUILD / f"{binary.name}.gtest.json"
     report.unlink(missing_ok=True)
-    cmd = [str(binaries[0]), f"--gtest_output=json:{report}"]
+    cmd = [str(binary), f"--gtest_output=json:{report}", *extra]
     print("$ " + " ".join(cmd), flush=True)
     rc, out = run(cmd, RUN_TIMEOUT)
     try:
-        return gtest_json(json.loads(report.read_text())), out
+        return gtest_json(json.loads(report.read_text())), out, False
     except (OSError, ValueError):       # no report: it crashed or timed out
         cases = gtest_stdout(out)
         if rc == "timeout":             # a hang is not a failure of the case
             cases = {n: "timeout" if s == "error" else s for n, s in cases.items()}
-        return cases, out
+        return cases, out, rc != "timeout"
+
+
+def listed_cases(text: str) -> list[str]:
+    """Suite.Case names from `--gtest_list_tests` ("Suite." then indented cases,
+    each with an optional `# GetParam() = ...` comment)."""
+    suite, out = "", []
+    for line in text.splitlines():
+        name = line.split("#")[0].rstrip()
+        if name and not line[0].isspace():
+            suite = name
+        elif name.strip():
+            out.append(suite + name.strip())
+    return out
+
+
+def run_gtest(cfg: dict, isolate: bool = False) -> tuple[dict[str, str], str]:
+    """Run the target's binary. With `isolate` (observe mode), when it ended
+    abnormally each case it did not finish reporting (the running one, which
+    is `error`, and those never started) is rerun alone with --gtest_filter,
+    so each gets its own status."""
+    binaries = [p for p in BUILD.rglob(cfg["target"]) if p.is_file()]
+    if not binaries:
+        return {}, f"no binary named {cfg['target']} under build/"
+    cases, out, crashed = run_binary(binaries[0])
+    if isolate and crashed:
+        _, listing = run([str(binaries[0]), "--gtest_list_tests"], 60)
+        for name in listed_cases(listing):
+            if cases.get(name) in (None, "error"):
+                one, text, _ = run_binary(binaries[0], [f"--gtest_filter={name}"])
+                cases[name] = one.get(name, "error")
+                out += "\n" + text
+    return cases, out
 
 
 def run_unit(names: list[str]) -> tuple[dict[str, str], str]:
@@ -181,7 +213,7 @@ def observe(cfg: dict) -> int:
     reported, in the same results block."""
     statuses, detail = {}, []
     for target in cfg["gtest"]:
-        cases, text = run_gtest({"target": target})
+        cases, text = run_gtest({"target": target}, isolate=True)
         statuses.update(cases)
         detail.append(text)
     if cfg["unit"]:
