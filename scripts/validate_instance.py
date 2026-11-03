@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -176,6 +177,19 @@ def observe_lists(before: dict[str, str], after: dict[str, str]) -> dict:
             "cases": {n: {"before": b[n], "after": a[n]} for n in names}}
 
 
+SETUP_ERROR = re.compile(r"ninja: error: unknown target|^CMake Error", re.M)
+
+
+def build_failure(out: str, compiled: str) -> str:
+    """Why an observe run ended rc 2. A configure error or a target ninja does
+    not know means nothing was compiled (the selected target is not built in
+    our profile): a setup error. Only a compiler error in a source file says
+    the code does not build."""
+    if SETUP_ERROR.search(out):
+        return "selected target not built in the profile (setup error)"
+    return compiled
+
+
 def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_override,
                      timeout: int) -> None:
     """Observe mode: run the selected executables as built and with the upstream
@@ -188,7 +202,7 @@ def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_overri
     rc1, out1, s1 = step("run_tests", ["run_tests"], "before.log", timeout)
     report["before"] = {"rc": rc1, "seconds": round(s1), "log": str(Path(report["logs"]) / "before.log")}
     if rc1 == 2:
-        return done(False, "test patch does not build against base")
+        return done(False, build_failure(out1, "test patch does not build against base"))
     before = report["before"]["cases"] = openthread_cases(out1)
     if not any(s in FAILED for s in before.values()):
         return done(False, "no case failed before the fix")
@@ -205,7 +219,7 @@ def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_overri
     rc2, out2, s2 = step("run_tests", ["run_tests"], "after.log", timeout)
     report["after"] = {"rc": rc2, "seconds": round(s2), "log": str(Path(report["logs"]) / "after.log")}
     if rc2 == 2:
-        return done(False, "the fix does not build in our profile (infra or era issue)")
+        return done(False, build_failure(out2, "the fix does not build in our profile (infra or era issue)"))
     after = report["after"]["cases"] = openthread_cases(out2)
     report.update(observe_lists(before, after))
     if not report["fail_to_pass"]:

@@ -316,6 +316,11 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
                       "so check attribution of the cases to the PR's change"}
     elif observe:
         sel = openthread_candidates.select_tests(rec)
+        gated = openthread_candidates.gated_targets(rec)
+        if not sel["unit"] and not sel["gtest"] and gated:
+            opts = sorted({o for _, m in gated for o in m})
+            sys.exit(f"ERROR: no runnable target for {pr} in our profile: its tests are only "
+                     f"built with {', '.join(opts)} (profile-gated)")
         if not sel["unit"] and not sel["gtest"]:
             sys.exit(f"ERROR: no runnable target for {pr}: its changed test files "
                      f"{rec['test_files']} are compiled into no unit or gtest executable")

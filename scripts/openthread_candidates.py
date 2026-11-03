@@ -32,7 +32,7 @@ import layout  # noqa: E402  (first: reads --run-dir)
 from generate_instance import OPENTHREAD_CMAKE_ARGS, OPENTHREAD_LAST_ARG  # noqa: E402
 
 URL = "https://github.com/openthread/openthread/pull/{}"
-ENRICH_VERSION = 3
+ENRICH_VERSION = 4
 DIFF_CAP = 120_000      # characters kept of each diff in a record
 
 # Not production code, by what the repository holds at the top level: tests/
@@ -181,7 +181,11 @@ def cmd_filter(args) -> None:
 
 
 def option_names(cond: str) -> list[str]:
-    """OT_* options a CMake condition needs to be true (negated ones skipped)."""
+    """OT_* options a CMake condition needs to be true (negated ones skipped).
+    A condition with an OR or a non-OT variable (CMAKE_SYSTEM_NAME, ...) is
+    not a plain conjunction of options and names none."""
+    if re.search(r"\bOR\b|\bCMAKE_\w+", cond):
+        return []
     cond = re.sub(r"\bNOT\s+\w+", "", cond)
     return list(dict.fromkeys(re.findall(r"\bOT_[A-Z0-9_]+\b", cond)))
 
@@ -431,16 +435,49 @@ def profile_options(base: str) -> list[str] | str:
     return out
 
 
+def enabled_options(base: str, profile: list[str] | str) -> list[str] | None:
+    """The OT_* options that are ON in our execution profile: those
+    etc/cmake/options.cmake at `base` declares `option(OT_X "..." ON)` (OT_FTD,
+    OT_MTD, OT_RCP), unless the profile sets them otherwise, plus the profile's
+    own =ON/1/TRUE ones. None when the profile could not be resolved."""
+    if isinstance(profile, str):
+        return None
+    on = set(re.findall(r'^\s*option\s*\(\s*(OT_\w+)\s+"[^"]*"\s+ON\s*\)',
+                        show(base, "etc/cmake/options.cmake") or "", re.M))
+    for a in profile:
+        name, _, val = a[2:].partition("=")
+        (on.add if val.upper() in ("ON", "1", "TRUE") else on.discard)(name)
+    return sorted(on)
+
+
+def missing_options(t: dict, rec: dict) -> list[str]:
+    """Options the target's CMake guards need that our profile leaves off."""
+    on = rec.get("profile_enabled_options")
+    return [] if on is None else [o for o in t["requires_options"] if o not in on]
+
+
+def gated_targets(rec: dict) -> list[tuple[str, list[str]]]:
+    """(target, missing options) for each executable that compiles a changed
+    test file but is not built in our profile."""
+    changed = set(rec["test_files"])
+    return [(t["target"], missing_options(t, rec)) for kind in ("unit", "gtest")
+            for t in rec["test_inventory"][kind]
+            if changed & set(t["sources"] + t.get("helper_sources", [])) and missing_options(t, rec)]
+
+
 def select_tests(rec: dict) -> dict:
     """The test executables that compile a file the PR's test diff changed
     (their own sources, or the helper libraries and headers they pull in),
     from an enriched record: {"unit": [inventory entries], "gtest": [...]}.
     Both empty means the changed test files (a CMakeLists, a helper no
-    registered executable compiles) map to no runnable target."""
+    registered executable compiles) map to no runnable target. An executable
+    whose CMake guards need an option our profile leaves off is not built, so
+    never selected (gated_targets() lists those, for the message)."""
     changed = set(rec["test_files"])
     inv = rec["test_inventory"]
     return {kind: [t for t in inv[kind]
-                   if changed & set(t["sources"] + t.get("helper_sources", []))]
+                   if changed & set(t["sources"] + t.get("helper_sources", []))
+                   and not missing_options(t, rec)]
             for kind in ("unit", "gtest")}
 
 
@@ -465,6 +502,7 @@ def enrich(r: dict) -> dict:
     base = r["parents"][0]
     fix = r["fix_commit"]
     tests = [f for f in r["files"] if f.startswith("tests/")]
+    profile = profile_options(base)
     return {"number": r["number"], "title": r["title"], "url": URL.format(r["number"]),
             "merged_at": r["merged_at"], "fix_commit": fix, "base_commit": base,
             "commits": r.get("commits", [fix]),
@@ -476,7 +514,8 @@ def enrich(r: dict) -> dict:
             "test_inventory": {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)},
             "test_config_guards": config_guards(fix, tests),
             "ci_cmake_options": ci_options(base),
-            "profile_cmake_options": profile_options(base),
+            "profile_cmake_options": profile,
+            "profile_enabled_options": enabled_options(base, profile),
             "enrich_version": ENRICH_VERSION}
 
 
@@ -501,6 +540,8 @@ def cmd_enrich(args) -> None:
         inv = rec["test_inventory"]
         print(f"  {r['number']}  {len(inv['unit'])} unit, "
               f"{sum(len(g['cases']) for g in inv['gtest'])} gtest cases -> {layout.show(path)}")
+        for t, opts in gated_targets(rec):
+            print(f"    not built in our profile (needs {', '.join(opts)}): {t}")
 
 
 # ---------------------------------------------------------------- selftest
