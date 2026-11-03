@@ -272,16 +272,24 @@ def merge_cmake_args(base: list[str], extra: list[str]) -> list[str]:
     return [a for a in base if key(a) not in {key(e) for e in extra}] + extra
 
 
-def observed_config(prior: dict, obs: dict) -> dict:
+def observed_config(prior: dict, obs: dict, inventory: list | None = None) -> dict:
     """instance.json fields of the verdict-style instance an observation
     finalizes into. run_tests holds one gtest target or the unit tests, so a
-    selection of both (or of several binaries) is refused."""
+    selection of both is refused. Several gtest targets finalize to the one
+    that holds every fail_to_pass case (inventory: the record's gtest list)."""
     f2p, p2p = obs["fail_to_pass"], obs["pass_to_pass"]
     if prior["gtest"] and not prior["unit"] and len(prior["gtest"]) == 1:
         return {"suite": "gtest", "target": prior["gtest"][0], "fail_to_pass": f2p,
                 "pass_to_pass": p2p}
     if prior["unit"] and not prior["gtest"]:
         return {"suite": "unit", "target": f2p[0], "fail_to_pass": f2p, "pass_to_pass": p2p}
+    if prior["gtest"] and not prior["unit"] and inventory:
+        owners = lambda c: [g["target"] for g in inventory if c in g["cases"]]
+        targets = {t for c in f2p for t in owners(c)}
+        if len(targets) == 1 and all(len(owners(c)) == 1 for c in f2p):
+            target = targets.pop()
+            return {"suite": "gtest", "target": target, "fail_to_pass": f2p,
+                    "pass_to_pass": [c for c in p2p if owners(c) == [target]]}
     sys.exit("ERROR: --from-observed handles one gtest target or unit tests only, not "
              f"gtest {prior['gtest']} with unit {prior['unit']}")
 
@@ -308,7 +316,7 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
             sys.exit(f"ERROR: {observed} is not observed-valid: {obs.get('reason')}")
         prior = json.loads((observed / "instance.json").read_text())
         old = json.loads((observed / "metadata.json").read_text())
-        cfg = observed_config(prior, obs)
+        cfg = observed_config(prior, obs, rec["test_inventory"]["gtest"])
         cmake_args = prior["cmake_args"]
         statement, change_type = old["problem_statement"], old["change_type"]
         extra_meta = {"oracle": "observed", "oracle_note": "observed by validate_instance.py "

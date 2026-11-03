@@ -32,7 +32,7 @@ import layout  # noqa: E402  (first: reads --run-dir)
 from generate_instance import OPENTHREAD_CMAKE_ARGS, OPENTHREAD_LAST_ARG  # noqa: E402
 
 URL = "https://github.com/openthread/openthread/pull/{}"
-ENRICH_VERSION = 4
+ENRICH_VERSION = 5
 DIFF_CAP = 120_000      # characters kept of each diff in a record
 
 # Not production code, by what the repository holds at the top level: tests/
@@ -190,9 +190,15 @@ def option_names(cond: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"\bOT_[A-Z0-9_]+\b", cond)))
 
 
+class Guard(list):
+    """The OT_* options of the enclosing if() blocks; `conds` holds the full
+    conditions (an elseif/else adds the negation of the earlier branches)."""
+    conds: list
+
+
 def cmake_commands(text: str):
     """(name, [args], guards) for every command outside a macro body, in
-    order; `guards` is the OT_* options of the enclosing if() blocks."""
+    order; `guards` is a Guard for the enclosing if() blocks."""
     text = re.sub(r"#[^\n]*", "", text)
     stack, in_macro = [], False
     for m in re.finditer(r"(\w+)\s*\(((?:[^()]|\([^()]*\))*)\)", text):
@@ -204,15 +210,17 @@ def cmake_commands(text: str):
         elif in_macro:
             continue
         elif name == "if":
-            stack.append(option_names(body))
-        elif name == "elseif":
-            stack[-1] = option_names(body)
-        elif name == "else":
-            stack[-1] = []
+            stack.append({"prev": [], "cur": body})
+        elif name in ("elseif", "else"):
+            stack[-1]["prev"].append(stack[-1]["cur"])
+            stack[-1]["cur"] = body if name == "elseif" else None
         elif name == "endif":
             stack.pop()
         else:
-            yield name, body.split(), list(dict.fromkeys(o for g in stack for o in g))
+            g = Guard(dict.fromkeys(o for f in stack if f["cur"] for o in option_names(f["cur"])))
+            g.conds = [c for f in stack for c in [f"NOT ({p})" for p in f["prev"]]
+                       + ([f["cur"]] if f["cur"] else [])]
+            yield name, body.split(), g
 
 
 def resolve(src: str, directory: str) -> str | None:
@@ -293,7 +301,7 @@ def unit_inventory(rev: str) -> list[dict]:
         sources = [s for s in (resolve(x, "tests/unit") for x in srcs) if s]
         out.append({"ctest_name": c, "target": t, "sources": sources,
                     "helper_sources": sorted(with_includes(rev, sources + libs) - set(sources)),
-                    "requires_options": g})
+                    "requires_options": list(g), "if_conditions": g.conds})
     return out
 
 
@@ -328,23 +336,31 @@ def gtest_inventory(rev: str) -> list[dict]:
             out.append({"target": t, "sources": sources,
                         "helper_sources": sorted(with_includes(rev, sources + helpers) - set(sources)),
                         "cases": [c for s in sources for c in gtest_cases(rev, s)],
-                        "requires_options": guards})
+                        "requires_options": list(guards), "if_conditions": guards.conds})
     return out
 
 
 def config_guards(rev: str, paths: list[str]) -> dict:
-    """OPENTHREAD_CONFIG_* macros that `#if` lines of the changed test sources
-    test, as the OT_* CMake option that sets each (etc/cmake/options.cmake).
-    Such a test body is compiled out, so passes vacuously, unless the option
-    is on; CMakeLists.txt shows nothing of it."""
+    """Macros that the #if/#elif/#ifdef/#ifndef lines (continuations joined) of
+    the changed test sources use, with the OT_* CMake option that sets each
+    OPENTHREAD_CONFIG_* one (etc/cmake/options.cmake). Such a test body is
+    compiled out, so passes vacuously, unless the guard holds; CMakeLists.txt
+    shows nothing of it. Include guards are left out."""
     to_option = dict((m, o) for o, m in re.findall(
-        r"ot_option\((OT_\w+)\s+(OPENTHREAD_\w+)", show(rev, "etc/cmake/options.cmake") or ""))
+        r"ot_\w*option\((OT_\w+)\s+(?:\w+\s+)?(OPENTHREAD_\w+)", show(rev, "etc/cmake/options.cmake") or ""))
     out = {}
     for p in paths:
         if p.endswith((".cpp", ".c", ".hpp", ".h")):
-            macros = re.findall(r"^\s*#\s*(?:el)?if\b(.*)$", show(rev, p) or "", re.M)
-            found = list(dict.fromkeys(m for line in macros
-                                       for m in re.findall(r"\bOPENTHREAD_\w*CONFIG_\w+", line)))
+            lines = c_lines(show(rev, p) or "")
+            found = []
+            for i, line in enumerate(lines):
+                d = directive(line)
+                if d and d[0] in ("if", "ifdef", "ifndef", "elif"):
+                    nxt = directive(lines[i + 1]) if i + 1 < len(lines) else None
+                    if d[0] == "ifndef" and nxt and nxt[0] == "define" and nxt[1].split()[:1] == [d[1]]:
+                        continue
+                    found += c_idents(d[1])
+            found = [m for m in dict.fromkeys(found) if not m.startswith("__")]
             if found:
                 out[p] = [to_option.get(m, m) for m in found]
     return out
@@ -456,13 +472,93 @@ def missing_options(t: dict, rec: dict) -> list[str]:
     return [] if on is None else [o for o in t["requires_options"] if o not in on]
 
 
+def cmake_if(cond: str, rec: dict) -> tuple[bool | None, list[str]]:
+    """A CMake if() condition under the profile: (True/False/None, unknown
+    names). CMAKE_SYSTEM_NAME is Linux; an OT_* option is its -D value, ON if
+    on by default, else unset (""); NOT, AND, OR, parentheses and STREQUAL
+    work. Anything else is unknown (None)."""
+    vals = {a[2:].split("=")[0]: a[2:].partition("=")[2] for a in rec.get("profile_cmake_options") or []
+            if a.startswith("-D")}
+    toks, i, unknown = re.findall(r'"[^"]*"|[()]|[^\s()"]+', cond), 0, []
+
+    def value(tok):
+        if tok.startswith('"'):
+            return tok[1:-1]
+        if tok == "CMAKE_SYSTEM_NAME":
+            return "Linux"
+        if tok.startswith("OT_"):
+            return vals.get(tok, "ON" if tok in (rec.get("profile_enabled_options") or []) else "")
+        if tok.upper() in ("ON", "OFF", "TRUE", "FALSE") or tok.isdigit():
+            return tok
+        unknown.append(tok)
+        return None
+
+    def truth(v):
+        return None if v is None else v.upper() in ("ON", "TRUE", "Y", "YES") or (v.isdigit() and int(v) != 0)
+
+    def parse(level):
+        nonlocal i
+        if level == 0:
+            left = parse(1)
+            while i < len(toks) and toks[i] == "OR":
+                i += 1
+                right = parse(1)
+                left = True if left or right else None if None in (left, right) else False
+            return left
+        if level == 1:
+            left = parse(2)
+            while i < len(toks) and toks[i] == "AND":
+                i += 1
+                right = parse(2)
+                left = False if left is False or right is False else None if None in (left, right) else True
+            return left
+        if level == 2:
+            if toks[i] == "NOT":
+                i += 1
+                v = parse(2)
+                return None if v is None else not v
+            return parse(3)
+        if toks[i] == "(":
+            i += 1
+            v = parse(0)
+            i += 1
+            return v
+        left = value(toks[i])
+        i += 1
+        if i < len(toks) and toks[i] == "STREQUAL":
+            right = value(toks[i + 1])
+            i += 2
+            return None if None in (left, right) else left == right
+        return truth(left)
+
+    try:
+        v = parse(0)
+        return (v if i == len(toks) else None), unknown
+    except IndexError:
+        return None, unknown or ["unparsable condition"]
+
+
+def unbuilt_reasons(t: dict, rec: dict) -> list[str]:
+    """Why the executable is not built in our profile: the options its CMake
+    guards need that are off or, failing that, the if() conditions that are
+    false or cannot be evaluated (such a target is conservatively not built)."""
+    if rec.get("profile_enabled_options") is None:
+        return []
+    why = missing_options(t, rec)
+    for c in [] if why else t.get("if_conditions", []):
+        v, unknown = cmake_if(c, rec)
+        if v is not True:
+            why.append(f"if({c})" + (f" cannot be evaluated ({', '.join(unknown)})" if v is None else " is false"))
+    return why
+
+
 def gated_targets(rec: dict) -> list[tuple[str, list[str]]]:
-    """(target, missing options) for each executable that compiles a changed
-    test file but is not built in our profile."""
+    """(target, reasons) for each executable that compiles a changed test
+    file but is not built in our profile."""
     changed = set(rec["test_files"])
-    return [(t["target"], missing_options(t, rec)) for kind in ("unit", "gtest")
+    return [(t["target"], unbuilt_reasons(t, rec)) for kind in ("unit", "gtest")
             for t in rec["test_inventory"][kind]
-            if changed & set(t["sources"] + t.get("helper_sources", [])) and missing_options(t, rec)]
+            if changed & set(t["sources"] + t.get("helper_sources", [])) and unbuilt_reasons(t, rec)]
 
 
 def select_tests(rec: dict) -> dict:
@@ -471,14 +567,393 @@ def select_tests(rec: dict) -> dict:
     from an enriched record: {"unit": [inventory entries], "gtest": [...]}.
     Both empty means the changed test files (a CMakeLists, a helper no
     registered executable compiles) map to no runnable target. An executable
-    whose CMake guards need an option our profile leaves off is not built, so
-    never selected (gated_targets() lists those, for the message)."""
+    that our profile does not build (a CMake guard needs an option it leaves
+    off, or an if() condition is false or unknown) is never selected
+    (gated_targets() lists those, for the message)."""
     changed = set(rec["test_files"])
     inv = rec["test_inventory"]
     return {kind: [t for t in inv[kind]
                    if changed & set(t["sources"] + t.get("helper_sources", []))
-                   and not missing_options(t, rec)]
+                   and not unbuilt_reasons(t, rec)]
             for kind in ("unit", "gtest")}
+
+
+# ---------------------------------------------------------------- guard resolution
+
+SIM_CONFIG = "examples/platforms/simulation/openthread-core-simulation-config.h"
+# Macros the unit/gtest executables get from their build (FTD, no POSIX platform) or the host.
+BUILD_FIXED = {"OPENTHREAD_FTD": 1, "OPENTHREAD_MTD": 0, "OPENTHREAD_RADIO": 0,
+               "OPENTHREAD_PLATFORM_POSIX": 0, "OPENTHREAD_PLATFORM_NEXUS": 0,
+               "__linux__": 1, "__GNUC__": 1, "__cplusplus": 201703}
+# Defined by compilers or third-party headers we do not index: value unknown.
+OPAQUE = re.compile(r"__|_[A-Z]|MBEDTLS_|PSA_|GTEST_|OPENTHREAD_POSIX_")
+TRUE_VALUES = ("ON", "1", "TRUE", "Y", "YES")
+C_LEVELS = (("||",), ("&&",), ("|",), ("^",), ("&",), ("==", "!="), ("<", ">", "<=", ">="),
+            ("<<", ">>"), ("+", "-"), ("*", "/", "%"))
+C_TOKEN = re.compile(r"\s*(?:(0[xX][0-9a-fA-F]+|\d+)[uUlL]*|([A-Za-z_]\w*)"
+                     r"|(<<|>>|<=|>=|==|!=|&&|\|\||[-+*/%<>!~&|^?:()]))")
+C_STRIP = re.compile(r'"(?:\\.|[^"\\])*"|/\*.*?\*/|//[^\n]*', re.S)
+
+
+def c_lines(text: str) -> list[str]:
+    """Logical source lines: comments removed, backslash continuations joined."""
+    text = C_STRIP.sub(lambda m: m.group(0) if m.group(0)[0] == '"' else " ", text)
+    return text.replace("\\\n", " ").split("\n")
+
+
+def directive(line: str) -> tuple[str, str] | None:
+    m = re.match(r"\s*#\s*(\w+)\s*(.*)$", line)
+    return (m.group(1), re.sub(r"\s+", " ", m.group(2)).strip()) if m else None
+
+
+def c_idents(expr: str) -> list[str]:
+    return [i for i in dict.fromkeys(re.findall(r"[A-Za-z_]\w*", expr)) if i not in ("defined", "true", "false")]
+
+
+def c_eval(expr: str, ident, is_defined) -> int | None:
+    """An #if expression as an int; None when it cannot be parsed or a value is
+    unknown (three-valued, so `0 && unknown` is 0). `ident(name)` gives a
+    macro's value (undefined ones are 0 in C), `is_defined(name)` defined()."""
+    toks, pos, expr = [], 0, expr.strip()
+    while pos < len(expr):
+        m = C_TOKEN.match(expr, pos)
+        if not m:
+            return None
+        pos = m.end()
+        toks.append(("n", int(m.group(1), 16 if m.group(1)[1:2] in "xX" else 10)) if m.group(1)
+                    else ("i", m.group(2)) if m.group(2) else ("o", m.group(3)))
+    i = 0
+
+    def peek():
+        return toks[i][1] if i < len(toks) and toks[i][0] == "o" else None
+
+    def take(op):
+        nonlocal i
+        if peek() != op:
+            raise ValueError(op)
+        i += 1
+
+    def binary(op, a, b):
+        if op == "&&":
+            return 0 if a == 0 or b == 0 else None if a is None or b is None else 1
+        if op == "||":
+            return 1 if a or b else None if a is None or b is None else 0
+        if a is None or b is None or (op in "/%" and b == 0) or (op in ("<<", ">>") and not 0 <= b < 64):
+            return None
+        q = abs(a) // abs(b) * (1 if (a < 0) == (b < 0) else -1) if op in "/%" else 0
+        return int({"|": lambda: a | b, "^": lambda: a ^ b, "&": lambda: a & b, "==": lambda: a == b,
+                    "!=": lambda: a != b, "<": lambda: a < b, ">": lambda: a > b, "<=": lambda: a <= b,
+                    ">=": lambda: a >= b, "<<": lambda: a << b, ">>": lambda: a >> b, "+": lambda: a + b,
+                    "-": lambda: a - b, "*": lambda: a * b, "/": lambda: q, "%": lambda: a - b * q}[op]())
+
+    def ternary():
+        nonlocal i
+        c = level(0)
+        if peek() != "?":
+            return c
+        i += 1
+        a = ternary()
+        take(":")
+        b = ternary()
+        return None if c is None else a if c else b
+
+    def level(n):
+        nonlocal i
+        if n == len(C_LEVELS):
+            return unary()
+        left = level(n + 1)
+        while peek() in C_LEVELS[n]:
+            op = peek()
+            i += 1
+            left = binary(op, left, level(n + 1))
+        return left
+
+    def unary():
+        nonlocal i
+        op = peek()
+        if op in ("!", "~", "-", "+"):
+            i += 1
+            v = unary()
+            return None if v is None else {"!": int(not v), "~": ~v, "-": -v, "+": v}[op]
+        if op == "(":
+            i += 1
+            v = ternary()
+            take(")")
+            return v
+        if i >= len(toks) or toks[i][0] == "o":
+            raise ValueError("operand")
+        kind, val = toks[i]
+        i += 1
+        if kind == "n":
+            return val
+        if val == "defined":
+            paren = peek() == "("
+            i += paren
+            name = toks[i][1]
+            i += 1
+            if paren:
+                take(")")
+            return is_defined(name)
+        if val in ("true", "false"):
+            return int(val == "true")
+        if peek() == "(":               # function-like macro or __has_include(): not modelled
+            depth = 0
+            while True:
+                depth += (peek() == "(") - (peek() == ")")
+                i += 1
+                if depth == 0:
+                    return None
+        return ident(val)
+
+    try:
+        v = ternary()
+        return v if i == len(toks) else None
+    except (ValueError, IndexError):
+        return None
+
+
+@functools.lru_cache(maxsize=None)
+def cmake_definitions(rev: str) -> str:
+    """The text of every CMake file at `rev` that passes a NAME=value definition."""
+    paths = [x.split(":", 1)[1] for x in git("grep", "-l", "-I", "-E", r"(OPENTHREAD|OT)_\w+=", rev, "--",
+                                              "*CMakeLists.txt", "*.cmake", check=False).split()]
+    return "\n".join(show(rev, f) or "" for f in paths)
+
+
+@functools.lru_cache(maxsize=None)
+def define_index(rev: str) -> dict:
+    """{macro: [(path, value)]} for the object-like #defines under src/ and
+    include/ at `rev` (and the simulation core config), from one git grep."""
+    raw, out = {}, {}
+    for line in git("grep", "-n", "-I", "-E", r"^\s*#\s*define\s+\w+", rev, "--", "src", "include",
+                    SIM_CONFIG, check=False).splitlines():
+        _, path, no, text = line.split(":", 3)
+        if text.rstrip().endswith("\\"):      # the grep shows only the first line
+            lines = raw.setdefault(path, (show(rev, path) or "").split("\n"))
+            text, n = "", int(no) - 1
+            while n < len(lines):
+                text += " " + lines[n].rstrip().rstrip("\\")
+                n += 1
+                if not lines[n - 1].rstrip().endswith("\\"):
+                    break
+        m = re.match(r"\s*#\s*define\s+(\w+)(\(?)\s*(.*)$", C_STRIP.sub(" ", text))
+        if m and not m.group(2):
+            out.setdefault(m.group(1), []).append((path, m.group(3).strip()))
+    return out
+
+
+class Resolver:
+    """Static macro values for the test executables of one `rev` under cmake
+    `options` (-DOT_X=VAL strings). Order: build facts, the cmake option that
+    options.cmake maps to the macro, macros CMake sets by logic we do not model
+    (unknown), the simulation core config, then the #defines of src/ and include/.
+    `local` holds the #defines of the test file being walked (None = #undef)."""
+
+    def __init__(self, rev: str, options):
+        self.rev, self.local, self.cache, self.stack = rev, {}, {}, []
+        self.opts = dict(o[2:].split("=", 1) for o in options if o.startswith("-D") and "=" in o)
+        text = show(rev, "etc/cmake/options.cmake") or ""
+        self.mapped = {c: ("option", n, d) for n, c, d in re.findall(
+            r'ot_option\((OT_\w+)\s+(OPENTHREAD_\w+)\s+"[^"]*"\s*(\w*)\s*\)', text)}
+        self.mapped |= {c: ("int", n, "") for n, c in re.findall(
+            r"ot_int_option\((OT_\w+)\s+(OPENTHREAD_\w+)", text)}
+        self.mapped |= {c: ("multi", n, p) for n, c, p in re.findall(
+            r"ot_multi_option\((OT_\w+)\s+\w+\s+(OPENTHREAD_\w+)\s+(\w+)", text)}
+        defs = cmake_definitions(rev)
+        self.mapped |= {c: ("flag", n, e) for n, c, e in re.findall(      # if(OT_X) ...MACRO=1 [else() ...MACRO=0]
+            r'if\s*\(\s*(OT_\w+)\s*\)\s*target_compile_definitions\(\s*\S+\s+\w+\s+"(\w+)=1"\s*\)'
+            r'(?:\s*(else)\s*\(\s*\)\s*target_compile_definitions\(\s*\S+\s+\w+\s+"\2=0"\s*\))?', defs)}
+        self.by_cmake = set(re.findall(r"(?<![\w{])((?:OPENTHREAD|OT)_\w+)=", defs)) - set(BUILD_FIXED) - set(self.mapped)
+
+    def value_of(self, text: str) -> int | None:
+        return c_eval(text, lambda n: self.lookup(n)[0], self.defined)
+
+    def defined(self, name: str) -> int | None:
+        if name in self.local:
+            return int(self.local[name] is not None)
+        if name in BUILD_FIXED or name in define_index(self.rev):
+            return 1
+        if name in self.mapped and self.opts.get(self.mapped[name][1]):
+            return 1
+        return None if name in self.by_cmake or OPAQUE.match(name) else 0
+
+    def lookup(self, name: str) -> tuple[int | None, str, list]:
+        """(value, where it came from, the #define texts it expands)."""
+        if name in self.local:
+            text = self.local[name]
+            if text is None:
+                return 0, "#undef in the test file", []
+            self.stack.append(name)
+            try:
+                return (None if name in self.stack[:-1] else self.value_of(text)), "defined in the test file", [text]
+            finally:
+                self.stack.pop()
+        if name in self.stack or len(self.stack) > 12:
+            return None, "recursive definition", []
+        if name not in self.cache:
+            self.stack.append(name)
+            try:
+                self.cache[name] = self._lookup(name)
+            finally:
+                self.stack.pop()
+        return self.cache[name]
+
+    def _lookup(self, name: str) -> tuple[int | None, str, list]:
+        if name in BUILD_FIXED:
+            return BUILD_FIXED[name], "fixed by the unit-test build (FTD, no POSIX platform)", []
+        kind, opt, extra = self.mapped.get(name, (None, None, None))
+        val = self.opts.get(opt, "") if opt else ""
+        if kind and val:
+            src = f"cmake option {opt}={val}"
+            if kind == "flag":
+                return int(val.upper() in TRUE_VALUES), src, []
+            if kind == "option":
+                return (1 if val.upper() in TRUE_VALUES else 0 if val.upper() in ("OFF", "0", "FALSE", "N", "NO")
+                        else None), src, []
+            if kind == "int":
+                return (int(val) if val.isdigit() else None), src, []
+            return self.value_of(extra + val), src, [extra + val]
+        note = f"; cmake option {opt} not set" if opt else ""
+        if kind == "option" and extra in ("ON", "OFF"):
+            return int(extra == "ON"), f"cmake option {opt} default {extra}", []
+        if kind == "flag" and extra:
+            return 0, f"cmake option {opt} not set", []
+        if name in self.by_cmake:
+            return None, "set by CMake logic that is not modelled" + note, []
+        defs = define_index(self.rev).get(name, [])
+        sim = [d for d in defs if d[0] == SIM_CONFIG]
+        defs = sim or [d for d in defs if not d[0].startswith("src/posix/")]
+        if not defs:
+            if OPAQUE.match(name) or name in define_index(self.rev):
+                return None, "defined outside the modelled sources" + note, []
+            return 0, "not defined anywhere (0)" + note, []
+        values = {self.value_of(v) if v else None for _, v in defs}
+        where = "simulation config header" if sim else f"default/derived in {defs[0][0]}"
+        return (values.pop() if len(values) == 1 else None), where + note, [v for _, v in defs]
+
+    def trace(self, expr: str) -> dict:
+        """{macro: {"value", "source"}} for the identifiers of `expr` and,
+        for derived macros, of the expressions they expand to (two levels)."""
+        out, todo = {}, [(n, 0) for n in c_idents(expr)]
+        while todo and len(out) < 12:
+            n, d = todo.pop(0)
+            if n not in out:
+                v, src, texts = self.lookup(n)
+                out[n] = {"value": v, "source": src}
+                if d < 2 and not src.startswith("cmake option"):
+                    todo += [(i, d + 1) for t in texts[:1] for i in c_idents(t)]
+        return out
+
+
+@functools.lru_cache(maxsize=None)
+def resolver(rev: str, options: tuple) -> Resolver:
+    return Resolver(rev, options)
+
+
+def resolve_macro(rev: str, name: str, options) -> int | None:
+    """Value of macro `name` in the unit-test build at `rev` under cmake
+    `options` (the profile's plus any requested), or None when unknown."""
+    return resolver(rev, tuple(options)).lookup(name)[0]
+
+
+def k_and(a, b):
+    return 0 if a == 0 or b == 0 else None if a is None or b is None else 1
+
+
+def k_not(a):
+    return None if a is None else int(not a)
+
+
+def k_or(a, b):
+    return 1 if a == 1 or b == 1 else None if a is None or b is None else 0
+
+
+def scan_file(rev: str, path: str, options, config_rev: str | None = None) -> dict:
+    """Walk the preprocessor conditionals of a test source, keeping its own
+    #defines. Result: "guards" [{expr, value, macros}] (each distinct #if
+    condition), "body_enabled" True/False/None and "body_chain" (the
+    conditions around the test body). The body is the call statements of
+    main() other than printf/return, or the TEST* cases of a file without
+    main(); it is enabled when any of them is compiled in. The source is read
+    at `rev` (the test patch); macro values come from `config_rev` (the base,
+    which the test must fail against), defaulting to `rev`."""
+    res = resolver(config_rev or rev, tuple(options))
+    res.local, res.cache = {}, {}
+    stack, guards, stmts, in_main = [], [], [], False   # frame: [taken, cond, branch, guard, kind]
+    for line in c_lines(show(rev, path) or ""):
+        d = directive(line)
+        state = 1
+        for f in stack:
+            state = k_and(state, f[2])
+        if d is None:
+            if re.search(r"\bint\s+main\s*\(", line):
+                in_main = True
+            elif (in_main and re.search(r"\w\s*\(", line) and not re.search(
+                    r"\b(printf|fprintf|puts|return|OT_UNUSED_VARIABLE)\b|\(void\)", line)) or (
+                    not in_main and re.match(r"\s*TEST(_F|_P)?\s*\(", line)):
+                stmts.append((state, [(f[3], f[4]) for f in stack]))
+            continue
+        word, arg = d
+        if word in ("if", "ifdef", "ifndef", "elif"):
+            expr = {"ifdef": f"defined({arg})", "ifndef": f"!defined({arg})"}.get(word, arg)
+            v = c_eval(expr, lambda n: res.lookup(n)[0], res.defined)
+            g = next((x for x in guards if x["expr"] == expr), None)
+            if g is None:
+                g = {"expr": expr, "value": v, "macros": res.trace(expr)}
+                guards.append(g)
+            if word == "elif" and stack:
+                f = stack[-1]
+                taken = k_or(f[0], f[1])
+                stack[-1] = [taken, v, k_and(k_not(taken), v), g, "if"]
+            else:
+                stack.append([0, v, v, g, "if"])
+        elif word == "else" and stack:
+            f = stack[-1]
+            taken = k_or(f[0], f[1])
+            stack[-1] = [taken, 0, k_not(taken), f[3], "else"]
+        elif word == "endif" and stack:
+            stack.pop()
+        elif word == "define" and state != 0:
+            m = re.match(r"(\w+)(\(?)\s*(.*)$", arg)
+            if m and not m.group(2):
+                res.local[m.group(1)] = m.group(3) if state == 1 else "(?)"
+        elif word == "undef" and state == 1:
+            res.local[arg] = None
+    res.local, res.cache = {}, {}
+    states = [s for s, _ in stmts]
+    enabled = None if not states else True if 1 in states else False if set(states) == {0} else None
+    pick = next((c for s, c in stmts if s == 1), stmts[0][1] if stmts else [])
+    return {"guards": guards, "body_enabled": enabled,
+            "body_chain": [{"expr": g["expr"], "value": g["value"], "branch": k} for g, k in pick]}
+
+
+def guard_resolution(rev: str, paths: list[str], profile, ci: list[str], base: str) -> dict:
+    """scan_file() of each changed test source under the profile. For a
+    disabled body, "ci_flips" lists the CI options (ci_cmake_options) that
+    would enable it on their own, and "ci_flips_combined" whether all of them
+    together would."""
+    out = {}
+    if isinstance(profile, str):
+        return out
+    for p in paths:
+        if p.endswith((".cpp", ".c")):
+            out[p] = r = scan_file(rev, p, profile, base)
+            if r["body_enabled"] is False:
+                r["ci_flips"] = [o for o in ci if scan_file(rev, p, profile + [o], base)["body_enabled"]]
+                r["ci_flips_combined"] = bool(scan_file(rev, p, profile + ci, base)["body_enabled"])
+    return out
+
+
+def body_enabled(rec: dict, path: str, extra_options=()) -> bool | None:
+    """Whether the test body of `path` is compiled in under the record's
+    profile plus `extra_options` (a verdict's cmake_options); None if unknown."""
+    profile = rec.get("profile_cmake_options")
+    if isinstance(profile, str) or profile is None:
+        return None
+    return scan_file(rec["fix_commit"], path, list(profile) + list(extra_options),
+                     rec["base_commit"])["body_enabled"]
+
+
 
 
 # ---------------------------------------------------------------- enrichment
@@ -503,6 +978,7 @@ def enrich(r: dict) -> dict:
     fix = r["fix_commit"]
     tests = [f for f in r["files"] if f.startswith("tests/")]
     profile = profile_options(base)
+    ci = ci_options(base)
     return {"number": r["number"], "title": r["title"], "url": URL.format(r["number"]),
             "merged_at": r["merged_at"], "fix_commit": fix, "base_commit": base,
             "commits": r.get("commits", [fix]),
@@ -513,13 +989,32 @@ def enrich(r: dict) -> dict:
                       "source": clip(git("diff", base, fix, "--", ".", ":(exclude)tests/"))},
             "test_inventory": {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)},
             "test_config_guards": config_guards(fix, tests),
-            "ci_cmake_options": ci_options(base),
+            "test_guard_resolution": guard_resolution(fix, tests, profile, ci, base),
+            "ci_cmake_options": ci,
             "profile_cmake_options": profile,
             "profile_enabled_options": enabled_options(base, profile),
             "enrich_version": ENRICH_VERSION}
 
 
+def reenrich_local(rec: dict) -> dict:
+    """The clone-derived fields of an enriched record recomputed, keeping
+    what came from GitHub or the base commit (no network)."""
+    fix, tests = rec["fix_commit"], rec["test_files"]
+    return rec | {"test_inventory": {"unit": unit_inventory(fix), "gtest": gtest_inventory(fix)},
+                  "test_config_guards": config_guards(fix, tests),
+                  "test_guard_resolution": guard_resolution(
+                      fix, tests, rec["profile_cmake_options"], rec["ci_cmake_options"],
+                      rec["base_commit"]),
+                  "enrich_version": ENRICH_VERSION}
+
+
 def cmd_enrich(args) -> None:
+    if args.local:
+        for path in sorted(enriched_dir().glob("*.json")):
+            if not args.pr or int(path.stem) in args.pr:
+                path.write_text(json.dumps(reenrich_local(json.loads(path.read_text())), indent=2) + "\n")
+                print(f"  {path.stem}  re-enriched locally")
+        return
     if args.pr:
         todo = [find_pr(p) for p in args.pr]
     else:
@@ -583,6 +1078,18 @@ def cmd_selftest(args=None) -> None:
     check("the fake platform selects only the gtest executables that link it",
           pick("tests/gtest/fake_platform.hpp") == {"unit": 0, "gtest": len(inv["gtest"])}
           and pick("tests/gtest/fake_coprocessor_platform.cpp") == {"unit": 0, "gtest": 1})
+    r = find_pr(13536)
+    scan = scan_file(r["fix_commit"], "tests/unit/test_dhcp6_pd_client.cpp", ["-DOT_BORDER_ROUTING=ON"])
+    check("13536 DHCP6 PD client body is disabled by a derived macro", scan["body_enabled"] is False)
+    check("...and enabled by the option that sets its default macro", scan_file(
+        r["fix_commit"], "tests/unit/test_dhcp6_pd_client.cpp",
+        ["-DOT_BORDER_ROUTING=ON", "-DOT_BORDER_ROUTING_DHCP6_PD=ON", "-DOT_BORDER_ROUTING_DHCP6_PD_CLIENT=ON"]
+    )["body_enabled"] is True)
+    check("#if expressions evaluate three-valued", c_eval("0 && X", lambda n: None, lambda n: None) == 0
+          and c_eval("X || 1", lambda n: None, lambda n: None) == 1 and c_eval("X", lambda n: None, lambda n: None) is None)
+    gate = 'NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND (OT_BACKBONE_ROUTER OR OT_BACKBONE_ROUTER STREQUAL "")'
+    check("a non-Linux-only CMake gate is false on Linux", cmake_if(gate, {}) == (False, []))
+    check("a CMake condition with an unknown variable is not true", cmake_if("FOO AND OT_FTD", {})[0] is not True)
     check("a CMakeLists.txt maps to no target", pick("tests/unit/CMakeLists.txt") == {"unit": 0, "gtest": 0})
     sys.exit(0 if ok else 1)
 
@@ -609,6 +1116,7 @@ def main() -> None:
     e.add_argument("--pr", type=int, nargs="+")
     e.add_argument("--limit", type=int)
     e.add_argument("--refresh", action="store_true")
+    e.add_argument("--local", action="store_true", help="recompute clone-derived fields of existing records")
     dispatch(p.parse_args())
 
 

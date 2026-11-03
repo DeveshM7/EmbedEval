@@ -461,6 +461,34 @@ def check_verdict(v: dict | None, rec: dict) -> list[str]:
 # ---------------------------------------------------------------- OpenThread
 
 
+def render_guard_resolution(res: dict, ci: list[str]) -> list[str]:
+    """Lines for the statically resolved #if guards of the changed test files
+    (test_guard_resolution of the enriched record)."""
+    fmt = lambda ms, all_: ", ".join(f"{m} = {'unknown' if v['value'] is None else v['value']} ({v['source']})"
+                                     for m, v in list(ms.items())[:8] if all_ or v["value"] != 1)
+    state = {True: "YES", False: "NO", None: "unknown"}
+    out = []
+    for path, r in res.items():
+        out.append(f"- {path}: test body enabled under the profile: {state[r['body_enabled']]}")
+        by_expr = {g["expr"]: g for g in r["guards"]}
+        for c in r["body_chain"]:
+            g = by_expr[c["expr"]]
+            out.append(f"  - around the test body: `{c['expr']}` ({c['branch']} branch) = "
+                       f"{'unknown' if c['value'] is None else c['value']}: {fmt(g['macros'], True)}")
+        if r["body_enabled"] is False:
+            if r["ci_flips"]:
+                out.append(f"  - a CI option could enable it: {', '.join(r['ci_flips'])}")
+            elif r["ci_flips_combined"]:
+                out.append("  - no single CI option enables it, but the CI options together (ci_cmake_options) do")
+            else:
+                out.append("  - no option in ci_cmake_options enables it")
+        shown = {c["expr"] for c in r["body_chain"]}
+        rest = sorted((g for g in r["guards"] if g["expr"] not in shown), key=lambda g: g["value"] == 1)[:8]
+        out += [f"  - other guard `{g['expr']}` = {'unknown' if g['value'] is None else g['value']}: "
+                f"{fmt(g['macros'], True)}" for g in rest]
+    return out
+
+
 def render_record_openthread(rec: dict) -> str:
     """The OpenThread enriched record (scripts/openthread_candidates.py) as
     markdown. There are no twister or dry-run facts; its diffs are capped when
@@ -489,6 +517,11 @@ def render_record_openthread(rec: dict) -> str:
     out += ["", "## Preprocessor guards in the changed test sources", ""]
     out += [f"- {p}: {', '.join(o)}" for p, o in rec.get("test_config_guards", {}).items()] \
         or ["(none)"]
+    out += ["", "## Guards resolved under the execution profile (static; they take precedence over your own "
+            "reading of headers)", "",
+            "A test whose body is not enabled only prints a notice and passes without running anything, "
+            "so it cannot fail before the fix.", ""]
+    out += render_guard_resolution(rec.get("test_guard_resolution", {}), rec["ci_cmake_options"]) or ["(none)"]
     prof = rec.get("profile_cmake_options")
     out += ["", "## Options already set in the execution profile (upstream script/cmake-build "
             "simulation at the base commit, then the profile's own args; later wins)", "",
@@ -559,6 +592,15 @@ def check_verdict_openthread(v: dict | None, rec: dict) -> list[str]:
                       "use [] or hold")
     if issues:
         return issues
+
+    import openthread_candidates
+    states = {s: openthread_candidates.body_enabled(rec, s, options)
+              for s in entry["sources"] if s in rec["test_files"]}
+    if False in states.values() and True not in states.values():
+        off = [s for s, v in states.items() if v is False]
+        return [f"the test body of {off} is compiled out under the profile plus `cmake_options` "
+                f"({options}), so {target} passes without running it and cannot fail before the fix; "
+                "reject, or hold, unless a CI option enables it"]
 
     patch = git("diff", rec["base_commit"], rec["fix_commit"], "--", "tests/").stdout
     with tempfile.TemporaryDirectory() as tmp:

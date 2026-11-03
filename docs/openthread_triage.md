@@ -157,7 +157,13 @@ the profile list nor in `ci_cmake_options`, are not part of the profile: `hold`.
    `OT_*` option that sets them: when such a guard is off, the test body is
    compiled out and the executable passes before and after. Resolve the guarded
    macro's value in section 12's order (profile list, then the simulation
-   platform's config header, then the default in the config header). A needed
+   platform's config header, then the default in the config header). The record's
+   "Guards resolved under the execution profile" section already did this
+   statically: it gives each guard's value, the macros behind it and where each
+   value came from, plus whether the test body is enabled. Trust those values over
+   your own reading of headers. A body that is not enabled cannot fail, so reject
+   unless a CI option (listed there) would enable it; unknown means check
+   yourself. A needed
    option may be added in `cmake_options` only if the profile does not already
    provide the value and it appears verbatim in `ci_cmake_options`
    (the base commit's own CI); otherwise hold. Never add an option to make a test

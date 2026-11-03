@@ -178,13 +178,18 @@ def observe_lists(before: dict[str, str], after: dict[str, str]) -> dict:
 
 
 SETUP_ERROR = re.compile(r"ninja: error: unknown target|^CMake Error", re.M)
+MISSING_SOURCES = re.compile(r"Cannot find source file|No SOURCES given to target")
 
 
 def build_failure(out: str, compiled: str) -> str:
     """Why an observe run ended rc 2. A configure error or a target ninja does
     not know means nothing was compiled (the selected target is not built in
     our profile): a setup error. Only a compiler error in a source file says
-    the code does not build."""
+    the code does not build. A configure error about missing sources is the
+    test patch adding an executable whose sources only the fix adds: it does
+    not build against base, like a compile error."""
+    if MISSING_SOURCES.search(out) and "CMake Error" in out:
+        return compiled
     if SETUP_ERROR.search(out):
         return "selected target not built in the profile (setup error)"
     return compiled
