@@ -34,6 +34,10 @@ import layout
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
+OPENTHREAD_TEMPLATES = REPO_ROOT / "templates" / "openthread" / "apptainer"
+
+# Instance pipelines built, validated and run as Apptainer images.
+APPTAINER_PIPELINES = ("twister", "cmake")
 
 
 def _default_root() -> Path:
@@ -169,12 +173,12 @@ def _run_build(cmd: list[str], fh, env: dict, cwd: Path, timeout: int) -> int | 
         return "timeout"
 
 
-def recipe_tag(definition: str) -> str:
+def recipe_tag(definition: str, templates: Path = TEMPLATES) -> str:
     """A short fingerprint of a shared image's recipe. It is part of the
     image's name, so changing the recipe (e.g. adding a compiler to sdk.def)
     builds a new image instead of silently reusing the old one."""
     import hashlib
-    return hashlib.sha256((TEMPLATES / definition).read_bytes()).hexdigest()[:8]
+    return hashlib.sha256((templates / definition).read_bytes()).hexdigest()[:8]
 
 
 def python_image(py: str) -> Path:
@@ -184,6 +188,10 @@ def python_image(py: str) -> Path:
 def sdk_image(sdk: str, py: str) -> Path:
     return shared_path("images", f"zephyr-sdk-{sdk}-py{py}-{recipe_tag('python.def')}"
                                  f"{recipe_tag('sdk.def')}.sif")
+
+
+def openthread_image() -> Path:
+    return shared_path("images", f"openthread-base-{recipe_tag('base.def', OPENTHREAD_TEMPLATES)}.sif")
 
 
 def instance_image(instance_id: str) -> Path:
@@ -252,6 +260,16 @@ def ensure_base_images(py: str, sdk: str, sdk_archive: str, logdir: Path) -> Pat
                      logdir / f"build-{simg.stem}.log"):
             raise RuntimeError(f"could not build {simg.name}")
     return simg
+
+
+def ensure_openthread_base(logdir: Path) -> Path:
+    """Build the shared OpenThread toolchain image if it does not exist yet."""
+    img = openthread_image()
+    if not img.exists():
+        print(f"  building shared image {img.name} ...")
+        if not build(img, OPENTHREAD_TEMPLATES / "base.def", {}, logdir / f"build-{img.stem}.log"):
+            raise RuntimeError(f"could not build {img.name}")
+    return img
 
 
 def exec_args(image: Path, binds: dict[Path, str] | None = None,

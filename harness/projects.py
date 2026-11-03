@@ -45,6 +45,14 @@ _ORIENTATION = {
         "incrementally. Never run distclean or configure.sh -- reconfiguring "
         "discards the container's setup and breaks the test runner."
     ),
+    "openthread": (
+        "OpenThread is built with CMake and Ninja into /testbed/build, which is "
+        "already configured and built for this instance's test target. Run "
+        "`run_tests` to rebuild incrementally (only what you changed is "
+        "recompiled), run the tests and print a status for every test in the "
+        "task. Do not run cmake or change its options, and do not build or run "
+        "test binaries by hand -- `run_tests` does it with the right target."
+    ),
     "riot": (
         "Builds use GNU Make. Tests are unit-test suites under tests/unittests that "
         "compile to a native host binary -- there is no emulator. `run_tests` already "
@@ -52,13 +60,20 @@ _ORIENTATION = {
     ),
 }
 
-# Zephyr only: twister's run_tests has its own exit codes.
+# Zephyr and OpenThread: their run_tests have their own exit codes.
 _EXTRA_WARNINGS = {
     "zephyr": (
         "`run_tests` exit codes on this instance: 0 = all tests passed, "
         "1 = a test, the build or the configuration failed, 2 = the test "
         "runner did not start, 3 = nothing ran. A run takes one to a few "
         "minutes; tests under QEMU include the emulator's boot."
+    ),
+    "openthread": (
+        "`run_tests` exit codes on this instance: 0 = every listed test passed, "
+        "1 = a listed test failed or crashed (a crash marks the running test "
+        "`error` and the ones after it `not_run`), 2 = the configure or the "
+        "build failed, 3 = a listed test did not run. After a change to a "
+        "widely included header a rebuild can take several minutes."
     ),
 }
 
@@ -81,6 +96,17 @@ PROJECTS: dict[str, dict] = {
         # times out ends its container and every process in it, so QEMU cannot
         # be left running (it was under docker exec).
         "command_timeout": 900,
+    },
+    "openthread": {
+        "label": "OpenThread",
+        "orientation": _ORIENTATION["openthread"],
+        "extra_warnings": _EXTRA_WARNINGS["openthread"],
+        "protected_paths": ["tests/"],
+        "runtime": "apptainer",
+        # run_tests configures (once), builds and runs.
+        "rebuild_command": "",
+        # A rebuild of the core library after a header change, then the tests.
+        "command_timeout": 1800,
     },
     "nuttx": {
         "label": "NuttX RTOS",
@@ -107,6 +133,10 @@ PROJECTS: dict[str, dict] = {
         "rebuild_command": "",
     },
 }
+
+
+# Instance pipelines run as Apptainer images: twister (Zephyr), cmake (OpenThread).
+APPTAINER_PIPELINES = ("twister", "cmake")
 
 
 def config_for(meta: dict) -> dict:

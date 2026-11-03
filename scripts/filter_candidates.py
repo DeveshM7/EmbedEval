@@ -2,6 +2,9 @@
 """
 Hard filters for Zephyr PR candidates.
 
+Use `--repo openthread` with selftest, fetch, filter or enrich to dispatch to
+scripts/openthread_candidates.py; Zephyr remains the default.
+
     python scripts/filter_candidates.py selftest
     python scripts/filter_candidates.py fetch --since 2024-01-01 --until 2024-06-30
     python scripts/filter_candidates.py filter
@@ -758,17 +761,24 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("selftest", help="check the 8 known-good PRs survive")
+    def add_repo(command) -> None:
+        command.add_argument("--repo", choices=("zephyr", "openthread"), default="zephyr")
+
+    check = sub.add_parser("selftest", help="check the 8 known-good PRs survive")
+    add_repo(check)
 
     f = sub.add_parser("fetch", help="download PRs into the local cache")
+    add_repo(f)
     f.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
     f.add_argument("--since", default="2024-01-01")
     f.add_argument("--until", default="2024-12-31")
 
-    sub.add_parser("filter", help="apply hard filters to the cache")
+    filtering = sub.add_parser("filter", help="apply hard filters to the cache")
+    add_repo(filtering)
 
     e = sub.add_parser("enrich",
                        help="full GitHub context for PRs that passed filtering")
+    add_repo(e)
     e.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
     e.add_argument("--limit", type=int, help="only the first N candidates")
     e.add_argument("--parallel", type=int, default=4,
@@ -782,6 +792,10 @@ def main() -> None:
     t.add_argument("--refresh", action="store_true", help="recompute existing blocks")
 
     args = p.parse_args()
+    if getattr(args, "repo", "zephyr") == "openthread":
+        import openthread_candidates
+        openthread_candidates.dispatch(args)
+        return
     {"selftest": cmd_selftest, "fetch": cmd_fetch, "filter": cmd_filter,
      "enrich": cmd_enrich, "enrich-twister": cmd_enrich_twister}[args.cmd](args)
 

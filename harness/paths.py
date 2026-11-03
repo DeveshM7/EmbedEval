@@ -38,7 +38,7 @@ OUTPUTS_DIR = layout.outputs()
 PATCH_NAME = "patch.diff"
 TRAJECTORY_NAME = "trajectory.json"
 
-PROJECTS = ("zephyr", "nuttx", "riot")
+PROJECTS = ("zephyr", "nuttx", "riot", "openthread")
 
 # LiteLLM model name -> directory name under outputs/<repo>/.
 # Unknown models raise rather than silently creating a new directory.

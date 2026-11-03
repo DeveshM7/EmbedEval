@@ -13,9 +13,10 @@ in a container started fresh from the instance image, so nothing the agent left
 behind -- stale build artefacts, a modified test file, a running process -- can
 influence the result. The patch text is the only thing that crosses over.
 
-Twister-pipeline Zephyr instances are graded in their Apptainer image instead
-(evaluate_apptainer): the patch on a fresh overlay, then the instance's
-`run_tests`, which must pass every test of the scenario.
+Twister-pipeline Zephyr and cmake-pipeline OpenThread instances are graded in
+their Apptainer image instead (evaluate_apptainer): the patch on a fresh
+overlay, then the instance's `run_tests`, which must pass every test of the
+scenario (OpenThread: every listed test).
 
     EMBEDEVAL_INSTANCES_DIR=generated python harness/evaluate_patches.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
@@ -109,7 +110,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
 
 def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dict:
     meta = paths.load_metadata(instance_id)
-    if meta.get("pipeline") == "twister":
+    if meta.get("pipeline") in projects.APPTAINER_PIPELINES:
         return evaluate_apptainer(instance_id, model_name, meta, timeout)
     if meta["project"] == "zephyr":
         return {"instance_id": instance_id, "model": paths.resolve_model(model_name),

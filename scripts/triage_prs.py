@@ -51,6 +51,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -342,12 +343,13 @@ TOOLS = [
 
 def git(*args: str, timeout: int = 300) -> subprocess.CompletedProcess:
     with GIT_LOCK:
-        return subprocess.run(["git", "-C", str(ensure_clone()), *args],
+        return subprocess.run(["git", "-C", str(PROJECTS[PROJECT]["clone"]()), *args],
                               capture_output=True, text=True, timeout=timeout)
 
 
 def run_tool(name: str, args: dict, rec: dict) -> str:
-    refs = {"base": rec.get("base_commit"), "merge": rec.get("merge_commit_sha")}
+    refs = {"base": rec.get("base_commit"),
+            "merge": rec.get("merge_commit_sha") or rec.get("fix_commit")}
     sha = refs.get(args.get("ref") or "merge")
     if not sha:
         return f"error: this record has no {args.get('ref') or 'merge'} commit"
@@ -456,6 +458,136 @@ def check_verdict(v: dict | None, rec: dict) -> list[str]:
     return issues
 
 
+# ---------------------------------------------------------------- OpenThread
+
+
+def render_record_openthread(rec: dict) -> str:
+    """The OpenThread enriched record (scripts/openthread_candidates.py) as
+    markdown. There are no twister or dry-run facts; its diffs are capped when
+    enriched, so the result is far below RECORD_BUDGET."""
+    out = [f"# PR #{rec['number']}: {rec['title']}", "",
+           f"- URL: {rec['url']}", f"- Merged: {rec.get('merged_at')}",
+           f"- Base commit (repo before this PR): {rec['base_commit']}",
+           f"- Fix commit (repo after this PR): {rec['fix_commit']}", "",
+           "## Description", "", rec.get("body") or "(not available)", "",
+           "## Changed files", "",
+           "Tests: " + ", ".join(rec["test_files"]),
+           "Production: " + ", ".join(rec["source_files"]), "",
+           "## Test inventory at the fix commit", "",
+           "`requires_options` are the OT_* options in the CMake `if()` guards around the target. "
+           "A unit test is one executable; its ctest name is the name in the first column.", "",
+           "### Unit executables (tests/unit/CMakeLists.txt)", ""]
+    out += [f"- {u['ctest_name']}: {', '.join(u['sources'])}"
+            + (f" [requires {', '.join(u['requires_options'])}]" if u["requires_options"] else "")
+            for u in rec["test_inventory"]["unit"]] or ["(none)"]
+    out += ["", "### GoogleTest executables (tests/gtest/CMakeLists.txt)", ""]
+    for g in rec["test_inventory"]["gtest"]:
+        out += [f"- {g['target']}: {', '.join(g['sources'])}"
+                + (f" [requires {', '.join(g['requires_options'])}]" if g["requires_options"] else ""),
+                f"  cases: {', '.join(g['cases']) or '(none found)'}"]
+    out += [] if rec["test_inventory"]["gtest"] else ["(none)"]
+    out += ["", "## Preprocessor guards in the changed test sources", ""]
+    out += [f"- {p}: {', '.join(o)}" for p, o in rec.get("test_config_guards", {}).items()] \
+        or ["(none)"]
+    out += ["", "## Configure options used by the base commit's own CI (.github/workflows/unit.yml)", "",
+            " ".join(rec["ci_cmake_options"]) or "(none)", "",
+            "## Test changes (git diff base fix -- tests/)", "", "```diff", rec["diffs"]["tests"], "```", "",
+            "## Production changes (everything else)", "", "```diff", rec["diffs"]["source"], "```", ""]
+    return "\n".join(out)
+
+
+def check_verdict_openthread(v: dict | None, rec: dict) -> list[str]:
+    """What docs/openthread_triage.md requires, checked mechanically: form,
+    names that must exist in the inventory, options the base CI uses, and that
+    the test patch applies to the base. Judgement is not second-guessed."""
+    if v is None:
+        return ["the reply is not a JSON object"]
+    issues = []
+    if v.get("pr") != rec["number"]:
+        issues.append(f"`pr` must be {rec['number']}")
+    if v.get("verdict") not in ("accept", "reject", "hold"):
+        issues.append("`verdict` must be \"accept\", \"reject\" or \"hold\"")
+    if not str(v.get("reason") or "").strip():
+        issues.append("`reason` is required")
+    if v.get("verdict") != "accept":
+        return issues
+
+    if v.get("confidence") not in ("high", "medium", "low"):
+        issues.append("`confidence` must be high, medium or low")
+    if v.get("change_type") not in ("fix", "feature"):
+        issues.append("`change_type` must be fix or feature")
+    for field in ("problem_statement", "causal_chain"):
+        if not str(v.get(field) or "").strip():
+            issues.append(f"`{field}` is required")
+    suite, target = v.get("suite"), v.get("target")
+    if suite not in ("unit", "gtest"):
+        return issues + ["`suite` must be unit or gtest"]
+    inventory = rec["test_inventory"][suite]
+    entry = next((e for e in inventory if e["target"] == target), None)
+    if entry is None:
+        return issues + [f"`target` {target!r} is not a {suite} target in the inventory: "
+                         f"{[e['target'] for e in inventory]}"]
+
+    if suite == "gtest":
+        f2p_allowed = p2p_allowed = set(entry["cases"])
+    else:
+        f2p_allowed = {entry["ctest_name"]}     # the whole executable is the unit
+        p2p_allowed = {e["ctest_name"] for e in inventory} - f2p_allowed
+    for field, required, allowed in (("fail_to_pass", True, f2p_allowed),
+                                     ("pass_to_pass", False, p2p_allowed)):
+        names = v.get(field, [])
+        if not isinstance(names, list) or (required and not names):
+            issues.append(f"`{field}` must be a {'non-empty ' if required else ''}list of test names")
+        elif [n for n in names if n not in allowed]:
+            issues.append(f"`{field}` names not in the inventory of {target}: "
+                          f"{[n for n in names if n not in allowed]}. Allowed: {sorted(allowed)}")
+    if (isinstance(v.get("fail_to_pass"), list) and isinstance(v.get("pass_to_pass"), list)
+            and set(v["fail_to_pass"]) & set(v["pass_to_pass"])):
+        issues.append("a test cannot be in both `fail_to_pass` and `pass_to_pass`")
+
+    options = v.get("cmake_options", [])
+    if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
+        issues.append("`cmake_options` must be a list of strings (usually [])")
+    elif [o for o in options if o not in rec["ci_cmake_options"]]:
+        issues.append(f"`cmake_options` {[o for o in options if o not in rec['ci_cmake_options']]} "
+                      f"are not options of the base commit's CI ({rec['ci_cmake_options']}); "
+                      "use [] or hold")
+    if issues:
+        return issues
+
+    patch = git("diff", rec["base_commit"], rec["fix_commit"], "--", "tests/").stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        clone = str(PROJECTS[PROJECT]["clone"]())
+        subprocess.run(["git", "-C", clone, "read-tree", rec["base_commit"]], env=env, check=True)
+        r = subprocess.run(["git", "-C", clone, "apply", "--check", "--cached", "-"],
+                           input=patch, env=env, capture_output=True, text=True)
+    return [f"the test patch does not apply to the base commit: {r.stderr.strip()[:200]}"] if r.returncode else []
+
+
+def use_project(name: str) -> None:
+    """Select the repository being triaged (module-level, as --run-dir is)."""
+    global PROJECT, INSTRUCTIONS, ENRICHED
+    PROJECT = name
+    INSTRUCTIONS = REPO_ROOT / PROJECTS[name]["instructions"]
+    ENRICHED = PROJECTS[name]["enriched"]()
+
+
+def openthread_enriched() -> Path:
+    import openthread_candidates
+    return openthread_candidates.enriched_dir()
+
+
+PROJECTS = {
+    "zephyr": {"instructions": "docs/pr_triage.md", "enriched": layout.enriched,
+               "clone": ensure_clone, "render": render_record, "check": check_verdict},
+    "openthread": {"instructions": "docs/openthread_triage.md", "enriched": openthread_enriched,
+                   "clone": layout.openthread_clone, "render": render_record_openthread,
+                   "check": check_verdict_openthread},
+}
+PROJECT = "zephyr"
+
+
 # ---------------------------------------------------------------- one PR
 
 
@@ -463,6 +595,7 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
     import litellm
 
     rec = json.loads((ENRICHED / f"{pr}.json").read_text())
+    render, check = PROJECTS[PROJECT]["render"], PROJECTS[PROJECT]["check"]
     sampling = dict(prof.get("sampling", {}))
     extra = {k: sampling.pop(k) for k in ("top_k", "min_p") if k in sampling}
     kw = dict(model=f"openai/{profile}", api_base=api_base, api_key="local",
@@ -472,7 +605,7 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
         kw["extra_body"] = extra
 
     messages = [{"role": "system", "content": INSTRUCTIONS.read_text()},
-                {"role": "user", "content": "Enriched PR record:\n\n" + render_record(rec)
+                {"role": "user", "content": "Enriched PR record:\n\n" + render(rec)
                  + f"\n\n---\nYou may use up to {MAX_TOOL_ROUNDS} tool rounds for this PR."}]
     trace = {"pr": pr, "profile": profile, "turns": [], "repairs": [], "error": None,
              "tool_calls": 0, "budget_hit": False}
@@ -520,7 +653,7 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
                 continue
 
             verdict = parse_verdict(msg.content)
-            issues = check_verdict(verdict, rec)
+            issues = check(verdict, rec)
             if not issues or repairs >= MAX_REPAIRS:
                 break
             repairs += 1
@@ -662,18 +795,21 @@ def git_state() -> dict:
 
 
 def cmd_run(args) -> None:
+    use_project(args.project)
     profiles = json.loads((TRIAGE / "models.json").read_text())
     if args.profile not in profiles or args.profile.startswith("_"):
         sys.exit(f"unknown profile {args.profile!r}")
     prof = profiles[args.profile]
 
+    if args.gold and PROJECT != "zephyr":
+        sys.exit("--gold is the Zephyr gold set")
     prs = list(dict.fromkeys((args.pr or []) + (sorted(load_gold()) if args.gold else [])))
     if not prs:
         sys.exit("give --pr and/or --gold")
     missing = [p for p in prs if not (ENRICHED / f"{p}.json").exists()]
     if missing:
         sys.exit(f"not enriched: {missing}. Run filter_candidates.py enrich --pr ...")
-    no_dry = [p for p in prs if load_dry_run(p) is None]
+    no_dry = [p for p in prs if PROJECT == "zephyr" and load_dry_run(p) is None]
     if no_dry:
         print(f"  WARNING: no dry run for {no_dry}; the model sees no board/scenario table "
               f"for them. Run scripts/dry_run.py {' '.join(map(str, no_dry))}")
@@ -682,11 +818,11 @@ def cmd_run(args) -> None:
     commits = set()
     for p in prs:
         rec = json.loads((ENRICHED / f"{p}.json").read_text())
-        commits |= {c for c in (rec.get("base_commit"), rec.get("merge_commit_sha")) if c}
+        commits |= {c for c in (rec.get("base_commit"), rec.get("merge_commit_sha") or rec.get("fix_commit")) if c}
     # Only what is missing: in a cluster run prepare.py has fetched them all,
     # and many triage calls fetching into one clone at once collide on locks.
     missing = [c for c in sorted(commits) if git("cat-file", "-e", f"{c}^{{commit}}").returncode]
-    print(f"Fetching {len(missing)} of {len(commits)} commits into the Zephyr clone ...")
+    print(f"Fetching {len(missing)} of {len(commits)} commits into the {PROJECT} clone ...")
     r = git("fetch", "-q", "origin", *missing, timeout=1800) if missing else None
     if r is not None and r.returncode:
         print(f"  warning: fetch failed; tools may not see every commit:\n  {r.stderr.strip()[:300]}")
@@ -704,8 +840,9 @@ def cmd_run(args) -> None:
         run_dir.mkdir(parents=True, exist_ok=False)
         tag = ""
     prompt = INSTRUCTIONS.read_text()
-    (run_dir / f"pr_triage{tag}.md").write_text(prompt)
-    manifest = {"profile": args.profile, "api_base": args.api_base,
+    (run_dir / f"{INSTRUCTIONS.stem}{tag}.md").write_text(prompt)
+    manifest = {"project": PROJECT, "instructions": str(INSTRUCTIONS.relative_to(REPO_ROOT)),
+                "profile": args.profile, "api_base": args.api_base,
                 "sampling": prof.get("sampling"), "max_tokens": prof.get("max_tokens"),
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()[:16],
                 "git": git_state(), "prs": prs, "parallel": args.parallel,
@@ -733,6 +870,9 @@ def cmd_run(args) -> None:
         print(f"  verdicts in {layout.show(run_dir)}; scorecard: triage_prs.py --run-dir "
               f"{layout.run_dir()} eval")
         return
+    if PROJECT != "zephyr":       # the scorecard is against the Zephyr gold set
+        print(f"  verdicts in {layout.show(run_dir)}")
+        return
     args.run_dir = str(run_dir)
     cmd_eval(args)
 
@@ -743,6 +883,8 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run", help="triage PRs with a served model, then score the run")
+    r.add_argument("--project", choices=sorted(PROJECTS), default="zephyr",
+                   help="repository being triaged: picks the instructions, clone, record and checks")
     r.add_argument("--profile", required=True, help="entry in triage/models.json")
     r.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
     r.add_argument("--gold", action="store_true", help="every PR in triage/gold.json")

@@ -35,7 +35,7 @@ INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_RO
                   if _override else [layout.generated()] if layout.run_dir()
                   else [APPTAINER_INSTANCES, REPO_ROOT / "docker" / "instances"])
 
-PROJECTS = ("zephyr", "nuttx", "riot")
+PROJECTS = ("zephyr", "nuttx", "riot", "openthread")
 
 _INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
 

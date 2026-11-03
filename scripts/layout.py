@@ -25,6 +25,7 @@ Shared between runs, set by environment variable:
                             and what GitHub said about each PR (github/)
                             (scripts/apptainer_util.py)
     EMBEDEVAL_ZEPHYR_CLONE  the full Zephyr clone; default candidates/zephyr.git
+    EMBEDEVAL_OPENTHREAD_CLONE  the OpenThread clone; default <shared root>/openthread.git
 
 Imported before any module computes a path, so it reads `--run-dir` from the
 command line itself and removes it, before argparse sees the arguments.
@@ -108,6 +109,14 @@ def lookup_overlay() -> Path | None:
 def zephyr_clone() -> Path:
     value = os.environ.get("EMBEDEVAL_ZEPHYR_CLONE")
     return Path(value) if value else REPO_ROOT / "candidates" / "zephyr.git"
+
+
+def openthread_clone() -> Path:
+    value = os.environ.get("EMBEDEVAL_OPENTHREAD_CLONE")
+    if value:
+        return Path(value)
+    import apptainer_util   # imports this module, so not at the top
+    return apptainer_util.shared_root() / "openthread.git"
 
 
 def show(p: Path) -> str:

@@ -17,6 +17,12 @@ are validated in their Apptainer image instead, exactly as built:
 
     EMBEDEVAL_INSTANCES_DIR=generated python scripts/validate_instance.py zephyr__zephyr-65697
 
+OpenThread instances ("pipeline": "cmake") take the same path. Their run_tests
+prints a `--- openthread: results` block, one `<status> <name>` line per
+expected test, and validity is judged per test (openthread_problem below): a
+build failure is never a valid "before", and every fail_to_pass test must fail
+before and every fail_to_pass and pass_to_pass test must pass after.
+
 Each step runs in a throwaway container with a fresh writable overlay, so the
 image itself is never changed:
 
@@ -82,10 +88,10 @@ def gold_patch(meta: dict, workdir: Path) -> str:
 
 
 def local_fix_patch(meta: dict) -> str:
-    """The upstream fix from the local Zephyr clone: every change of the PR
-    outside tests/. The same range the test patch comes from, so the two
-    never overlap."""
-    clone = layout.zephyr_clone()
+    """The upstream fix from the local clone: every change of the PR outside
+    tests/. The same range the test patch comes from, so the two never
+    overlap."""
+    clone = layout.openthread_clone() if meta["project"] == "openthread" else layout.zephyr_clone()
     base, fix = meta["base_commit"], meta["fix_commit"]
     for sha in (base, fix):
         if sh(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:
@@ -98,17 +104,18 @@ def local_fix_patch(meta: dict) -> str:
 
 
 RUN_TESTS_MEANING = {0: "passed", 1: "failed", 2: "twister did not run", 3: "nothing ran"}
+OPENTHREAD_MEANING = {**RUN_TESTS_MEANING, 2: "build or configure failed"}
 
 
 def summary(output: str) -> list[str]:
     """The per-test lines and verdict from run_tests' output."""
     keep, on = [], False
     for line in output.splitlines():
-        if line.startswith("--- twister:"):
+        if line.startswith(("--- twister:", "--- openthread:")):
             on = True
         if on or line.startswith("==> run_tests"):
             keep.append(line)
-        if line.startswith("--- suite:"):
+        if line.startswith(("--- suite:", "--- end")):
             on = False
     if len(keep) <= 40:
         return keep
@@ -119,14 +126,45 @@ def summary(output: str) -> list[str]:
     return rest[:1] + [f"  ({len(passed)} tests passed)"] + rest[1:40]
 
 
+def openthread_cases(output: str) -> dict[str, str]:
+    """name -> status from the `--- openthread: results` block of run_tests."""
+    cases, on = {}, False
+    for line in output.splitlines():
+        if line.startswith("--- openthread: results"):
+            on = True
+        elif on and line.startswith("--- end"):
+            break
+        elif on and line.startswith("  "):
+            status, _, name = line.strip().partition(" ")
+            cases[name] = status
+    return cases
+
+
+def openthread_problem(want: dict, cases: dict[str, str], after: bool) -> str | None:
+    """Why an OpenThread instance is not valid, from its per-test results, or
+    None. Before the fix every fail_to_pass test must have failed or errored
+    (not `not_run`); with it every fail_to_pass and pass_to_pass test must pass."""
+    f2p, p2p = want["fail_to_pass"], want["pass_to_pass"]
+    if not after:
+        bad = [n for n in f2p if cases.get(n) not in ("failed", "error")]
+        return f"fail_to_pass tests did not fail before the fix: {bad}" if bad else None
+    bad = [n for n in f2p + p2p if cases.get(n) != "passed"]
+    return f"tests did not pass with the fix: {bad}" if bad else None
+
+
 def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
                        verbose: bool) -> bool:
     meta = instances.load_metadata(instance_id)
     image = au.instance_image(instance_id)
     print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
-    print(f"  {meta['test_path']}/{meta['scenario']} on {meta['platform']}")
-    report = {"instance_id": instance_id, "image": str(image), "platform": meta["platform"],
-              "scenario": f"{meta['test_path']}/{meta['scenario']}", "valid": False,
+    cmake = meta.get("pipeline") == "cmake"     # OpenThread: no board or scenario
+    if not cmake:
+        print(f"  {meta['test_path']}/{meta['scenario']} on {meta['platform']}")
+    meanings = OPENTHREAD_MEANING if cmake else RUN_TESTS_MEANING
+    report = {"instance_id": instance_id, "image": str(image),
+              **({} if cmake else {"platform": meta["platform"],
+                                   "scenario": f"{meta['test_path']}/{meta['scenario']}"}),
+              "valid": False,
               # what was validated: promote_instance.py refuses a recipe that
               # changed after this point
               "recipe_sha256": au.recipe_fingerprint(instances.instance_dir(instance_id)),
@@ -163,18 +201,33 @@ def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: i
     try:
         print("\n  Step 1: expecting run_tests to FAIL on the image as built")
         rc1, out1, s1 = step("run_tests", ["run_tests"], "before.log", timeout)
-        report["before"] = {"rc": rc1, "meaning": RUN_TESTS_MEANING.get(rc1, str(rc1)),
+        report["before"] = {"rc": rc1, "meaning": meanings.get(rc1, str(rc1)),
                             "seconds": round(s1), "summary": summary(out1)}
         for line in summary(out1):
             print(f"      {line}")
         if rc1 != 1:
             why = {0: "tests PASSED before the fix -- the instance does not detect the bug",
                    3: "nothing ran: the scenario is filtered or skipped on this board",
-                   2: "twister did not run (environment problem)"}.get(
+                   2: ("the build or configure failed: not a valid before (no test ran)" if cmake
+                       else "twister did not run (environment problem)")}.get(
                        rc1, f"run_tests ended with {rc1}")
             print(f"  INVALID: {why}")
             report["reason"] = why
             return _finish(instance_id, report)
+
+        if cmake:
+            cases1 = openthread_cases(out1)
+            report["before"]["cases"] = cases1
+            want = json.loads((instances.instance_dir(instance_id) / "instance.json").read_text())
+            # Failing before the fix is not held against a pass_to_pass test;
+            # it is recorded as the baseline's health.
+            report["before"]["pass_to_pass_failing"] = [
+                n for n in want["pass_to_pass"] if cases1.get(n) != "passed"]
+            why = openthread_problem(want, cases1, after=False)
+            if why:
+                print(f"  INVALID: {why}")
+                report["reason"] = why
+                return _finish(instance_id, report)
 
         print("\n  Step 2: applying the upstream fix")
         patch_text = (Path(patch_override).read_text() if patch_override
@@ -189,18 +242,27 @@ def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: i
 
         print("\n  Step 3: expecting run_tests to PASS with the fix")
         rc2, out2, s2 = step("run_tests", ["run_tests"], "after.log", timeout)
-        report["after"] = {"rc": rc2, "meaning": RUN_TESTS_MEANING.get(rc2, str(rc2)),
+        report["after"] = {"rc": rc2, "meaning": meanings.get(rc2, str(rc2)),
                            "seconds": round(s2), "summary": summary(out2)}
         for line in summary(out2):
             print(f"      {line}")
         if rc2 != 0:
             why = {1: "tests still fail with the fix",
                    3: "nothing ran with the fix",
-                   2: "twister did not run (environment problem)"}.get(
+                   2: ("the build or configure failed with the fix" if cmake
+                       else "twister did not run (environment problem)")}.get(
                        rc2, f"run_tests ended with {rc2}")
             print(f"  INVALID: {why}")
             report["reason"] = why
             return _finish(instance_id, report)
+
+        if cmake:
+            report["after"]["cases"] = cases2 = openthread_cases(out2)
+            why = openthread_problem(want, cases2, after=True)
+            if why:
+                print(f"  INVALID: {why}")
+                report["reason"] = why
+                return _finish(instance_id, report)
 
         print("\n  VALID: fails before the fix, passes after")
         report["valid"] = True
@@ -223,7 +285,7 @@ def _finish(instance_id: str, report: dict) -> bool:
 def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
              verbose: bool = False) -> bool:
     meta = instances.load_metadata(instance_id)
-    if meta.get("pipeline") == "twister":
+    if meta.get("pipeline") in au.APPTAINER_PIPELINES:
         return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
     if meta["project"] == "zephyr":
         print(f"  SKIP: {instance_id} is a Docker Zephyr instance, kept as reference "

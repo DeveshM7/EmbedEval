@@ -78,7 +78,7 @@ def ensure_clone() -> Path:
     return CLONE_CACHE
 
 
-def build_test_patch(base: str, head: str) -> str:
+def build_test_patch(base: str, head: str, clone: Path | None = None) -> str:
     """The PR's test-file changes, as a diff written by git.
 
     Produced by git rather than assembled from GitHub's per-file `patch`
@@ -98,7 +98,7 @@ def build_test_patch(base: str, head: str) -> str:
     commit* -- base..merge_commit traverses everyone else's work, which is what
     put seven foreign files into the nuttx-11889 patch.
     """
-    clone = ensure_clone()
+    clone = clone or ensure_clone()
     for sha in (base, head):
         if run(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"],
                check=False).returncode:
@@ -107,7 +107,7 @@ def build_test_patch(base: str, head: str) -> str:
     return r.stdout
 
 
-def check_applies(patch: str, base: str, inst: Path) -> None:
+def check_applies(patch: str, base: str, inst: Path, clone: Path | None = None) -> None:
     """Refuse to emit an instance whose patch git will not accept.
 
     Without this the first sign of a malformed patch is `git apply` failing
@@ -115,7 +115,7 @@ def check_applies(patch: str, base: str, inst: Path) -> None:
     build. A dry run against the base commit costs about a second and covers
     every instance, every time.
     """
-    clone = ensure_clone()
+    clone = clone or ensure_clone()
     patch_file = (inst / "test_patch.diff").resolve()
     with tempfile.TemporaryDirectory(prefix="embedeval-applycheck-") as tmp:
         work = Path(tmp) / "tree"
@@ -244,8 +244,103 @@ def generate(pr: int, triage: dict, out_root: Path, force: bool = False) -> Path
     return inst
 
 
+# --- OpenThread --------------------------------------------------------------
+OPENTHREAD_URL = "https://github.com/openthread/openthread"
+OPENTHREAD_TEMPLATES = REPO_ROOT / "templates" / "openthread" / "apptainer"
+
+# THE arguments of an OpenThread instance's `script/cmake-build simulation`
+# (instance.json "configure"), for both suites; the verdict's cmake_options are
+# added to them. From the smoke control (candidates/openthread/research/smoke.md):
+# upstream unit.yml's first simulation step, which cmake-build completes with its
+# own option list. Plain cmake with hand-picked flags does not configure.
+OPENTHREAD_CONFIGURE = "script/cmake-build simulation"
+OPENTHREAD_CMAKE_ARGS = ["-DOT_BUILD_GTEST=ON", "-DOT_BORDER_ROUTING=ON",
+                         "-DOT_BORDER_ROUTING_DHCP6_PD=ON", "-DOT_WAKE_INITIATOR=ON",
+                         "-DOT_WAKE_LISTENER=ON"]
+# Always last, after the verdict's: cmake-build passes -Werror, and a newer
+# compiler's warnings on older code are not the oracle.
+OPENTHREAD_LAST_ARG = "-DOT_COMPILE_WARNING_AS_ERROR=OFF"
+
+
+def merge_cmake_args(base: list[str], extra: list[str]) -> list[str]:
+    """base args, minus any whose option the verdict sets again, then the
+    verdict's. The union of CI options can hold ON and OFF of one option; the
+    verdict must pick one."""
+    key = lambda a: a.split("=")[0]
+    if len({key(a) for a in extra}) != len(extra):
+        sys.exit(f"ERROR: verdict cmake_options set an option twice: {extra}")
+    return [a for a in base if key(a) not in {key(e) for e in extra}] + extra
+
+
+def generate_openthread(pr: int, verdict: dict, out_root: Path) -> Path:
+    """Build `openthread__openthread-<pr>` from an accepted verdict. The
+    verdict is checked again here, mechanically, so an unchecked one is refused."""
+    import openthread_candidates
+    import triage_prs
+    rec_path = openthread_candidates.enriched_dir() / f"{pr}.json"
+    if not rec_path.exists():
+        sys.exit(f"ERROR: no enriched record at {rec_path}. Run `openthread_candidates.py enrich` first.")
+    rec = json.loads(rec_path.read_text())
+    if verdict.get("verdict") != "accept":
+        sys.exit(f"ERROR: verdict for {pr} is {verdict.get('verdict')!r}, not accept: "
+                 f"{verdict.get('reason', 'no reason given')}")
+    triage_prs.use_project("openthread")
+    issues = triage_prs.check_verdict_openthread(verdict, rec)
+    if issues:
+        sys.exit(f"ERROR: verdict for {pr} fails the check:\n  " + "\n  ".join(issues))
+
+    base, fix = rec["base_commit"], rec["fix_commit"]
+    cmake_args = merge_cmake_args(OPENTHREAD_CMAKE_ARGS, verdict.get("cmake_options", [])
+                                  ) + [OPENTHREAD_LAST_ARG]
+    instance_id = f"openthread__openthread-{pr}"
+    inst = out_root / instance_id
+    inst.mkdir(parents=True, exist_ok=True)
+
+    clone = layout.openthread_clone()
+    patch = build_test_patch(base, fix, clone)
+    if not patch.strip():
+        sys.exit(f"ERROR: no tests/ diff for {pr}; instance would have no tests")
+    (inst / "test_patch.diff").write_text(patch)
+    check_applies(patch, base, inst, clone)
+
+    f2p, p2p = verdict["fail_to_pass"], verdict.get("pass_to_pass", [])
+    (inst / "instance.json").write_text(json.dumps(
+        {"suite": verdict["suite"], "target": verdict["target"],
+         "configure": OPENTHREAD_CONFIGURE, "cmake_args": cmake_args,
+         "fail_to_pass": f2p, "pass_to_pass": p2p}, indent=2) + "\n")
+    shutil.copy(OPENTHREAD_TEMPLATES / "run_tests.py", inst / "run_tests.py")
+
+    definition = (OPENTHREAD_TEMPLATES / "instance.def.tmpl").read_text()
+    for key, val in {"@@INSTANCE_ID@@": instance_id, "@@REPO@@": OPENTHREAD_URL,
+                     "@@BASE_COMMIT@@": base}.items():
+        definition = definition.replace(key, val)
+    (inst / "instance.def").write_text(definition)
+
+    meta = {
+        "instance_id": instance_id,
+        "project": "openthread",
+        "pipeline": "cmake",
+        "repo": OPENTHREAD_URL,
+        "base_commit": base,
+        "fix_commit": fix,
+        "test_commit": fix,
+        "problem_statement": verdict["problem_statement"],
+        "fail_to_pass": f2p,
+        "pass_to_pass": p2p,
+        "files_changed_by_fix": rec["source_files"],
+        "pr_url": rec["url"],
+        "change_type": verdict["change_type"],
+        "run_command": "run_tests",
+        "apptainer_image": f"{instance_id}.sif",
+        "generated": True,
+    }
+    (inst / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
+    return inst
+
+
 def main() -> None:
-    p = argparse.ArgumentParser(description="Generate a Zephyr instance from a triage verdict.")
+    p = argparse.ArgumentParser(description="Generate an instance from a triage verdict.")
+    p.add_argument("--project", choices=("zephyr", "openthread"), default="zephyr")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--triage", required=True, help="path to the triage verdict JSON")
     p.add_argument("--out", default=str(DEFAULT_OUT),
@@ -258,7 +353,8 @@ def main() -> None:
     if triage.get("verdict") == "reject":
         sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
 
-    inst = generate(args.pr, triage, Path(args.out), args.force)
+    inst = (generate_openthread(args.pr, triage, Path(args.out)) if args.project == "openthread"
+            else generate(args.pr, triage, Path(args.out), args.force))
     print(f"  wrote {layout.show(inst)}")
     for f in sorted(inst.iterdir()):
         print(f"    {f.name:<20} {f.stat().st_size:>7} B")
