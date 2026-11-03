@@ -1187,7 +1187,9 @@ def added_lines(base: str, fix: str, *pathspec: str) -> list[tuple[str, int, str
 
 
 def code_idents(text: str) -> set[str]:
-    text = re.sub(r'"(\\.|[^"\\])*"|//.*', "", text)
+    if re.match(r"\s*\*(\s|/|$)", text):   # a block-comment continuation (license header, doc comment)
+        return set()
+    text = re.sub(r'"(\\.|[^"\\])*"|//.*|/\*.*?(\*/|$)', "", text)
     return {i for i in IDENT.findall(text) if len(i) >= 3 and i not in KEYWORDS}
 
 
