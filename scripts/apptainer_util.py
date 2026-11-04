@@ -191,6 +191,14 @@ def riot_image(tag: str) -> Path:
     return shared_path("images", f"riotbuild-{tag}.sif")
 
 
+def instance_container(meta: dict, image: Path) -> tuple[Path, Path | None]:
+    """(what to run, its read-only layer). `image` is the file validated and published
+    for the instance: its own image, or, for RIOT, a layer on the era's shared image."""
+    if meta.get("pipeline") == "riot-layer":
+        return riot_image(meta["base_image"].removeprefix("riotbuild-")), image
+    return image, None
+
+
 def instance_image(instance_id: str) -> Path:
     return path("images", "instances", f"{instance_id}.sif")
 

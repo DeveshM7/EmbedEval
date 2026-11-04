@@ -7,12 +7,15 @@ Build a RIOT instance as a small layer on its era's shared image, and validate i
 A PR the quick check passed (DIR/check/<pr>.json) gets:
 
     DIR/instances/riot__riot-<pr>/                 the recipe and validation.json
-    <work>/images/instances/riot__riot-<pr>.layer  a read-only squashfs layer
+    <work>/images/instances/riot__riot-<pr>.sif    a read-only layer, in a SIF
 
 The layer holds only what the shared image lacks: /testbed, /opt/embedeval (the
 instance's config, Rust packages) and run_tests. It is run as
 
-    apptainer exec --overlay <layer> --overlay <writable folder> <era image> run_tests
+    apptainer exec --overlay <layer>:ro --overlay <writable folder> <era image> run_tests
+
+A SIF holding one squashfs overlay: it is what the registry takes, so
+scripts/registry.py pushes and pulls it like any instance image.
 
 /testbed is a new git repository, one commit at the PR's base with the PR's test
 changes on top, uncommitted, as in the Zephyr instances; there is no history, so
@@ -25,6 +28,9 @@ well fail. External packages stay in build/pkg, which git ignores.
 Validation runs on the layer as packaged, on a fresh writable folder: run_tests
 must exit 1, the fix must apply, run_tests must exit 0, and the tests must have
 gone the way the quick check said. Rust downloads are off while it runs.
+
+If the LLM stage has run (DIR/triage/<pr>.json), a PR it rejected is not built, and
+its problem statement and change type go into the metadata.
 
 Temporary files are in <work>/build/<pr>/ and <work>/validate/<pr>/, always deleted.
 """
@@ -65,7 +71,7 @@ def instance_id(pr: int) -> str:
 
 
 def layer_path(pr: int) -> Path:
-    return au.path("images", "instances", f"{instance_id(pr)}.layer")
+    return au.instance_image(instance_id(pr))
 
 
 def plan(check: dict, select: dict) -> tuple[dict, list[str], list[str], list[str]]:
@@ -92,8 +98,9 @@ def fingerprint(folder: Path) -> str:
     return h.hexdigest()
 
 
-def write_recipe(check: dict, select: dict) -> Path:
+def write_recipe(check: dict, select: dict, verdict: dict | None) -> Path:
     pr = check["pr"]
+    verdict = verdict or {}
     units, programs, f2p, p2p = plan(check, select)
     folder = layout.generated() / instance_id(pr)
     folder.mkdir(parents=True, exist_ok=True)
@@ -106,7 +113,12 @@ def write_recipe(check: dict, select: dict) -> Path:
         "repo": riot_env.URL, "base_commit": check["base"], "fix_commit": check["head"],
         "merge_commit": check["merge"], "board": check["board"],
         "base_image": f"riotbuild-{check['image']}", "kind": check["outcome"],
-        "fail_to_pass": f2p, "pass_to_pass": p2p, "problem_statement": ""}, indent=2) + "\n")
+        "fail_to_pass": f2p, "pass_to_pass": p2p,
+        "problem_statement": verdict.get("problem_statement", ""),
+        "change_type": verdict.get("change_type"),
+        "files_changed_by_fix": riot_env.git("diff", "--name-only", check["base"], check["head"],
+                                             "--", ".", ":!tests/").split(),
+        "pr_url": f"{riot_env.URL.removesuffix('.git')}/pull/{pr}"}, indent=2) + "\n")
     return folder
 
 
@@ -121,10 +133,10 @@ def contained(image: Path, binds: dict, script: str, log: Path, timeout: int) ->
             return 124
 
 
-def build_layer(check: dict, select: dict, logs: Path) -> dict:
+def build_layer(check: dict, select: dict, logs: Path, verdict: dict | None = None) -> dict:
     """The layer file; raises if the instance cannot be built as it must be."""
     pr, base = check["pr"], check["base"]
-    recipe = write_recipe(check, select)
+    recipe = write_recipe(check, select, verdict)
     work = au.path("build", str(pr), "x").parent
     if work.exists():
         au.remove(work)
@@ -187,10 +199,19 @@ def build_layer(check: dict, select: dict, logs: Path) -> dict:
         if out.exists():
             au.remove(out)
         t = time.time()
-        r = subprocess.run([MKSQUASHFS, str(layer), str(out), "-all-root", "-no-progress",
+        out.parent.mkdir(parents=True, exist_ok=True)
+        squash = work / "layer.squashfs"
+        r = subprocess.run([MKSQUASHFS, str(layer), str(squash), "-all-root", "-no-progress",
                             "-noappend", "-processors", "8"], capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError(f"mksquashfs: {r.stderr[:300]}")
+        # datatype 4 partition, fs squash, type overlay, arch amd64
+        for cmd in (["new", str(out)],
+                    ["add", "--datatype", "4", "--partfs", "1", "--parttype", "4", "--partarch", "2",
+                     "--groupid", "1", str(out), str(squash)]):
+            r = subprocess.run(["apptainer", "sif", *cmd], capture_output=True, text=True)
+            if r.returncode:
+                raise RuntimeError(f"apptainer sif {cmd[0]}: {r.stderr[:300]}")
         return {"build_seconds": round(built), "squash_seconds": round(time.time() - t),
                 "first_build_ok": first == 0, "layer_bytes": out.stat().st_size,
                 "tree_bytes": int(subprocess.run(["du", "-sb", str(layer)], capture_output=True,
@@ -304,8 +325,13 @@ def main() -> None:
             shutil.rmtree(logs)
         logs.mkdir(parents=True)
         select = json.loads((run / "select" / f"{pr}.json").read_text())
+        triage = run / "triage" / f"{pr}.json"
+        verdict = json.loads(triage.read_text()) if triage.exists() else None
+        if verdict and verdict["verdict"] != "accept":
+            print(f"  {pr}: not built, the LLM stage rejected it", flush=True)
+            return
         try:
-            built = build_layer(c, select, logs)
+            built = build_layer(c, select, logs, verdict)
         except Exception as e:
             print(f"  {pr}: BUILD FAILED: {e}", flush=True)
             return

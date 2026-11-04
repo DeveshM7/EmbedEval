@@ -41,7 +41,7 @@ RUN_TESTS_ERRORS = {1: "tests failed (a test, the build or the configuration)",
 
 
 def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: int) -> dict:
-    """Grade a patch on a twister-pipeline instance, in its Apptainer image.
+    """Grade a patch on an instance run in Apptainer (twister-pipeline Zephyr, RIOT).
 
     A fresh writable overlay on the image as built (base commit + the PR's
     tests), the agent's patch applied on top, then `run_tests`: twister builds
@@ -76,7 +76,8 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     overlay = run_dir / "overlay"
     overlay.mkdir(parents=True)
     (run_dir / "agent.patch").write_text(patch_path.read_text())
-    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay)
+    base, layer = au.instance_container(meta, image)
+    container = au.exec_args(base, binds={run_dir: "/embedeval-run"}, overlay=overlay, layer=layer)
     try:
         print("  applying patch ...")
         ap = subprocess.run(container + ["git", "-C", "/testbed", "apply",
@@ -109,7 +110,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
 
 def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dict:
     meta = paths.load_metadata(instance_id)
-    if meta.get("pipeline") == "twister":
+    if meta.get("pipeline") in ("twister", "riot-layer"):
         return evaluate_apptainer(instance_id, model_name, meta, timeout)
     if meta["project"] == "zephyr":
         return {"instance_id": instance_id, "model": paths.resolve_model(model_name),

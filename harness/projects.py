@@ -62,6 +62,19 @@ _EXTRA_WARNINGS = {
     ),
 }
 
+# RIOT instances built as a layer (scripts/riot_instance.py).
+_RIOT_LAYER = (
+    "Builds use GNU Make and RIOT's native board, which compiles RIOT into an ordinary "
+    "Linux process: there is no emulator. The tests are unit-test groups under "
+    "tests/unittests or test programs under tests/. `run_tests` builds them "
+    "incrementally and runs them; do not construct make invocations by hand."
+)
+_RIOT_LAYER_WARNINGS = (
+    "`run_tests` exit codes on this instance: 0 = all expected tests passed, 1 = a test "
+    "or a build failed, 3 = nothing ran. Rust packages cannot be downloaded here: only "
+    "those already present can be used."
+)
+
 PROJECTS: dict[str, dict] = {
     "zephyr": {
         "label": "Zephyr RTOS",
@@ -113,6 +126,9 @@ def config_for(meta: dict) -> dict:
     """The project configuration for one instance. A Zephyr instance must come
     from the twister pipeline; the Docker ones in docker/instances/ are kept as
     reference metadata only and cannot be run."""
+    if meta.get("pipeline") == "riot-layer":
+        return {**config("riot"), "runtime": "apptainer", "orientation": _RIOT_LAYER,
+                "extra_warnings": _RIOT_LAYER_WARNINGS}
     if meta["project"] == "zephyr" and meta.get("pipeline") != "twister":
         raise ValueError(f"{meta.get('instance_id')}: not a twister-pipeline instance. "
                          "Zephyr instances are run from generated/ "
