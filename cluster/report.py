@@ -47,6 +47,8 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
         return "accepted, validation not yet", ""
     if v["state"] != "done":
         return f"validation: {v['state']}", v.get("note", "")
+    if v["outcome"] == "HOLD":
+        return "validation: hold", v.get("note", "")
     if v["outcome"] == "VALID":
         return "VALID", v.get("note", "")             # e.g. retried on another board
     return "INVALID", "; ".join(x for x in (v["outcome"], v.get("note")) if x)

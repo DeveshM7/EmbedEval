@@ -51,7 +51,7 @@ class ApptainerEnvironment:
         self.cwd, self.timeout = cwd, timeout
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = au.path("runs", f"agent-{name}-{stamp}", "x").parent
-        self.local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-agent-") if local_overlay else None
+        self.local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-agent-", dir="/tmp") if local_overlay else None
         self.overlay = (Path(self.local_overlay.name) if self.local_overlay else self.run_dir) / "overlay"
         self.overlay.mkdir(parents=True, exist_ok=True)
         self.config = {"image": str(self.image), "cwd": cwd, "timeout": timeout,

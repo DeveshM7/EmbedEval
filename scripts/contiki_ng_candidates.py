@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Source-derived Contiki-NG PR discovery and runnable inventory."""
 from __future__ import annotations
-import argparse, hashlib, json, os, posixpath, re, subprocess
+import argparse, json, posixpath, re, subprocess
 from pathlib import Path
 import layout
 

@@ -75,7 +75,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
 
     start = time.time()
     run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
-    local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-grade-") if meta["project"] == "contiki-ng" else None
+    local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-grade-", dir="/tmp") if meta["project"] == "contiki-ng" else None
     overlay = (Path(local_overlay.name) if local_overlay else run_dir) / "overlay"
     overlay.mkdir(parents=True)
     (run_dir / "agent.patch").write_text(patch_path.read_text())

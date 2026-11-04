@@ -16,6 +16,7 @@ import ledger
 import prepare
 import status
 import submit
+import report
 
 
 class ContikiClusterTest(unittest.TestCase):
@@ -66,6 +67,14 @@ class ContikiClusterTest(unittest.TestCase):
                 fallback = submit.freeze_source(root, root / "git-source")
             self.assertEqual((root / "git-source/.embedeval-revision").read_text(), "git-sha\n")
             self.assertIn(".embedeval-revision", fallback["files"])
+
+    def test_infrastructure_hold_does_not_settle_as_invalid(self):
+        entry={"pr":123,"stage":"to triage"}
+        phases={"triage":{"state":"done","verdict":"accept"},
+                "validate":{"state":"done","outcome":"HOLD","note":"missing fixture"}}
+        outcome,detail=report.outcome(entry,phases)
+        self.assertEqual(outcome,"validation: hold")
+        self.assertFalse(ledger.settled(outcome,detail))
 
     def test_project_ledgers_and_unfinished_runs_are_separate(self):
         with tempfile.TemporaryDirectory() as tmp:

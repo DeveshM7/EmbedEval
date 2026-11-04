@@ -453,7 +453,10 @@ def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: d
         if rc == 143:
             return None
         report = run / "instances" / iid / "validation.json"
-        reason = json.loads(report.read_text()).get("reason") if report.exists() else None
+        receipt = json.loads(report.read_text()) if report.exists() else {}
+        reason = receipt.get("reason")
+        if receipt.get("status") == "hold":
+            return "done", "HOLD", reason or "infrastructure/profile hold"
         if rc == 0:
             if not venv.get("EMBEDEVAL_REGISTRY"):
                 return "done", "VALID", ""

@@ -140,12 +140,12 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
     folder=instances.instance_dir(iid);meta=instances.load_metadata(iid)
     cfg=json.loads((folder/'instance.json').read_text()); image=au.instance_image(iid)
     report={'instance_id':iid,'image':str(image),'valid':False,'observe':bool(cfg.get('observe')),
-            'recipe_sha256':au.recipe_fingerprint(folder),'profile':cfg.get('profile'),
+            'recipe_sha256':au.recipe_fingerprint(folder),'profile':cfg.get('profile'),'oracle':cfg.get('oracle','runtime'),
             'validated_at':time.strftime('%Y-%m-%dT%H:%M:%S')}
     if not image.exists():report['reason']='image not built';return _finish(iid,report)
     stamp=time.strftime('%Y%m%d-%H%M%S')+'-'+str(os.getpid())
     work=au.path('runs',iid+'-'+stamp,'x').parent
-    local_overlay=tempfile.TemporaryDirectory(prefix='embedeval-contiki-')
+    local_overlay=tempfile.TemporaryDirectory(prefix='embedeval-contiki-',dir='/tmp')
     overlay=Path(local_overlay.name)/'overlay';overlay.mkdir()
     logs=au.path('logs',iid,'validate-'+stamp,'x').parent;logs.mkdir(parents=True,exist_ok=True)
     report['logs']=str(logs)
@@ -201,6 +201,9 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
                 report['before_repeats']=repeats;report['deterministic_before']=deterministic
                 report['valid'] &= deterministic
                 if not deterministic:report['reason']='before-state failures are not repeatable'
+        if not report['valid'] and (after['rc'] in (2,3,'timeout') or before['rc']=='timeout'):
+            report['status']='hold'
+            report['reason']='infrastructure/profile hold: '+report['reason']
         print(iid+': '+report['reason'])
         return _finish(iid,report)
     except Exception as e:
