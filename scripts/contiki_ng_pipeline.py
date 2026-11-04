@@ -190,14 +190,14 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
         else:
             f2p=cfg['fail_to_pass'];p2p=cfg['pass_to_pass'];oracle=cfg.get('oracle','runtime')
             if oracle=='runtime':signal=(before['rc']==1
-                and all(before['cases'].get(n) in ('failed','error') for n in f2p)
-                and all(before['cases'].get(n)=='passed' for n in p2p))
+                and all(before['cases'].get(n) in ('failed','error') for n in f2p))
             elif oracle=='compile':
                 signal=before['rc']==2 and bool(compile_attribution(out1,cfg.get('compile_symbols',[])))
             else:
                 signal=before['rc']==2 and bool(config_attribution(out1,cfg.get('config_diagnostics',[])))
             passes=all(after['cases'].get(n)=='passed' for n in f2p+p2p)
-            report['valid']=bool(f2p) and signal and after['rc']==0 and passes
+            before_passes=all(before['cases'].get(n)=='passed' for n in p2p)
+            report['valid']=bool(f2p) and signal and before_passes and after['rc']==0 and passes
             report['reason']='attributable before failure and named after passes' if report['valid'] else 'oracle or required named case evidence missing'
             if report['valid']:
                 repeat,out=step('before-repeat-reset',['git','-C','/testbed','apply','-R','/embedeval-run/fix.diff'])
@@ -207,12 +207,12 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
                         result,repeat_out=step('before-repeat-'+str(i+1),['run_tests']);repeats.append(result)
                         if oracle=='runtime':
                             deterministic &= (result['rc']==1
-                                and all(result['cases'].get(n) in ('failed','error') for n in f2p)
-                                and all(result['cases'].get(n)=='passed' for n in p2p))
+                                and all(result['cases'].get(n) in ('failed','error') for n in f2p))
                         elif oracle=='compile':
                             deterministic &= result['rc']==2 and bool(compile_attribution(repeat_out,cfg['compile_symbols']))
                         else:
                             deterministic &= result['rc']==2 and bool(config_attribution(repeat_out,cfg['config_diagnostics']))
+                        deterministic &= all(result['cases'].get(n)=='passed' for n in p2p)
                 report['before_repeats']=repeats;report['deterministic_before']=deterministic
                 report['valid'] &= deterministic
                 if not deterministic:report['reason']='before-state failures are not repeatable'

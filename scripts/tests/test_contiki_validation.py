@@ -14,10 +14,19 @@ import validate_instance
 
 class ContikiValidationTest(unittest.TestCase):
     def test_failing_pass_to_pass_case_cannot_validate(self):
+        self.check_invalid_pass_to_pass('runtime', 1, '  failed unit::fix\n  failed unit::stable\n')
+
+    def test_compile_oracle_cannot_claim_unexecuted_pass_to_pass(self):
+        self.check_invalid_pass_to_pass('compile', 2, '')
+
+    def test_config_oracle_cannot_claim_unexecuted_pass_to_pass(self):
+        self.check_invalid_pass_to_pass('config', 2, '')
+
+    def check_invalid_pass_to_pass(self, oracle, before_rc, before_status):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'instance.json').write_text(json.dumps({
-                'profile': 'native', 'oracle': 'runtime',
+                'profile': 'native', 'oracle': oracle,
                 'fail_to_pass': ['unit::fix'], 'pass_to_pass': ['unit::stable']}))
             image = root / 'image.sif'
             image.touch()
@@ -25,10 +34,10 @@ class ContikiValidationTest(unittest.TestCase):
             fix.write_text('diff --git a/os/lib/foo.c b/os/lib/foo.c\n')
             def output(status):
                 return '--- contiki-ng: results\n' + status + '--- end\n'
-            before = output('  failed unit::fix\n  failed unit::stable\n')
+            before = output(before_status)
             after = output('  passed unit::fix\n  passed unit::stable\n')
             results = [SimpleNamespace(returncode=rc, stdout=out, stderr='')
-                       for rc, out in ((1, before), (0, ''), (0, after))]
+                       for rc, out in ((before_rc, before), (0, ''), (0, after))]
             with (patch.object(pipeline.instances, 'instance_dir', return_value=root),
                   patch.object(pipeline.instances, 'load_metadata', return_value={}),
                   patch.object(pipeline.au, 'instance_image', return_value=image),
@@ -36,6 +45,8 @@ class ContikiValidationTest(unittest.TestCase):
                   patch.object(pipeline.au, 'recipe_fingerprint', return_value='control'),
                   patch.object(pipeline.au, 'exec_args', return_value=[]),
                   patch.object(pipeline.subprocess, 'run', side_effect=results),
+                  patch.object(validate_instance, 'compile_attribution', return_value='fix_api'),
+                  patch.object(pipeline, 'config_attribution', return_value='config error'),
                   patch.object(validate_instance, '_finish', side_effect=lambda iid, report: report)):
                 result = pipeline.validate('contiki-ng__contiki-ng-1', patch_override=fix)
             self.assertFalse(result['valid'])
