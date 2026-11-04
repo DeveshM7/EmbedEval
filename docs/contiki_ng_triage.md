@@ -150,7 +150,9 @@ identity and verify archived base/fix availability before observation. The
 first-parent chain separately contains 1,758 commits: 1,744 merges (1,743
 numbered PRs plus one release merge) and 14 unassociated direct commits. Its
 rename, deletion, and revert flags are mechanical, not hard-filter acceptance
-counts. Release rollups require deduplication.
+counts. Across the full PR census, 24 PRs rename test paths, 26 delete them,
+and 18 contain other official PR merges in their base..fix ancestry. Those 18
+need rollup review and deduplication; nesting alone does not imply exclusion.
 
 For ordinary merge PRs, base = merge first parent; fix = complete merge result.
 Check the second-parent history and complete diff for merge-resolution changes.
@@ -161,7 +163,9 @@ If squash/rebase styles appear in a future window, map full PR commit ranges
 before enabling them; never apply OpenThread's title regex as a universal rule.
 
 Read the changed test setup/input/assertion against the old production path and
-record a causal chain. Hold unclear attribution. New APIs can supply semantic
+record a causal chain. Hold unclear attribution. A newly added vector-decoding helper or utility header
+is an incidental compile dependency when the PR targets a separate algorithm
+fix; its absence must not be mislabeled as the intended compile oracle. New APIs can supply semantic
 compile oracles; symbols and diagnostic notes must identify the intended API.
 Protect upstream tests/support and transport them identically to both states;
 apply only the selected production patch to the after state. Do not copy gold
