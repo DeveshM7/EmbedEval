@@ -5,6 +5,11 @@ Per-PR progress of a run: <run>/status/<pr>.json, one file per PR.
      "triage":   {"state": "done", "verdict": "accept", "minutes": 10.6, "note": "", "node": 0},
      "validate": {"state": "done", "outcome": "VALID", "minutes": 24.0, "note": "", "node": 1}}
 
+OpenThread runs (manifest "project") differ in what they record: triage has
+"oracle" and "profile" instead of "pair", and validation runs for every PR with
+a verdict, accepted or not (observation needs no accept): "outcome" is VALID or
+"INVALID: <reason>", with "oracle" (runtime / compile) and "profile".
+
 A stage appears only once it has finished, one way or another:
 
     triage.state    done            a verdict (accept / reject / error)
@@ -53,6 +58,11 @@ def manifest(run: Path) -> dict:
     return json.loads((Path(run) / "manifest.json").read_text())
 
 
+def project(run: Path) -> str:
+    """The run's project; manifests from before OpenThread are Zephyr's."""
+    return manifest(run).get("project", "zephyr")
+
+
 def triage_needed(run: Path, pr: int) -> bool:
     """No triage outcome yet. "server failed" was written by workers before
     the queue (claims.py): a node whose server fails now just takes no PRs."""
@@ -82,19 +92,29 @@ def accepted(run: Path) -> list[int]:
             if (read(run, e["pr"]).get("triage") or {}).get("verdict") == "accept"]
 
 
-def unfinished(runs: Path, but: Path | None = None) -> dict[int, str]:
-    """PRs some run has taken and not finished -- what a resubmit of that run
-    would still do -- and the run's name. Every run under `runs` but `but`."""
+def unfinished(runs: Path, but: Path | None = None, of: str = "zephyr") -> dict[int, str]:
+    """PRs some run of project `of` has taken and not finished -- what a
+    resubmit of that run would still do -- and the run's name. Every such run
+    under `runs` but `but`."""
     out = {}
     for m in sorted(Path(runs).glob("*/manifest.json")):
         other = m.parent
-        if but and other.resolve() == Path(but).resolve():
+        if (but and other.resolve() == Path(but).resolve()) or project(other) != of:
             continue
         for pr in triage_todo(other) + validate_todo(other):
             out.setdefault(pr, other.name)
     return out
 
 
+def validatable(run: Path) -> list[int]:
+    """The PRs validation takes: Zephyr's accepted ones; OpenThread's all with
+    a verdict, whatever it says (its observation needs no accept)."""
+    if project(run) == "zephyr":
+        return accepted(run)
+    return [e["pr"] for e in manifest(run)["prs"]
+            if (read(run, e["pr"]).get("triage") or {}).get("state") == "done"]
+
+
 def validate_todo(run: Path) -> list[int]:
-    """Accepted PRs with no validation outcome yet."""
-    return [pr for pr in accepted(run) if validate_needed(run, pr)]
+    """Validatable PRs with no validation outcome yet."""
+    return [pr for pr in validatable(run) if validate_needed(run, pr)]

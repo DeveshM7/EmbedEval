@@ -13,7 +13,9 @@ INVALID unless twister itself failed to run. Failures of the machinery
 (server, caps, disk guard, unfinished work) are not, so the next run tries
 those PRs again. prepare.py skips every PR the ledger has settled, unless
 given --redo. A PR's latest line wins; deleting a run folder does not
-touch the ledger. prepare.py also skips PRs another run has taken and not
+touch the ledger. A line of another project than Zephyr (PR numbers repeat
+across projects) carries "project"; a line without it is Zephyr's.
+prepare.py also skips PRs another run has taken and not
 finished (status.unfinished), so two runs never work on the same PR.
 """
 
@@ -24,7 +26,8 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
-SETTLED = {"hard filter", "dry run: no runnable pair", "triage: reject", "INVALID", "VALID"}
+SETTLED = {"hard filter", "dry run: no runnable pair", "enrich: no runnable test",
+           "triage: reject", "INVALID", "VALID"}
 
 
 def settled(outcome: str, detail: str) -> bool:
@@ -39,27 +42,29 @@ def _locked(path: Path):
         yield
 
 
-def _read(path: Path) -> dict[int, dict]:
+def _read(path: Path, project: str = "zephyr") -> dict[int, dict]:
     latest = {}
     if path.exists():
         for line in path.read_text().splitlines():
             if line.strip():
                 e = json.loads(line)
-                latest[e["pr"]] = e
+                if e.get("project", "zephyr") == project:
+                    latest[e["pr"]] = e
     return latest
 
 
-def latest(path: Path) -> dict[int, dict]:
+def latest(path: Path, project: str = "zephyr") -> dict[int, dict]:
     """Each PR's latest settled entry."""
     with _locked(path):
-        return _read(path)
+        return _read(path, project)
 
 
-def record(path: Path, run: str, commit: str, date: str, rows: list[dict]) -> int:
+def record(path: Path, run: str, commit: str, date: str, rows: list[dict],
+           project: str = "zephyr") -> int:
     """Append the settled rows of a report; a row already recorded for this
     run with the same outcome is not repeated. Returns how many were added."""
     with _locked(path):
-        have = _read(path)
+        have = _read(path, project)
         new = []
         for r in rows:
             if not settled(r["outcome"], r["detail"]):
@@ -68,7 +73,8 @@ def record(path: Path, run: str, commit: str, date: str, rows: list[dict]) -> in
             if old and old["run"] == run and old["outcome"] == r["outcome"]:
                 continue
             new.append({"pr": r["pr"], "outcome": r["outcome"], "detail": r["detail"],
-                        "run": run, "commit": commit, "date": date})
+                        "run": run, "commit": commit, "date": date}
+                       | ({"project": project} if project != "zephyr" else {}))
         if new:
             with open(path, "a") as fh:
                 fh.writelines(json.dumps(e) + "\n" for e in new)

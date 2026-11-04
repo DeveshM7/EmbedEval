@@ -25,6 +25,14 @@ Creates <scratch_root>/runs/<name>/ and, in it:
 
 Then `python cluster/submit.py pipeline --run <name>`. Run this from an
 interactive session on a Spark node: the SDK images are built here.
+
+--project openthread (or `project: openthread` in the config) prepares an
+OpenThread run instead (plan_openthread): the PRs come from the OpenThread
+clone's history (scripts/openthread_candidates.py filter and enrich, its
+hard filters and its test selection), there is no dry run and no SDK image
+(the one shared toolchain image is built here), a PR whose changed tests map
+to no runnable executable is settled here, and every base and fix commit
+must be in the clone, which workers never fetch into.
 """
 
 from __future__ import annotations
@@ -71,6 +79,134 @@ def script(name: str, *args: str, env: dict, logfile: Path, timeout: int | None 
             return 124
 
 
+def git_absent(clone: Path, shas) -> list[str]:
+    """The commits among `shas` that the clone lacks."""
+    return [x for x in shas if subprocess.run(["git", "-C", str(clone), "cat-file", "-e", f"{x}^{{commit}}"],
+                                              capture_output=True).returncode]
+
+
+def plan_openthread(args, cfg: dict, run: Path, env: dict, logs: Path, skip_known, stage: dict,
+                    notes: dict, timings: dict) -> tuple[list[int], dict, list[str]]:
+    """Steps 1-5 for OpenThread: (the PRs, the manifest's source, the shared
+    images that could not be built). Every PR ends in `stage`: "to triage", or
+    why not. Its own scripts do the work (openthread_candidates.py filter /
+    enrich); PRs whose enrichment selects no runnable test are settled here."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    import apptainer_util as au
+    import layout
+    import openthread_candidates as oc
+    clone = layout.openthread_clone()
+    if not clone.exists():
+        sys.exit(f"no OpenThread clone at {clone}; clone https://github.com/openthread/openthread.git "
+                 "there (bare, full) or set paths.openthread_clone")
+    t = time.time()
+    if args.pr:
+        prs = list(dict.fromkeys(args.pr))
+        source = {"pr": prs, "hard_filter": True, "redo": args.redo}
+        skip_known(prs)
+        log("hard filters")
+        for pr in (p for p in prs if p not in stage):
+            try:
+                why = oc.classify(dict(oc.find_pr(pr)))
+            except SystemExit as e:      # not in the clone's history: not an outcome, so not settled
+                stage[pr], notes[pr] = "fetch failed", str(e)
+                continue
+            if why:
+                stage[pr], notes[pr] = "hard filter", why
+    else:
+        source = {"since": args.since, "until": args.until, "redo": args.redo}
+        log(f"candidates merged {args.since} .. {args.until}")
+        if script("openthread_candidates.py", "filter", "--since", args.since, env=env,
+                  logfile=logs / "filter.log"):
+            sys.exit(f"filter failed; see {logs / 'filter.log'}")
+        found = [json.loads(l) for l in open(run / "candidates" / "openthread" / "candidates.jsonl")]
+        prs = [c["number"] for c in found if c["merged_at"][:10] <= args.until]
+        skip_known(prs)
+    timings["select"] = time.time() - t
+    log(f"{len(prs)} PRs")
+
+    t = time.time()
+    par = cfg["parallel"]["enrich"]
+    log(f"enriching, {par} at a time")
+    kept = [pr for pr in prs if pr not in stage]
+    with ThreadPoolExecutor(par) as pool:
+        list(pool.map(lambda pr: script("openthread_candidates.py", "enrich", "--pr", str(pr), env=env,
+                                        logfile=logs / "enrich" / f"{pr}.log", timeout=None), kept))
+    timings["enrich"] = time.time() - t
+    for pr in kept:
+        f = oc.enriched_dir() / f"{pr}.json"
+        if not f.exists():
+            stage[pr], notes[pr] = "enrich failed", f"see {logs / 'enrich' / f'{pr}.log'}"
+            continue
+        rec = json.loads(f.read_text())
+        sel = oc.select_tests(rec)
+        if not sel["unit"] and not sel["gtest"]:
+            gated = oc.gated_targets(rec)
+            stage[pr], notes[pr] = "enrich: no runnable test", (
+                "profile-gated: its tests are only built with " + ", ".join(sorted({o for _, m in gated for o in m}))
+                if gated else f"its changed test files {rec['test_files']} are compiled into no unit or gtest executable")
+        else:
+            stage[pr] = "to triage"
+    log(f"enriched {sum(1 for pr in kept if stage[pr] != 'enrich failed')}/{len(kept)} in {timings['enrich']:.0f} s")
+
+    # every commit a worker reads must be in the clone already
+    t = time.time()
+    recs = {pr: json.loads((oc.enriched_dir() / f"{pr}.json").read_text()) for pr in kept if stage[pr] == "to triage"}
+    need = lambda r: {r["base_commit"], r["fix_commit"], *r.get("commits", [])}
+    lacking = set(git_absent(clone, sorted(set().union(*map(need, recs.values())))))
+    if lacking:
+        subprocess.run(["git", "-C", str(clone), "fetch", "-q", "origin", *sorted(lacking)], capture_output=True)
+        lacking = set(git_absent(clone, sorted(lacking)))
+    for pr, r in recs.items():
+        if lacking & need(r):
+            stage[pr], notes[pr] = "enrich failed", f"commits not in the clone: {sorted(lacking & need(r))}"
+    timings["commits"] = time.time() - t
+    to_triage = [pr for pr in prs if stage[pr] == "to triage"]
+    log(f"commits: {'all present' if not lacking else f'{len(lacking)} missing'}; {len(to_triage)} to triage")
+
+    # the one shared toolchain image, built once here so no two workers build it
+    t = time.time()
+    missing = []
+    if to_triage:
+        try:
+            au.ensure_openthread_base(Path(cfg["derived"]["shared"]) / "logs")
+        except RuntimeError as e:
+            log(f"  FAILED: {e}")
+            missing = [au.openthread_image().name]
+    timings["base_image"] = time.time() - t
+    return prs, source, missing
+
+
+def finish(args, cfg: dict, project: str, run: Path, env: dict, source: dict, prs: list[int],
+           stage: dict, notes: dict, timings: dict, t0: float, missing_images: list[str]) -> None:
+    """Step 6: the manifest, the ledger's settled outcomes, and the summary."""
+    git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
+                                    text=True).stdout.strip()
+    manifest = {
+        "name": args.name, "project": project, "prepared": datetime.now().isoformat(timespec="seconds"),
+        "source": source,
+        "code": {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))},
+        "config": {k: v for k, v in cfg.items() if k != "derived"},
+        "environment": env,
+        "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
+                for pr in prs],
+        "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
+        "missing_sdk_images": missing_images,
+        "seconds": {k: round(v) for k, v in timings.items()},
+    }
+    tmp = run / "manifest.json.tmp"
+    tmp.write_text(json.dumps(manifest, indent=2) + "\n")
+    tmp.replace(run / "manifest.json")
+    report.to_ledger(run)          # the hard filters' and dry runs' settled outcomes
+    log(f"done in {time.time() - t0:.0f} s -> {run / 'manifest.json'}")
+    for s, n in manifest["counts"].items():
+        print(f"    {n:>5}  {s}")
+    if manifest["missing_sdk_images"]:
+        print(f"  WARNING: {'SDK' if project == 'zephyr' else 'shared'} images could not be built: "
+              f"{manifest['missing_sdk_images']}")
+    print(f"\nnext: python cluster/submit.py pipeline --run {args.name}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -83,6 +219,8 @@ def main() -> None:
                    help="also take PRs the ledger has already settled in an earlier run")
     p.add_argument("--until", help="with --since: merged on or before this date")
     p.add_argument("--config", help="default: cluster/config.yaml")
+    p.add_argument("--project", choices=cluster_config.PROJECTS,
+                   help="default: the config's `project` (zephyr)")
     args = p.parse_args()
     if args.since and not args.until:
         p.error("--since needs --until")
@@ -90,12 +228,15 @@ def main() -> None:
         p.error("--no-filter goes with --pr")
 
     cfg = cluster_config.load_or_exit(args.config)
+    project = args.project or cfg["project"]
+    if args.no_filter and project != "zephyr":
+        p.error("--no-filter is Zephyr only: openthread_candidates enriches no PR the hard filters drop")
     run = Path(cfg["derived"]["runs"]) / args.name
     if (run / "manifest.json").exists():
         sys.exit(f"{run} is already prepared; pick another --name "
                  "(or delete that run folder yourself)")
     run.mkdir(parents=True, exist_ok=True)
-    env = cluster_config.env_for(cfg, run)
+    env = cluster_config.env_for(cfg, run, project)
     os.environ.update(env)              # for the modules imported below
     logs = run / "logs" / "prepare"
     par = cfg["parallel"]
@@ -106,8 +247,8 @@ def main() -> None:
     # 1. the PRs; skipped: those an earlier run settled (ledger.py), and those
     # another run has taken and not finished (never two runs on one PR)
     stage, notes = {}, {}
-    done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]))
-    taken = status.unfinished(Path(cfg["derived"]["runs"]), but=run)
+    done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]), project)
+    taken = status.unfinished(Path(cfg["derived"]["runs"]), but=run, of=project)
 
     def skip_known(prs):
         for pr in prs:
@@ -124,6 +265,11 @@ def main() -> None:
         if n:
             log(f"{n} taken by unfinished runs ({', '.join(sorted({taken[p] for p in prs if p in taken}))})")
 
+    if project == "openthread":
+        prs, source, missing_images = plan_openthread(args, cfg, run, env, logs, skip_known, stage,
+                                                      notes, timings)
+        finish(args, cfg, project, run, env, source, prs, stage, notes, timings, t0, missing_images)
+        return
     if args.pr:
         prs = list(dict.fromkeys(args.pr))
         source = {"pr": prs, "hard_filter": not args.no_filter, "redo": args.redo}
@@ -223,31 +369,8 @@ def main() -> None:
     log(f"commits: {len(shas)} present ({fetched})")
 
     # 6. the manifest
-    git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
-                                    text=True).stdout.strip()
-    manifest = {
-        "name": args.name, "prepared": datetime.now().isoformat(timespec="seconds"),
-        "source": source,
-        "code": {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))},
-        "config": {k: v for k, v in cfg.items() if k != "derived"},
-        "environment": env,
-        "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
-                for pr in prs],
-        "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
-        "missing_sdk_images": [f"{sdk} (Python {py})" for py, sdk, _ in missing
-                               if not au.sdk_image(sdk, py).exists()],
-        "seconds": {k: round(v) for k, v in timings.items()},
-    }
-    tmp = run / "manifest.json.tmp"
-    tmp.write_text(json.dumps(manifest, indent=2) + "\n")
-    tmp.replace(run / "manifest.json")
-    report.to_ledger(run)          # the hard filters' and dry runs' settled outcomes
-    log(f"done in {time.time() - t0:.0f} s -> {run / 'manifest.json'}")
-    for s, n in manifest["counts"].items():
-        print(f"    {n:>5}  {s}")
-    if manifest["missing_sdk_images"]:
-        print(f"  WARNING: SDK images could not be built: {manifest['missing_sdk_images']}")
-    print(f"\nnext: python cluster/submit.py pipeline --run {args.name}")
+    finish(args, cfg, project, run, env, source, prs, stage, notes, timings, t0,
+           [f"{sdk} (Python {py})" for py, sdk, _ in missing if not au.sdk_image(sdk, py).exists()])
 
 
 if __name__ == "__main__":

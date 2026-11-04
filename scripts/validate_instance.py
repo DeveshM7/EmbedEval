@@ -23,6 +23,13 @@ expected test, and validity is judged per test (openthread_problem below): a
 build failure is never a valid "before", and every fail_to_pass test must fail
 before and every fail_to_pass and pass_to_pass test must pass after.
 
+With --determinism N, a valid OpenThread runtime instance also has its before
+state run N times in the image as built (`apptainer exec --writable-tmpfs`,
+each in a fresh container): every fail_to_pass test must fail, and every
+pass_to_pass test pass, in all N runs, else the instance is invalid (a flaky
+before state). The tally is recorded in validation.json ("determinism");
+promote_instance.py refuses a runtime instance without one.
+
 An instance whose instance.json says "observe": true (generate_instance.py
 --observe) is observed instead: before and after the fix, the cases that flip
 are derived and written to <instance>/observed.json (observe_instance below).
@@ -304,8 +311,30 @@ def observe_instance(meta: dict, report: dict, step, run_dir: Path, patch_overri
                f"{len(report['pass_to_pass'])} pass_to_pass")
 
 
+def before_determinism(image: Path, want: dict, runs: int, timeout: int) -> dict:
+    """run_tests `runs` times on the image as built, each in a fresh container,
+    and tally each wanted test's statuses: ok if every fail_to_pass test failed
+    and every pass_to_pass test passed in every run."""
+    tally: dict[str, dict[str, int]] = {}
+    for _ in range(runs):
+        try:
+            r = subprocess.run(["apptainer", "exec", "--containall", "--cleanenv", "--writable-tmpfs",
+                                str(image), "run_tests"], capture_output=True, text=True, timeout=timeout)
+            out = (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            out = str(e.stdout or "")
+        cases = openthread_cases(out)
+        for n in want["fail_to_pass"] + want["pass_to_pass"]:
+            st = cases.get(n, "not_run")
+            tally.setdefault(n, {})[st] = tally.get(n, {}).get(st, 0) + 1
+    flaky = [n for n in want["fail_to_pass"]
+             if sum(c for st, c in tally[n].items() if st in FAILED) != runs]
+    flaky += [n for n in want["pass_to_pass"] if tally[n].get("passed", 0) != runs]
+    return {"runs": runs, "ok": not flaky, "flaky": flaky, "tally": tally}
+
+
 def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
-                       verbose: bool) -> bool:
+                       verbose: bool, determinism: int = 0) -> bool:
     meta = instances.load_metadata(instance_id)
     image = au.instance_image(instance_id)
     print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
@@ -438,6 +467,15 @@ def validate_apptainer(instance_id: str, patch_override: Path | None, timeout: i
                 report["reason"] = why
                 return _finish(instance_id, report)
 
+        if cmake and not compile_oracle and determinism:
+            print(f"\n  Determinism: the before state, {determinism} runs")
+            report["determinism"] = d = before_determinism(image, want, determinism, timeout)
+            if not d["ok"]:
+                why = f"flaky before state: {d['flaky']} did not fail/pass in all {determinism} runs"
+                print(f"  INVALID: {why}")
+                report["reason"] = why
+                return _finish(instance_id, report)
+
         reason = (f"fails to build before the fix ({symbol}), passes after" if compile_oracle
                   else "fails before the fix, passes after")
         print(f"\n  VALID: {reason}")
@@ -460,10 +498,10 @@ def _finish(instance_id: str, report: dict) -> bool:
 
 
 def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
-             verbose: bool = False) -> bool:
+             verbose: bool = False, determinism: int = 0) -> bool:
     meta = instances.load_metadata(instance_id)
     if meta.get("pipeline") in au.APPTAINER_PIPELINES:
-        return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
+        return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose, determinism)
     if meta["project"] == "zephyr":
         print(f"  SKIP: {instance_id} is a Docker Zephyr instance, kept as reference "
               f"metadata only; Zephyr instances are validated from the twister pipeline "
@@ -567,6 +605,9 @@ def main() -> None:
     p.add_argument("--timeout", type=int, default=600)
     p.add_argument("--verbose", "-v", action="store_true",
                    help="stream build and test output instead of capturing it")
+    p.add_argument("--determinism", type=int, default=0, metavar="N",
+                   help="OpenThread runtime instances: also run the before state N times "
+                        "and require the same result every time")
     args = p.parse_args()
 
     if args.all:
@@ -583,7 +624,7 @@ def main() -> None:
 
     start = time.time()
     results = {t: validate(t, Path(args.patch) if args.patch else None, args.timeout,
-                           args.verbose)
+                           args.verbose, args.determinism)
                for t in targets}
 
     print(f"\n{'=' * 70}\nSUMMARY  ({(time.time() - start) / 60:.1f} min)\n{'=' * 70}")

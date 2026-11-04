@@ -20,6 +20,8 @@ validate  only once the run's triage is complete: take accepted PRs
           each, capped; a PR's image and overlays are always removed
           afterwards. While the run's instance images exceed disk_guard_gb,
           no new PR is taken. No model server runs.
+          OpenThread runs (the manifest's project) take every PR with a
+          verdict and observe it first (openthread_validate below).
 
 Every PR gets status/<pr>.json once a phase is through with it (status.py).
 Each step runs in its own process group, killed whole on a timeout. On
@@ -52,6 +54,8 @@ import report  # noqa: E402
 import status  # noqa: E402
 
 PY = sys.executable
+API_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "TOGETHER_API_KEY")
+DETERMINISM_RUNS = 5                 # OpenThread: before-state runs a runtime instance must pass
 WARM = ".warm"                       # in the compile cache once a server filled it
 _children: set[int] = set()          # process groups of running steps
 _lock = threading.Lock()
@@ -222,6 +226,17 @@ def server_ready(p: subprocess.Popen, minutes: float) -> bool:
     return False
 
 
+def verdict_fields(v: dict) -> dict:
+    """What a verdict adds to the triage status: Zephyr's board and scenario;
+    OpenThread's oracle and profile (it has neither)."""
+    if PROJECT == "openthread":
+        return {"verdict": v.get("verdict"),
+                "oracle": v.get("oracle", "runtime") if v.get("verdict") == "accept" else None,
+                "profile": v.get("profile")}
+    pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
+    return {"verdict": v.get("verdict"), "pair": pair}
+
+
 def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> None:
     todo = status.triage_todo(run)
     log(f"triage: {len(todo)} PRs left in the run")
@@ -246,7 +261,8 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> N
                 return                                    # stays to do: a resubmit runs it
             cap = min(caps["triage_pr"], left)
             start = time.time()
-            rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "run", "--profile",
+            rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "run",
+                       *(["--project", PROJECT] if PROJECT != "zephyr" else []), "--profile",
                        profile, "--pr", str(pr), "--parallel", "1"],
                       LOGS / f"triage-{pr}.log", cap, env)
             if rc == 143:
@@ -255,8 +271,7 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> N
             f = run / "triage" / f"{pr}.json"
             if f.exists() and f.stat().st_mtime >= start:
                 v = json.loads(f.read_text())
-                pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
-                info = {"state": "done", "verdict": v.get("verdict"), "pair": pair,
+                info = {"state": "done", **verdict_fields(v),
                         "confidence": v.get("confidence"), "minutes": minutes, "node": N}
             elif rc == 124:
                 info = {"state": "cap", "minutes": minutes, "node": N,
@@ -321,27 +336,40 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     venv = {**env, "EMBEDEVAL_BUILD_TIMEOUT_MIN": str(caps["build"])}
     sweep(Path(env["EMBEDEVAL_WORK"]))
 
+    def budget(start: float):
+        """left() for a piece of work that began at `start`: minutes to the
+        per-PR cap or the phase's end, whichever is first."""
+        return lambda: min(caps["validate_pr"] - (time.time() - start) / 60,
+                           (deadline - time.time()) / 60)
+
     def one(pr: int) -> None:
-        iid = f"zephyr__zephyr-{pr}"
+        iid = f"{PROJECT}__{PROJECT}-{pr}"
         start = time.time()
+        left = budget(start)
 
-        def left() -> float:
-            return min(caps["validate_pr"] - (time.time() - start) / 60,
-                       (deadline - time.time()) / 60)
-
-        def done(state: str, note: str = "", outcome: str | None = None) -> None:
+        def done(state: str, note: str = "", outcome: str | None = None, extra: dict | None = None) -> None:
             info = {"state": state, "minutes": round((time.time() - start) / 60, 1), "node": N}
             if outcome:
                 info["outcome"] = outcome
             if note:
                 info["note"] = note
-            if record(run, pr, "validate", info):
+            if record(run, pr, "validate", info | (extra or {})):
                 log(f"validate {pr}: {outcome or state} {note}")
 
         if left() < 10 or _stopping.is_set():
             return                                         # stays to do
         lg = LOGS / f"validate-{pr}.log"
         verdict = run / "triage" / f"{pr}.json"
+        if PROJECT == "openthread":
+            res = openthread_validate(run, pr, iid, verdict, lg, lambda: budget(time.time()), venv)
+            if res is None:
+                return                                     # stopping: stays to do
+            state, what, extra = res
+            if state == "done":
+                done("done", extra.pop("note", ""), outcome=what, extra=extra)
+            else:
+                done("failed", what)
+            return
         tried = []
         while True:
             tried.append(json.loads(verdict.read_text())["platform"])
@@ -378,32 +406,50 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     drain(q, todo, one, cfg["parallel"]["validate_per_node"], deadline - 10 * 60, room)
 
 
+def image_unit(iid: str, generate: list[str], lg: Path, left, venv: dict, inst: Path,
+               report: str = "validation.json", validate_args: tuple = ()):
+    """Generate, build and validate one instance: None if the worker is
+    stopping, ("failed", why), or ("done", rc, reason) -- the validator's exit
+    code and the reason it wrote to `report` in the instance directory `inst`."""
+    rc = step(generate, lg, min(5, left()), venv)
+    if rc == 143:
+        return None
+    if rc:
+        return "failed", "generate failed"
+    rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
+              min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
+    if rc == 143:
+        return None
+    if rc:
+        return "failed", "build failed" if rc != 124 else "build hit the cap"
+    if left() < 3:
+        return "failed", "no time left to validate"
+    rc = step([PY, "scripts/validate_instance.py", iid, *validate_args], lg, left(), venv)
+    if rc == 143:
+        return None
+    f = inst / report
+    return "done", rc, json.loads(f.read_text()).get("reason") if f.exists() else None
+
+
+def cleanup(iid: str, lg: Path, venv: dict) -> None:
+    step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+
+
 def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: dict):
     """One generate, build, validate of the verdict's pair: ("done", outcome,
     note), ("failed", why, ""), or None if the worker is stopping. A VALID
     image is pushed to the registry, if there is one, before it is removed;
     a push that fails leaves the PR VALID, with a note."""
-    step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)   # leftovers of a cut-short try
+    cleanup(iid, lg, venv)                         # leftovers of a cut-short try
     try:
-        rc = step([PY, "scripts/generate_instance.py", "--pr", str(pr), "--triage", str(verdict)],
-                  lg, min(5, left()), venv)
-        if rc == 143:
+        res = image_unit(iid, [PY, "scripts/generate_instance.py", "--pr", str(pr), "--triage",
+                               str(verdict)], lg, left, venv, run / "instances" / iid)
+        if res is None:
             return None
-        if rc:
-            return "failed", "generate failed: the verdict's pair is not runnable", ""
-        rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
-                  min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
-        if rc == 143:
-            return None
-        if rc:
-            return "failed", "build failed" if rc != 124 else "build hit the cap", ""
-        if left() < 3:
-            return "failed", "no time left to validate", ""
-        rc = step([PY, "scripts/validate_instance.py", iid], lg, left(), venv)
-        if rc == 143:
-            return None
-        report = run / "instances" / iid / "validation.json"
-        reason = json.loads(report.read_text()).get("reason") if report.exists() else None
+        if res[0] == "failed":
+            return "failed", res[1] + (": the verdict's pair is not runnable"
+                                       if res[1] == "generate failed" else ""), ""
+        _, rc, reason = res
         if rc == 0:
             if not venv.get("EMBEDEVAL_REGISTRY"):
                 return "done", "VALID", ""
@@ -415,7 +461,7 @@ def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: d
             return "failed", "validation hit the cap", ""
         return "done", f"INVALID: {reason or f'rc={rc}'}", ""
     finally:
-        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+        cleanup(iid, lg, venv)
 
 
 def other_board(run: Path, pr: int, verdict: Path, tried: list[str]) -> Path | None:
@@ -435,6 +481,170 @@ def other_board(run: Path, pr: int, verdict: Path, tried: list[str]) -> Path | N
     return out
 
 
+# ---------------------------------------------------------------- OpenThread validate
+#
+# Per PR, once triage is complete (the verdict's accept does not matter: what
+# flips is observed, not judged):
+#   a. observe the record's profile, then its extra_observe profiles until one is valid
+#      (generate --observe, build, validate -> observed.json, each in its own
+#      instances/work/<profile>/; a finished observation is reused);
+#   b. an observed-valid one is finalized (--from-observed, with the verdict's
+#      problem statement), built, validated, and its before state run
+#      DETERMINISM_RUNS times (validate_instance.py --determinism): VALID,
+#      or INVALID if the before state is flaky;
+#   c. else an accepted compile-oracle verdict is generated, built, validated;
+#   d. else INVALID, with the observations' reasons and the verdict's.
+# The instance is run/instances/<iid>/; each image is built, used and removed.
+
+
+def openthread_env(env: dict) -> dict:
+    """Triage uses the local model only (no provider keys), and apptainer
+    needs ldconfig from the sbin directories, which a batch job's PATH may lack
+    (and a step run with no exported environment has no PATH at all)."""
+    env = {k: v for k, v in env.items() if k not in API_KEYS}
+    path = (env.get("PATH") or os.defpath).split(":")
+    env["PATH"] = ":".join(path + [d for d in ("/usr/sbin", "/sbin") if d not in path])
+    return env
+
+
+def error_line(lg: Path) -> str:
+    """The last ERROR line a script wrote to the log, for a generate that refused."""
+    lines = [l.strip() for l in lg.read_text(errors="replace").splitlines() if "ERROR:" in l] \
+        if lg.exists() else []
+    return lines[-1][:300] if lines else "see the log"
+
+
+def observed_receipt(inst: Path) -> dict | None:
+    """The finished observation in `inst`, if it can be reused: written for the
+    recipe that is there now, and a result, not an infrastructure error."""
+    import apptainer_util as au
+    try:
+        o = json.loads((inst / "observed.json").read_text())
+        same = o.get("recipe_sha256") == au.recipe_fingerprint(inst)
+    except (OSError, ValueError):
+        return None
+    reason = o.get("reason") or ""
+    return o if same and not reason.startswith("error:") and reason != "image not built" else None
+
+
+def unit(iid: str, generate: list[str], lg: Path, fresh, venv: dict, inst: Path,
+         report: str = "validation.json", validate_args: tuple = ()):
+    """image_unit between cleanups, with its own budget (the per-PR cap
+    applies to each image: an OpenThread PR builds up to several)."""
+    left = fresh()
+    if left() < 10:
+        return "failed", "no time left"
+    cleanup(iid, lg, venv)
+    try:
+        return image_unit(iid, generate, lg, left, venv, inst, report, validate_args)
+    finally:
+        cleanup(iid, lg, venv)
+
+
+def observe(run: Path, pr: int, iid: str, profile: str, extra: bool, lg: Path, fresh, venv: dict):
+    """One observation: {"profile", "dir", "valid", "reason"}, ("failed", why)
+    or None if the worker is stopping."""
+    root = run / "instances" / "work" / profile
+    inst = root / iid
+    o = observed_receipt(inst)
+    if o is None:
+        shutil.rmtree(inst, ignore_errors=True)
+        res = unit(iid, [PY, "scripts/generate_instance.py", "--project", "openthread", "--observe",
+                         "--pr", str(pr), *(["--profile", profile] if extra else []), "--out", str(root)],
+                   lg, fresh, {**venv, "EMBEDEVAL_INSTANCES_DIR": str(root)}, inst, "observed.json")
+        if res is None:
+            return None
+        if res[0] == "failed":
+            if res[1] != "generate failed":
+                return res
+            return {"profile": profile, "dir": inst, "valid": False,
+                    "reason": f"generate failed: {error_line(lg)}"}   # nothing to observe, for good
+        if res[1] == 124:
+            return "failed", "validation hit the cap"
+        o = observed_receipt(inst)
+        if o is None:
+            return "failed", f"no observation written (rc={res[1]}, {res[2]})"
+    return {"profile": profile, "dir": inst, "valid": bool(o.get("valid")), "reason": o.get("reason")}
+
+
+def final_outcome(res, inst: Path, oracle: str):
+    """The PR's (state, what, info) from the validator's result on the
+    finalized or compile instance in `inst`; None if stopping."""
+    if res is None:
+        return None
+    if res[0] == "failed":
+        return "failed", res[1], {}
+    _, rc, reason = res
+    if rc == 124:
+        return "failed", "validation hit the cap", {}
+    report = json.loads((inst / "validation.json").read_text()) if (inst / "validation.json").exists() else {}
+    meta = json.loads((inst / "metadata.json").read_text())
+    conf = json.loads((inst / "instance.json").read_text())
+    notes = []
+    d = report.get("determinism")
+    if d and d["ok"]:
+        notes.append(f"before state deterministic {d['runs']}/{d['runs']}")
+    elif d:
+        notes.append("before state flaky: " + "; ".join(f"{n} {d['tally'].get(n)}" for n in d["flaky"][:4]))
+    if rc != 0:
+        info = {"oracle": oracle, "profile": conf.get("profile", "simulation"),
+                "note": "; ".join(notes)}
+        return "done", f"INVALID: {reason or f'rc={rc}'}", info
+    if not (meta.get("problem_statement") or "").strip():
+        notes.append("no problem statement (promotion will refuse it)")
+    return "done", "VALID", {"oracle": oracle, "profile": conf.get("profile", "simulation"),
+                             "note": "; ".join(notes)}
+
+
+def openthread_validate(run: Path, pr: int, iid: str, verdict_file: Path, lg: Path, fresh, venv: dict):
+    """One PR: ("done", "VALID" | "INVALID: why", info), ("failed", why, ...)
+    or None if the worker is stopping. `fresh()` gives a new budget (left())."""
+    v = json.loads(verdict_file.read_text())
+    rec = json.loads((run / "candidates" / "openthread" / "enriched" / f"{pr}.json").read_text())
+    final = run / "instances" / iid
+    observations, failed, refused = [], [], []
+    for profile, extra in [(rec.get("profile", "simulation"), False)] + [
+            (e["profile"], True) for e in rec.get("extra_observe") or []]:
+        o = observe(run, pr, iid, profile, extra, lg, fresh, venv)
+        if o is None:
+            return None
+        if isinstance(o, tuple):
+            failed.append(f"{o[1]} (observing {profile})")
+        else:
+            observations.append(o)
+            if o["valid"]:
+                break           # only one is finalized: the extra profiles are for when this one is not
+
+    statement = ["--statement-from", str(verdict_file)] if (
+        str(v.get("problem_statement") or "").strip() and v.get("pr") in (None, pr)) else []
+    for o in (o for o in observations if o["valid"]):
+        shutil.rmtree(final, ignore_errors=True)
+        res = unit(iid, [PY, "scripts/generate_instance.py", "--project", "openthread", "--pr",
+                         str(pr), "--from-observed", str(o["dir"]), *statement], lg, fresh, venv,
+                   final, validate_args=("--determinism", str(DETERMINISM_RUNS)))
+        if res and res[0] == "failed" and res[1] == "generate failed":
+            refused.append(f"{o['profile']}: {error_line(lg)}")          # try the next observation
+            continue
+        return final_outcome(res, final, "runtime")
+
+    if v.get("verdict") == "accept" and v.get("oracle") == "compile":
+        shutil.rmtree(final, ignore_errors=True)
+        res = unit(iid, [PY, "scripts/generate_instance.py", "--project", "openthread", "--pr",
+                         str(pr), "--triage", str(verdict_file)], lg, fresh, venv, final)
+        if not (res and res[0] == "failed" and res[1] == "generate failed"):
+            return final_outcome(res, final, "compile")
+        refused.append(f"compile: {error_line(lg)}")
+
+    if failed:
+        return "failed", "; ".join(failed), {}
+    several = len(observations) > 1
+    why = [f"{o['profile'] + ': ' if several else ''}{o['reason']}" for o in observations]
+    why += [f"finalize refused ({r})" for r in refused]
+    if v.get("verdict") != "accept":
+        why.append(f"triage {v.get('verdict')}: {str(v.get('reason') or '').strip()[:200]}")
+    return "done", "INVALID: " + "; ".join(why), {}
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -451,7 +661,7 @@ def on_sigterm(signum, frame) -> None:
 
 
 def main() -> None:
-    global N, NN, LOGS, ME
+    global N, NN, LOGS, ME, PROJECT
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True)
@@ -471,10 +681,13 @@ def main() -> None:
     sys.stdout = open(LOGS / f"worker-{args.phase}.log", "a", buffering=1)
     sys.stderr = sys.stdout
     signal.signal(signal.SIGTERM, on_sigterm)
-    env = {**os.environ, **cluster_config.env_for(cfg, run),
+    PROJECT = status.project(run)           # the run's, as prepared
+    env = {**os.environ, **cluster_config.env_for(cfg, run, PROJECT),
            # this node's own images, overlays and temp files: its cleanup can
            # never touch another node's work
            "EMBEDEVAL_WORK": str(node_dir / "work")}
+    if PROJECT == "openthread":
+        env = openthread_env(env)
     log(f"phase {args.phase}, node {N} of {NN}, run {run}, {args.minutes:.0f} min")
     claims.keep_alive(run, ME)
     if args.phase == "triage":
@@ -484,7 +697,7 @@ def main() -> None:
     log(f"phase {args.phase} done")
 
 
-N, NN, LOGS, ME = 0, 1, Path("."), "local-node0"
+N, NN, LOGS, ME, PROJECT = 0, 1, Path("."), "local-node0", "zephyr"
 
 if __name__ == "__main__":
     main()

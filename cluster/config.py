@@ -22,6 +22,9 @@ EXAMPLE = CLUSTER_DIR / "config.example.yaml"
 DEFAULT = CLUSTER_DIR / "config.yaml"
 
 
+PROJECTS = ("zephyr", "openthread")
+
+
 class ConfigError(Exception):
     pass
 
@@ -76,6 +79,8 @@ def load(path: str | Path | None = None) -> dict:
     elif path != DEFAULT:
         raise ConfigError(f"no config file {path}")
     cfg = _expand(_overlay(base, user))
+    if cfg["project"] not in PROJECTS:
+        raise ConfigError(f"'project' must be one of {', '.join(PROJECTS)}, got {cfg['project']!r}")
     root = Path(cfg["scratch_root"])
     p = cfg["paths"]
     shared = Path(p["shared"]) if p["shared"] else root / "shared"
@@ -85,20 +90,24 @@ def load(path: str | Path | None = None) -> dict:
         "shared": str(shared),
         "runs": str(root / "runs"),
         "zephyr_clone": p["zephyr_clone"] or str(shared / "zephyr.git"),
+        "openthread_clone": p["openthread_clone"] or str(shared / "openthread.git"),
         "vllm_cache": p["vllm_cache"] or str(shared / "vllm-cache"),
         "ledger": str(shared / "ledger.jsonl"),
     }
     return cfg
 
 
-def env_for(cfg: dict, run_dir: Path | None = None) -> dict:
+def env_for(cfg: dict, run_dir: Path | None = None, project: str | None = None) -> dict:
     """The environment the pipeline scripts read (scripts/layout.py,
-    scripts/apptainer_util.py, scripts/serve_triage_model.sh)."""
+    scripts/apptainer_util.py, scripts/serve_triage_model.sh). `project`: the
+    run's (its manifest's); default the config's."""
     d, p = cfg["derived"], cfg["paths"]
     env = {"EMBEDEVAL_SHARED": d["shared"],
            "EMBEDEVAL_ZEPHYR_CLONE": d["zephyr_clone"],
            "EMBEDEVAL_MODELS": p["models"],
            "EMBEDEVAL_VLLM_IMAGE": p["vllm_image"]}
+    if (project or cfg["project"]) == "openthread":
+        env["EMBEDEVAL_OPENTHREAD_CLONE"] = d["openthread_clone"]
     if cfg.get("registry"):
         env["EMBEDEVAL_REGISTRY"] = cfg["registry"]
     if run_dir is not None:

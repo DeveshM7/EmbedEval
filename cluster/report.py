@@ -31,8 +31,9 @@ import ledger  # noqa: E402
 import status  # noqa: E402
 
 
-def outcome(entry: dict, st: dict) -> tuple[str, str]:
-    """(where the PR ended up, detail)."""
+def outcome(entry: dict, st: dict, project: str = "zephyr") -> tuple[str, str]:
+    """(where the PR ended up, detail). OpenThread validates every PR with a
+    verdict, so only Zephyr stops at a reject."""
     if entry["stage"] != "to triage":
         return entry["stage"], entry.get("note", "")
     t = st.get("triage")
@@ -40,11 +41,11 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
         return "triage: not yet", ""
     if t["state"] != "done":
         return f"triage: {t['state']}", t.get("note", "")
-    if t.get("verdict") != "accept":
+    if project == "zephyr" and t.get("verdict") != "accept":
         return f"triage: {t.get('verdict')}", t.get("note", "")
     v = st.get("validate")
     if not v:
-        return "accepted, validation not yet", ""
+        return "accepted, validation not yet" if project == "zephyr" else "triaged, validation not yet", ""
     if v["state"] != "done":
         return f"validation: {v['state']}", v.get("note", "")
     if v["outcome"] == "VALID":
@@ -52,24 +53,28 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
     return "INVALID", "; ".join(x for x in (v["outcome"], v.get("note")) if x)
 
 
-ORDER = ["in ledger", "in another run", "fetch failed", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "triage: server failed",
+ORDER = ["in ledger", "in another run", "fetch failed", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "enrich: no runnable test", "triage: server failed",
          "triage: cap", "triage: failed", "triage: error", "triage: reject", "triage: not yet",
-         "accepted, validation not yet", "validation: skipped", "validation: failed",
+         "accepted, validation not yet", "triaged, validation not yet", "validation: skipped", "validation: failed",
          "INVALID", "VALID"]
 
 
 def build(run: Path) -> dict:
     m = status.manifest(run)
+    project = status.project(run)
     rows = []
     for e in m["prs"]:
         st = status.read(run, e["pr"])
-        where, detail = outcome(e, st)
+        where, detail = outcome(e, st, project)
         rows.append({"pr": e["pr"], "outcome": where, "detail": detail,
                      "triage_min": (st.get("triage") or {}).get("minutes"),
                      "validate_min": (st.get("validate") or {}).get("minutes"),
-                     "pair": (st.get("triage") or {}).get("pair")})
+                     "pair": (st.get("triage") or {}).get("pair")}
+                    | ({"oracle": (st.get("validate") or {}).get("oracle"),
+                        "profile": (st.get("validate") or {}).get("profile")}
+                       if project == "openthread" else {}))
     counts = Counter(r["outcome"] for r in rows)
-    return {"run": m["name"], "generated": datetime.now().isoformat(timespec="seconds"),
+    return {"run": m["name"], "project": project, "generated": datetime.now().isoformat(timespec="seconds"),
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
             "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"], "rows": rows}
@@ -83,15 +88,36 @@ def to_ledger(run: Path, prs: set[int] | None = None) -> tuple[int, Path]:
     rows = []
     for e in m["prs"]:
         if prs is None or e["pr"] in prs:
-            where, detail = outcome(e, status.read(run, e["pr"]))
+            where, detail = outcome(e, status.read(run, e["pr"]), status.project(run))
             rows.append({"pr": e["pr"], "outcome": where, "detail": detail})
     book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
     n = ledger.record(book, m["name"], m["code"]["commit"],
-                      datetime.now().isoformat(timespec="seconds"), rows)
+                      datetime.now().isoformat(timespec="seconds"), rows, status.project(run))
     return n, book
 
 
+def markdown_openthread(rep: dict) -> str:
+    """OpenThread's table: the oracle and profile of each instance, not a pair."""
+    valid = [r for r in rep["rows"] if r["outcome"] == "VALID"]
+    by = Counter(r["oracle"] for r in valid)
+    out = [f"# Run {rep['run']} (OpenThread)", "", f"{rep['prs']} PRs; report made {rep['generated']}.", "",
+           "| Outcome | PRs |", "|---|---|"]
+    out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
+    out += ["", f"**Valid instances ({len(valid)}):** "
+            + (", ".join(map(str, rep["valid"])) or "none")
+            + (f" -- {by['runtime']} runtime, {by['compile']} compile" if valid else ""), "",
+            "| PR | outcome | oracle | profile | detail | triage min | validation min |",
+            "|---|---|---|---|---|---|---|"]
+    for r in rep["rows"]:
+        out.append(f"| {r['pr']} | {r['outcome']} | {r.get('oracle') or ''} | {r.get('profile') or ''} | "
+                   f"{r['detail'][:100]} | {r['triage_min'] if r['triage_min'] is not None else ''} | "
+                   f"{r['validate_min'] if r['validate_min'] is not None else ''} |")
+    return "\n".join(out) + "\n"
+
+
 def markdown(rep: dict) -> str:
+    if rep.get("project") == "openthread":
+        return markdown_openthread(rep)
     out = [f"# Run {rep['run']}", "", f"{rep['prs']} PRs; report made {rep['generated']}.", "",
            "| Outcome | PRs |", "|---|---|"]
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]

@@ -652,3 +652,42 @@ they break if moved. Delete them instead.
 `scripts/` still work on their own, but without `--run-dir` they write next
 to the code (`candidates/`, `generated/`, `triage/runs/`) and into
 `$SCRATCH/embedeval-twister`, as they did before run folders existed.
+
+---
+
+## 11. OpenThread runs
+
+The same orchestration runs OpenThread (`project: openthread` in
+`cluster/config.yaml`, or `--project openthread` on `prepare.py`; the run's
+manifest records it and the rest of the run follows the manifest). It needs a
+full bare clone of OpenThread at `paths.openthread_clone` (default
+`$SCRATCH/embedeval/shared/openthread.git`); workers never fetch into it.
+
+```bash
+.venv/bin/python cluster/prepare.py --project openthread --name ot-check --pr 13499 13787
+.venv/bin/python cluster/prepare.py --project openthread --name ot-2025-09 --since 2025-09-01 --until 2025-09-30
+.venv/bin/python cluster/submit.py pipeline --run ot-check --dry-run
+.venv/bin/python cluster/submit.py pipeline --run ot-check          # nodes follow the work (1 per 4 PRs); slurm.nodes_max caps them
+.venv/bin/python cluster/report.py --run ot-check
+```
+
+What differs from Zephyr:
+
+- **prepare**: the PRs, hard filters and enrichment are `scripts/openthread_candidates.py`'s
+  (from the clone's history); no dry run, no SDK image (the one shared toolchain image is
+  built here). A PR whose changed tests map to no runnable executable is settled as
+  `enrich: no runnable test`. `--no-filter` is not available.
+- **triage** is `triage_prs.py run --project openthread`; its status holds the verdict, `oracle`
+  and `profile`.
+- **validation** takes every PR with a verdict, accepted or not. Per PR: observe the record's
+  profile and each `extra_observe` profile (`instances/work/<profile>/`, reused on a resubmit);
+  an observed-valid one is finalized into `instances/<id>/`, built, validated and its before
+  state run 5 times (`validate_instance.py --determinism 5`, recorded in `validation.json`):
+  VALID (runtime), or INVALID if flaky; otherwise an accepted compile-oracle verdict is
+  validated (VALID, compile); otherwise INVALID with the observations' and the verdict's reasons.
+  The per-PR cap `caps.validate_pr` applies to each image the PR builds, not to the PR.
+- **report**: VALID / INVALID with the oracle (runtime / compile) and profile per row. A VALID
+  instance whose verdict had no problem statement is flagged in its note; promotion refuses it.
+- **promotion** stays manual: `scripts/promote_instance.py --run-dir $R --all`. It refuses an
+  OpenThread runtime instance without a 5/5 determinism record.
+- Instance images are not pushed to a registry.

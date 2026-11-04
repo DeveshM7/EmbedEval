@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Promote validated Zephyr instances from generated/ to apptainer/instances/.
+Promote validated instances from generated/ (or a run's instances/) to
+apptainer/instances/.
 
     python scripts/promote_instance.py zephyr__zephyr-65697
     python scripts/promote_instance.py --all            # every valid one in generated/
+    python scripts/promote_instance.py --run-dir RUN --all
 
 apptainer/instances/ is the committed Zephyr benchmark: the instances the
 harness runs agents on. Only an instance that passed validation gets there,
@@ -47,8 +49,17 @@ def promote(instance_id: str, source: Path = GENERATED) -> tuple[bool, str]:
         return False, "validation.json predates recipe fingerprints; validate it again"
     if au.recipe_fingerprint(src) != want:
         return False, "recipe changed since it was validated; validate it again"
-    if not (json.loads((src / "metadata.json").read_text()).get("problem_statement") or "").strip():
+    meta = json.loads((src / "metadata.json").read_text())
+    if not (meta.get("problem_statement") or "").strip():
         return False, "no problem statement (metadata.json problem_statement is empty)"
+    # An OpenThread runtime instance must have a deterministic before state
+    # (validate_instance.py --determinism): a flaky one (13735) is no benchmark.
+    if meta.get("project") == "openthread" and meta.get("oracle") != "compile":
+        d = report.get("determinism")
+        if not d:
+            return False, "no determinism record; validate it again with --determinism 5"
+        if not d.get("ok") or d.get("runs", 0) < 5:
+            return False, f"before state not deterministic ({d.get('runs')} runs, flaky: {d.get('flaky')})"
     missing = [f for f in FILES if not (src / f).exists()]
     if missing:
         return False, f"missing {', '.join(missing)}"
