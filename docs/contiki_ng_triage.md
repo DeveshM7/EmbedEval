@@ -297,3 +297,10 @@ November 11, 2026. The bounded inference submission was canceled after its
 forecast moved to November 11; no inference occurred and no paid fallback was
 used. Actual qwen38-nvfp4 triage-to-validation handoff remains unverified. No
 instances have been promoted or published.
+
+Fresh-grader control job 484672 rebuilt the JSON image independently and applied
+only the upstream production fix on a fresh node-local overlay: all six cases
+passed. A separate protected-test patch was rejected before container execution.
+Results are under `research/gold-grader-control/` in the Scholar workspace. This
+is an upstream-gold control, not an agent attempt. The final local verification
+has 24 pipeline/runner/grading checks and nine cluster checks passing.
