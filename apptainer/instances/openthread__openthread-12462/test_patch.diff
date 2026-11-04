@@ -1,0 +1,297 @@
+diff --git a/tests/unit/test_ncp_dnssd.cpp b/tests/unit/test_ncp_dnssd.cpp
+index 05b892bb03..9e9274debe 100644
+--- a/tests/unit/test_ncp_dnssd.cpp
++++ b/tests/unit/test_ncp_dnssd.cpp
+@@ -244,6 +244,78 @@ void TestNcpDnssdBrowse(void)
+     VerifyOrQuit(sDnssdBrowseCallbackInvoked);
+ }
+ 
++static bool sDnssdSrvCallbackInvoked = false;
++
++static void TestDnssdSrvCallback(otInstance *aInstance, const otPlatDnssdSrvResult *aResult)
++{
++    OT_UNUSED_VARIABLE(aInstance);
++
++    VerifyOrQuit(strcmp(aResult->mServiceInstance, "GAT-X303 #1") == 0);
++    VerifyOrQuit(strcmp(aResult->mServiceType, "_ms._tcp") == 0);
++    VerifyOrQuit(strcmp(aResult->mHostName, "GAT-X303 #1._ms._tcp.local") == 0);
++    VerifyOrQuit(aResult->mPort == 5353);
++    VerifyOrQuit(aResult->mPriority == 1);
++    VerifyOrQuit(aResult->mWeight == 10);
++    VerifyOrQuit(aResult->mTtl == 120);
++    VerifyOrQuit(aResult->mInfraIfIndex == 1);
++
++    sDnssdSrvCallbackInvoked = true;
++}
++
++static otError GenerateSpinelDnssdSrvResultFrame(const otPlatDnssdSrvResult &aSrvResult, uint8_t *aBuf, uint16_t &aLen)
++{
++    otError                error = OT_ERROR_NONE;
++    uint8_t                buf[kMaxSpinelBufferSize];
++    Spinel::Buffer         ncpBuffer(buf, kMaxSpinelBufferSize);
++    Spinel::Encoder        encoder(ncpBuffer);
++    otPlatDnssdSrvCallback callback = &TestDnssdSrvCallback;
++
++    uint8_t header = SPINEL_HEADER_FLAG | 0 /* Iid */ | 1 /* Tid */;
++    SuccessOrExit(error = encoder.BeginFrame(header, SPINEL_CMD_PROP_VALUE_SET, SPINEL_PROP_DNSSD_SRV_RESULT));
++    SuccessOrExit(error = EncodeDnssdSrvResult(encoder, aSrvResult, reinterpret_cast<const uint8_t *>(&callback),
++                                               sizeof(callback)));
++    SuccessOrExit(error = encoder.EndFrame());
++
++    SuccessOrExit(ncpBuffer.OutFrameBegin());
++    aLen = ncpBuffer.OutFrameGetLength();
++    VerifyOrExit(ncpBuffer.OutFrameRead(aLen, aBuf) == aLen, error = OT_ERROR_FAILED);
++
++exit:
++    return error;
++}
++
++void TestNcpDnssdSrvResolve(void)
++{
++    Instance              *instance = static_cast<Instance *>(testInitInstance());
++    Ncp::NcpBase           ncpBase(instance);
++    uint8_t                recvBuf[kMaxSpinelBufferSize];
++    uint16_t               recvLen;
++    otPlatDnssdSrvResolver resolver;
++    otPlatDnssdSrvResult   srvResult;
++
++    resolver.mServiceInstance = "GAT-X303 #1";
++    resolver.mServiceType     = "_ms._tcp";
++    resolver.mInfraIfIndex    = 1;
++    resolver.mCallback        = TestDnssdSrvCallback;
++
++    otPlatDnssdStartSrvResolver(instance, &resolver);
++
++    srvResult.mServiceInstance = "GAT-X303 #1";
++    srvResult.mServiceType     = "_ms._tcp";
++    srvResult.mHostName        = "GAT-X303 #1._ms._tcp.local";
++    srvResult.mPort            = 5353;
++    srvResult.mPriority        = 1;
++    srvResult.mWeight          = 10;
++    srvResult.mTtl             = 120;
++    srvResult.mInfraIfIndex    = 1;
++
++    SuccessOrQuit(GenerateSpinelDnssdSrvResultFrame(srvResult, recvBuf, recvLen));
++
++    ncpBase.HandleReceive(recvBuf, recvLen);
++
++    VerifyOrQuit(sDnssdSrvCallbackInvoked);
++}
++
+ } // namespace ot
+ 
+ #endif // OPENTHREAD_CONFIG_NCP_DNSSD_ENABLE && OPENTHREAD_CONFIG_PLATFORM_DNSSD_ENABLE
+@@ -254,6 +326,7 @@ int main(void)
+     ot::TestNcpDnssdGetState();
+     ot::TestNcpDnssdRegistrations();
+     ot::TestNcpDnssdBrowse();
++    ot::TestNcpDnssdSrvResolve();
+ #endif
+     printf("All tests passed\n");
+     return 0;
+diff --git a/tests/unit/test_spinel_prop_codec.cpp b/tests/unit/test_spinel_prop_codec.cpp
+index c4c64aa251..458d3e75f0 100644
+--- a/tests/unit/test_spinel_prop_codec.cpp
++++ b/tests/unit/test_spinel_prop_codec.cpp
+@@ -47,18 +47,25 @@ static void FakeDnssdBrowseCallback(otInstance *aInstance, const otPlatDnssdBrow
+     OT_UNUSED_VARIABLE(aResult);
+ }
+ 
++static void FakeDnssdSrvCallback(otInstance *aInstance, const otPlatDnssdSrvResult *aResult)
++{
++    OT_UNUSED_VARIABLE(aInstance);
++    OT_UNUSED_VARIABLE(aResult);
++}
++
++static constexpr uint16_t kMaxSpinelBufferSize = 2048;
++
+ void TestDnssd(void)
+ {
+-    constexpr uint16_t kMaxSpinelBufferSize = 2048;
+-    uint8_t            buf[kMaxSpinelBufferSize];
+-    uint16_t           len;
+-    Spinel::Buffer     ncpBuffer(buf, kMaxSpinelBufferSize);
+-    Spinel::Encoder    encoder(ncpBuffer);
+-    Spinel::Decoder    decoder;
+-    uint8_t            header;
+-    unsigned int       command;
+-    unsigned int       propKey;
+-    otError            error = OT_ERROR_NONE;
++    uint8_t         buf[kMaxSpinelBufferSize];
++    uint16_t        len;
++    Spinel::Buffer  ncpBuffer(buf, kMaxSpinelBufferSize);
++    Spinel::Encoder encoder(ncpBuffer);
++    Spinel::Decoder decoder;
++    uint8_t         header;
++    unsigned int    command;
++    unsigned int    propKey;
++    otError         error = OT_ERROR_NONE;
+ 
+     // Test DnssdHost encoding and decoding
+     otPlatDnssdHost dnssdHostEncode;
+@@ -184,8 +191,22 @@ void TestDnssd(void)
+     VerifyOrQuit(requestId == 3);
+     VerifyOrQuit(callbackDataLen == sizeof(otPlatDnssdRegisterCallback));
+     VerifyOrQuit(*reinterpret_cast<const otPlatDnssdRegisterCallback *>(callbackData) == DnssdFakeCallback);
++}
++
++void TestDnssdBrowser(void)
++{
++    uint8_t         buf[kMaxSpinelBufferSize];
++    Spinel::Buffer  ncpBuffer(buf, kMaxSpinelBufferSize);
++    uint16_t        len;
++    Spinel::Encoder encoder(ncpBuffer);
++    Spinel::Decoder decoder;
++    uint8_t         header;
++    unsigned int    command;
++    unsigned int    propKey;
++    const uint8_t  *callbackData;
++    uint16_t        callbackDataLen;
++    otError         error = OT_ERROR_NONE;
+ 
+-    // Test Dnssd Browser encoding and decoding
+     otPlatDnssdBrowser dnssdBrowserEncode;
+     otPlatDnssdBrowser dnssdBrowserDecode;
+ 
+@@ -216,8 +237,22 @@ void TestDnssd(void)
+     VerifyOrQuit(dnssdBrowserDecode.mInfraIfIndex == dnssdBrowserEncode.mInfraIfIndex);
+     VerifyOrQuit(callbackDataLen == sizeof(otPlatDnssdBrowseCallback));
+     VerifyOrQuit(*reinterpret_cast<const otPlatDnssdBrowseCallback *>(callbackData) == FakeDnssdBrowseCallback);
++}
++
++void TestDnssdBrowserResult(void)
++{
++    uint8_t         buf[kMaxSpinelBufferSize];
++    Spinel::Buffer  ncpBuffer(buf, kMaxSpinelBufferSize);
++    uint16_t        len;
++    Spinel::Encoder encoder(ncpBuffer);
++    Spinel::Decoder decoder;
++    uint8_t         header;
++    unsigned int    command;
++    unsigned int    propKey;
++    const uint8_t  *callbackData;
++    uint16_t        callbackDataLen;
++    otError         error = OT_ERROR_NONE;
+ 
+-    // Test Dnssd Browser Result encoding and decoding
+     otPlatDnssdBrowseResult dnssdBrowseResultEncode;
+     otPlatDnssdBrowseResult dnssdBrowseResultDecode;
+ 
+@@ -255,12 +290,117 @@ void TestDnssd(void)
+     VerifyOrQuit(*reinterpret_cast<const otPlatDnssdBrowseCallback *>(callbackData) == FakeDnssdBrowseCallback);
+ }
+ 
++void TestDnssdSrvResolver(void)
++{
++    constexpr uint16_t kMaxSpinelBufferSize = 2048;
++    uint8_t            buf[kMaxSpinelBufferSize];
++    uint16_t           len;
++    Spinel::Buffer     ncpBuffer(buf, kMaxSpinelBufferSize);
++    Spinel::Encoder    encoder(ncpBuffer);
++    Spinel::Decoder    decoder;
++    uint8_t            header;
++    unsigned int       command;
++    unsigned int       propKey;
++
++    otError error = OT_ERROR_NONE;
++
++    otPlatDnssdSrvResolver srvResolverEncode;
++    otPlatDnssdSrvResolver srvResolverDecode;
++    const uint8_t         *callbackData;
++    uint16_t               callbackDataLen;
++
++    srvResolverEncode.mServiceInstance = "ZGMF-X10A #1";
++    srvResolverEncode.mServiceType     = "_ms._tcp";
++    srvResolverEncode.mInfraIfIndex    = 1;
++    srvResolverEncode.mCallback        = FakeDnssdSrvCallback;
++
++    ncpBuffer.Clear();
++    SuccessOrQuit(
++        error = encoder.BeginFrame(SPINEL_HEADER_FLAG, SPINEL_CMD_PROP_VALUE_INSERTED, SPINEL_PROP_DNSSD_SRV_RESOLVER));
++    SuccessOrQuit(error = EncodeDnssdDiscovery(encoder, srvResolverEncode));
++    SuccessOrQuit(error = encoder.EndFrame());
++    SuccessOrQuit(ncpBuffer.OutFrameBegin());
++    len = ncpBuffer.OutFrameGetLength();
++    VerifyOrQuit(ncpBuffer.OutFrameRead(len, buf) == len);
++
++    decoder.Init(buf, len);
++    SuccessOrQuit(error = decoder.ReadUint8(header));
++    SuccessOrQuit(error = decoder.ReadUintPacked(command));
++    SuccessOrQuit(error = decoder.ReadUintPacked(propKey));
++    SuccessOrQuit(error = DecodeDnssdSrvResolver(decoder, srvResolverDecode, callbackData, callbackDataLen));
++    VerifyOrQuit(strcmp(srvResolverDecode.mServiceInstance, srvResolverEncode.mServiceInstance) == 0);
++    VerifyOrQuit(strcmp(srvResolverDecode.mServiceType, srvResolverEncode.mServiceType) == 0);
++    VerifyOrQuit(srvResolverDecode.mInfraIfIndex == srvResolverEncode.mInfraIfIndex);
++    VerifyOrQuit(callbackDataLen == sizeof(otPlatDnssdSrvCallback));
++    VerifyOrQuit(*reinterpret_cast<const otPlatDnssdSrvCallback *>(callbackData) == FakeDnssdSrvCallback);
++}
++
++void TestDnssdSrvResult(void)
++{
++    constexpr uint16_t kMaxSpinelBufferSize = 2048;
++    uint8_t            buf[kMaxSpinelBufferSize];
++    uint16_t           len;
++    Spinel::Buffer     ncpBuffer(buf, kMaxSpinelBufferSize);
++    Spinel::Encoder    encoder(ncpBuffer);
++    Spinel::Decoder    decoder;
++    uint8_t            header;
++    unsigned int       command;
++    unsigned int       propKey;
++    otError            error = OT_ERROR_NONE;
++
++    otPlatDnssdSrvResult srvResultEncode;
++    otPlatDnssdSrvResult srvResultDecode;
++    const uint8_t       *callbackData;
++    uint16_t             callbackDataLen;
++
++    srvResultEncode.mServiceInstance = "ZGMF-X13A #1";
++    srvResultEncode.mServiceType     = "_ms._tcp";
++    srvResultEncode.mHostName        = "ZGMF-X13A #1._ms._tcp.local.";
++    srvResultEncode.mPort            = 5353;
++    srvResultEncode.mPriority        = 10;
++    srvResultEncode.mWeight          = 100;
++    srvResultEncode.mTtl             = 120;
++    srvResultEncode.mInfraIfIndex    = 1;
++
++    otPlatDnssdSrvCallback callback = FakeDnssdSrvCallback;
++
++    ncpBuffer.Clear();
++    SuccessOrQuit(error =
++                      encoder.BeginFrame(SPINEL_HEADER_FLAG, SPINEL_CMD_PROP_VALUE_SET, SPINEL_PROP_DNSSD_SRV_RESULT));
++    SuccessOrQuit(error = EncodeDnssdSrvResult(encoder, srvResultEncode, reinterpret_cast<const uint8_t *>(&callback),
++                                               sizeof(callback)));
++    SuccessOrQuit(error = encoder.EndFrame());
++    SuccessOrQuit(ncpBuffer.OutFrameBegin());
++    len = ncpBuffer.OutFrameGetLength();
++    VerifyOrQuit(ncpBuffer.OutFrameRead(len, buf) == len);
++
++    decoder.Init(buf, len);
++    SuccessOrQuit(error = decoder.ReadUint8(header));
++    SuccessOrQuit(error = decoder.ReadUintPacked(command));
++    SuccessOrQuit(error = decoder.ReadUintPacked(propKey));
++    SuccessOrQuit(error = DecodeDnssdSrvResult(decoder, srvResultDecode, callbackData, callbackDataLen));
++    VerifyOrQuit(strcmp(srvResultDecode.mServiceInstance, srvResultEncode.mServiceInstance) == 0);
++    VerifyOrQuit(strcmp(srvResultDecode.mServiceType, srvResultEncode.mServiceType) == 0);
++    VerifyOrQuit(strcmp(srvResultDecode.mHostName, srvResultEncode.mHostName) == 0);
++    VerifyOrQuit(srvResultDecode.mPort == srvResultEncode.mPort);
++    VerifyOrQuit(srvResultDecode.mPriority == srvResultEncode.mPriority);
++    VerifyOrQuit(srvResultDecode.mWeight == srvResultEncode.mWeight);
++    VerifyOrQuit(srvResultDecode.mTtl == srvResultEncode.mTtl);
++    VerifyOrQuit(srvResultDecode.mInfraIfIndex == srvResultEncode.mInfraIfIndex);
++    VerifyOrQuit(callbackDataLen == sizeof(otPlatDnssdSrvCallback));
++    VerifyOrQuit(*reinterpret_cast<const otPlatDnssdSrvCallback *>(callbackData) == FakeDnssdSrvCallback);
++}
++
+ } // namespace Spinel
+ } // namespace ot
+ 
+ int main(void)
+ {
+     ot::Spinel::TestDnssd();
++    ot::Spinel::TestDnssdBrowser();
++    ot::Spinel::TestDnssdBrowserResult();
++    ot::Spinel::TestDnssdSrvResolver();
++    ot::Spinel::TestDnssdSrvResult();
+     printf("\nAll tests passed.\n");
+     return 0;
+ }

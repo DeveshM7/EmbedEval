@@ -1,0 +1,217 @@
+diff --git a/tests/scripts/expect/cli-tcat-decommission.exp b/tests/scripts/expect/cli-tcat-decommission.exp
+index cfd5e589c3..3825dac3c4 100755
+--- a/tests/scripts/expect/cli-tcat-decommission.exp
++++ b/tests/scripts/expect/cli-tcat-decommission.exp
+@@ -53,6 +53,9 @@ send "thread start\n"
+ expect_line "\tTYPE:\tRESPONSE_W_STATUS"
+ expect_line "\tVALUE:\t0x00"
+ 
++send "disconnect\n"
++expect_line "Done"
++
+ dispose_tcat_client 1
+ 
+ switch_node 1
+diff --git a/tests/unit/test_platform.cpp b/tests/unit/test_platform.cpp
+index 621dd0f816..d81f4f3196 100644
+--- a/tests/unit/test_platform.cpp
++++ b/tests/unit/test_platform.cpp
+@@ -35,7 +35,7 @@
+ #include <sys/time.h>
+ #include <openthread/platform/flash.h>
+ 
+-#ifdef OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
++#if OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
+ #include <openthread/tcat.h>
+ #include <openthread/platform/ble.h>
+ #endif
+@@ -800,7 +800,11 @@ OT_TOOL_WEAK otPlatMcuPowerState otPlatGetMcuPowerState(otInstance *aInstance) {
+ 
+ OT_TOOL_WEAK otError otPlatSetMcuPowerState(otInstance *aInstance, otPlatMcuPowerState aState) { return OT_ERROR_NONE; }
+ #endif // OPENTHREAD_CONFIG_NCP_ENABLE_MCU_POWER_STATE_CONTROL
+-#ifdef OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
++#if OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
++
++uint8_t  sPlatBleLastAdvSetData[OT_TCAT_ADVERTISEMENT_MAX_LEN];
++uint16_t sPlatBleLastAdvSetDataLen = 0;
++
+ otError otPlatBleEnable(otInstance *aInstance)
+ {
+     OT_UNUSED_VARIABLE(aInstance);
+@@ -838,7 +842,9 @@ otError otPlatBleGapAdvStop(otInstance *aInstance)
+ 
+ otError otPlatBleGapDisconnect(otInstance *aInstance)
+ {
+-    OT_UNUSED_VARIABLE(aInstance);
++    // Honor the platform contract: report completion of the disconnection via the callback.
++    // Normally this call is done asynchronously, but for unit testing purposes we make the reentrant call.
++    otPlatBleGapOnDisconnected(aInstance, 0);
+     return OT_ERROR_NONE;
+ }
+ 
+@@ -875,17 +881,19 @@ bool otPlatBleSupportsMultiRadio(otInstance *aInstance)
+ otError otPlatBleGapAdvSetData(otInstance *aInstance, uint8_t *aAdvertisementData, uint16_t aAdvertisementLen)
+ {
+     OT_UNUSED_VARIABLE(aInstance);
+-    OT_UNUSED_VARIABLE(aAdvertisementData);
+-    OT_UNUSED_VARIABLE(aAdvertisementLen);
++    if (aAdvertisementData == nullptr || aAdvertisementLen > OT_TCAT_ADVERTISEMENT_MAX_LEN)
++    {
++        return OT_ERROR_INVALID_ARGS;
++    }
++    memcpy(sPlatBleLastAdvSetData, aAdvertisementData, aAdvertisementLen);
++    sPlatBleLastAdvSetDataLen = aAdvertisementLen;
++
+     return OT_ERROR_NONE;
+ }
+ 
+ otError otPlatBleGapAdvUpdateData(otInstance *aInstance, uint8_t *aAdvertisementData, uint16_t aAdvertisementLen)
+ {
+-    OT_UNUSED_VARIABLE(aInstance);
+-    OT_UNUSED_VARIABLE(aAdvertisementData);
+-    OT_UNUSED_VARIABLE(aAdvertisementLen);
+-    return OT_ERROR_NONE;
++    return otPlatBleGapAdvSetData(aInstance, aAdvertisementData, aAdvertisementLen);
+ }
+ 
+ #endif // OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
+diff --git a/tests/unit/test_platform.h b/tests/unit/test_platform.h
+index 4eedd4edcf..87904c214a 100644
+--- a/tests/unit/test_platform.h
++++ b/tests/unit/test_platform.h
+@@ -57,4 +57,16 @@ ot::Instance *testInitAdditionalInstance(uint8_t id);
+ #endif
+ void testFreeInstance(otInstance *aInstance);
+ 
++#if OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
++#include <openthread/tcat.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern uint8_t  sPlatBleLastAdvSetData[OT_TCAT_ADVERTISEMENT_MAX_LEN];
++extern uint16_t sPlatBleLastAdvSetDataLen;
++#ifdef __cplusplus
++}
++#endif
++#endif
++
+ #endif // OT_UNIT_TEST_PLATFORM_H_
+diff --git a/tests/unit/test_tcat.cpp b/tests/unit/test_tcat.cpp
+index 2c4acfd56d..c9ab997d11 100644
+--- a/tests/unit/test_tcat.cpp
++++ b/tests/unit/test_tcat.cpp
+@@ -36,6 +36,7 @@
+ #include <openthread/ble_secure.h>
+ 
+ #include "cli/cli_dataset.hpp"
++#include "radio/ble_secure.hpp"
+ 
+ #define OT_TCAT_X509_CERT                                                \
+     "-----BEGIN CERTIFICATE-----\n"                                      \
+@@ -193,6 +194,7 @@ public:
+     TestBleSecure(void)
+         : mIsConnected(false)
+         , mIsBleConnectionOpen(false)
++        , mConnectCallbackCount(0)
+     {
+     }
+ 
+@@ -200,14 +202,18 @@ public:
+     {
+         mIsConnected         = aConnected;
+         mIsBleConnectionOpen = aBleConnectionOpen;
++        mConnectCallbackCount++;
+     }
+ 
+-    bool IsConnected(void) const { return mIsConnected; }
+-    bool IsBleConnectionOpen(void) const { return mIsBleConnectionOpen; }
++    bool     IsConnected(void) const { return mIsConnected; }
++    bool     IsBleConnectionOpen(void) const { return mIsBleConnectionOpen; }
++    uint32_t GetConnectCallbackCount(void) const { return mConnectCallbackCount; }
++    void     ResetConnectCallbackCount(void) { mConnectCallbackCount = 0; }
+ 
+ private:
+-    bool mIsConnected;
+-    bool mIsBleConnectionOpen;
++    bool     mIsConnected;
++    bool     mIsBleConnectionOpen;
++    uint32_t mConnectCallbackCount;
+ };
+ 
+ static void HandleBleSecureConnect(otInstance *aInstance, bool aConnected, bool aBleConnectionOpen, void *aContext)
+@@ -267,6 +273,8 @@ static Instance *TestInitInstanceTcat(void)
+     memcpy(&sCommExtPanId, &kExtPanId, sizeof(sCommExtPanId));
+     memcpy(&sCommAuth, &kCommCert1AuthField, sizeof(sCommAuth));
+     memcpy(&sDeviceAuth, &kDeviceCert1AuthField, sizeof(sDeviceAuth));
++    sPlatBleLastAdvSetDataLen = 0;
++    memset(sPlatBleLastAdvSetData, 0, OT_TCAT_ADVERTISEMENT_MAX_LEN);
+ 
+     return instance;
+ }
+@@ -303,8 +311,11 @@ void TestTcatConnectionAndCertAttributes(void)
+     // Validate connection callbacks when calling `otBleSecureDisconnect()`
+     otPlatBleGapOnConnected(instance, kConnectionId);
+     VerifyOrQuit(!ble.IsConnected() && ble.IsBleConnectionOpen());
++    ble.ResetConnectCallbackCount();
+     otBleSecureDisconnect(instance);
+     VerifyOrQuit(!ble.IsConnected() && !ble.IsBleConnectionOpen());
++    // Regression test: a locally-initiated disconnect must invoke the connect callback exactly once.
++    VerifyOrQuit(ble.GetConnectCallbackCount() == 1);
+ 
+     // Validate TLS connection can be started (as client) only when peer is BLE-connected
+     otPlatBleGapOnConnected(instance, kConnectionId);
+@@ -336,6 +347,46 @@ void TestTcatConnectionAndCertAttributes(void)
+     testFreeInstance(instance);
+ }
+ 
++void TestTcatAdvertisementUpdates(void)
++{
++    TestBleSecure ble;
++    Instance     *instance = TestInitInstanceTcat();
++    uint8_t       advDataSnapshot[OT_TCAT_ADVERTISEMENT_MAX_LEN];
++    uint16_t      advDataSnapshotLen;
++
++    VerifyOrQuit(sPlatBleLastAdvSetDataLen == 0, "Adv data should be unset before BleSecure start");
++
++    SuccessOrQuit(otBleSecureStart(instance, HandleBleSecureConnect, nullptr, true, &ble));
++    SuccessOrQuit(otBleSecureTcatStart(instance, nullptr));
++
++    VerifyOrQuit(sPlatBleLastAdvSetDataLen > 0, "Adv data should be set after BleSecure start");
++    advDataSnapshotLen = sPlatBleLastAdvSetDataLen;
++    memcpy(advDataSnapshot, sPlatBleLastAdvSetData, advDataSnapshotLen);
++
++    otPlatBleGapOnConnected(instance, kConnectionId);
++    SuccessOrQuit(otBleSecureConnect(instance));
++
++    // BLE connect and initiating TLS does not change the adv data.
++    VerifyOrQuit(sPlatBleLastAdvSetDataLen == advDataSnapshotLen &&
++                     memcmp(sPlatBleLastAdvSetData, advDataSnapshot, advDataSnapshotLen) == 0,
++                 "Adv data changed unexpectedly after BLE connect");
++    advDataSnapshotLen = sPlatBleLastAdvSetDataLen;
++    memcpy(advDataSnapshot, sPlatBleLastAdvSetData, advDataSnapshotLen);
++
++    // Commissioner sets dataset, then disconnects
++    instance->Get<ActiveDatasetManager>().SaveLocal(sPartialDataset);
++    otBleSecureDisconnect(instance);
++
++    // Adv is changed due to the partial dataset now being advertised in the S flag.
++    VerifyOrQuit(sPlatBleLastAdvSetDataLen == advDataSnapshotLen, "Adv data length changed unexpectedly");
++    VerifyOrQuit(memcmp(sPlatBleLastAdvSetData, advDataSnapshot, advDataSnapshotLen) != 0,
++                 "Adv data did not change after disconnect, which it should due to S flag");
++
++    otBleSecureStop(instance);
++
++    testFreeInstance(instance);
++}
++
+ class UnitTester
+ {
+ private:
+@@ -834,6 +885,7 @@ int main(void)
+     ot::MeshCoP::UnitTester::TestTcatCommissioner1AuthWithDeviceRequirements();
+     ot::MeshCoP::UnitTester::TestTcatCommissioner2AuthWithDeviceRequirements();
+     ot::MeshCoP::UnitTester::TestTcatCommissioner4AuthWithExistingPartialDataset();
++    ot::MeshCoP::TestTcatAdvertisementUpdates();
+     printf("All tests passed\n");
+ #else
+     printf("TCAT feature is not enabled\n");

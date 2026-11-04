@@ -1,0 +1,134 @@
+diff --git a/tests/toranj/cli/cli.py b/tests/toranj/cli/cli.py
+index 2036bd70dc..a398f4bcbf 100644
+--- a/tests/toranj/cli/cli.py
++++ b/tests/toranj/cli/cli.py
+@@ -856,6 +856,9 @@ class Node(object):
+     def br_get_multiail(self):
+         return self._cli_single_output('br multiail')
+ 
++    def br_get_multiail_state(self):
++        return self.cli('br multiail state')
++
+     def br_get_ifaddrs(self):
+         return self.cli('br ifaddrs')
+ 
+diff --git a/tests/toranj/cli/test-505-multi-ail-detection.py b/tests/toranj/cli/test-505-multi-ail-detection.py
+index 13323dcee9..cec180198c 100755
+--- a/tests/toranj/cli/test-505-multi-ail-detection.py
++++ b/tests/toranj/cli/test-505-multi-ail-detection.py
+@@ -36,9 +36,9 @@ import time
+ #
+ # Check multi AIL detection
+ #
+-#   -+-       _______
+-#    |       /       \
+-#   br1 --- br2 --- br3
++#   -+-       _________________
++#    |       /       \         \
++#   br1 --- br2 --- br3  --- detector
+ #
+ 
+ test_name = __file__[:-3] if __file__.endswith('.py') else __file__
+@@ -56,6 +56,7 @@ one_minute = 60
+ br1 = cli.Node()
+ br2 = cli.Node()
+ br3 = cli.Node()
++detector = cli.Node()
+ 
+ IF_INDEX_1 = 1
+ IF_INDEX_2 = 2
+@@ -66,10 +67,12 @@ IF_INDEX_2 = 2
+ br1.form("multiail")
+ br2.join(br1)
+ br3.join(br2)
++detector.join(br2)
+ 
+ verify(br1.get_state() == 'leader')
+ verify(br2.get_state() == 'router')
+ verify(br3.get_state() == 'router')
++verify(detector.get_state() == 'router')
+ 
+ # -----------------------------------------------------------------------------------------------------------------------
+ # Test implementation
+@@ -86,6 +89,20 @@ time.sleep(one_minute / speedup)
+ verify(br1.br_get_state() == 'running')
+ verify(br1.br_get_multiail() == 'not detected')
+ 
++# Init `detector` on different AIL without enabling it as a BR.
++
++detector.br_init(IF_INDEX_2, 1)
++time.sleep(10 / speedup)
++
++# Check that multi-ail detection is auto-enabled and started
++# on `detector`.
++
++state = detector.br_get_multiail_state()
++verify(len(state) == 3)
++verify(state[0].strip() == 'Enabled: yes')
++verify(state[1].strip() == 'Running: yes')
++verify(state[2].strip() == 'Detected: no')
++
+ # Start `br2` and `br3` together on a different AIL
+ 
+ br2.br_init(IF_INDEX_2, 1)
+@@ -108,6 +125,7 @@ time.sleep(10.01 * one_minute / speedup)
+ verify(br1.br_get_multiail() == 'detected')
+ verify(br2.br_get_multiail() == 'detected')
+ verify(br3.br_get_multiail() == 'detected')
++verify(detector.br_get_multiail() == 'detected')
+ 
+ # Disable `br1`
+ 
+@@ -118,8 +136,9 @@ time.sleep(9 * one_minute / speedup)
+ 
+ verify(br2.br_get_multiail() == 'not detected')
+ verify(br3.br_get_multiail() == 'not detected')
++verify(detector.br_get_multiail() == 'not detected')
+ 
+-# Enable `br` again, wait for a short time (before detection) and disable it
++# Enable `br1` again, wait for a short time (before detection) and disable it
+ 
+ br1.br_enable()
+ 
+@@ -133,6 +152,18 @@ time.sleep(10 * one_minute / speedup)
+ 
+ verify(br2.br_get_multiail() == 'not detected')
+ verify(br3.br_get_multiail() == 'not detected')
++verify(detector.br_get_multiail() == 'not detected')
++
++# `br1` is no longer enabled to act as BR, but its multi-ail detector
++# should continue to operate and detect that it is on a different AIL.
++
++verify(br1.br_get_multiail() == 'detected')
++
++state = br1.br_get_multiail_state()
++verify(len(state) == 3)
++verify(state[0].strip() == 'Enabled: yes')
++verify(state[1].strip() == 'Running: yes')
++verify(state[2].strip() == 'Detected: yes')
+ 
+ # -----------------------------------------------------------------------------------------------------------------------
+ # Test finished
+diff --git a/tests/unit/test_routing_manager.cpp b/tests/unit/test_routing_manager.cpp
+index e4f90601b1..5b5f1853c3 100644
+--- a/tests/unit/test_routing_manager.cpp
++++ b/tests/unit/test_routing_manager.cpp
+@@ -1416,6 +1416,18 @@ void InitTest(bool aEnablBorderRouting = false, bool aAfterReset = false)
+ 
+     SuccessOrQuit(otIp6SetEnabled(sInstance, true));
+     SuccessOrQuit(otThreadSetEnabled(sInstance, true));
++
++#if OPENTHREAD_CONFIG_BORDER_ROUTING_MULTI_AIL_DETECTION_ENABLE
++    // We explicitly disable the multi-AIL detector to prevent
++    // interference with the tests. The detector enables
++    // `RxRaTracker` and keeps it enabled even when Border Routing is
++    // disabled, which keeps prefix entries in the heap and can
++    // invalidate the heap allocation checks. It may also mess up the
++    // expected timing of RS (Router Solicitation) messages (starting
++    // the `RxRaTracker` early).
++    otBorderRoutingSetMultiAilDetectionEnabled(sInstance, false);
++#endif
++
+     SuccessOrQuit(otBorderRoutingSetEnabled(sInstance, aEnablBorderRouting));
+ 
+     // Reset all test flags

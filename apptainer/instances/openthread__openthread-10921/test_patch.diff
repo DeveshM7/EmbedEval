@@ -1,0 +1,216 @@
+diff --git a/tests/gtest/fake_platform.cpp b/tests/gtest/fake_platform.cpp
+index db915b10f2..5f109e0757 100644
+--- a/tests/gtest/fake_platform.cpp
++++ b/tests/gtest/fake_platform.cpp
+@@ -39,8 +39,6 @@
+ #include <openthread/instance.h>
+ #include <openthread/tasklet.h>
+ #include <openthread/tcat.h>
+-#include <openthread/platform/alarm-micro.h>
+-#include <openthread/platform/alarm-milli.h>
+ #include <openthread/platform/ble.h>
+ #include <openthread/platform/diag.h>
+ #include <openthread/platform/dso_transport.h>
+@@ -124,11 +122,15 @@ void FakePlatform::StartMilliAlarm(uint32_t aT0, uint32_t aDt)
+ 
+ void FakePlatform::StopMilliAlarm() { mMilliAlarmStart = kAlarmStop; }
+ 
+-void FakePlatform::ProcessAlarm(uint64_t &aTimeout)
++template <> void FakePlatform::HandleSchedule<&FakePlatform::mReceiveAtStart>() { mChannel = mReceiveAtChannel; }
++
++template <> void FakePlatform::HandleSchedule<&FakePlatform::mReceiveAtEnd>() { mChannel = 0; }
++
++void FakePlatform::ProcessSchedules(uint64_t &aTimeout)
+ {
+-    uint64_t end = mNow + aTimeout;
++    uint64_t guard = mNow + aTimeout;
+ 
+-    uint64_t *alarm = &end;
++    uint64_t *alarm = &guard;
+ #if OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE
+     if (mMicroAlarmStart < *alarm)
+     {
+@@ -139,6 +141,14 @@ void FakePlatform::ProcessAlarm(uint64_t &aTimeout)
+     {
+         alarm = &mMilliAlarmStart;
+     }
++    if (mReceiveAtStart < *alarm)
++    {
++        alarm = &mReceiveAtStart;
++    }
++    else if (mReceiveAtEnd < *alarm)
++    {
++        alarm = &mReceiveAtEnd;
++    }
+ 
+     if (mNow < *alarm)
+     {
+@@ -146,17 +156,29 @@ void FakePlatform::ProcessAlarm(uint64_t &aTimeout)
+         mNow = *alarm;
+     }
+     *alarm = kAlarmStop;
+-#if OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE
+-    if (alarm == &mMicroAlarmStart)
++
++    if (alarm == &guard)
+     {
+-        otPlatAlarmMicroFired(mInstance);
++        // nonthing scheduled within this period.
+     }
+-    else
+-#endif
+-        if (alarm == &mMilliAlarmStart)
++    else if (alarm == &mReceiveAtEnd)
+     {
+-        otPlatAlarmMilliFired(mInstance);
++        FakePlatform::HandleSchedule<&FakePlatform::mReceiveAtEnd>();
+     }
++    else if (alarm == &mReceiveAtStart)
++    {
++        FakePlatform::HandleSchedule<&FakePlatform::mReceiveAtStart>();
++    }
++    else if (alarm == &mMilliAlarmStart)
++    {
++        FakePlatform::HandleSchedule<&FakePlatform::mMilliAlarmStart>();
++    }
++#if OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE
++    else if (alarm == &mMicroAlarmStart)
++    {
++        FakePlatform::HandleSchedule<&FakePlatform::mMicroAlarmStart>();
++    }
++#endif
+ }
+ 
+ uint64_t FakePlatform::Run(uint64_t aTimeoutInUs)
+@@ -167,7 +189,7 @@ uint64_t FakePlatform::Run(uint64_t aTimeoutInUs)
+     }
+     else
+     {
+-        ProcessAlarm(aTimeoutInUs);
++        ProcessSchedules(aTimeoutInUs);
+     }
+ 
+     return aTimeoutInUs;
+@@ -356,6 +378,11 @@ otError otPlatRadioSleep(otInstance *) { return OT_ERROR_NONE; }
+ 
+ otError otPlatRadioReceive(otInstance *, uint8_t aChannel) { return FakePlatform::CurrentPlatform().Receive(aChannel); }
+ 
++otError otPlatRadioReceiveAt(otInstance *, uint8_t aChannel, uint32_t aStart, uint32_t aDuration)
++{
++    return FakePlatform::CurrentPlatform().ReceiveAt(aChannel, aStart, aDuration);
++}
++
+ otError otPlatRadioTransmit(otInstance *, otRadioFrame *aFrame)
+ {
+     return FakePlatform::CurrentPlatform().Transmit(aFrame);
+diff --git a/tests/gtest/fake_platform.hpp b/tests/gtest/fake_platform.hpp
+index b10c7ca1b8..1cabe39020 100644
+--- a/tests/gtest/fake_platform.hpp
++++ b/tests/gtest/fake_platform.hpp
+@@ -38,6 +38,8 @@
+ 
+ #include <openthread/error.h>
+ #include <openthread/instance.h>
++#include <openthread/platform/alarm-micro.h>
++#include <openthread/platform/alarm-milli.h>
+ #include <openthread/platform/radio.h>
+ #include <openthread/platform/time.h>
+ 
+@@ -77,7 +79,16 @@ public:
+     uint8_t               GetReceiveChannel(void) const { return mChannel; }
+     virtual otRadioFrame *GetTransmitBuffer() { return &mTransmitFrame; }
+     virtual otError       Transmit(otRadioFrame *aFrame);
+-    virtual otError       Receive(uint8_t aChannel)
++    virtual otError       ReceiveAt(uint8_t aChannel, uint32_t aStart, uint32_t aDuration)
++    {
++        mReceiveAtChannel = aChannel;
++        mReceiveAtStart   = mNow + aStart;
++        mReceiveAtEnd     = mReceiveAtStart + aDuration;
++
++        return OT_ERROR_NONE;
++    }
++
++    virtual otError Receive(uint8_t aChannel)
+     {
+         mChannel = aChannel;
+         return OT_ERROR_NONE;
+@@ -98,7 +109,7 @@ public:
+     virtual uint64_t GetEui64() const { return 0; }
+ 
+ protected:
+-    void ProcessAlarm(uint64_t &aTimeout);
++    void ProcessSchedules(uint64_t &aTimeout);
+ 
+     static constexpr uint64_t kAlarmStop = 0xffffffffffffffffUL;
+ 
+@@ -115,15 +126,33 @@ protected:
+ #endif
+     uint64_t mMilliAlarmStart = kAlarmStop;
+ 
++    uint64_t mReceiveAtStart = kAlarmStop;
++    uint64_t mReceiveAtEnd   = kAlarmStop;
++
++    template <uint64_t FakePlatform::*T> void HandleSchedule();
++
+     otRadioFrame mTransmitFrame;
+     uint8_t      mTransmitBuffer[OT_RADIO_FRAME_MAX_SIZE];
+-    uint8_t      mChannel = 0;
++    uint8_t      mChannel          = 0;
++    uint8_t      mReceiveAtChannel = 0;
+ 
+     uint8_t mFlash[kFlashSwapSize * kFlashSwapNum];
+ 
+     std::map<uint32_t, std::vector<std::vector<uint8_t>>> mSettings;
+ };
+ 
++template <> inline void FakePlatform::HandleSchedule<&FakePlatform::mMilliAlarmStart>()
++{
++    otPlatAlarmMilliFired(mInstance);
++}
++
++#if OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE
++template <> inline void FakePlatform::HandleSchedule<&FakePlatform::mMicroAlarmStart>()
++{
++    otPlatAlarmMicroFired(mInstance);
++}
++#endif
++
+ } // namespace ot
+ 
+ #endif // OT_GTEST_FAKE_PLATFORM_HPP_
+diff --git a/tests/gtest/radio_spinel_rcp_test.cpp b/tests/gtest/radio_spinel_rcp_test.cpp
+index 4865b14b89..74ab0c2363 100644
+--- a/tests/gtest/radio_spinel_rcp_test.cpp
++++ b/tests/gtest/radio_spinel_rcp_test.cpp
+@@ -285,3 +285,31 @@ TEST(RadioSpinelTransmit, shouldNotCauseSwitchingToRxAfterTxDoneIfNotRxOnWhenIdl
+     platform.GoInMs(1000);
+     EXPECT_EQ(platform.GetReceiveChannel(), 11);
+ }
++
++TEST(RadioSpinelReceiveAt, shouldReceiveAtGiveRadioTime)
++{
++    class MockPlatform : public FakeCoprocessorPlatform
++    {
++    public:
++        MOCK_METHOD(otError, ReceiveAt, (uint8_t aChannel, uint32_t aStart, uint32_t aDuration), (override));
++    };
++
++    MockPlatform platform;
++
++    ON_CALL(platform, ReceiveAt)
++        .WillByDefault([&platform](uint8_t aChannel, uint32_t aStart, uint32_t aDuration) -> otError {
++            return platform.FakePlatform::ReceiveAt(aChannel, aStart, aDuration);
++        });
++
++    EXPECT_CALL(platform, ReceiveAt).Times(1);
++
++    ASSERT_EQ(platform.mRadioSpinel.Enable(FakePlatform::CurrentInstance()), kErrorNone);
++    ASSERT_EQ(platform.mRadioSpinel.SetRxOnWhenIdle(false), kErrorNone);
++    ASSERT_EQ(platform.mRadioSpinel.ReceiveAt(100000, 10000, 11), kErrorNone);
++    platform.GoInUs(100000);
++    EXPECT_EQ(platform.GetReceiveChannel(), 0);
++    platform.GoInUs(1);
++    EXPECT_EQ(platform.GetReceiveChannel(), 11);
++    platform.GoInUs(10000);
++    EXPECT_EQ(platform.GetReceiveChannel(), 0);
++}

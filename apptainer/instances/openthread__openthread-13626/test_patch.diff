@@ -1,0 +1,522 @@
+diff --git a/tests/gtest/CMakeLists.txt b/tests/gtest/CMakeLists.txt
+index a651533f1e..4aebe046fb 100644
+--- a/tests/gtest/CMakeLists.txt
++++ b/tests/gtest/CMakeLists.txt
+@@ -67,6 +67,55 @@ target_link_libraries(ot-ftd-gtest
+ )
+ gtest_discover_tests(ot-ftd-gtest)
+ 
++add_executable(ot-posix-gtest
++    multicast_forwarding_test.cpp
++    ${openthread_SOURCE_DIR}/src/posix/platform/multicast_forwarding.cpp
++)
++
++target_include_directories(ot-posix-gtest PRIVATE
++    ${openthread_SOURCE_DIR}/src
++    ${openthread_SOURCE_DIR}/src/core
++    ${openthread_SOURCE_DIR}/src/posix/platform
++)
++
++target_link_libraries(ot-posix-gtest
++    ot-fake-ftd
++    GTest::gtest
++    GTest::gtest_main
++)
++
++gtest_discover_tests(ot-posix-gtest)
++
++# The BPF tap exists only where BPF does. Its source is compiled under the Backbone Router multicast routing
++# configuration, which the test turns on for itself so that it runs whether or not the build enables the Backbone
++# Router; only an explicit OT_BACKBONE_ROUTER=OFF, where ot-config already defines the guard as 0, leaves it out.
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND (OT_BACKBONE_ROUTER OR OT_BACKBONE_ROUTER STREQUAL ""))
++    add_executable(ot-posix-bpf-gtest
++        bpf_tap_test.cpp
++        ${openthread_SOURCE_DIR}/src/posix/platform/bpf_tap.cpp
++    )
++
++    target_compile_definitions(ot-posix-bpf-gtest PRIVATE
++        OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE=1
++        OPENTHREAD_CONFIG_BACKBONE_ROUTER_MULTICAST_ROUTING_ENABLE=1
++        OPENTHREAD_POSIX_CONFIG_BACKBONE_ROUTER_MULTICAST_ROUTING_ENABLE=1
++    )
++
++    target_include_directories(ot-posix-bpf-gtest PRIVATE
++        ${openthread_SOURCE_DIR}/src
++        ${openthread_SOURCE_DIR}/src/core
++        ${openthread_SOURCE_DIR}/src/posix/platform
++    )
++
++    target_link_libraries(ot-posix-bpf-gtest
++        ot-fake-ftd
++        GTest::gtest
++        GTest::gtest_main
++    )
++
++    gtest_discover_tests(ot-posix-bpf-gtest)
++endif()
++
+ add_library(ot-fake-rcp
+     fake_coprocessor_platform.cpp
+ )
+diff --git a/tests/gtest/bpf_tap_test.cpp b/tests/gtest/bpf_tap_test.cpp
+new file mode 100644
+index 0000000000..a7325f9ba3
+--- /dev/null
++++ b/tests/gtest/bpf_tap_test.cpp
+@@ -0,0 +1,134 @@
++/*
++ *  Copyright (c) 2026, The OpenThread Authors.
++ *  All rights reserved.
++ *
++ *  Redistribution and use in source and binary forms, with or without
++ *  modification, are permitted provided that the following conditions are met:
++ *  1. Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ *  2. Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ *  3. Neither the name of the copyright holder nor the
++ *     names of its contributors may be used to endorse or promote products
++ *     derived from this software without specific prior written permission.
++ *
++ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ *  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ *  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ *  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ *  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ *  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ *  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ *  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ *  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ *  POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <gtest/gtest.h>
++
++#include <net/bpf.h>
++#include <stddef.h>
++#include <string.h>
++#include <vector>
++
++#include "posix/platform/bpf_tap.hpp"
++
++using namespace ot::Posix;
++
++namespace {
++
++struct Seen
++{
++    std::vector<std::vector<uint8_t>> mFrames;
++
++    static void Handle(void *aContext, const uint8_t *aFrame, uint16_t aLength)
++    {
++        static_cast<Seen *>(aContext)->mFrames.emplace_back(aFrame, aFrame + aLength);
++    }
++};
++
++// The header fields end with `bh_hdrlen`: 18 bytes where `bh_tstamp` is 8 bytes (macOS), 26 where it is 16 bytes
++// (64-bit BSDs). `BpfTap::ParseBuffer()` accepts no header shorter than this.
++constexpr uint16_t kMinHeaderLength = static_cast<uint16_t>(offsetof(struct bpf_hdr, bh_hdrlen) + sizeof(u_short));
++
++// One record as the kernel lays it out: the header fields, padding up to `aHeaderLength`, the frame, and padding
++// to a word boundary.
++void AddRecord(std::vector<uint8_t> &aBuffer,
++               uint16_t              aHeaderLength,
++               uint32_t              aCapLen,
++               uint32_t              aDataLen,
++               uint8_t               aFill)
++{
++    size_t start = aBuffer.size();
++    size_t total = BPF_WORDALIGN(aHeaderLength + aCapLen);
++
++    aBuffer.resize(start + total, 0);
++    memcpy(&aBuffer[start + offsetof(struct bpf_hdr, bh_caplen)], &aCapLen, sizeof(aCapLen));
++    memcpy(&aBuffer[start + offsetof(struct bpf_hdr, bh_datalen)], &aDataLen, sizeof(aDataLen));
++    memcpy(&aBuffer[start + offsetof(struct bpf_hdr, bh_hdrlen)], &aHeaderLength, sizeof(aHeaderLength));
++    memset(&aBuffer[start + aHeaderLength], aFill, aCapLen);
++}
++
++TEST(BpfTapParseBuffer, AcceptsEthernetAndTunnelHeaderLengths)
++{
++    // The kernel pads the header so that the frame behind it is word-aligned: on macOS the fields alone before a
++    // 14-byte Ethernet header, two more bytes before a 4-byte tunnel header. Neither exceeds `sizeof(struct bpf_hdr)`.
++    std::vector<uint8_t> buffer;
++    Seen                 seen;
++
++    AddRecord(buffer, kMinHeaderLength, 60, 60, 0xa1);
++    AddRecord(buffer, kMinHeaderLength, 61, 61, 0xa2); // odd length: the next record is realigned
++    AddRecord(buffer, kMinHeaderLength + 2, 44, 44, 0xa3);
++
++    EXPECT_EQ(BpfTap::ParseBuffer(buffer.data(), buffer.size(), Seen::Handle, &seen), OT_ERROR_NONE);
++    ASSERT_EQ(seen.mFrames.size(), 3u);
++    EXPECT_EQ(seen.mFrames[0].size(), 60u);
++    EXPECT_EQ(seen.mFrames[0][0], 0xa1);
++    EXPECT_EQ(seen.mFrames[1].size(), 61u);
++    EXPECT_EQ(seen.mFrames[1][60], 0xa2);
++    EXPECT_EQ(seen.mFrames[2].size(), 44u);
++    EXPECT_EQ(seen.mFrames[2][43], 0xa3);
++}
++
++TEST(BpfTapParseBuffer, SkipsTruncatedCaptures)
++{
++    std::vector<uint8_t> buffer;
++    Seen                 seen;
++
++    AddRecord(buffer, kMinHeaderLength, 40, 1400, 0xb1); // snapshot shorter than the frame
++    AddRecord(buffer, kMinHeaderLength, 60, 60, 0xb2);
++
++    EXPECT_EQ(BpfTap::ParseBuffer(buffer.data(), buffer.size(), Seen::Handle, &seen), OT_ERROR_NONE);
++    ASSERT_EQ(seen.mFrames.size(), 1u);
++    EXPECT_EQ(seen.mFrames[0][0], 0xb2);
++}
++
++TEST(BpfTapParseBuffer, RejectsInconsistentHeaders)
++{
++    std::vector<uint8_t> buffer;
++    Seen                 seen;
++
++    // A header length of 0 would otherwise loop for ever.
++    AddRecord(buffer, kMinHeaderLength, 60, 60, 0xc1);
++    memset(&buffer[offsetof(struct bpf_hdr, bh_hdrlen)], 0, sizeof(u_short));
++    EXPECT_EQ(BpfTap::ParseBuffer(buffer.data(), buffer.size(), Seen::Handle, &seen), OT_ERROR_PARSE);
++    EXPECT_EQ(seen.mFrames.size(), 0u);
++
++    // A captured length beyond the buffer.
++    buffer.clear();
++    AddRecord(buffer, kMinHeaderLength, 60, 60, 0xc2);
++    buffer.resize(kMinHeaderLength + 30);
++    EXPECT_EQ(BpfTap::ParseBuffer(buffer.data(), buffer.size(), Seen::Handle, &seen), OT_ERROR_PARSE);
++    EXPECT_EQ(seen.mFrames.size(), 0u);
++
++    // A trailing partial header is not a record.
++    buffer.clear();
++    AddRecord(buffer, kMinHeaderLength, 60, 60, 0xc3);
++    buffer.resize(buffer.size() + 10, 0);
++    EXPECT_EQ(BpfTap::ParseBuffer(buffer.data(), buffer.size(), Seen::Handle, &seen), OT_ERROR_NONE);
++    EXPECT_EQ(seen.mFrames.size(), 1u);
++}
++
++} // namespace
+diff --git a/tests/gtest/multicast_forwarding_test.cpp b/tests/gtest/multicast_forwarding_test.cpp
+new file mode 100644
+index 0000000000..183ae91be0
+--- /dev/null
++++ b/tests/gtest/multicast_forwarding_test.cpp
+@@ -0,0 +1,316 @@
++/*
++ *  Copyright (c) 2026, The OpenThread Authors.
++ *  All rights reserved.
++ *
++ *  Redistribution and use in source and binary forms, with or without
++ *  modification, are permitted provided that the following conditions are met:
++ *  1. Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ *  2. Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ *  3. Neither the name of the copyright holder nor the
++ *     names of its contributors may be used to endorse or promote products
++ *     derived from this software without specific prior written permission.
++ *
++ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ *  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ *  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ *  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ *  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ *  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ *  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ *  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ *  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ *  POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <gtest/gtest.h>
++
++#include <string.h>
++
++#include "core/net/ip6_address.hpp"
++#include "posix/platform/multicast_forwarding.hpp"
++
++using namespace ot;
++using namespace ot::Posix::MulticastForwarding;
++
++namespace {
++
++constexpr uint64_t kSecond = 1000000; // otPlatTimeGet() counts microseconds
++
++// An IPv6 header followed by `aPayloadLength` bytes of payload, in `aBuffer` (which may be larger: padding).
++uint16_t MakePacket(uint8_t    *aBuffer,
++                    const char *aSource,
++                    const char *aDestination,
++                    uint16_t    aPayloadLength,
++                    uint8_t     aHopLimit = 64)
++{
++    Ip6::Address source;
++    Ip6::Address destination;
++
++    EXPECT_EQ(source.FromString(aSource), kErrorNone);
++    EXPECT_EQ(destination.FromString(aDestination), kErrorNone);
++
++    memset(aBuffer, 0, kIp6HeaderSize + aPayloadLength);
++    aBuffer[0] = 0x60;
++    aBuffer[4] = static_cast<uint8_t>(aPayloadLength >> 8);
++    aBuffer[5] = static_cast<uint8_t>(aPayloadLength);
++    aBuffer[6] = 17; // UDP
++    aBuffer[7] = aHopLimit;
++    memcpy(aBuffer + 8, source.GetBytes(), 16);
++    memcpy(aBuffer + 24, destination.GetBytes(), 16);
++
++    for (uint16_t i = 0; i < aPayloadLength; i++)
++    {
++        aBuffer[kIp6HeaderSize + i] = static_cast<uint8_t>(i);
++    }
++
++    return kIp6HeaderSize + aPayloadLength;
++}
++
++Ip6::NetworkPrefix MeshLocalPrefix(void)
++{
++    Ip6::Address address;
++
++    EXPECT_EQ(address.FromString("fd7c:1343:5997:b9e7::"), kErrorNone);
++    return address.GetPrefix();
++}
++
++TEST(Check, ForwardsSiteLocalGroupFromUlaSource)
++{
++    uint8_t  packet[100];
++    uint16_t length       = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::abcd", 10);
++    uint16_t packetLength = 0;
++
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kForward);
++    EXPECT_EQ(packetLength, length);
++}
++
++TEST(Check, ReportsRealLengthOfPaddedFrame)
++{
++    // Ethernet pads small frames: the capture is longer than the packet.
++    uint8_t  packet[100];
++    uint16_t length       = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::abcd", 4);
++    uint16_t packetLength = 0;
++
++    memset(packet + length, 0xa5, 20);
++    EXPECT_EQ(Check(packet, length + 20, nullptr, packetLength), kForward);
++    EXPECT_EQ(packetLength, length);
++}
++
++TEST(Check, RejectsTruncatedAndNonIp6)
++{
++    uint8_t  packet[100];
++    uint16_t length = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::abcd", 40);
++    uint16_t packetLength;
++
++    EXPECT_EQ(Check(packet, length - 1, nullptr, packetLength), kNotIp6);         // payload length beyond the capture
++    EXPECT_EQ(Check(packet, kIp6HeaderSize - 1, nullptr, packetLength), kNotIp6); // shorter than a header
++    packet[0] = 0x45;
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kNotIp6);
++}
++
++TEST(Check, RejectsUnicastDestination)
++{
++    uint8_t  packet[100];
++    uint16_t length = MakePacket(packet, "fd26:e30:5393:1::1", "fd26:e30:5393:1::2", 10);
++    uint16_t packetLength;
++
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kNotMulticast);
++}
++
++TEST(Check, RejectsScopesSmallerThanAdminLocal)
++{
++    uint8_t  packet[100];
++    uint16_t packetLength;
++    uint16_t length;
++
++    length = MakePacket(packet, "fd26:e30:5393:1::1", "ff02::1", 10);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kScopeTooSmall);
++    length = MakePacket(packet, "fd26:e30:5393:1::1", "ff03::1", 10);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kScopeTooSmall);
++    length = MakePacket(packet, "fd26:e30:5393:1::1", "ff04::1", 10);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kForward);
++    length = MakePacket(packet, "fd26:e30:5393:1::1", "ff0e::1", 10);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kForward);
++}
++
++TEST(Check, RejectsBadSources)
++{
++    uint8_t            packet[100];
++    uint16_t           packetLength;
++    uint16_t           length;
++    Ip6::NetworkPrefix meshLocal = MeshLocalPrefix();
++
++    length = MakePacket(packet, "fe80::1", "ff05::1", 10);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kBadSource);
++    length = MakePacket(packet, "::", "ff05::1", 10);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kBadSource);
++    length = MakePacket(packet, "ff05::2", "ff05::1", 10);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kBadSource);
++    length = MakePacket(packet, "::1", "ff05::1", 10);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kBadSource);
++
++    // Mesh-local sources stay in the mesh; without a prefix to compare against they pass.
++    length = MakePacket(packet, "fd7c:1343:5997:b9e7:0:ff:fe00:fc00", "ff05::1", 10);
++    EXPECT_EQ(Check(packet, length, &meshLocal, packetLength), kBadSource);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kForward);
++    length = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::1", 10);
++    EXPECT_EQ(Check(packet, length, &meshLocal, packetLength), kForward);
++}
++
++TEST(Check, RejectsHopLimitBelowTwo)
++{
++    uint8_t  packet[100];
++    uint16_t packetLength;
++    uint16_t length;
++
++    length = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::1", 10, 1);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kHopLimitExceeded);
++    length = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::1", 10, 0);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kHopLimitExceeded);
++    length = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::1", 10, 2);
++    EXPECT_EQ(Check(packet, length, nullptr, packetLength), kForward);
++}
++
++TEST(DedupCache, SecondSightingIsDuplicateAndHopLimitIsIgnored)
++{
++    DedupCache cache;
++    uint8_t    packet[100];
++    uint16_t   length      = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::1", 10, 64);
++    uint64_t   fingerprint = DedupCache::Fingerprint(packet, length);
++
++    cache.Clear();
++    EXPECT_FALSE(cache.Check(fingerprint, 0));
++    EXPECT_TRUE(cache.Check(fingerprint, 10));
++
++    packet[7] = 63; // one hop later, same packet
++    EXPECT_EQ(DedupCache::Fingerprint(packet, length), fingerprint);
++
++    packet[kIp6HeaderSize] ^= 1;
++    EXPECT_FALSE(cache.Check(DedupCache::Fingerprint(packet, length), 20));
++}
++
++TEST(DedupCache, WindowRunsFromTheFirstSighting)
++{
++    // A sender repeating an identical packet more often than the window must not be suppressed for ever.
++    DedupCache cache;
++    uint64_t   window = static_cast<uint64_t>(DedupCache::kWindowMs) * 1000;
++
++    cache.Clear();
++    EXPECT_FALSE(cache.Check(42, 0));
++    EXPECT_TRUE(cache.Check(42, window / 3));
++    EXPECT_TRUE(cache.Check(42, 2 * window / 3));
++    EXPECT_FALSE(cache.Check(42, window + 1));
++}
++
++TEST(DedupCache, EvictsTheOldestWhenFull)
++{
++    DedupCache cache;
++
++    cache.Clear();
++    for (uint32_t i = 0; i < DedupCache::kNumEntries; i++)
++    {
++        EXPECT_FALSE(cache.Check(1000 + i, i));
++    }
++    // Every miss takes the least recently seen entry's slot.
++    EXPECT_FALSE(cache.Check(5000, DedupCache::kNumEntries)); // evicts 1000
++    EXPECT_TRUE(cache.Check(1002, DedupCache::kNumEntries + 1));
++    EXPECT_FALSE(cache.Check(1000, DedupCache::kNumEntries + 2)); // gone; evicts 1001
++    EXPECT_FALSE(cache.Check(1001, DedupCache::kNumEntries + 3)); // gone; evicts 1002
++    EXPECT_FALSE(cache.Check(1002, DedupCache::kNumEntries + 4)); // gone; evicts 1003
++    EXPECT_TRUE(cache.Check(1004, DedupCache::kNumEntries + 5));
++}
++
++TEST(TokenBucket, ZeroRateNeverRefills)
++{
++    TokenBucket bucket;
++
++    bucket.Init(/* aRatePerSecond */ 0, /* aBurst */ 2, 0);
++    EXPECT_TRUE(bucket.Take(0));
++    EXPECT_TRUE(bucket.Take(0));
++    EXPECT_FALSE(bucket.Take(0));
++    EXPECT_FALSE(bucket.Take(10 * kSecond));
++    EXPECT_FALSE(bucket.Take(1000 * kSecond));
++}
++
++TEST(TokenBucket, RefillsAtRateUpToBurst)
++{
++    TokenBucket bucket;
++
++    bucket.Init(/* aRatePerSecond */ 10, /* aBurst */ 5, 0);
++    for (int i = 0; i < 5; i++)
++    {
++        EXPECT_TRUE(bucket.Take(0));
++    }
++    EXPECT_FALSE(bucket.Take(0));
++    EXPECT_FALSE(bucket.Take(kSecond / 20)); // 50 ms: half a token
++    EXPECT_TRUE(bucket.Take(kSecond / 10));  // 100 ms: one token
++    EXPECT_FALSE(bucket.Take(kSecond / 10));
++    for (int i = 0; i < 5; i++)
++    {
++        EXPECT_TRUE(bucket.Take(100 * kSecond)); // long idle: full again, but not more than the burst
++    }
++    EXPECT_FALSE(bucket.Take(100 * kSecond));
++}
++
++TEST(RateLimiter, GroupOverItsLimitDoesNotDrainTheSharedBudget)
++{
++    RateLimiter::Config config = {/* mPerGroupRatePerSecond */ 0, /* mPerGroupBurst */ 1,
++                                  /* mTotalRatePerSecond */ 0, /* mTotalBurst */ 10};
++    RateLimiter         limiter(config);
++    Ip6::Address        a, b;
++
++    EXPECT_EQ(a.FromString("ff05::a"), kErrorNone);
++    EXPECT_EQ(b.FromString("ff05::b"), kErrorNone);
++
++    EXPECT_TRUE(limiter.Allow(a, 0));
++    for (int i = 0; i < 20; i++)
++    {
++        EXPECT_FALSE(limiter.Allow(a, 0));
++    }
++    EXPECT_TRUE(limiter.Allow(b, 0)); // the shared budget has 9 left
++}
++
++TEST(RateLimiter, GroupIsNotChargedWhenTheSharedBudgetIsExhausted)
++{
++    RateLimiter::Config config = {/* mPerGroupRatePerSecond */ 0, /* mPerGroupBurst */ 1,
++                                  /* mTotalRatePerSecond */ 2, /* mTotalBurst */ 1};
++    RateLimiter         limiter(config);
++    Ip6::Address        a, b;
++
++    EXPECT_EQ(a.FromString("ff05::a"), kErrorNone);
++    EXPECT_EQ(b.FromString("ff05::b"), kErrorNone);
++
++    EXPECT_TRUE(limiter.Allow(a, 0));           // takes the only shared token
++    EXPECT_FALSE(limiter.Allow(b, 0));          // shared budget exhausted: b's own token must survive this
++    EXPECT_TRUE(limiter.Allow(b, kSecond / 2)); // shared budget refilled one token; b spends its own
++    EXPECT_FALSE(limiter.Allow(b, kSecond));    // b's own bucket is now empty (rate 0)
++}
++
++TEST(BuildEthernetFrame, MapsGroupToMulticastMac)
++{
++    uint8_t  packet[100];
++    uint8_t  frame[200];
++    uint8_t  mac[kMacSize] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
++    uint16_t length        = MakePacket(packet, "fd26:e30:5393:1::1", "ff05::1234:5678:9abc:def0", 10);
++    uint16_t frameLength   = BuildEthernetFrame(packet, length, mac, frame, sizeof(frame));
++
++    ASSERT_EQ(frameLength, kEthernetHeaderSize + length);
++    EXPECT_EQ(frame[0], 0x33);
++    EXPECT_EQ(frame[1], 0x33);
++    EXPECT_EQ(frame[2], 0x9a);
++    EXPECT_EQ(frame[3], 0xbc);
++    EXPECT_EQ(frame[4], 0xde);
++    EXPECT_EQ(frame[5], 0xf0);
++    EXPECT_EQ(memcmp(frame + 6, mac, kMacSize), 0);
++    EXPECT_EQ(frame[12], 0x86);
++    EXPECT_EQ(frame[13], 0xdd);
++    EXPECT_EQ(memcmp(frame + kEthernetHeaderSize, packet, length), 0);
++
++    EXPECT_EQ(BuildEthernetFrame(packet, length, mac, frame, kEthernetHeaderSize + length - 1), 0);
++}
++
++} // namespace

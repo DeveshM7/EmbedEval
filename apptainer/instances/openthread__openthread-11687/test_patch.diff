@@ -1,0 +1,462 @@
+diff --git a/tests/scripts/thread-cert/border_router/test_dnssd_server.py b/tests/scripts/thread-cert/border_router/test_dnssd_server.py
+index 178ead1715..51ccd85c0f 100755
+--- a/tests/scripts/thread-cert/border_router/test_dnssd_server.py
++++ b/tests/scripts/thread-cert/border_router/test_dnssd_server.py
+@@ -218,16 +218,16 @@ class TestDnssdServerOnBr(thread_cert.TestCase):
+             if len(answer) >= 2 and answer[-2] == 'PTR':
+                 dp_instance_name = answer[-1]
+                 break
+-        self._assert_dig_result_matches(
+-            dig_result, {
+-                'QUESTION': [(dp_service_name, 'IN', 'PTR'),],
+-                'ANSWER': [(dp_service_name, 'IN', 'PTR', dp_instance_name),],
+-                'ADDITIONAL': [
+-                    (dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),
+-                    (dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
+-                        'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),
+-                ],
+-            })
++        self._assert_dig_result_matches(dig_result, {
++            'QUESTION': [(dp_service_name, 'IN', 'PTR'),],
++            'ANSWER': [(dp_service_name, 'IN', 'PTR', dp_instance_name),],
++            'ADDITIONAL': [
++                (dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),
++                (dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get('nn') == network_name
++                                                             and 'xp' in txt and 'tv' in txt and 'xa' in txt)),
++            ],
++        },
++                                        max_ttl=10)
+ 
+         # Find the actual host name and IPv6 address
+         dp_ip6_address = None
+@@ -240,22 +240,22 @@ class TestDnssdServerOnBr(thread_cert.TestCase):
+         assert isinstance(dp_hostname, str), dig_result
+ 
+         dig_result = digger.dns_dig(server_addr, dp_instance_name, 'SRV')
+-        self._assert_dig_result_matches(
+-            dig_result, {
+-                'QUESTION': [(dp_instance_name, 'IN', 'SRV'),],
+-                'ANSWER': [(dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),],
+-                'ADDITIONAL': [(dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
+-                    'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),],
+-            })
++        self._assert_dig_result_matches(dig_result, {
++            'QUESTION': [(dp_instance_name, 'IN', 'SRV'),],
++            'ANSWER': [(dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),],
++            'ADDITIONAL': [(dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
++                'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),],
++        },
++                                        max_ttl=10)
+ 
+         dig_result = digger.dns_dig(server_addr, dp_instance_name, 'TXT')
+-        self._assert_dig_result_matches(
+-            dig_result, {
+-                'QUESTION': [(dp_instance_name, 'IN', 'TXT'),],
+-                'ANSWER': [(dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
+-                    'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),],
+-                'ADDITIONAL': [(dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),],
+-            })
++        self._assert_dig_result_matches(dig_result, {
++            'QUESTION': [(dp_instance_name, 'IN', 'TXT'),],
++            'ANSWER': [(dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
++                'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),],
++            'ADDITIONAL': [(dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),],
++        },
++                                        max_ttl=10)
+ 
+         if dp_ip6_address is not None:
+             dig_result = digger.dns_dig(server_addr, dp_hostname, 'AAAA')
+@@ -264,7 +264,8 @@ class TestDnssdServerOnBr(thread_cert.TestCase):
+                 'QUESTION': [(dp_hostname, 'IN', 'AAAA'),],
+                 'ANSWER': [(dp_hostname, 'IN', 'AAAA', dp_ip6_address),],
+             },
+-                                            allow_extra_answer=True)
++                                            allow_extra_answer=True,
++                                            max_ttl=10)
+ 
+     def _config_srp_client_services(self, client, instancename, hostname, port, priority, weight, addrs):
+         client.srp_client_enable_auto_start_mode()
+@@ -282,9 +283,14 @@ class TestDnssdServerOnBr(thread_cert.TestCase):
+ 
+         self.fail((dig_result, question))
+ 
+-    def _assert_have_answer(self, dig_result, record, additional=False):
++    def _assert_have_answer(self, dig_result, record, additional=False, max_ttl=0):
+         for dig_answer in dig_result['ANSWER' if not additional else 'ADDITIONAL']:
+             dig_answer = list(dig_answer)
++            ttl = dig_answer[1]
++            if max_ttl and ttl > max_ttl:
++                print('not match: ttl = {ttl} > {max_ttl}')
++                continue
++
+             dig_answer[1:2] = []  # remove TTL from answer
+ 
+             record = list(record)
+@@ -316,7 +322,7 @@ class TestDnssdServerOnBr(thread_cert.TestCase):
+ 
+         return all(a == b or (callable(b) and b(a)) for a, b in zip(record, match))
+ 
+-    def _assert_dig_result_matches(self, dig_result, expected_result, allow_extra_answer=False):
++    def _assert_dig_result_matches(self, dig_result, expected_result, allow_extra_answer=False, max_ttl=0):
+         self.assertEqual(dig_result['opcode'], expected_result.get('opcode', 'QUERY'), dig_result)
+         self.assertEqual(dig_result['status'], expected_result.get('status', 'NOERROR'), dig_result)
+ 
+@@ -333,11 +339,11 @@ class TestDnssdServerOnBr(thread_cert.TestCase):
+                 self.assertEqual(len(dig_result['ANSWER']), len(expected_result['ANSWER']), dig_result)
+ 
+             for record in expected_result['ANSWER']:
+-                self._assert_have_answer(dig_result, record, additional=False)
++                self._assert_have_answer(dig_result, record, additional=False, max_ttl=max_ttl)
+ 
+         if 'ADDITIONAL' in expected_result:
+             for record in expected_result['ADDITIONAL']:
+-                self._assert_have_answer(dig_result, record, additional=True)
++                self._assert_have_answer(dig_result, record, additional=True, max_ttl=max_ttl)
+ 
+         logging.info("dig result matches:\r%s", json.dumps(dig_result, indent=True))
+ 
+diff --git a/tests/scripts/thread-cert/border_router/test_dnssd_server_multi_border_routers.py b/tests/scripts/thread-cert/border_router/test_dnssd_server_multi_border_routers.py
+index 783f7fa0bc..148cf6b99a 100755
+--- a/tests/scripts/thread-cert/border_router/test_dnssd_server_multi_border_routers.py
++++ b/tests/scripts/thread-cert/border_router/test_dnssd_server_multi_border_routers.py
+@@ -297,16 +297,16 @@ class TestDnssdServerOnMultiBr(thread_cert.TestCase):
+             if len(answer) >= 2 and answer[-2] == 'PTR':
+                 dp_instance_name = answer[-1]
+                 break
+-        self._assert_dig_result_matches(
+-            dig_result, {
+-                'QUESTION': [(dp_service_name, 'IN', 'PTR'),],
+-                'ANSWER': [(dp_service_name, 'IN', 'PTR', dp_instance_name),],
+-                'ADDITIONAL': [
+-                    (dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),
+-                    (dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
+-                        'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),
+-                ],
+-            })
++        self._assert_dig_result_matches(dig_result, {
++            'QUESTION': [(dp_service_name, 'IN', 'PTR'),],
++            'ANSWER': [(dp_service_name, 'IN', 'PTR', dp_instance_name),],
++            'ADDITIONAL': [
++                (dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),
++                (dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get('nn') == network_name
++                                                             and 'xp' in txt and 'tv' in txt and 'xa' in txt)),
++            ],
++        },
++                                        max_ttl=10)
+ 
+         # Find the actual host name and IPv6 address
+         dp_ip6_address = None
+@@ -319,22 +319,22 @@ class TestDnssdServerOnMultiBr(thread_cert.TestCase):
+         assert isinstance(dp_hostname, str), dig_result
+ 
+         dig_result = digger.dns_dig(server_addr, dp_instance_name, 'SRV')
+-        self._assert_dig_result_matches(
+-            dig_result, {
+-                'QUESTION': [(dp_instance_name, 'IN', 'SRV'),],
+-                'ANSWER': [(dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),],
+-                'ADDITIONAL': [(dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
+-                    'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),],
+-            })
++        self._assert_dig_result_matches(dig_result, {
++            'QUESTION': [(dp_instance_name, 'IN', 'SRV'),],
++            'ANSWER': [(dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),],
++            'ADDITIONAL': [(dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
++                'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),],
++        },
++                                        max_ttl=10)
+ 
+         dig_result = digger.dns_dig(server_addr, dp_instance_name, 'TXT')
+-        self._assert_dig_result_matches(
+-            dig_result, {
+-                'QUESTION': [(dp_instance_name, 'IN', 'TXT'),],
+-                'ANSWER': [(dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
+-                    'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),],
+-                'ADDITIONAL': [(dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),],
+-            })
++        self._assert_dig_result_matches(dig_result, {
++            'QUESTION': [(dp_instance_name, 'IN', 'TXT'),],
++            'ANSWER': [(dp_instance_name, 'IN', 'TXT', lambda txt: (isinstance(txt, dict) and txt.get(
++                'nn') == network_name and 'xp' in txt and 'tv' in txt and 'xa' in txt)),],
++            'ADDITIONAL': [(dp_instance_name, 'IN', 'SRV', 0, 0, check_border_agent_port, dp_hostname),],
++        },
++                                        max_ttl=10)
+ 
+         if dp_ip6_address is not None:
+             dig_result = digger.dns_dig(server_addr, dp_hostname, 'AAAA')
+@@ -343,7 +343,8 @@ class TestDnssdServerOnMultiBr(thread_cert.TestCase):
+                 'QUESTION': [(dp_hostname, 'IN', 'AAAA'),],
+                 'ANSWER': [(dp_hostname, 'IN', 'AAAA', dp_ip6_address),],
+             },
+-                                            allow_extra_answer=True)
++                                            allow_extra_answer=True,
++                                            max_ttl=10)
+ 
+     def _config_srp_client_services(self, client, instancename, hostname, port, priority, weight, addrs):
+         client.srp_client_enable_auto_start_mode()
+@@ -362,9 +363,14 @@ class TestDnssdServerOnMultiBr(thread_cert.TestCase):
+ 
+         self.fail((dig_result, question))
+ 
+-    def _assert_have_answer(self, dig_result, record, additional=False):
++    def _assert_have_answer(self, dig_result, record, additional=False, max_ttl=0):
+         for dig_answer in dig_result['ANSWER' if not additional else 'ADDITIONAL']:
+             dig_answer = list(dig_answer)
++            ttl = dig_answer[1]
++            if max_ttl and ttl > max_ttl:
++                print('not match: ttl = {ttl} > {max_ttl}')
++                continue
++
+             dig_answer[1:2] = []  # remove TTL from answer
+ 
+             record = list(record)
+@@ -396,7 +402,7 @@ class TestDnssdServerOnMultiBr(thread_cert.TestCase):
+ 
+         return all(a == b or (callable(b) and b(a)) for a, b in zip(record, match))
+ 
+-    def _assert_dig_result_matches(self, dig_result, expected_result, allow_extra_answer=False):
++    def _assert_dig_result_matches(self, dig_result, expected_result, allow_extra_answer=False, max_ttl=0):
+         self.assertEqual(dig_result['opcode'], expected_result.get('opcode', 'QUERY'), dig_result)
+         self.assertEqual(dig_result['status'], expected_result.get('status', 'NOERROR'), dig_result)
+ 
+@@ -413,11 +419,11 @@ class TestDnssdServerOnMultiBr(thread_cert.TestCase):
+                 self.assertEqual(len(dig_result['ANSWER']), len(expected_result['ANSWER']), dig_result)
+ 
+             for record in expected_result['ANSWER']:
+-                self._assert_have_answer(dig_result, record, additional=False)
++                self._assert_have_answer(dig_result, record, additional=False, max_ttl=max_ttl)
+ 
+         if 'ADDITIONAL' in expected_result:
+             for record in expected_result['ADDITIONAL']:
+-                self._assert_have_answer(dig_result, record, additional=True)
++                self._assert_have_answer(dig_result, record, additional=True, max_ttl=max_ttl)
+ 
+         logging.info("dig result matches:\r%s", json.dumps(dig_result, indent=True))
+ 
+diff --git a/tests/unit/test_dnssd_discovery_proxy.cpp b/tests/unit/test_dnssd_discovery_proxy.cpp
+index 8daf7dab80..d242f447db 100644
+--- a/tests/unit/test_dnssd_discovery_proxy.cpp
++++ b/tests/unit/test_dnssd_discovery_proxy.cpp
+@@ -158,6 +158,8 @@ void otPlatLog(otLogLevel aLogLevel, otLogRegion aLogRegion, const char *aFormat
+ 
+ //---------------------------------------------------------------------------------------------------------------------
+ 
++static constexpr uint32_t kCappedTtl = 10;
++
+ void ProcessRadioTxAndTasklets(void)
+ {
+     do
+@@ -1286,12 +1288,12 @@ void TestProxyBasic(void)
+     VerifyOrQuit(!strcmp(sBrowseInfo.mInstanceLabel, "hulk"));
+     VerifyOrQuit(!strcmp(sBrowseInfo.mServiceInfo.mHostNameBuffer, "compound.default.service.arpa."));
+     VerifyOrQuit(sBrowseInfo.mServiceInfo.mPort == 7777);
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTtl <= kCappedTtl);
+     VerifyOrQuit(AsCoreType(&sBrowseInfo.mServiceInfo.mHostAddress) == AsCoreType(&addressAndTtl.mAddress));
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mHostAddressTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mHostAddressTtl <= kCappedTtl);
+     VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataSize == sizeof(kTxtData));
+     VerifyOrQuit(!memcmp(sBrowseInfo.mServiceInfo.mTxtData, kTxtData, sizeof(kTxtData)));
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataTtl <= kCappedTtl);
+     VerifyOrQuit(!sBrowseInfo.mServiceInfo.mTxtDataTruncated);
+ 
+     Log("--------------------------------------------------------------------------------------------");
+@@ -1457,12 +1459,12 @@ void TestProxyBasic(void)
+ 
+     VerifyOrQuit(!strcmp(sResolveServiceInfo.mInfo.mHostNameBuffer, "starktower.default.service.arpa."));
+     VerifyOrQuit(sResolveServiceInfo.mInfo.mPort == 1024);
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mTtl == kTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mTtl <= kCappedTtl);
+     VerifyOrQuit(AsCoreType(&sResolveServiceInfo.mInfo.mHostAddress) == AsCoreType(&addressAndTtl.mAddress));
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mHostAddressTtl == kTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mHostAddressTtl <= kCappedTtl);
+     VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataSize == sizeof(kTxtData));
+     VerifyOrQuit(!memcmp(sResolveServiceInfo.mInfo.mTxtData, kTxtData, sizeof(kTxtData)));
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataTtl == kTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataTtl <= kCappedTtl);
+     VerifyOrQuit(!sResolveServiceInfo.mInfo.mTxtDataTruncated);
+ 
+     Log("--------------------------------------------------------------------------------------------");
+@@ -1533,7 +1535,7 @@ void TestProxyBasic(void)
+     VerifyOrQuit(!strcmp(sResolveAddressInfo.mHostName, "earth.default.service.arpa."));
+     VerifyOrQuit(sResolveAddressInfo.mNumHostAddresses == 1);
+     VerifyOrQuit(sResolveAddressInfo.mHostAddresses[0] == AsCoreType(&addressAndTtl.mAddress));
+-    VerifyOrQuit(sResolveAddressInfo.mTtl == kTtl);
++    VerifyOrQuit(sResolveAddressInfo.mTtl <= kCappedTtl);
+ 
+     Log("--------------------------------------------------------------------------------------------");
+ 
+@@ -1606,14 +1608,14 @@ void TestProxyBasic(void)
+     // The 1.2.3.4 address with the NAT64 prefix
+     SuccessOrQuit(address.FromString("64:ff9b:0:0:0:0:102:304"));
+     VerifyOrQuit(sResolveAddressInfo.mHostAddresses[0] == address);
+-    VerifyOrQuit(sResolveAddressInfo.mTtl == kTtl);
++    VerifyOrQuit(sResolveAddressInfo.mTtl <= kCappedTtl);
+ 
+     VerifyOrQuit(sResolveAddressInfo.mCallbackCount == 1);
+     SuccessOrQuit(sResolveAddressInfo.mError);
+ 
+     VerifyOrQuit(!strcmp(sResolveAddressInfo.mHostName, "shield.default.service.arpa."));
+     VerifyOrQuit(sResolveAddressInfo.mNumHostAddresses == 1);
+-    VerifyOrQuit(sResolveAddressInfo.mTtl == kTtl);
++    VerifyOrQuit(sResolveAddressInfo.mTtl <= kCappedTtl);
+ 
+     VerifyOrQuit(sResolveAddressInfo.mHostAddresses[0] == address);
+ 
+@@ -1692,7 +1694,7 @@ void TestProxyBasic(void)
+     VerifyOrQuit(!strcmp(sQueryRecordInfo.mRecords[0].mNameBuffer, "shield.default.service.arpa."));
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordType == Dns::ResourceRecord::kTypeKey);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordLength == sizeof(kKeyData));
+-    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl == kTtl);
++    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl <= kCappedTtl);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mDataBufferSize == sizeof(kKeyData));
+     VerifyOrQuit(!memcmp(sQueryRecordInfo.mRecords[0].mDataBuffer, kKeyData, sizeof(kKeyData)));
+     VerifyOrQuit(MapEnum(sQueryRecordInfo.mRecords[0].mSection) == Dns::Client::RecordInfo::kSectionAnswer);
+@@ -1772,7 +1774,7 @@ void TestProxyBasic(void)
+     VerifyOrQuit(!strcmp(sQueryRecordInfo.mRecords[0].mNameBuffer, "iron.man._avenger._udp.default.service.arpa."));
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordType == Dns::ResourceRecord::kTypeKey);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordLength == sizeof(kKeyData));
+-    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl == kTtl);
++    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl <= kCappedTtl);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mDataBufferSize == sizeof(kKeyData));
+     VerifyOrQuit(!memcmp(sQueryRecordInfo.mRecords[0].mDataBuffer, kKeyData, sizeof(kKeyData)));
+     VerifyOrQuit(MapEnum(sQueryRecordInfo.mRecords[0].mSection) == Dns::Client::RecordInfo::kSectionAnswer);
+@@ -1851,7 +1853,7 @@ void TestProxyBasic(void)
+     VerifyOrQuit(!strcmp(sQueryRecordInfo.mRecords[0].mNameBuffer, "avengers.default.service.arpa."));
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordType == Dns::ResourceRecord::kTypeCname);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordLength == sizeof(kTranslatedCnameData));
+-    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl == kTtl);
++    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl <= kCappedTtl);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mDataBufferSize == sizeof(kTranslatedCnameData));
+     VerifyOrQuit(!memcmp(sQueryRecordInfo.mRecords[0].mDataBuffer, kTranslatedCnameData, sizeof(kTranslatedCnameData)));
+     VerifyOrQuit(MapEnum(sQueryRecordInfo.mRecords[0].mSection) == Dns::Client::RecordInfo::kSectionAnswer);
+@@ -1930,7 +1932,7 @@ void TestProxyBasic(void)
+     VerifyOrQuit(!strcmp(sQueryRecordInfo.mRecords[0].mNameBuffer, "shield.default.service.arpa."));
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordType == Dns::ResourceRecord::kTypeKey);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordLength == sizeof(kKeyData));
+-    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl == kTtl);
++    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl <= kCappedTtl);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mDataBufferSize == sizeof(kKeyData));
+     VerifyOrQuit(!memcmp(sQueryRecordInfo.mRecords[0].mDataBuffer, kKeyData, sizeof(kKeyData)));
+     VerifyOrQuit(MapEnum(sQueryRecordInfo.mRecords[0].mSection) == Dns::Client::RecordInfo::kSectionAnswer);
+@@ -2009,7 +2011,7 @@ void TestProxyBasic(void)
+     VerifyOrQuit(!strcmp(sQueryRecordInfo.mRecords[0].mNameBuffer, "iron.man._avenger._udp.default.service.arpa."));
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordType == Dns::ResourceRecord::kTypeKey);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordLength == sizeof(kKeyData));
+-    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl == kTtl);
++    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl <= kCappedTtl);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mDataBufferSize == sizeof(kKeyData));
+     VerifyOrQuit(!memcmp(sQueryRecordInfo.mRecords[0].mDataBuffer, kKeyData, sizeof(kKeyData)));
+     VerifyOrQuit(MapEnum(sQueryRecordInfo.mRecords[0].mSection) == Dns::Client::RecordInfo::kSectionAnswer);
+@@ -2249,12 +2251,12 @@ void TestProxySubtypeBrowse(void)
+     VerifyOrQuit(!strcmp(sBrowseInfo.mInstanceLabel, "thor"));
+     VerifyOrQuit(!strcmp(sBrowseInfo.mServiceInfo.mHostNameBuffer, "asgard.default.service.arpa."));
+     VerifyOrQuit(sBrowseInfo.mServiceInfo.mPort == 1234);
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTtl <= kCappedTtl);
+     VerifyOrQuit(AsCoreType(&sBrowseInfo.mServiceInfo.mHostAddress) == AsCoreType(&addressAndTtl.mAddress));
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mHostAddressTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mHostAddressTtl <= kCappedTtl);
+     VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataSize == sizeof(kTxtData));
+     VerifyOrQuit(!memcmp(sBrowseInfo.mServiceInfo.mTxtData, kTxtData, sizeof(kTxtData)));
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataTtl <= kCappedTtl);
+     VerifyOrQuit(!sBrowseInfo.mServiceInfo.mTxtDataTruncated);
+ 
+     Log("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ");
+@@ -2815,11 +2817,11 @@ void TestProxySharedResolver(void)
+     VerifyOrQuit(!strcmp(sBrowseInfo.mInstanceLabel, "starlord"));
+     VerifyOrQuit(!strcmp(sBrowseInfo.mServiceInfo.mHostNameBuffer, "knowhere.default.service.arpa."));
+     VerifyOrQuit(sBrowseInfo.mServiceInfo.mPort == 3333);
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTtl == kTtl);
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mHostAddressTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTtl <= kCappedTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mHostAddressTtl <= kCappedTtl);
+     VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataSize == sizeof(kTxtData));
+     VerifyOrQuit(!memcmp(sBrowseInfo.mServiceInfo.mTxtData, kTxtData, sizeof(kTxtData)));
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataTtl <= kCappedTtl);
+     VerifyOrQuit(!sBrowseInfo.mServiceInfo.mTxtDataTruncated);
+ 
+     // Check the service resolve response received on client
+@@ -2829,11 +2831,11 @@ void TestProxySharedResolver(void)
+ 
+     VerifyOrQuit(!strcmp(sResolveServiceInfo.mInfo.mHostNameBuffer, "knowhere.default.service.arpa."));
+     VerifyOrQuit(sResolveServiceInfo.mInfo.mPort == 3333);
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mTtl == kTtl);
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mHostAddressTtl == kTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mTtl <= kCappedTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mHostAddressTtl <= kCappedTtl);
+     VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataSize == sizeof(kTxtData));
+     VerifyOrQuit(!memcmp(sResolveServiceInfo.mInfo.mTxtData, kTxtData, sizeof(kTxtData)));
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataTtl == kTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataTtl <= kCappedTtl);
+     VerifyOrQuit(!sResolveServiceInfo.mInfo.mTxtDataTruncated);
+     VerifyOrQuit(sResolveServiceInfo.mNumHostAddresses == 2);
+     for (uint16_t index = 0; index < 2; index++)
+@@ -2848,7 +2850,7 @@ void TestProxySharedResolver(void)
+     SuccessOrQuit(sResolveAddressInfo.mError);
+ 
+     VerifyOrQuit(!strcmp(sResolveAddressInfo.mHostName, "knowhere.default.service.arpa."));
+-    VerifyOrQuit(sResolveAddressInfo.mTtl == kTtl);
++    VerifyOrQuit(sResolveAddressInfo.mTtl <= kCappedTtl);
+     VerifyOrQuit(sResolveAddressInfo.mNumHostAddresses == 2);
+     for (uint16_t index = 0; index < 2; index++)
+     {
+@@ -2987,7 +2989,7 @@ void TestProxyFilterInvalidAddresses(void)
+     SuccessOrQuit(sResolveAddressInfo.mError);
+ 
+     VerifyOrQuit(!strcmp(sResolveAddressInfo.mHostName, "host.default.service.arpa."));
+-    VerifyOrQuit(sResolveAddressInfo.mTtl == kTtl);
++    VerifyOrQuit(sResolveAddressInfo.mTtl <= kCappedTtl);
+     VerifyOrQuit(sResolveAddressInfo.mNumHostAddresses == 1);
+     VerifyOrQuit(sResolveAddressInfo.mHostAddresses[0] == AsCoreType(&addressAndTtl[4].mAddress));
+ 
+@@ -3440,11 +3442,11 @@ void TestProxyInvokeCallbackFromStartApi(void)
+     VerifyOrQuit(!strcmp(sBrowseInfo.mInstanceLabel, "mantis"));
+     VerifyOrQuit(!strcmp(sBrowseInfo.mServiceInfo.mHostNameBuffer, "nova.default.service.arpa."));
+     VerifyOrQuit(sBrowseInfo.mServiceInfo.mPort == 3333);
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTtl == kTtl);
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mHostAddressTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTtl <= kCappedTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mHostAddressTtl <= kCappedTtl);
+     VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataSize == sizeof(kTxtData));
+     VerifyOrQuit(!memcmp(sBrowseInfo.mServiceInfo.mTxtData, kTxtData, sizeof(kTxtData)));
+-    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataTtl == kTtl);
++    VerifyOrQuit(sBrowseInfo.mServiceInfo.mTxtDataTtl <= kCappedTtl);
+     VerifyOrQuit(!sBrowseInfo.mServiceInfo.mTxtDataTruncated);
+ 
+     Log("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ");
+@@ -3488,11 +3490,11 @@ void TestProxyInvokeCallbackFromStartApi(void)
+ 
+     VerifyOrQuit(!strcmp(sResolveServiceInfo.mInfo.mHostNameBuffer, "nova.default.service.arpa."));
+     VerifyOrQuit(sResolveServiceInfo.mInfo.mPort == 3333);
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mTtl == kTtl);
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mHostAddressTtl == kTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mTtl <= kCappedTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mHostAddressTtl <= kCappedTtl);
+     VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataSize == sizeof(kTxtData));
+     VerifyOrQuit(!memcmp(sResolveServiceInfo.mInfo.mTxtData, kTxtData, sizeof(kTxtData)));
+-    VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataTtl == kTtl);
++    VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataTtl <= kCappedTtl);
+     VerifyOrQuit(!sResolveServiceInfo.mInfo.mTxtDataTruncated);
+     VerifyOrQuit(sResolveServiceInfo.mNumHostAddresses == 2);
+     for (uint16_t index = 0; index < 2; index++)
+@@ -3529,7 +3531,7 @@ void TestProxyInvokeCallbackFromStartApi(void)
+     SuccessOrQuit(sResolveAddressInfo.mError);
+ 
+     VerifyOrQuit(!strcmp(sResolveAddressInfo.mHostName, "nova.default.service.arpa."));
+-    VerifyOrQuit(sResolveAddressInfo.mTtl == kTtl);
++    VerifyOrQuit(sResolveAddressInfo.mTtl <= kCappedTtl);
+     VerifyOrQuit(sResolveAddressInfo.mNumHostAddresses == 2);
+     for (uint16_t index = 0; index < 2; index++)
+     {
+@@ -3572,7 +3574,7 @@ void TestProxyInvokeCallbackFromStartApi(void)
+     VerifyOrQuit(!strcmp(sQueryRecordInfo.mRecords[0].mNameBuffer, "drax._guardian._glaxy.default.service.arpa."));
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordType == Dns::ResourceRecord::kTypeKey);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mRecordLength == sizeof(kKeyData));
+-    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl == kTtl);
++    VerifyOrQuit(sQueryRecordInfo.mRecords[0].mTtl <= kCappedTtl);
+     VerifyOrQuit(sQueryRecordInfo.mRecords[0].mDataBufferSize == sizeof(kKeyData));
+     VerifyOrQuit(!memcmp(sQueryRecordInfo.mRecords[0].mDataBuffer, kKeyData, sizeof(kKeyData)));
+     VerifyOrQuit(MapEnum(sQueryRecordInfo.mRecords[0].mSection) == Dns::Client::RecordInfo::kSectionAnswer);
