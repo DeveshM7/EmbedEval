@@ -290,7 +290,8 @@ def main() -> None:
         print(f"    {n:>5}  {s}")
     if manifest["missing_sdk_images"]:
         print(f"  WARNING: SDK images could not be built: {manifest['missing_sdk_images']}")
-    print(f"\nnext: python cluster/submit.py pipeline --run {args.name}")
+    mode = "triage" if project == "contiki-ng" else "pipeline"
+    print(f"\nnext: python cluster/submit.py {mode} --run {args.name}")
 
 
 if __name__ == "__main__":

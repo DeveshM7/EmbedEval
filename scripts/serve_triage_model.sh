@@ -95,5 +95,7 @@ exec apptainer exec --cleanenv --bind "$(IFS=,; echo "${BINDS[*]}")" "$IMAGE" \
     vllm serve "$WEIGHTS" --served-model-name "$PROFILE" \
         --host 127.0.0.1 --port "$PORT" \
         --safetensors-load-strategy eager \
-        --gpu-memory-utilization 0.80 --max-num-seqs 4 --max-model-len 262144 \
+        --gpu-memory-utilization "${EMBEDEVAL_GPU_MEMORY_UTILIZATION:-0.80}" \
+        --max-num-seqs "${EMBEDEVAL_MAX_NUM_SEQS:-4}" \
+        --max-model-len "${EMBEDEVAL_MAX_MODEL_LEN:-262144}" \
         "${SERVE_ARGS[@]}"

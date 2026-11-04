@@ -198,6 +198,9 @@ def cache_filled(cfg: dict) -> None:
 def start_server(cfg: dict, env: dict, node_dir: Path) -> subprocess.Popen:
     scr = node_dir / "scr"
     senv = {**env, "EMBEDEVAL_SCRATCH": str(scr), "PORT": "8000",
+            "EMBEDEVAL_GPU_MEMORY_UTILIZATION": str(cfg["model"]["gpu_memory_utilization"]),
+            "EMBEDEVAL_MAX_MODEL_LEN": str(cfg["model"]["max_model_len"]),
+            "EMBEDEVAL_MAX_NUM_SEQS": str(cfg["model"]["max_num_seqs"]),
             "EMBEDEVAL_VLLM_CACHE": str(compile_cache(cfg, node_dir))}
     senv.pop("SLURM_SUBMIT_DIR", None)    # the script then reads models.json from the repo
     out = open(LOGS / "server.log", "a")

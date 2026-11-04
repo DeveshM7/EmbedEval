@@ -64,6 +64,16 @@ from generate_instance import ensure_clone  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENRICHED = layout.enriched()
 INSTRUCTIONS = REPO_ROOT / "docs" / "pr_triage.md"
+
+
+def instruction_text():
+    text = INSTRUCTIONS.read_text()
+    if PROJECT == "contiki-ng":
+        text, marker, _ = text.partition("<!-- END TRIAGE INSTRUCTIONS -->")
+        if not marker:
+            raise ValueError("Contiki triage instructions lack the reporting boundary")
+    return text
+
 TRIAGE = REPO_ROOT / "triage"
 RUNS = layout.triage_runs()
 
@@ -752,7 +762,7 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
     if extra:
         kw["extra_body"] = extra
 
-    messages = [{"role": "system", "content": INSTRUCTIONS.read_text()},
+    messages = [{"role": "system", "content": instruction_text()},
                 {"role": "user", "content": "Enriched PR record:\n\n" + render(rec)
                  + f"\n\n---\nYou may use up to {MAX_TOOL_ROUNDS} tool rounds for this PR."}]
     trace = {"pr": pr, "profile": profile, "turns": [], "repairs": [], "error": None,
@@ -1003,7 +1013,7 @@ def cmd_run(args) -> None:
         run_dir = RUNS / f"{datetime.now():%Y-%m-%d_%H%M}_{args.profile}"
         run_dir.mkdir(parents=True, exist_ok=False)
         tag = ""
-    prompt = INSTRUCTIONS.read_text()
+    prompt = instruction_text()
     (run_dir / f"{INSTRUCTIONS.stem}{tag}.md").write_text(prompt)
     manifest = {"project": PROJECT, "instructions": str(INSTRUCTIONS.relative_to(REPO_ROOT)),
                 "profile": args.profile, "api_base": args.api_base,

@@ -238,6 +238,8 @@ baseline inventories, guarded-body execution agreement and model handoff proof
 are outstanding. No full pass has been launched.
 
 
+<!-- END TRIAGE INSTRUCTIONS -->
+
 ## Cluster execution
 
 Set `project: contiki-ng` and `slurm.build_partition: cpu` in the cluster config.
