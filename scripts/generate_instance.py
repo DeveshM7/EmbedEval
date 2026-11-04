@@ -299,7 +299,8 @@ def observed_config(prior: dict, obs: dict, inventory: list | None = None) -> di
 
 
 def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: bool = False,
-                        observed: Path | None = None, observe_profile: str | None = None) -> Path:
+                        observed: Path | None = None, observe_profile: str | None = None,
+                        statement_from: dict | None = None) -> Path:
     """Build `openthread__openthread-<pr>` from an accepted verdict. The
     verdict is checked again here, mechanically, so an unchecked one is refused.
 
@@ -309,7 +310,9 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
     regenerated as a normal instance from observed.json (with the profile and
     arguments of the observation). observe_profile: observe under this profile
     instead of the record's, one of its `extra_observe` entries (only the
-    targets listed there, whose test bodies the chosen profile compiles out)."""
+    targets listed there, whose test bodies the chosen profile compiles out).
+    statement_from: with observed, a triage verdict of the same PR whose
+    problem_statement and change_type fill an observation that has none."""
     import openthread_candidates
     import triage_prs
     rec_path = openthread_candidates.enriched_dir() / f"{pr}.json"
@@ -330,6 +333,10 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
         configure, cmake_args = prior["configure"], prior["cmake_args"]
         profile = prior.get("profile", "simulation")
         statement, change_type = old["problem_statement"], old["change_type"]
+        if not (statement or "").strip() and statement_from:
+            if statement_from.get("pr") not in (None, pr) or not (statement_from.get("problem_statement") or "").strip():
+                sys.exit(f"ERROR: --statement-from is not a verdict of {pr} with a problem statement")
+            statement, change_type = statement_from["problem_statement"], statement_from.get("change_type")
         extra_meta = {"oracle": "observed", "oracle_note": "observed by validate_instance.py "
                       "(fail before, pass after the fix); the unit oracle is per executable, "
                       "so check attribution of the cases to the PR's change"}
@@ -440,6 +447,9 @@ def main() -> None:
     p.add_argument("--from-observed", type=Path, metavar="DIR",
                    help="OpenThread: regenerate an observed-valid instance directory as a "
                         "normal instance with the observed test lists")
+    p.add_argument("--statement-from", type=Path, metavar="VERDICT",
+                   help="with --from-observed: take the problem statement from this triage verdict "
+                        "of the same PR when the observation has none")
     p.add_argument("--out", default=str(DEFAULT_OUT),
                    help="output root (default: generated/, never docker/instances/)")
     p.add_argument("--force", action="store_true",
@@ -451,7 +461,10 @@ def main() -> None:
             p.error("--observe and --from-observed are OpenThread only and take no --triage")
         if args.profile and not args.observe:
             p.error("--profile goes with --observe")
-        inst = generate_openthread(args.pr, None, Path(args.out), args.observe, args.from_observed, args.profile)
+        if args.statement_from and not args.from_observed:
+            p.error("--statement-from goes with --from-observed")
+        stmt = json.loads(args.statement_from.read_text()) if args.statement_from else None
+        inst = generate_openthread(args.pr, None, Path(args.out), args.observe, args.from_observed, args.profile, stmt)
     else:
         if not args.triage:
             p.error("--triage is required")
