@@ -378,6 +378,7 @@ def main() -> None:
     p.add_argument("--parallel", type=int, default=8, help=f"PRs at once, {JOBS} cores each (default 8)")
     p.add_argument("--redo", action="store_true", help="again for PRs that have a record")
     p.add_argument("--selftest", action="store_true")
+    p.add_argument("--shard", help="I/N: this node's share of the PRs")
     args = p.parse_args()
     if args.selftest:
         return selftest()
@@ -397,7 +398,8 @@ def main() -> None:
         au.remove(old)
     recs = [json.loads(f.read_text()) for f in sorted((run / "select").glob("*.json"))]
     recs = [r for r in recs if "reason" not in r and (not args.pr or r["pr"] in args.pr)]
-    todo = [r for r in recs if args.redo or not (folder / f"{r['pr']}.json").exists()]
+    todo = [r for r in recs if (args.redo or not (folder / f"{r['pr']}.json").exists())
+            and riot_env.in_shard(r["pr"], args.shard)]
     print(f"{len(recs)} runnable PRs, {len(todo)} to do, {args.parallel} at a time", flush=True)
 
     def one(r: dict) -> None:

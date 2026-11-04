@@ -22,6 +22,15 @@ import apptainer_util as au
 URL = "https://github.com/RIOT-OS/RIOT.git"
 
 
+def in_shard(pr: int, shard: str | None) -> bool:
+    """--shard I/N: this node's share of the PRs, of N nodes. A rerun with another N
+    is safe: PRs that have a record are skipped wherever they were done."""
+    if not shard:
+        return True
+    i, n = shard.split("/")
+    return pr % int(n) == int(i)
+
+
 def clone() -> Path:
     return au.shared_path("riot", "riot.git")
 

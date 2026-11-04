@@ -30,7 +30,10 @@ must exit 1, the fix must apply, run_tests must exit 0, and the tests must have
 gone the way the quick check said. Rust downloads are off while it runs.
 
 If the LLM stage has run (DIR/triage/<pr>.json), a PR it rejected is not built, and
-its problem statement and change type go into the metadata.
+its problem statement and change type go into the metadata. Without that stage, the
+statement is the PR's own title and description ("problem_statement_source":
+"pr_description"): unreviewed, and it may well describe the fix. metadata.json is not
+in the layer or its fingerprint, so a better statement can replace it with no rebuild.
 
 Temporary files are in <work>/build/<pr>/ and <work>/validate/<pr>/, always deleted.
 """
@@ -71,7 +74,9 @@ def instance_id(pr: int) -> str:
 
 
 def layer_path(pr: int) -> Path:
-    return au.instance_image(instance_id(pr))
+    """Under the run, not the node's work folder: every node's layers in one place, where
+    scripts/registry.py finds them when run without EMBEDEVAL_WORK."""
+    return layout.run_dir() / "work" / "images" / "instances" / f"{instance_id(pr)}.sif"
 
 
 def plan(check: dict, select: dict) -> tuple[dict, list[str], list[str], list[str]]:
@@ -98,6 +103,16 @@ def fingerprint(folder: Path) -> str:
     return h.hexdigest()
 
 
+def pr_statement(pr: int) -> str:
+    """The PR's title and description, without RIOT's template and its testing section."""
+    rec = json.loads(au.shared_path("github", "riot", "prs", f"{pr}.json").read_text())
+    body = re.sub(r"<!--.*?-->", "", (rec.get("body") or "").replace("\r\n", "\n"), flags=re.S)
+    m = re.search(r"#+\s*Contribution description\s*\n(.*?)(?=\n#+\s*(Testing procedure|Issues/PRs references)\b|\Z)",
+                  body, re.S | re.I)
+    text = (m.group(1) if m else body).strip()
+    return f"{rec['title']}\n\n{text}".strip()
+
+
 def write_recipe(check: dict, select: dict, verdict: dict | None) -> Path:
     pr = check["pr"]
     verdict = verdict or {}
@@ -114,7 +129,8 @@ def write_recipe(check: dict, select: dict, verdict: dict | None) -> Path:
         "merge_commit": check["merge"], "board": check["board"],
         "base_image": f"riotbuild-{check['image']}", "kind": check["outcome"],
         "fail_to_pass": f2p, "pass_to_pass": p2p,
-        "problem_statement": verdict.get("problem_statement", ""),
+        "problem_statement": verdict.get("problem_statement") or pr_statement(pr),
+        "problem_statement_source": "llm" if verdict.get("problem_statement") else "pr_description",
         "change_type": verdict.get("change_type"),
         "files_changed_by_fix": riot_env.git("diff", "--name-only", check["base"], check["head"],
                                              "--", ".", ":!tests/").split(),
@@ -307,6 +323,8 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pr", type=int, nargs="+", help="only these PRs")
     p.add_argument("--parallel", type=int, default=4, help="instances at once, 8 cores each")
+    p.add_argument("--redo", action="store_true", help="again for PRs that have a validation")
+    p.add_argument("--shard", help="I/N: this node's share of the PRs")
     args = p.parse_args()
     if not layout.run_dir():
         sys.exit("needs --run-dir")
@@ -315,7 +333,10 @@ def main() -> None:
     run = layout.run_dir()
     checks = [json.loads(f.read_text()) for f in sorted((run / "check").glob("*.json"))]
     checks = [c for c in checks if c["outcome"] in ("strong", "weak")
-              and (not args.pr or c["pr"] in args.pr)]
+              and (not args.pr or c["pr"] in args.pr) and riot_env.in_shard(c["pr"], args.shard)
+              and (args.redo or not (layout.generated() / instance_id(c["pr"]) / "validation.json").exists())]
+    if (run / "triage").exists():       # once the LLM stage has run, only what it accepted
+        checks = [c for c in checks if (run / "triage" / f"{c['pr']}.json").exists()]
     print(f"{len(checks)} instances, {args.parallel} at a time", flush=True)
 
     def one(c: dict) -> None:

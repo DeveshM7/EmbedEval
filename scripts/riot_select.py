@@ -149,6 +149,7 @@ def main() -> None:
     p.add_argument("--pr", type=int, nargs="+", help="only these PRs of the candidates")
     p.add_argument("--parallel", type=int, default=8, help="PRs at once (default 8)")
     p.add_argument("--redo", action="store_true", help="again for PRs that have a record")
+    p.add_argument("--shard", help="I/N: this node's share of the PRs")
     args = p.parse_args()
     if not layout.run_dir():
         sys.exit("needs --run-dir")
@@ -161,7 +162,8 @@ def main() -> None:
     cands = [json.loads(l) for l in open(layout.candidates() / "candidates.jsonl")]
     if args.pr:
         cands = [c for c in cands if c["number"] in args.pr]
-    todo = [c for c in cands if args.redo or not (folder / f"{c['number']}.json").exists()]
+    todo = [c for c in cands if (args.redo or not (folder / f"{c['number']}.json").exists())
+            and riot_env.in_shard(c["number"], args.shard)]
     print(f"{len(cands)} candidates, {len(todo)} to do, {args.parallel} at a time", flush=True)
 
     def one(c: dict) -> None:
