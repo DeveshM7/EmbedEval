@@ -295,10 +295,15 @@ invalid-instance ledger. Resubmitting observation retries failed/capped work
 and preserves completed observations.
 
 Spark's `SparkRelocation` maintenance reservation covers November 4 through
-November 11, 2026. The bounded inference submission was canceled after its
-forecast moved to November 11; no inference occurred and no paid fallback was
-used. Actual qwen38-nvfp4 triage-to-validation handoff remains unverified. No
-instances have been promoted or published.
+November 11, 2026, including the batch partition; it does not block every Spark
+node. The first batch inference submission was canceled after its forecast
+moved to November 11; no inference occurred and no paid fallback was used.
+`spark-interactive` remains usable with a 60,250 MB maximum memory request.
+The six-control pilot uses one node, 60,000 MB, GPU memory utilization 0.40,
+131,072 context tokens and two concurrent requests. Model settings and inputs
+are frozen in `runs/triage-six-controls/` (triage job 484681, dependent CPU
+validation/comparison job 484682). Handoff remains unverified until those jobs
+finish. No instances have been promoted or published.
 
 Fresh-grader control job 484672 rebuilt the JSON image independently and applied
 only the upstream production fix on a fresh node-local overlay: all six cases
