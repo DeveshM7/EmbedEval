@@ -10,6 +10,12 @@ How the parts work together, and how to change them, is in
 
 Paths below use `$SCRATCH` for `/scratch/scholar/$USER`.
 
+Contiki-NG uses the same cluster entrypoints with `project: contiki-ng`, a
+separate scratch root, and an x86 CPU build partition. Its `observe`, `triage`
+and `validate` jobs run separately; see
+[Contiki-NG cluster execution](contiki_ng_triage.md#cluster-execution) for the
+configuration, supported profiles and current validation evidence.
+
 ---
 
 ## 1. What the pipeline does

@@ -80,7 +80,8 @@ def triage_todo(run: Path) -> list[int]:
 def observe_todo(run: Path) -> list[int]:
     """Contiki candidates without a completed observation."""
     return [e["pr"] for e in manifest(run)["prs"]
-            if e["stage"] == "to triage" and "observe" not in read(run, e["pr"])]
+            if e["stage"] == "to triage"
+            and read(run, e["pr"]).get("observe", {}).get("state") != "done"]
 
 
 def accepted(run: Path) -> list[int]:

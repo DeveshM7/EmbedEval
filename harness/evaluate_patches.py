@@ -66,6 +66,11 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     if not patch_path.read_text().strip():
         result.update(patch_empty=True, error="empty patch — agent made no changes")
         return result
+    if meta["project"] == "contiki-ng":
+        from contiki_ng_pipeline import protected_test_change
+        if protected_test_change(patch_path.read_text()):
+            result["error"] = "patch modifies protected upstream tests"
+            return result
     import registry       # the validated image: pulled from the registry if published
     try:
         image = registry.image_for(instance_id)

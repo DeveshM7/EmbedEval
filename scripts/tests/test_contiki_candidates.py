@@ -102,6 +102,7 @@ class CandidatesTests(unittest.TestCase):
     def test_override_cannot_modify_protected_upstream_test(self):
         self.assertTrue(pipeline.protected_test_change('diff --git a/tests/08-native-runs/x.c b/tests/08-native-runs/x.c'))
         self.assertTrue(pipeline.protected_test_change('+++ b/regression-tests/x.c'))
+        self.assertTrue(pipeline.protected_test_change('diff --git a/tools/cooja/x b/tools/cooja/x'))
         self.assertFalse(pipeline.protected_test_change('diff --git a/os/lib/json.c b/os/lib/json.c'))
 
     def test_compile_requirements_only_new_production_interface_absent_at_base(self):

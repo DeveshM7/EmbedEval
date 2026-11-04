@@ -231,10 +231,11 @@ mechanically obtainable inventory gaps. Research controls are intentionally
 selected, not held-out triage-accuracy evidence, and their expected answers must
 stay out of future prompts.
 
-Readiness remains closed: historical profile resolution, remaining profile/era
-controls, complete baseline inventories, guard execution agreement,
-adapter/schema integration, and measured model and finalization costs are
-outstanding. No full pass has been launched.
+The native adapter, schema, generator, validator and cluster integration are
+implemented and bounded CPU controls pass. Full-campaign readiness remains
+closed: historical profile resolution, remaining profile/era controls, complete
+baseline inventories, guarded-body execution agreement and model handoff proof
+are outstanding. No full pass has been launched.
 
 
 ## Cluster execution
@@ -268,3 +269,31 @@ the user namespace returns permission denied; those selections are infrastructur
 holds. Current automatic accepts require source-unconditional native bodies;
 Cooja/script observations are supported, while guarded/scenario accepts need
 additional compiled-body evidence. No full-history campaign is certified yet.
+
+## Integration proof (2026-11-04)
+
+Scholar CPU job 484669 ran the final two controls from a frozen source archive
+(`5b4c9e9`, archive SHA256
+`0c4551e4122d44136778a3dc31355b2232ce967b7a75d70f3614406733563637`).
+These use explicitly labelled, source-informed manual verdicts; they prove
+packaging and validation, not unattended model selection or triage accuracy.
+
+| PR | Profile/oracle | Before | After | Repeated before |
+| --- | --- | --- | --- | --- |
+| #3246 | native/runtime | Four named JSON failures; two named passes | All six pass | Three additional runs agree |
+| #3020 | native/semantic compile | Missing `cbor_write_signed` / `cbor_read_signed`, attributed to the interface added by the PR | Named signed-integer case passes | Three additional builds agree |
+
+Finalization took about 4.7 minutes per instance including image creation.
+Receipts and logs live under
+`/scratch/scholar/zhan5136/embedeval-contiki/runs/port-pilot/`.
+The earlier observation pass retains its own receipts; the CBOR observation
+correctly held for semantic attribution rather than counting an unexecuted case
+as a runtime failure. Infrastructure/profile holds remain outside the permanent
+invalid-instance ledger. Resubmitting observation retries failed/capped work
+and preserves completed observations.
+
+Spark's `SparkRelocation` maintenance reservation covers November 4 through
+November 11, 2026. The bounded inference submission was canceled after its
+forecast moved to November 11; no inference occurred and no paid fallback was
+used. Actual qwen38-nvfp4 triage-to-validation handoff remains unverified. No
+instances have been promoted or published.

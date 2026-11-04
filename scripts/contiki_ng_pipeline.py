@@ -133,7 +133,7 @@ def config_attribution(output,diagnostics):
     return next((d for d in diagnostics if any(d in line for line in failure_lines)),None)
 
 def protected_test_change(patch):
-    return bool(re.search(r'^(?:diff --git a/|--- a/|\+\+\+ b/)(?:tests/|regression-tests/)',patch,re.M))
+    return bool(re.search(r'^(?:diff --git a/|--- a/|\+\+\+ b/)(?:tests/|regression-tests/|tools/cooja/)',patch,re.M))
 
 def validate(iid,patch_override=None,timeout=1800,verbose=False):
     from validate_instance import observe_lists, compile_attribution, build_errors, _finish

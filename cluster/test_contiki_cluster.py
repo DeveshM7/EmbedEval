@@ -20,6 +20,15 @@ import report
 
 
 class ContikiClusterTest(unittest.TestCase):
+    def test_observation_resume_retries_failures_but_keeps_receipts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "manifest.json").write_text(json.dumps({"prs": [
+                {"pr": pr, "stage": "to triage"} for pr in range(1, 5)]}))
+            for pr, state in ((1, "done"), (2, "failed"), (3, "cap")):
+                status.write_stage(run, pr, "observe", {"state": state})
+            self.assertEqual(status.observe_todo(run), [2, 3, 4])
+
     def test_idle_nodes_excludes_maintenance_and_reserved_nodes(self):
         response = SimpleNamespace(returncode=0,
                                    stdout="idle 2\nmaint 14\nresv 8\ndown$ 4\nidle~ 3\n",
