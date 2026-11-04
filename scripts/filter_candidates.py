@@ -601,6 +601,15 @@ def fetch_full(number: int, refresh: bool = False) -> dict | None:
         "linked_issues": linked,
     }
 
+    if PROJECT != "zephyr":
+        # RIOT's stage reads diffs and code from its own clone (scripts/riot_triage.py).
+        record["enrich_version"] = ENRICH_VERSION
+        text = json.dumps(record, indent=2)
+        write_atomic(out, text)
+        if shared:
+            write_atomic(shared, text)
+        return record
+
     # The complete test suite behind every test file the PR touched.
     #
     # The diff alone is not enough to judge runnability: a PR that adds cases
