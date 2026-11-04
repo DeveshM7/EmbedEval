@@ -553,3 +553,32 @@ Verification: 55 local Contiki checks and nine cluster checks pass. Refreshed
 development records identify the CBOR API and AES fixture-helper build
 requirements without conflating their semantic purposes. The legacy packet
 executor remains an inventory gap. No new model accuracy result is claimed yet.
+
+### Frozen version-6 pilots (in progress)
+
+Revision `7e2cb1c` freezes the source and prompt for a fresh six-control
+development run and an eight-PR evaluation. The evaluation uses deterministic
+SHA256 ranking within test-path strata (four native-source, one script, one
+simulation, one build/config-only and one legacy), excluding prior reviewed
+controls. Selection was frozen before source review or execution outcomes:
+`triage/runs/contiki-eval-v6/selection.json`, SHA256
+`4a3e6f4e3d3c8b5d5794e822d68cb2fc0eed566b19baaf28437c280e9f3dd8a4`.
+It selects #3251, #3202, #2898, #3261, #1410, #29, #2587 and #52.
+This is a small coverage sample, not a population accuracy estimate. Evaluation
+outcomes will assess this frozen version, not tune it in place.
+
+Source hypotheses were separately frozen before seeing model or observation
+outcomes (`source-expectations.json`, SHA256
+`c1117744c50067c1d22dcc1287b9e5698103f0f6150b7e07f7e6245fa4901f14`).
+Independent native observations for #3202, #3261 and #52 use a separate audit
+run; its outcomes do not enter the model input directory. The other sampled
+PRs include empty production patches and unsupported historical/dependency
+profiles; those must be reported separately from semantic correctness.
+
+Scholar jobs: development triage 484823 and independent audit 484824;
+development validation 484827 and evaluation triage 484828 depend on both;
+evaluation validation 484829 depends on 484827 and 484828. This sequence permits
+at most two running jobs and automatically validates untouched model accepts.
+Every phase has a source snapshot/hash and a two-hour wall limit. Previous pilot
+artifacts remain intact. Model, infrastructure, coverage, oracle choice and
+named-case selection must be assessed separately when these jobs finish.
