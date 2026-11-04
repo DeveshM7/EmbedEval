@@ -15,8 +15,10 @@ Detailed research and logs live in `triage/runs/contiki-research/` (ignored).
   Origin refreshed before comparison; checkout was clean and ten commits ahead
   of origin/main. Reuse generic observe, after-fix, profile and compile-oracle
   infrastructure; do not transplant OpenThread discovery or CMake assumptions.
-- Goal: maximum valid-instance yield. Validation is the gate; do not tune triage
-  accuracy. Use upstream tests only, never authored regression substitutes.
+- Goal: maximum valid-instance yield with trustworthy triage. Small-pilot triage
+  tuning is allowed (user clarification, 2026-11-04); validating the full pool
+  to tune triage is not. Validation remains the gate. Use upstream tests only,
+  never authored regression substitutes.
 - Runtime and semantic compile oracles are allowed. A compile failure qualifies
   only when the PR supplies the very interface/build fix that its tests need;
   incidental incompatibilities do not qualify. Attributable configuration/dependency-only
@@ -376,3 +378,77 @@ before/after case evidence and three deterministic before repeats for valid
 instances. Local verification: 30 pipeline/runner/grading checks and nine
 cluster checks pass. The pilot supports using triage with validation as the
 gate; it does not certify full-history campaign readiness.
+
+## Repository audit for small-pilot triage improvements (2026-11-04)
+
+The user authorized further research and tuning through small pilots, while
+explicitly prohibiting whole-pool validation as a tuning procedure. The original
+six controls are development data, not an independent accuracy benchmark.
+Future evaluation must distinguish semantic mistakes, unsupported profiles,
+missing inventory and infrastructure errors; a hold caused by missing input is
+not evidence that the model understood a non-detecting test.
+
+The audit retains research pin `c02eedae8b187123069891f81a7111b833701f9c`.
+An upstream reference check reports a newer `develop` tip,
+`3c8c6c8282c5b9f3f745167c5fd3fb29f7c29479`; that does not silently extend the
+candidate window. The read-only census catalogs 2,855 tracked entries and reads
+2,715 bounded UTF-8 files for source indexing, including 17 gitlinks, 17 main CI
+suites, 95 Cooja scenario files and 34 unit-test C sources with 391 registration
+matches. These are source counts, not execution coverage. The current adapter
+emits 28 native variants, 19 script entries and 94 direct scenario entries;
+only 22 native variants currently have its source-unconditional enabled flag.
+That flag alone does not prove complete dependencies or actual execution.
+
+Historical CI/source inputs already cover 591 distinct base/fix revisions and
+98 CI blobs across the 341 test-touching PRs. Nine candidate bases retain
+`regression-tests/`; the remainder use `tests/`. Travis and GitHub configurations
+overlap across historical branches, so calendar dates cannot replace inspecting
+the candidate's actual base. In the test-root path census, 117 PRs change only
+build/configuration paths. These are not 117 known valid tasks: they require
+inspection of what the build checks and whether its failure is attributable.
+
+### What a packaged instance must preserve
+
+- The verified PR base and complete fix, with a disjoint, source-justified
+  partition of protected assertions/setup/data/support and editable production.
+  A missing production dependency must not be copied into the before state just
+  to make a regression compile.
+- The actual runnable consumer, target, board, Make assignments and configuration
+  chain, including local headers, included C data, `PROJECT_SOURCEFILES`, nested
+  `MODULES`, module `-imacros`, platform configuration and feature guards.
+- All fixed runtime inputs: packet files, vector tables, Cooja scripts and mote
+  programs, generated-data prerequisites, local services and filesystem state.
+  Directory names alone cannot determine their roles. A scenario-referenced
+  application can be either test support or the program being repaired.
+- External repositories at their recorded gitlink revisions and the candidate's
+  build-tool/toolchain era. Native targets can need crypto submodules; Cooja can
+  need Ant or Gradle depending on revision. Current CI uses recursive submodules.
+- A fixed execution recipe and named evidence contract. A registration, a clean
+  compiler exit, `All tests OK`, or an absent failure log alone does not prove a
+  selected assertion executed. Preserve timeout, crash and not-run outcomes.
+
+### Source-confirmed gaps to address before another model pilot
+
+| Gap | Pinned source evidence | Consequence |
+| --- | --- | --- |
+| Incomplete native consumer closure | AES test C includes `test-vectors.c`; Make automatically includes local `project-conf.h` | Vector/header/unit-Makefile changes can miss their consumer because inventory currently lists too few inputs |
+| Transitive script fixtures absent | `20-packet-parsing/02-test-sicslowpan.sh` sources `packet-injector.sh`, which loads `packet-injector/$TEST_PROTOCOL-data/*` | Packet-only changes can select no unit, as in the development control |
+| Missing native submodule dependency | `08-native-runs/18-ecc/Makefile` adds `os/services/ecc`; its `Makefile.ecc` adds `os/net/security/micro-ecc` | Inventory predicts enabled native tests but generated native units request no submodule |
+| Script wrapper hides another executor | `06-script-base/code-result-visualization/Makefile` invokes the simulation runner; its shell check invokes an analyzer under `examples/benchmarks/` | A script entry needs Cooja, analyzer code and generated output, not just its top-level shell file |
+| C string concatenation is misparsed | `13-ieee802154/code-6tisch/test-sixp.c` uses adjacent string literals for distinct case descriptions | The current registration regex truncates descriptions and produces collisions |
+| Profile and build-only coverage incomplete | Compile-base has native/MCU/config variants and Clang passes; ARM suite has 146 entries; NAT64 has a custom Make target | Current runnable-unit discovery cannot represent all CI test types |
+| Configuration proof too coarse | `Makefile.include` selects modules, includes nested module Makefiles, adds `-imacros` and target/project definitions | Presence or absence of `#if` in the main C file does not resolve the whole compiled test |
+| Test/support boundaries need per-instance roles | Cooja scenarios reference programs in `examples/`; test infrastructure can itself be a PR's target | Applying every test-root change before and every other change after can mix setup repair with production behavior |
+
+The CI audit also includes CodeQL's separate example-build/SARIF workflow,
+not just the main 17-suite matrix. Static-analysis findings are not automatically
+an authorized runtime/compile/config oracle. Unsupported analyzer, hardware,
+privilege or historical-toolchain requirements must remain explicit scope holds.
+
+Next work is to correct the dependency/input model and encode mechanically
+checkable oracle contradictions, then revise the instructions to match the
+implemented facts. Bounded development and separate evaluation pilots follow
+that work; no new model run or pool-wide build/validation was launched for this
+source audit. Detailed artifacts are `repository-sweep.json`,
+`sweep-history-coverage.json` and `sweep-ci-eras.json` under the ignored research
+run directory. Source predictions remain separate from observed results.
