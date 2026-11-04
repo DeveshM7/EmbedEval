@@ -452,3 +452,33 @@ that work; no new model run or pool-wide build/validation was launched for this
 source audit. Detailed artifacts are `repository-sweep.json`,
 `sweep-history-coverage.json` and `sweep-ci-eras.json` under the ignored research
 run directory. Source predictions remain separate from observed results.
+
+### Bounded source-model controls
+
+CPU job 484810 ran unmodified upstream sources at the research pin, not candidate
+PR validation. Inputs, logs and compiler output are retained under Scholar's
+`research/sweep-controls-484810/` and local `sweep-controls-results/`.
+
+| Control | Observed result | Implication |
+| --- | --- | --- |
+| Native ECC, gitlink contents absent | Build fails at missing `uECC.h` | The generated native unit's empty submodule list is incomplete |
+| Same ECC source, pinned `micro-ecc` initialized | All three named cases pass | Dependency initialization repairs packaging without changing tests or production |
+| Heapmem with upstream `HEAPMEM_DEBUG=0` | All nine named cases pass | Configuration guards do not imply disabled testcase bodies |
+| Heapmem with upstream `HEAPMEM_DEBUG=1` | All nine named cases pass | Preserve and resolve the two build variants separately |
+| Framer-negative built for native | TSCH timing conversion macros are unavailable | A Makefile and registered cases do not establish native buildability; its CI scenario selects `TARGET=cooja` |
+| Framer preprocessing, upstream configuration | Guarded security case is emitted | Compiler evidence can establish body presence independently of build success |
+| Framer preprocessing, diagnostic security-off wrapper | Guarded security case is absent | A negative preprocessing control; generated configuration only, not a benchmark profile or authored testcase |
+
+All upstream test C hashes remain unchanged. The compiler-only negative control
+does not claim runtime agreement: the framer native target did not build. These
+checks require distinct enrichment facts for dependency closure, body enablement,
+target buildability and execution evidence; none can substitute for the others.
+
+Additional source audit findings: custom framer failure reports use
+`FAILED - description (exit at N)`, while the runner currently recognizes only
+the older `description: exit at LN` suffix. The enricher also silently clips
+production diffs at 120,000 characters. Both need explicit handling before
+unseen-pilot confidence can be assessed. Testing infrastructure itself can be a
+PR's fix target, so a test-root-only change must not be presumed either a valid
+production task or an intrinsically invalid PR; fixed-test/editable-fix separation
+must be representable first.
