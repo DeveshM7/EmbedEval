@@ -322,7 +322,7 @@ GIT_LOCK = threading.Lock()   # lazy blob fetches into one clone, one at a time
 TOOLS = [
     {"type": "function", "function": {
         "name": "read_file",
-        "description": "Read a file from the Zephyr repository, before (base) or after "
+        "description": "Read a file from the selected upstream repository, before (base) or after "
                        "(merge) this PR. Use for files the record does not include: "
                        "board definitions, Kconfig, headers, other source.",
         "parameters": {"type": "object", "properties": {

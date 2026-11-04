@@ -29,6 +29,23 @@ def verdict(oracle='runtime'):
             'causal_chain':'New vector exercises the parser','change_type':'bugfix'}
 
 class CandidatesTests(unittest.TestCase):
+    def test_prompt_summarizes_large_hex_data_without_changing_patch(self):
+        rec=record()
+        original='+  "'+'ab'*5000+'",\n+assert(check_result());\n'
+        rec['test_patch']=original
+        rendered=json.loads(pipeline.render_record(rec))
+        self.assertEqual(rec['test_patch'],original)
+        self.assertIn('+assert(check_result());',rendered['test_patch'])
+        self.assertIn('PROMPT ONLY:',rendered['test_patch'])
+        self.assertEqual(rendered['prompt_omissions'][0]['hex_characters'],10000)
+        self.assertLess(len(rendered['test_patch']),1000)
+
+    def test_ordinary_prompt_patch_is_unchanged(self):
+        rec=record()
+        rendered=json.loads(pipeline.render_record(rec))
+        self.assertEqual(rendered['test_patch'],rec['test_patch'])
+        self.assertNotIn('prompt_omissions',rendered)
+
     def test_multiline_suite_keeps_options_on_their_own_entry(self):
         text='EXAMPLES = \\\nexamples/mqtt/native:./mqtt.sh:DEFINES=MQTT=1 \\\ntests/json/native:./json.sh \\\ntests/heap/native:./heap.sh:DEFINES=HEAPMEM_DEBUG=0 \\\ntests/heap/native:./heap.sh:DEFINES=HEAPMEM_DEBUG=1\n'
         entries=c.suite_entries(text)

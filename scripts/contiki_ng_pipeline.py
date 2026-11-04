@@ -1,6 +1,6 @@
 """Contiki-NG packaging and validation using shared EmbedEval receipts/builds."""
 from __future__ import annotations
-import json, os, shutil, subprocess, time
+import hashlib, json, os, shutil, subprocess, time
 import re
 import tempfile
 from pathlib import Path
@@ -16,6 +16,17 @@ def render_record(rec):
         'source_files','profiles','inventory_holds','test_patch','production_diff','nested_merge_count','compile_requirements')}
     payload['test_inventory']=candidates.select_tests(rec)
     payload['inventory_note']='Only affected supported runnable units; absent or guarded selections must be held.'
+    omissions=[]
+    for field in ('test_patch','production_diff'):
+        def summarize(match):
+            value=match[1]
+            digest=hashlib.sha256(value.encode()).hexdigest()
+            omissions.append({'field':field,'hex_characters':len(value),'sha256':digest})
+            return '"'+value[:128]+f' [PROMPT ONLY: {len(value)-256} hex characters omitted; sha256={digest}] '+value[-128:]+'"'
+        payload[field]=re.sub(r'"([0-9a-fA-F]{4096,})"',summarize,payload[field])
+    if omissions:
+        payload['prompt_omissions']=omissions
+        payload['prompt_omission_note']='Only oversized hex literals are summarized. Original patches are unchanged; use read_file at base/merge for full upstream data.'
     return json.dumps(payload,indent=2)
 
 def checked_observation(prior,receipt,rec,available):
