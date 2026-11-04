@@ -37,7 +37,7 @@ TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
 OPENTHREAD_TEMPLATES = REPO_ROOT / "templates" / "openthread" / "apptainer"
 
 # Instance pipelines built, validated and run as Apptainer images.
-APPTAINER_PIPELINES = ("twister", "cmake")
+APPTAINER_PIPELINES = ("twister", "cmake", "contiki-ng")
 
 
 def _default_root() -> Path:
@@ -326,3 +326,27 @@ def remove(target: Path) -> bool:
     else:
         t.unlink()
     return True
+
+
+def ensure_contiki_ng_base(logdir: Path | None = None) -> Path:
+    import platform
+    if platform.machine() not in ("x86_64", "amd64"):
+        raise RuntimeError("Contiki-NG CI image requires an x86_64 build worker")
+    override = os.environ.get("EMBEDEVAL_CONTIKI_NG_IMAGE")
+    image = Path(override).expanduser().resolve() if override else shared_path("images", "contiki-ng-ci-dcf5962b-x86_64.sif")
+    if image.exists():
+        return image
+    if override:
+        raise RuntimeError(f"Contiki-NG image override does not exist: {image}")
+    image.parent.mkdir(parents=True, exist_ok=True)
+    partial = image.with_suffix(".partial.sif")
+    source = "docker://contiker/contiki-ng:dcf5962b018eabbc69bbbc3d67bd74e586c605b9b367d92adc51906c0c90ff05"
+    logs = logdir or path("logs", "bases", "x").parent
+    logs.mkdir(parents=True, exist_ok=True)
+    with (logs / "contiki-ng-pull.log").open("w") as fh:
+        r = subprocess.run(["apptainer", "pull", "--force", str(partial), source],
+                           stdout=fh, stderr=subprocess.STDOUT, env=build_env(), timeout=2400)
+    if r.returncode:
+        raise RuntimeError("Contiki-NG CI image pull failed; inspect contiki-ng-pull.log")
+    partial.replace(image)
+    return image

@@ -1,0 +1,51 @@
+Bootstrap: localimage
+From: {{ BASE_IMAGE }}
+
+# EmbedEval Contiki-NG instance @@INSTANCE_ID@@.
+
+%arguments
+    BASE_IMAGE=contiki-ng-base.sif
+
+%files
+    test_patch.diff /opt/embedeval/test_patch.diff
+    instance.json /opt/embedeval/instance.json
+    run_tests.py /usr/local/bin/run_tests
+
+%post
+    set -e
+    retry() { for i in 1 2 3; do "$@" && return 0; sleep 20; done; return 1; }
+
+    git init -q /testbed
+    cd /testbed
+    git remote add origin @@REPO@@.git
+    retry git fetch -q --depth 1 origin @@BASE_COMMIT@@
+    git checkout -q --detach FETCH_HEAD
+
+    # Add only the upstream test changes selected for this instance.
+    git apply /opt/embedeval/test_patch.diff
+
+    # The instance profile lists the submodules needed by its selected tests.
+    python3 - <<'PY'
+import json
+import subprocess
+
+with open('/opt/embedeval/instance.json') as stream:
+    config = json.load(stream)
+paths = dict.fromkeys(path for unit in config['units'] for path in unit.get('submodules', []))
+for path in paths:
+    subprocess.run(['git', 'submodule', 'update', '--init', '--depth', '1', '--', path],
+                   cwd='/testbed', check=True)
+PY
+
+    mkdir -p /testbed/.embedeval/logs
+    printf '.embedeval/\ntags\n' >> .git/info/exclude
+    ctags -R --languages=C,C++ -f /testbed/tags os arch tests examples 2>/dev/null || true
+    chmod 755 /usr/local/bin/run_tests
+    run_tests --build-only || true
+
+%environment
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.instance @@INSTANCE_ID@@
+    embedeval.base_commit @@BASE_COMMIT@@

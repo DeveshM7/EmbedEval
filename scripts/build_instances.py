@@ -56,14 +56,15 @@ def build_apptainer(instance_id: str, dry_run: bool = False) -> bool:
     logdir = au.path("logs", instance_id, "x").parent
     print(f"\n=== {instance_id} -> {image} ===")
     cmake = meta.get("pipeline") == "cmake"
-    if not cmake:
+    if not cmake and meta.get("pipeline") != "contiki-ng":
         print(f"  era: Python {meta['python_version']}, SDK {meta['sdk_version']}")
     if dry_run:
         return True
     start = time.time()
     try:
         bases = au.path("logs", "bases", "x").parent
-        base = (au.ensure_openthread_base(bases) if cmake else
+        base = (au.ensure_contiki_ng_base(bases) if meta.get("pipeline") == "contiki-ng" else
+                au.ensure_openthread_base(bases) if cmake else
                 au.ensure_base_images(meta["python_version"], meta["sdk_version"],
                                       meta["sdk_archive"], bases))
     except RuntimeError as e:

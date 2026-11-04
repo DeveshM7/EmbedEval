@@ -35,9 +35,9 @@ INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_RO
                   if _override else [layout.generated()] if layout.run_dir()
                   else [APPTAINER_INSTANCES, REPO_ROOT / "docker" / "instances"])
 
-PROJECTS = ("zephyr", "nuttx", "riot", "openthread")
+PROJECTS = ("zephyr", "nuttx", "riot", "openthread", "contiki-ng")
 
-_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
+_INSTANCE_RE = re.compile(r"^(?P<project>[a-z][a-z0-9-]*)__(?P=project)-(?P<pr>\d+)$")
 
 
 def split_instance(instance_id: str) -> tuple[str, str]:

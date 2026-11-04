@@ -323,7 +323,7 @@ TOOLS = [
             "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "list_dir",
-        "description": "List the entries of a directory in the Zephyr repository.",
+        "description": "List the entries of a directory in the selected upstream repository.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "Repository-relative directory, e.g. boards/qemu/x86"},
             "ref": {"type": "string", "enum": ["base", "merge"], "description": "Default: merge"}},
@@ -712,7 +712,21 @@ def openthread_enriched() -> Path:
     return openthread_candidates.enriched_dir()
 
 
+def contiki_ng_enriched():
+    import contiki_ng_candidates
+    return contiki_ng_candidates.enriched_dir()
+
+def render_record_contiki_ng(rec):
+    from contiki_ng_pipeline import render_record
+    return render_record(rec)
+
+def check_verdict_contiki_ng(v, rec):
+    from contiki_ng_candidates import check_verdict
+    return check_verdict(v, rec)
+
 PROJECTS = {
+    "contiki-ng": {"instructions": "docs/contiki_ng_triage.md", "enriched": contiki_ng_enriched,
+                   "clone": layout.contiki_ng_clone, "render": render_record_contiki_ng, "check": check_verdict_contiki_ng},
     "zephyr": {"instructions": "docs/pr_triage.md", "enriched": layout.enriched,
                "clone": ensure_clone, "render": render_record, "check": check_verdict},
     "openthread": {"instructions": "docs/openthread_triage.md", "enriched": openthread_enriched,
@@ -943,6 +957,11 @@ def cmd_run(args) -> None:
     missing = [p for p in prs if not (ENRICHED / f"{p}.json").exists()]
     if missing:
         sys.exit(f"not enriched: {missing}. Run filter_candidates.py enrich --pr ...")
+    if PROJECT == "contiki-ng":
+        import contiki_ng_candidates
+        stale_contiki = [n for n in prs if contiki_ng_candidates.stale_record(json.loads((ENRICHED / f"{n}.json").read_text()))]
+        if stale_contiki:
+            sys.exit(f"stale Contiki-NG records: {stale_contiki}; re-enrich")
     if PROJECT == "openthread":
         import openthread_candidates
         stale = [p for p in prs if openthread_candidates.stale_record(json.loads((ENRICHED / f"{p}.json").read_text()))]

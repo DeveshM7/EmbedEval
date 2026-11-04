@@ -38,7 +38,7 @@ OUTPUTS_DIR = layout.outputs()
 PATCH_NAME = "patch.diff"
 TRAJECTORY_NAME = "trajectory.json"
 
-PROJECTS = ("zephyr", "nuttx", "riot", "openthread")
+PROJECTS = ("zephyr", "nuttx", "riot", "openthread", "contiki-ng")
 
 # LiteLLM model name -> directory name under outputs/<repo>/.
 # Unknown models raise rather than silently creating a new directory.
@@ -56,7 +56,7 @@ MODEL_DIRS: dict[str, str] = {
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.
 MODEL_ALIASES: dict[str, str] = {short: full for full, short in MODEL_DIRS.items()}
 
-_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
+_INSTANCE_RE = re.compile(r"^(?P<project>[a-z][a-z0-9-]*)__(?P=project)-(?P<pr>\d+)$")
 
 
 class UnknownModelError(ValueError):

@@ -27,6 +27,7 @@ import platform
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ SUBMIT = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 class ApptainerEnvironment:
     def __init__(self, *, image: str | Path, name: str, cwd: str = "/testbed",
-                 timeout: int = 900, setup_commands: list[str] | None = None,
+                 timeout: int = 900, local_overlay: bool = False, setup_commands: list[str] | None = None,
                  logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
@@ -50,7 +51,8 @@ class ApptainerEnvironment:
         self.cwd, self.timeout = cwd, timeout
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = au.path("runs", f"agent-{name}-{stamp}", "x").parent
-        self.overlay = self.run_dir / "overlay"
+        self.local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-agent-") if local_overlay else None
+        self.overlay = (Path(self.local_overlay.name) if self.local_overlay else self.run_dir) / "overlay"
         self.overlay.mkdir(parents=True, exist_ok=True)
         self.config = {"image": str(self.image), "cwd": cwd, "timeout": timeout,
                        "overlay": str(self.overlay)}
@@ -97,5 +99,7 @@ class ApptainerEnvironment:
 
     def cleanup(self) -> None:
         """Remove the overlay -- the only state the run created."""
+        if getattr(self, "local_overlay", None):
+            self.local_overlay.cleanup()
         if getattr(self, "run_dir", None) and self.run_dir.exists():
             au.remove(self.run_dir)

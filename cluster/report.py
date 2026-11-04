@@ -65,13 +65,17 @@ def build(run: Path) -> dict:
         st = status.read(run, e["pr"])
         where, detail = outcome(e, st)
         rows.append({"pr": e["pr"], "outcome": where, "detail": detail,
+                     "observe": (st.get("observe") or {}).get("state"),
                      "triage_min": (st.get("triage") or {}).get("minutes"),
                      "validate_min": (st.get("validate") or {}).get("minutes"),
                      "pair": (st.get("triage") or {}).get("pair")})
     counts = Counter(r["outcome"] for r in rows)
+    observations = Counter(r["observe"] for r in rows if r["observe"])
     return {"run": m["name"], "generated": datetime.now().isoformat(timespec="seconds"),
+            "project": m.get("project", "zephyr"),
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
+            "observations": dict(observations),
             "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"], "rows": rows}
 
 
@@ -87,7 +91,8 @@ def to_ledger(run: Path, prs: set[int] | None = None) -> tuple[int, Path]:
             rows.append({"pr": e["pr"], "outcome": where, "detail": detail})
     book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
     n = ledger.record(book, m["name"], m["code"]["commit"],
-                      datetime.now().isoformat(timespec="seconds"), rows)
+                      datetime.now().isoformat(timespec="seconds"), rows,
+                      project=m.get("project", "zephyr"))
     return n, book
 
 
@@ -95,6 +100,8 @@ def markdown(rep: dict) -> str:
     out = [f"# Run {rep['run']}", "", f"{rep['prs']} PRs; report made {rep['generated']}.", "",
            "| Outcome | PRs |", "|---|---|"]
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
+    if rep["observations"]:
+        out += ["", "Observation: " + ", ".join(f"{v} {k}" for k, v in rep["observations"].items())]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
             "| PR | outcome | detail | pair | triage min | validation min |",
@@ -125,6 +132,8 @@ def main() -> None:
     print(f"run {rep['run']}: {rep['prs']} PRs")
     for k, v in rep["funnel"].items():
         print(f"  {v:>5}  {k}")
+    if rep["observations"]:
+        print("  observed: " + ", ".join(f"{v} {k}" for k, v in rep["observations"].items()))
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
     print(f"  -> {run / 'report.md'}")
     n, book = to_ledger(run)      # normally already there: workers record as PRs settle

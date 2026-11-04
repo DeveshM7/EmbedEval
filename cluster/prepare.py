@@ -90,6 +90,7 @@ def main() -> None:
         p.error("--no-filter goes with --pr")
 
     cfg = cluster_config.load_or_exit(args.config)
+    project = cfg["project"]
     run = Path(cfg["derived"]["runs"]) / args.name
     if (run / "manifest.json").exists():
         sys.exit(f"{run} is already prepared; pick another --name "
@@ -106,8 +107,18 @@ def main() -> None:
     # 1. the PRs; skipped: those an earlier run settled (ledger.py), and those
     # another run has taken and not finished (never two runs on one PR)
     stage, notes = {}, {}
-    done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]))
-    taken = status.unfinished(Path(cfg["derived"]["runs"]), but=run)
+    done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]), project)
+    taken = status.unfinished(Path(cfg["derived"]["runs"]), but=run, project=project)
+
+    sys.path.insert(0, str(REPO / "scripts"))
+    if project == "contiki-ng":
+        import contiki_ng_candidates as candidates
+    else:
+        import filter_candidates as candidates
+
+    def candidate_cmd(command: str, *more: str, logfile: Path, timeout=None) -> int:
+        return script("filter_candidates.py", command, "--repo", project, *more,
+                      env=env, logfile=logfile, timeout=timeout)
 
     def skip_known(prs):
         for pr in prs:
@@ -131,27 +142,38 @@ def main() -> None:
         fresh = [pr for pr in prs if pr not in stage]
         if not args.no_filter and fresh:
             log("hard filters")
-            script("filter_candidates.py", "fetch", "--pr", *map(str, fresh), env=env,
-                   logfile=logs / "fetch.log", timeout=None)
-            sys.path.insert(0, str(REPO / "scripts"))
-            import filter_candidates as fc
+            if candidate_cmd("fetch", "--pr", *map(str, fresh),
+                             logfile=logs / "fetch.log"):
+                sys.exit(f"fetch failed; see {logs / 'fetch.log'}")
             for pr in fresh:
-                f = fc.CACHE / f"{pr}.json"
-                if not f.exists():     # GitHub did not answer: not an outcome, so not settled
-                    stage[pr], notes[pr] = "fetch failed", f"see {logs / 'fetch.log'}"
-                    continue
-                ok, why = fc.classify(json.loads(f.read_text()))
+                if project == "contiki-ng":
+                    try:
+                        rec = candidates.find_pr(pr)
+                    except (KeyError, ValueError):
+                        rec = None
+                    if rec is None:
+                        stage[pr], notes[pr] = "fetch failed", f"see {logs / 'fetch.log'}"
+                        continue
+                    ok, why = candidates.classify(rec)
+                else:
+                    f = candidates.CACHE / f"{pr}.json"
+                    if not f.exists():
+                        stage[pr], notes[pr] = "fetch failed", f"see {logs / 'fetch.log'}"
+                        continue
+                    ok, why = candidates.classify(json.loads(f.read_text()))
                 if not ok:
                     stage[pr], notes[pr] = "hard filter", why
     else:
         source = {"since": args.since, "until": args.until, "redo": args.redo}
         log(f"fetching PRs merged {args.since} .. {args.until}")
-        if script("filter_candidates.py", "fetch", "--since", args.since, "--until", args.until,
-                  env=env, logfile=logs / "fetch.log", timeout=None):
+        if candidate_cmd("fetch", "--since", args.since, "--until", args.until,
+                         logfile=logs / "fetch.log"):
             sys.exit(f"fetch failed; see {logs / 'fetch.log'}")
-        if script("filter_candidates.py", "filter", env=env, logfile=logs / "filter.log"):
+        if candidate_cmd("filter", logfile=logs / "filter.log"):
             sys.exit(f"filter failed; see {logs / 'filter.log'}")
-        prs = [json.loads(l)["number"] for l in open(run / "candidates" / "candidates.jsonl")]
+        candidate_file = (run / "candidates" / ("contiki-ng" if project == "contiki-ng" else "")
+                          / "candidates.jsonl")
+        prs = [json.loads(l)["number"] for l in open(candidate_file)]
         skip_known(prs)
     timings["select"] = time.time() - t0
     log(f"{len(prs)} PRs")
@@ -161,8 +183,8 @@ def main() -> None:
     log(f"enriching, {par['enrich']} at a time")
     kept = [pr for pr in prs if pr not in stage]
     if kept:
-        script("filter_candidates.py", "enrich", "--parallel", str(par["enrich"]),
-               "--pr", *map(str, kept), env=env, logfile=logs / "enrich.log", timeout=None)
+        candidate_cmd("enrich", "--parallel", str(par["enrich"]),
+                      "--pr", *map(str, kept), logfile=logs / "enrich.log")
     enriched = [pr for pr in kept if (run / "enriched" / f"{pr}.json").exists()]
     timings["enrich"] = time.time() - t
     log(f"enriched {len(enriched)}/{len(kept)} in {timings['enrich']:.0f} s")
@@ -170,16 +192,19 @@ def main() -> None:
     # 3. dry runs, in parallel: one process per PR
     t = time.time()
     log(f"dry runs, {par['dry_run']} at a time")
-    with ThreadPoolExecutor(par["dry_run"]) as pool:
-        list(pool.map(lambda pr: script("dry_run.py", str(pr), env=env,
-                                        logfile=logs / "dryrun" / f"{pr}.log", timeout=1800),
-                      enriched))
+    if project == "zephyr":
+        with ThreadPoolExecutor(par["dry_run"]) as pool:
+            list(pool.map(lambda pr: script("dry_run.py", str(pr), env=env,
+                                            logfile=logs / "dryrun" / f"{pr}.log", timeout=1800),
+                          enriched))
     timings["dry_run"] = time.time() - t
 
     for pr in kept:
         f = run / "dryrun" / f"{pr}.json"
         if pr not in enriched:
             stage[pr] = "enrich failed"
+        elif project == "contiki-ng":
+            stage[pr] = "to triage"
         elif not f.exists():
             stage[pr] = "dry run error"
         elif json.loads(f.read_text())["auto_reject"]:
@@ -190,32 +215,37 @@ def main() -> None:
     log(f"dry runs done in {timings['dry_run']:.0f} s: {len(to_triage)} to triage")
 
     # 4. shared SDK images the triaged PRs may need, each built once
-    sys.path.insert(0, str(REPO / "scripts"))
-    import apptainer_util as au
     t = time.time()
-    need = {}
-    for pr in to_triage:
-        tw = json.loads((run / "enriched" / f"{pr}.json").read_text())["twister"]
-        need[(tw["python"], tw["sdk"], tw["sdk_archive"])] = pr
-    missing = [k for k in need if not au.sdk_image(k[1], k[0]).exists()]
-    for py, sdk, archive in missing:          # one at a time: two may share a Python image
-        log(f"building SDK image {sdk} (Python {py})")
-        try:
-            au.ensure_base_images(py, sdk, archive, Path(cfg["derived"]["shared"]) / "logs")
-        except RuntimeError as e:
-            log(f"  FAILED: {e}")
+    missing = []
+    if project == "zephyr":
+        import apptainer_util as au
+        need = {}
+        for pr in to_triage:
+            tw = json.loads((run / "enriched" / f"{pr}.json").read_text())["twister"]
+            need[(tw["python"], tw["sdk"], tw["sdk_archive"])] = pr
+        missing = [k for k in need if not au.sdk_image(k[1], k[0]).exists()]
+        for py, sdk, archive in missing:
+            log(f"building SDK image {sdk} (Python {py})")
+            try:
+                au.ensure_base_images(py, sdk, archive, Path(cfg["derived"]["shared"]) / "logs")
+            except RuntimeError as e:
+                log(f"  FAILED: {e}")
     timings["sdk_images"] = time.time() - t
 
     # 5. every commit a worker reads, fetched now: workers never fetch
     t = time.time()
-    import zephyr_env
+    if project == "zephyr":
+        import zephyr_env
     shas = set()
     for pr in to_triage:
         rec = json.loads((run / "enriched" / f"{pr}.json").read_text())
         shas |= {s for s in (rec.get("base_commit"), rec.get("head_commit"),
-                             rec.get("merge_commit_sha")) if s}
+                             rec.get("merge_commit_sha"), rec.get("fix_commit")) if s}
     try:
-        zephyr_env.ensure_commits(*sorted(shas))
+        if project == "contiki-ng":
+            candidates.ensure_commits(*sorted(shas))
+        else:
+            zephyr_env.ensure_commits(*sorted(shas))
         fetched = "ok"
     except RuntimeError as e:
         fetched = str(e)[:300]
@@ -226,7 +256,8 @@ def main() -> None:
     git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
                                     text=True).stdout.strip()
     manifest = {
-        "name": args.name, "prepared": datetime.now().isoformat(timespec="seconds"),
+        "name": args.name, "project": project,
+        "prepared": datetime.now().isoformat(timespec="seconds"),
         "source": source,
         "code": {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))},
         "config": {k: v for k, v in cfg.items() if k != "derived"},
@@ -234,8 +265,8 @@ def main() -> None:
         "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
                 for pr in prs],
         "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
-        "missing_sdk_images": [f"{sdk} (Python {py})" for py, sdk, _ in missing
-                               if not au.sdk_image(sdk, py).exists()],
+        "missing_sdk_images": ([f"{sdk} (Python {py})" for py, sdk, _ in missing
+                                if not au.sdk_image(sdk, py).exists()] if project == "zephyr" else []),
         "seconds": {k: round(v) for k, v in timings.items()},
     }
     tmp = run / "manifest.json.tmp"

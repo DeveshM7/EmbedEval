@@ -39,27 +39,29 @@ def _locked(path: Path):
         yield
 
 
-def _read(path: Path) -> dict[int, dict]:
+def _read(path: Path, project: str = "zephyr") -> dict[int, dict]:
     latest = {}
     if path.exists():
         for line in path.read_text().splitlines():
             if line.strip():
                 e = json.loads(line)
-                latest[e["pr"]] = e
+                if e.get("project", "zephyr") == project:
+                    latest[e["pr"]] = e
     return latest
 
 
-def latest(path: Path) -> dict[int, dict]:
+def latest(path: Path, project: str = "zephyr") -> dict[int, dict]:
     """Each PR's latest settled entry."""
     with _locked(path):
-        return _read(path)
+        return _read(path, project)
 
 
-def record(path: Path, run: str, commit: str, date: str, rows: list[dict]) -> int:
+def record(path: Path, run: str, commit: str, date: str, rows: list[dict],
+           project: str = "zephyr") -> int:
     """Append the settled rows of a report; a row already recorded for this
     run with the same outcome is not repeated. Returns how many were added."""
     with _locked(path):
-        have = _read(path)
+        have = _read(path, project)
         new = []
         for r in rows:
             if not settled(r["outcome"], r["detail"]):
@@ -67,8 +69,11 @@ def record(path: Path, run: str, commit: str, date: str, rows: list[dict]) -> in
             old = have.get(r["pr"])
             if old and old["run"] == run and old["outcome"] == r["outcome"]:
                 continue
-            new.append({"pr": r["pr"], "outcome": r["outcome"], "detail": r["detail"],
-                        "run": run, "commit": commit, "date": date})
+            entry = {"pr": r["pr"], "outcome": r["outcome"], "detail": r["detail"],
+                     "run": run, "commit": commit, "date": date}
+            if project != "zephyr":
+                entry["project"] = project
+            new.append(entry)
         if new:
             with open(path, "a") as fh:
                 fh.writelines(json.dumps(e) + "\n" for e in new)

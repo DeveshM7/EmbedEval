@@ -246,7 +246,8 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> N
                 return                                    # stays to do: a resubmit runs it
             cap = min(caps["triage_pr"], left)
             start = time.time()
-            rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "run", "--profile",
+            rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "run", "--project",
+                       cfg["project"], "--profile",
                        profile, "--pr", str(pr), "--parallel", "1"],
                       LOGS / f"triage-{pr}.log", cap, env)
             if rc == 143:
@@ -255,7 +256,8 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> N
             f = run / "triage" / f"{pr}.json"
             if f.exists() and f.stat().st_mtime >= start:
                 v = json.loads(f.read_text())
-                pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
+                pair = (f"{v['platform']} / {v['scenario']}" if v.get("platform") else
+                        v.get("profile") or v.get("test_target"))
                 info = {"state": "done", "verdict": v.get("verdict"), "pair": pair,
                         "confidence": v.get("confidence"), "minutes": minutes, "node": N}
             elif rc == 124:
@@ -277,6 +279,51 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> N
 
 
 # ---------------------------------------------------------------- validate
+
+
+def observe(cfg: dict, run: Path, env: dict, minutes: float) -> None:
+    """Run Contiki's upstream test inventory without model-selected expectations."""
+    todo = status.observe_todo(run)
+    log(f"observation: {len(todo)} PRs left in the run")
+    if not todo:
+        return
+    deadline = time.time() + (minutes - 3) * 60
+    sweep(Path(env["EMBEDEVAL_WORK"]))
+
+    def one(pr: int) -> None:
+        start = time.time()
+        iid = f"contiki-ng__contiki-ng-{pr}"
+        lg = LOGS / f"observe-{pr}.log"
+
+        def left() -> float:
+            return min(cfg["caps"]["validate_pr"] - (time.time() - start) / 60,
+                       (deadline - time.time()) / 60)
+
+        if left() < 10 or _stopping.is_set():
+            return
+        try:
+            for cmd, cap in (([PY, "scripts/generate_instance.py", "--project", "contiki-ng",
+                               "--pr", str(pr), "--observe"], 5),
+                             ([PY, "scripts/build_instances.py", "--instance", iid],
+                              2 * cfg["caps"]["build"] + 5),
+                             ([PY, "scripts/validate_instance.py", iid], left())):
+                rc = step(cmd, lg, min(cap, left()), env)
+                if rc == 143:
+                    return
+                observed = run / "instances" / iid / "observed.json"
+                if rc and not (cmd[1] == "scripts/validate_instance.py" and observed.exists()):
+                    state = "cap" if rc == 124 else "failed"
+                    break
+            else:
+                state = "done"
+            if record(run, pr, "observe", {"state": state, "minutes": round((time.time() - start) / 60, 1),
+                                            "node": N, "note": str(observed) if observed.exists() else ""}):
+                log(f"observe {pr}: {state}")
+        finally:
+            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, env)
+
+    q = claims.Queue(run, "observe", ME, lambda pr: pr in status.observe_todo(run))
+    drain(q, todo, one, cfg["parallel"]["validate_per_node"], deadline - 10 * 60)
 
 
 def images_gb(run: Path) -> float:
@@ -322,7 +369,8 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     sweep(Path(env["EMBEDEVAL_WORK"]))
 
     def one(pr: int) -> None:
-        iid = f"zephyr__zephyr-{pr}"
+        iid = (f"contiki-ng__contiki-ng-{pr}" if cfg["project"] == "contiki-ng"
+               else f"zephyr__zephyr-{pr}")
         start = time.time()
 
         def left() -> float:
@@ -344,14 +392,14 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         verdict = run / "triage" / f"{pr}.json"
         tried = []
         while True:
-            tried.append(json.loads(verdict.read_text())["platform"])
+            tried.append(json.loads(verdict.read_text()).get("platform", "contiki-ng"))
             note = f"retried on {tried[-1]}: nothing ran on {tried[0]}" if len(tried) > 1 else ""
             res = attempt(run, pr, iid, verdict, lg, left, venv)
             if res is None:
                 return                                     # stopping: stays to do
             state, what, published = res
             nothing_ran = what.startswith("INVALID: nothing ran")
-            if nothing_ran and len(tried) == 1 and left() >= 10:
+            if cfg["project"] == "zephyr" and nothing_ran and len(tried) == 1 and left() >= 10:
                 verdict = other_board(run, pr, verdict, tried)
                 if verdict:
                     log(f"validate {pr}: nothing ran on {tried[0]}; retrying on another board")
@@ -385,7 +433,9 @@ def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: d
     a push that fails leaves the PR VALID, with a note."""
     step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)   # leftovers of a cut-short try
     try:
-        rc = step([PY, "scripts/generate_instance.py", "--pr", str(pr), "--triage", str(verdict)],
+        project = "contiki-ng" if iid.startswith("contiki-ng__") else "zephyr"
+        rc = step([PY, "scripts/generate_instance.py", "--project", project,
+                   "--pr", str(pr), "--triage", str(verdict)],
                   lg, min(5, left()), venv)
         if rc == 143:
             return None
@@ -456,7 +506,7 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True)
     p.add_argument("--config", required=True, help="the frozen settings submit.py wrote")
-    p.add_argument("--phase", required=True, choices=["triage", "validate"])
+    p.add_argument("--phase", required=True, choices=["triage", "observe", "validate"])
     p.add_argument("--minutes", type=float, required=True,
                    help="the phase's time: what is left of the job, less the report's")
     args = p.parse_args()
@@ -478,8 +528,16 @@ def main() -> None:
     log(f"phase {args.phase}, node {N} of {NN}, run {run}, {args.minutes:.0f} min")
     claims.keep_alive(run, ME)
     if args.phase == "triage":
+        if cfg["project"] == "contiki-ng" and os.uname().machine != "aarch64":
+            sys.exit("Contiki-NG model triage requires Spark ARM64")
         triage(cfg, run, env, node_dir, args.minutes)
+    elif args.phase == "observe":
+        if cfg["project"] != "contiki-ng" or os.uname().machine != "x86_64":
+            sys.exit("Contiki-NG observation requires x86_64")
+        observe(cfg, run, env, args.minutes)
     else:
+        if cfg["project"] == "contiki-ng" and os.uname().machine != "x86_64":
+            sys.exit("Contiki-NG validation requires x86_64")
         validate(cfg, run, env, args.minutes)
     log(f"phase {args.phase} done")
 

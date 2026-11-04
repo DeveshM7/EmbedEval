@@ -78,6 +78,13 @@ _EXTRA_WARNINGS = {
 }
 
 PROJECTS: dict[str, dict] = {
+    "contiki-ng": {
+        "label": "Contiki-NG",
+        "orientation": "Run `run_tests` to rebuild and execute the fixed upstream native units or Cooja scenarios. The selected target and configuration are fixed by this instance.",
+        "extra_warnings": "Exit 2 means a build failed; exit 3 means required named tests did not execute.",
+        "protected_paths": ["tests/", "regression-tests/", "tools/cooja/"],
+        "runtime": "apptainer", "rebuild_command": "", "command_timeout": 1800,
+    },
     "zephyr": {
         "label": "Zephyr RTOS",
         "orientation": _ORIENTATION["zephyr"],
@@ -136,13 +143,15 @@ PROJECTS: dict[str, dict] = {
 
 
 # Instance pipelines run as Apptainer images: twister (Zephyr), cmake (OpenThread).
-APPTAINER_PIPELINES = ("twister", "cmake")
+APPTAINER_PIPELINES = ("twister", "cmake", "contiki-ng")
 
 
 def config_for(meta: dict) -> dict:
     """The project configuration for one instance. A Zephyr instance must come
     from the twister pipeline; the Docker ones in docker/instances/ are kept as
     reference metadata only and cannot be run."""
+    if meta["project"] == "contiki-ng" and meta.get("pipeline") != "contiki-ng":
+        raise ValueError("Contiki-NG requires a generated Contiki-NG pipeline instance")
     if meta["project"] == "zephyr" and meta.get("pipeline") != "twister":
         raise ValueError(f"{meta.get('instance_id')}: not a twister-pipeline instance. "
                          "Zephyr instances are run from generated/ "

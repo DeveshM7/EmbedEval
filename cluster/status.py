@@ -77,18 +77,27 @@ def triage_todo(run: Path) -> list[int]:
             if e["stage"] == "to triage" and triage_needed(run, e["pr"])]
 
 
+def observe_todo(run: Path) -> list[int]:
+    """Contiki candidates without a completed observation."""
+    return [e["pr"] for e in manifest(run)["prs"]
+            if e["stage"] == "to triage" and "observe" not in read(run, e["pr"])]
+
+
 def accepted(run: Path) -> list[int]:
     return [e["pr"] for e in manifest(run)["prs"]
             if (read(run, e["pr"]).get("triage") or {}).get("verdict") == "accept"]
 
 
-def unfinished(runs: Path, but: Path | None = None) -> dict[int, str]:
+def unfinished(runs: Path, but: Path | None = None,
+               project: str = "zephyr") -> dict[int, str]:
     """PRs some run has taken and not finished -- what a resubmit of that run
     would still do -- and the run's name. Every run under `runs` but `but`."""
     out = {}
     for m in sorted(Path(runs).glob("*/manifest.json")):
         other = m.parent
         if but and other.resolve() == Path(but).resolve():
+            continue
+        if manifest(other).get("project", "zephyr") != project:
             continue
         for pr in triage_todo(other) + validate_todo(other):
             out.setdefault(pr, other.name)

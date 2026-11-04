@@ -127,3 +127,11 @@ def show(p: Path) -> str:
         if root is not None and (p == root or root in p.parents):
             return str(p.relative_to(root))
     return str(p)
+
+
+def contiki_ng_clone() -> Path:
+    value = os.environ.get("EMBEDEVAL_CONTIKI_NG_CLONE")
+    if value:
+        return Path(value)
+    import apptainer_util
+    return apptainer_util.shared_root() / "contiki-ng.git"

@@ -429,7 +429,7 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Generate an instance from a triage verdict.")
-    p.add_argument("--project", choices=("zephyr", "openthread"), default="zephyr")
+    p.add_argument("--project", choices=("zephyr", "openthread", "contiki-ng"), default="zephyr")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--triage", help="path to the triage verdict JSON")
     p.add_argument("--observe", action="store_true",
@@ -445,6 +445,15 @@ def main() -> None:
     p.add_argument("--force", action="store_true",
                    help="generate even if the board/scenario check fails (for testing)")
     args = p.parse_args()
+
+    if args.project == "contiki-ng":
+        from contiki_ng_pipeline import generate as generate_contiki
+        verdict = json.loads(Path(args.triage).read_text()) if args.triage else None
+        if not (args.observe or args.from_observed or verdict):
+            p.error("--triage, --observe or --from-observed required")
+        inst = generate_contiki(args.pr, verdict, Path(args.out), args.observe, args.from_observed, args.profile)
+        print(f"  wrote {layout.show(inst)}")
+        return
 
     if args.observe or args.from_observed:
         if args.project != "openthread" or args.triage:

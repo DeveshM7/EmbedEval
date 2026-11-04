@@ -75,7 +75,11 @@ def load(path: str | Path | None = None) -> dict:
             raise ConfigError(f"{path}: not a mapping of settings")
     elif path != DEFAULT:
         raise ConfigError(f"no config file {path}")
+    if user.get("project") == "contiki-ng" and "scratch_root" not in user:
+        base["scratch_root"] = "/scratch/scholar/${USER}/embedeval-contiki"
     cfg = _expand(_overlay(base, user))
+    if cfg["project"] not in ("zephyr", "contiki-ng"):
+        raise ConfigError("project must be 'zephyr' or 'contiki-ng'")
     root = Path(cfg["scratch_root"])
     p = cfg["paths"]
     shared = Path(p["shared"]) if p["shared"] else root / "shared"
@@ -85,6 +89,8 @@ def load(path: str | Path | None = None) -> dict:
         "shared": str(shared),
         "runs": str(root / "runs"),
         "zephyr_clone": p["zephyr_clone"] or str(shared / "zephyr.git"),
+        "contiki_ng_clone": p["contiki_ng_clone"] or str(shared / "contiki-ng.git"),
+        "contiki_ng_image": p["contiki_ng_image"] or str(shared / "images" / "contiki-ng-ci-dcf5962b-x86_64.sif"),
         "vllm_cache": p["vllm_cache"] or str(shared / "vllm-cache"),
         "ledger": str(shared / "ledger.jsonl"),
     }
@@ -97,6 +103,8 @@ def env_for(cfg: dict, run_dir: Path | None = None) -> dict:
     d, p = cfg["derived"], cfg["paths"]
     env = {"EMBEDEVAL_SHARED": d["shared"],
            "EMBEDEVAL_ZEPHYR_CLONE": d["zephyr_clone"],
+           "EMBEDEVAL_CONTIKI_NG_CLONE": d["contiki_ng_clone"],
+           "EMBEDEVAL_CONTIKI_NG_IMAGE": d["contiki_ng_image"],
            "EMBEDEVAL_MODELS": p["models"],
            "EMBEDEVAL_VLLM_IMAGE": p["vllm_image"]}
     if cfg.get("registry"):

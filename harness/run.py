@@ -241,10 +241,17 @@ def make_environment(meta: dict):
         commit_tests = ("cd /testbed && git add -A -- tests/ && git -c user.name=EmbedEval "
                         "-c user.email=embedeval@localhost commit -q -m "
                         "'The PR test changes, without its fix'")
+        if meta["project"] == "contiki-ng":
+            commit_tests = ("cd /testbed && "
+                            "if [ -d tests ]; then git add -A -- tests/; fi; "
+                            "if [ -d regression-tests ]; then git add -A -- regression-tests/; fi; "
+                            "git -c user.name=EmbedEval -c user.email=embedeval@localhost "
+                            "commit -q -m 'Protected upstream tests'")
         import registry   # the validated image: pulled from the registry if published
         return ApptainerEnvironment(image=registry.image_for(meta["instance_id"]),
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
+                                    local_overlay=meta["project"] == "contiki-ng",
                                     setup_commands=[commit_tests])
 
     # NuttX, RIOT: Docker.

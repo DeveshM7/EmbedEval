@@ -1,8 +1,8 @@
 # Contiki-NG triage contract
 
-Status: research checkpoint; **not ready for automated triage or a full pass**.
-There is no Contiki adapter in the generic pipeline yet. This document must not
-be used to generate automatic accepts until that adapter and its checks exist.
+Status: integrated adapter undergoing bounded Scholar pilot verification.
+A full campaign requires the remaining profile/era controls below. Supported
+selections pass the inventory checker before generation and named-case validation.
 Detailed research and logs live in `triage/runs/contiki-research/` (ignored).
 
 ## Run contract
@@ -77,8 +77,9 @@ Cooja units are scenarios, not gtest cases.
 Use the compiler's actual preprocessing command (upstream `build/<target>/obj/*.e`
 rule) to resolve bodies. Preserve include provenance and macro dumps, and mark
 unresolved expressions unknown. Research verified that IP64_CONF_DHCP=0 removes
-`IP64_TAP_MODE dhcp` and keeps `static`, while =1 reverses them. Full automated
-guard/provenance resolution and runtime agreement remain readiness work.
+`IP64_TAP_MODE dhcp` and keeps `static`, while =1 reverses them. Compiler line/definition evidence is recorded by the research resolver. Guarded
+native selections remain holds until their own profile has compiler-backed proof.
+The TAP runtime agreement control was blocked by device access permissions.
 
 ## CI profiles and worker status
 
@@ -97,15 +98,15 @@ with seven macOS exclusions (27 combinations). MacOS is out of worker scope.
 | script-base | native LC switch/address-labels, memb, visualization | Full current suite completed on x86 control, including visualization Cooja scenario; historical versions untested |
 | simulation-base | Cooja scenario matrix | Native-mote ringbufindex and Sky hello-world passed on current x86 control; remaining scenarios/eras untested |
 | native-runs | native applications and shell runners | Current pure-native subset: 20 runner logs, 158 named cases passed; network/service cases untested |
-| ipv6 | Cooja scenarios | Pending simulator control |
+| ipv6 | Cooja scenarios | Current single native-mote scenario passed; older eras need controls |
 | ipv6-nbr | native neighbor test | Current x86 control passed with named unit result; historical versions untested |
-| ieee802154 | Cooja scenarios | Pending simulator control |
-| rpl-lite | Cooja scenarios | Pending simulator control |
-| rpl-classic | Cooja scenarios | Pending simulator control |
+| ieee802154 | Cooja scenarios | Current PAN-ID native-mote scenario passed |
+| rpl-lite | Cooja scenarios | Current route scenario passed on node-local storage; NFS clean fails with loaded libraries |
+| rpl-classic | Cooja scenarios | Current route scenario passed on node-local storage; NFS clean fails with loaded libraries |
 | tun-rpl-br | Cooja plus host TUN/router scripts | Pending simulator and network privilege fixture |
 | coap-lwm2m | simulations/standalone native and queue mode | External submodule/services; fixture unverified |
 | packet-parsing | native packet injector, four shell consumers | Current x86 suite completed; historical profile coverage bounded |
-| security-protocols | Cooja and crypto dependencies | Pending simulator/submodule controls |
+| security-protocols | Cooja and crypto dependencies | Current EDHOC method-0 scenario passed with pinned crypto trees |
 | nat64-standalone | native application plus host echo fixture | Current x86 UDP echo round trip passed; historical versions untested |
 
 Within native-runs, MQTT, ping, CoAP, SNMP and IP64 TAP scripts have network,
@@ -184,20 +185,45 @@ PR #3267). Require fresh logs, positive completion markers and named execution.
 Do not transplant that fix into old benchmark tests without separate fixture
 analysis. Repeat the before state to check determinism.
 
-The existing generic convention uses `pr`, `verdict` (`accept`, `reject`, `hold`)
-and `reason`; accepts require project-specific selection checks. **Contiki's
-accept schema, inventory checker and dispatch are not implemented.** Do not
-invent OpenThread `test_targets` or CMake fields for Contiki. A neutral research
-hold can be recorded as follows; this is not a launchable verdict:
+The implemented decision schema uses `pr`, `verdict` (`accept`, `reject`,
+`hold`), and `reason` for rejects/holds. Accepts require:
+
+- `units`: nonempty list of exact affected `test_inventory` unit IDs.
+- `profile`: optional `native`, `cooja`, or `script`; selected units must match.
+- `fail_to_pass`: exact case IDs; native IDs are `unit_id::test_symbol`,
+  while script/scenario IDs equal their unit ID.
+- `pass_to_pass`: relevant unaffected case IDs, or an empty list.
+- `oracle`: `runtime` (default), `compile`, or `config`.
+- `problem_statement`, `causal_chain`, and `change_type`: nonempty strings.
+- Compile oracles also require `compile_symbols`, drawn from the record's
+  verified absent-at-base `compile_requirements`, plus `oracle_attribution`.
+  Missing test utilities remain incidental unless they implement the PR purpose.
+- Config oracles require exact `config_diagnostics` and `oracle_attribution`.
+  An unavailable dependency without source attribution is an infrastructure hold.
+
+Native accept selections require enabled-body evidence; unresolved guarded
+bodies remain holds until compiler evidence establishes the selected profile.
+Source-unconditional bodies are recorded explicitly. Observations can investigate
+unknown bodies but do not turn missing execution into failure. Records carry an
+enrichment version and required fields; stale records must be re-enriched.
+
+Illustrative schema only; every ID below is a placeholder, never an execution
+claim or an allowed substitute for actual inventory values:
 
 ```json
-{"pr": 123, "verdict": "hold", "reason": "Selected upstream scenario has no smoke-controlled worker profile"}
+{
+  "pr": 123,
+  "verdict": "accept",
+  "profile": "native",
+  "units": ["tests/example/test-example"],
+  "fail_to_pass": ["tests/example/test-example::bounds"],
+  "pass_to_pass": [],
+  "oracle": "runtime",
+  "change_type": "bugfix",
+  "problem_statement": "The parser must respect the supplied input length.",
+  "causal_chain": "The changed upstream case supplies a truncated input and checks the documented error."
+}
 ```
-
-123 is an illustrative placeholder. Runtime/compile distinctions, profile,
-compile-symbol provenance, named F2P/P2P and patch separation must round-trip
-through the actual adapter before accepts are permitted. Configuration-only
-oracles are authorized, but remain holds until the adapter schema supports them.
 
 High confidence requires source attribution plus compatible observed evidence;
 uncertain dependencies/configuration are holds. Do not spend model calls filling
@@ -209,3 +235,36 @@ Readiness remains closed: historical profile resolution, remaining profile/era
 controls, complete baseline inventories, guard execution agreement,
 adapter/schema integration, and measured model and finalization costs are
 outstanding. No full pass has been launched.
+
+
+## Cluster execution
+
+Set `project: contiki-ng` and `slurm.build_partition: cpu` in the cluster config.
+Use a separate scratch root and optional `paths.contiki_ng_image` override for
+the verified x86 CI SIF. `cluster/setup.py` verifies the clone, image and tools;
+`cluster/prepare.py` fetches/enriches the selected PRs without Twister or Zephyr
+SDK setup. Full history needs an explicit 2017-to-pin preparation date window.
+
+Submit prepared runs with `cluster/submit.py observe --run NAME` for x86 runtime
+observation, `triage` for Spark model inference, and `validate` for x86 accepted
+recipes. Contiki does not use the combined Zephyr `pipeline` mode. CPU resources
+use `slurm.build_cpus_per_node`, `build_mem`, and `build_python`; Spark retains
+`cpus_per_node`, `mem`, and `triage_python`. Set architecture-appropriate Python
+executables when system Python lacks dependencies. The model is qwen38-nvfp4.
+
+Jobs use `--export=NONE`, a clean environment, absolute shell paths, and PATH
+including `/usr/sbin`. Submissions cap wall time at four hours. Run folders,
+claims, project-scoped ledgers, recipes, observed/validation receipts and logs
+support resuming incomplete work. A VALID receipt certifies only its matching
+recipe fingerprint; promotion/publication still requires user authorization.
+
+
+Cooja writable overlays use node-local temporary storage during validation and
+fresh agent grading. On Scholar NFS, a loaded native mote library can prevent
+`make clean` from removing its build directory; node-local reruns of the unchanged
+RPL controls pass. Logs/receipts remain in the shared run directory. TUN/TAP
+fixtures remain unsupported on this worker because opening the bound device from
+the user namespace returns permission denied; those selections are infrastructure
+holds. Current automatic accepts require source-unconditional native bodies;
+Cooja/script observations are supported, while guarded/scenario accepts need
+additional compiled-body evidence. No full-history campaign is certified yet.

@@ -462,6 +462,9 @@ def _finish(instance_id: str, report: dict) -> bool:
 def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
              verbose: bool = False) -> bool:
     meta = instances.load_metadata(instance_id)
+    if meta.get("pipeline") == "contiki-ng":
+        from contiki_ng_pipeline import validate as validate_contiki
+        return validate_contiki(instance_id, patch_override, max(timeout, 1800), verbose)
     if meta.get("pipeline") in au.APPTAINER_PIPELINES:
         return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
     if meta["project"] == "zephyr":

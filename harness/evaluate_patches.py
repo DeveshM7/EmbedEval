@@ -29,6 +29,7 @@ import json
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -74,7 +75,8 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
 
     start = time.time()
     run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
-    overlay = run_dir / "overlay"
+    local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-grade-") if meta["project"] == "contiki-ng" else None
+    overlay = (Path(local_overlay.name) if local_overlay else run_dir) / "overlay"
     overlay.mkdir(parents=True)
     (run_dir / "agent.patch").write_text(patch_path.read_text())
     container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay)
@@ -104,6 +106,8 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
         print("  FAIL — overall timeout")
     finally:
         result["elapsed_seconds"] = round(time.time() - start, 1)
+        if local_overlay:
+            local_overlay.cleanup()
         au.remove(run_dir)
     return result
 

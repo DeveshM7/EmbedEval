@@ -762,7 +762,7 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add_repo(command) -> None:
-        command.add_argument("--repo", choices=("zephyr", "openthread"), default="zephyr")
+        command.add_argument("--repo", choices=("zephyr", "openthread", "contiki-ng"), default="zephyr")
 
     check = sub.add_parser("selftest", help="check the 8 known-good PRs survive")
     add_repo(check)
@@ -770,8 +770,8 @@ def main() -> None:
     f = sub.add_parser("fetch", help="download PRs into the local cache")
     add_repo(f)
     f.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
-    f.add_argument("--since", default="2024-01-01")
-    f.add_argument("--until", default="2024-12-31")
+    f.add_argument("--since")
+    f.add_argument("--until")
 
     filtering = sub.add_parser("filter", help="apply hard filters to the cache")
     add_repo(filtering)
@@ -792,6 +792,13 @@ def main() -> None:
     t.add_argument("--refresh", action="store_true", help="recompute existing blocks")
 
     args = p.parse_args()
+    if getattr(args, "repo", "zephyr") == "contiki-ng":
+        import contiki_ng_candidates
+        contiki_ng_candidates.dispatch(args)
+        return
+    if args.cmd == "fetch":
+        args.since = args.since or "2024-01-01"
+        args.until = args.until or "2024-12-31"
     if getattr(args, "repo", "zephyr") == "openthread":
         import openthread_candidates
         openthread_candidates.dispatch(args)
