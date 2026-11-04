@@ -8,7 +8,7 @@ from functools import lru_cache
 from contiki_ng_inputs import closure
 
 REPO='https://github.com/contiki-ng/contiki-ng'
-ENRICH_VERSION=5
+ENRICH_VERSION=6
 TEST_ROOTS=('tests/','regression-tests/')
 SUPPORTED_SIM_SUITES=('07-simulation-base','09-ipv6','13-ieee802154','21-security-protocols')
 
@@ -66,9 +66,57 @@ def find_pr(pr):
     return {'body':None,**found,'base_commit':parents[0],'fix_commit':found['merge_commit_sha']}
 
 def files_at(rev): return git('ls-tree','-r','--name-only',rev).splitlines()
+C_TOKEN=re.compile(r'/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[A-Za-z_]\w*|\S')
+
 def c_tokens(source):
-    pattern=r'/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[A-Za-z_]\w*|\S'
-    return [m[0] for m in re.finditer(pattern,source) if not m[0].startswith(('/*','//'))]
+    return [m[0] for m in C_TOKEN.finditer(source) if not m[0].startswith(('/*','//'))]
+
+def balanced_end(tokens,start,left,right):
+    level=1
+    for j in range(start+1,len(tokens)):
+        if tokens[j]==left:level+=1
+        elif tokens[j]==right:level-=1
+        if level==0:return j+1
+    return None
+
+def native_body_evidence(source,path,entries):
+    """Unconditional definitions/calls, not an assertion that the target builds."""
+    matches=[m for m in C_TOKEN.finditer(source) if not m[0].startswith(('/*','//'))]
+    tokens=[m[0] for m in matches];stack=[];branches=[];ranges=[];defined=set()
+    names={case['id'] for case in entries};malformed=False
+    for i,token in enumerate(tokens):
+        if token=='#' and i+1<len(tokens):
+            directive=tokens[i+1]
+            if directive in ('if','ifdef','ifndef','elif','else'):
+                if directive in ('elif','else'):
+                    if not stack:malformed=True;continue
+                    branches[stack.pop()]['end']=i
+                start=matches[i].start();end=source.find('\n',start)
+                branches.append({'start':i,'end':len(tokens),'source':path,
+                                 'line':source.count('\n',0,start)+1,
+                                 'directive':source[start:end if end>=0 else None]})
+                stack.append(len(branches)-1)
+            elif directive=='endif':
+                if stack:branches[stack.pop()]['end']=i
+                else:malformed=True
+        if token not in ('UNIT_TEST','UNIT_TEST_REGISTER','UNIT_TEST_RUN') or tokens[i+1:i+2]!=['(']:continue
+        if i+2>=len(tokens) or tokens[i+2] not in names:continue
+        end=balanced_end(tokens,i+1,'(',')')
+        if end is None:malformed=True;continue
+        if token=='UNIT_TEST':
+            if tokens[end:end+1]!=['{']:continue
+            end=balanced_end(tokens,end,'{','}')
+            if end is None:malformed=True;continue
+            defined.add(tokens[i+2])
+        ranges.append((i,end))
+    relevant=[b for b in branches if any(start<b['end'] and end>b['start'] for start,end in ranges)]
+    def describe(branch):return {k:branch[k] for k in ('source','line','directive')}
+    unresolved=sorted(names-defined)
+    enabled=True if names and not relevant and not unresolved and not stack and not malformed else None
+    return {'enabled':enabled,'method':'source-unconditional-test-bodies' if enabled else 'compiler-proof-pending',
+            'sources':[path],'guards':[describe(b) for b in relevant],
+            'configuration_guards':[describe(b) for b in branches if b not in relevant],
+            'unresolved_definitions':unresolved}
 
 def cases(source):
     tokens=c_tokens(source);registered={};invoked=[]
@@ -83,6 +131,45 @@ def cases(source):
             parts.append(ast.literal_eval(tokens[j]));j+=1
         if parts and j<len(tokens) and tokens[j]==')':registered[name]=''.join(parts)
     return [{'id':n,'description':registered[n]} for n in dict.fromkeys(invoked) if n in registered]
+
+def source_functions(source):
+    """Recognize direct C calls and definitions; do not interpret macro expansion."""
+    tokens=c_tokens(source);calls=set();provided=set();depth=0
+    for i,token in enumerate(tokens):
+        if token=='{':depth+=1
+        elif token=='}':depth=max(0,depth-1)
+        if not re.fullmatch(r'[A-Za-z_]\w*',token) or tokens[i+1:i+2]!=['(']:continue
+        j=balanced_end(tokens,i+1,'(',')')
+        if j is None:continue
+        if tokens[j:j+1]==['{']:provided.add(token)
+        elif depth and (i==0 or tokens[i-1] not in ('.','>')):calls.add(token)
+    return calls,provided
+
+def before_compile_evidence(unit,requirements,read):
+    evidence={'method':'project-source-absence-and-direct-test-call',
+              'status':'unknown','required_interfaces':[],'requirements':[]}
+    # External providers and unresolved source guards are outside this strict
+    # static check. Unknown does not mean that the target compiles or runs.
+    if (unit['kind']!='native' or unit.get('submodules') or
+        unit['profile_evidence'].get('enabled') is not True):return evidence
+    relevant=[r for r in requirements if r['kind']=='function' and r['at_base'] is False
+              and set(r['test_files']).intersection(unit['sources'])]
+    if not relevant:return evidence
+    calls=set();provided=set();support=[]
+    for path in unit['sources']:
+        if not path.startswith(TEST_ROOTS) or not path.endswith(('.c','.h','/Makefile')):continue
+        text=read(path);support.append(text)
+        if path.endswith(('.c','.h')):
+            used,defined=source_functions(text);calls.update(used);provided.update(defined)
+    support='\n'.join(support+unit.get('make_options',[]))
+    for requirement in relevant:
+        symbol=requirement['symbol']
+        aliases=re.search(r'^\s*#\s*define\s+'+re.escape(symbol)+r'\b|\b'+re.escape(symbol)+r'(?:\([^)]*\))?\s*=(?!=)|\(\s*\*\s*'+re.escape(symbol)+r'\s*\)',support,re.M)
+        if symbol in calls and symbol not in provided and not aliases:
+            evidence['requirements'].append(requirement)
+    evidence['required_interfaces']=sorted({r['symbol'] for r in evidence['requirements']})
+    if evidence['required_interfaces']:evidence['status']='source_blocked'
+    return evidence
 
 def logical_lines(text): return re.sub(r'\\\n',' ',text).splitlines()
 def suite_entries(text):
@@ -193,6 +280,8 @@ def inventory(rev):
         unit['profile_evidence']={'enabled':True if unit['kind']=='native' and sources and not guards else None,
                                   'method':'source-unconditional' if unit['kind']=='native' and sources and not guards else 'compiler-proof-pending',
                                   'sources':sources,'guards':guards}
+        if unit['kind']=='native':
+            unit['profile_evidence']=native_body_evidence(read(unit['case_source']),unit['case_source'],unit['cases'])
         descriptions=[case['description'] for case in unit['cases']]
         if unit['kind']=='native' and len(set(descriptions))!=len(descriptions):
             unit['supported']=False
@@ -280,10 +369,14 @@ def stale_record(rec):
     if not isinstance(rec['test_inventory'],list) or not isinstance(rec['test_files'],list) or not isinstance(rec['source_files'],list):return True
     if any(not isinstance(p,str) for p in rec['test_files']+rec['source_files']):return True
     if not isinstance(rec['profiles'],dict) or not isinstance(rec['compile_requirements'],list):return True
-    return any(not isinstance(u,dict) or not all(k in u for k in ('id','kind','profile','sources','cases','profile_evidence','dependency_evidence'))
+    return any(not isinstance(u,dict) or not all(k in u for k in ('id','kind','profile','sources','cases','profile_evidence','dependency_evidence','before_compile','before_dependencies'))
                or not isinstance(u['profile_evidence'],dict) or not isinstance(u['sources'],list)
                or not isinstance(u['dependency_evidence'],dict)
                or not all(k in u['dependency_evidence'] for k in ('method','edges','unresolved','build_verified'))
+               or not isinstance(u['before_compile'],dict)
+               or not isinstance(u['before_compile'].get('required_interfaces'),list)
+               or not isinstance(u['before_dependencies'],dict)
+               or not isinstance(u['before_dependencies'].get('missing_submodules'),list)
                or any(not isinstance(p,str) for p in u['sources'])
                or not isinstance(u['cases'],list) for u in rec['test_inventory'])
 
@@ -297,6 +390,17 @@ def enrich(pr):
             if line.startswith('Merge pull request #')]
     test_patch=git('diff','--binary',base,fix,'--',*TEST_ROOTS)
     production_diff=git('diff','--binary',base,fix,'--','.',':(exclude)tests/',':(exclude)regression-tests/')
+    requirements=compile_requirements(base,production_diff,test_patch)
+    base_submodules={line.partition('\t')[2] for line in git('ls-tree','-r',base).splitlines()
+                     if line.startswith('160000 ')}
+    declared_submodules=set(re.findall(r'^\s*path\s*=\s*(.*?)\s*$',show(base,'.gitmodules') or '',re.M))
+    @lru_cache(maxsize=None)
+    def read(path):return show(fix,path) or ''
+    for unit in units:
+        unit['before_compile']=before_compile_evidence(unit,requirements,read)
+        unit['before_dependencies']={'method':'base-gitlink-and-base-gitmodules',
+            'missing_submodules':[p for p in unit.get('submodules',[])
+                                  if p not in declared_submodules or p not in base_submodules]}
     return {**r,'repo':REPO,'enrich_version':ENRICH_VERSION,'test_files':tests,'source_files':source,
             'test_inventory':units,'inventory_holds':holds,
             'profiles':{'native':{'architecture':'x86_64','target':'native'},
@@ -304,7 +408,7 @@ def enrich(pr):
                         'script':{'architecture':'x86_64','target':'native'}},
             'test_patch':test_patch,
             'production_diff':production_diff,
-            'compile_requirements':compile_requirements(base,production_diff,test_patch),
+            'compile_requirements':requirements,
             'nested_merge_count':max(0,len(nested)-1),
             'ci_sources':{p:show(base,p) for p in ('.github/workflows/build.yml','.travis.yml') if show(base,p)}}
 
@@ -326,6 +430,8 @@ def check_verdict(v,rec):
     if any(available[name]['profile']!=profile for name in chosen):errors.append('units must match selected profile')
     if any(available[name]['profile_evidence'].get('enabled') is not True for name in chosen):
         errors.append('selected test body needs compiler-backed profile evidence')
+    if any(available[name]['before_dependencies']['missing_submodules'] for name in chosen):
+        errors.append('selected dependencies cannot be initialized in the before snapshot; state-dependent dependency setup is unsupported')
     names={n for name in chosen for n in case_names(available[name])}
     f2p=v.get('fail_to_pass',[]);p2p=v.get('pass_to_pass',[])
     if not isinstance(f2p,list) or not f2p or not all(isinstance(x,str) and x in names for x in f2p):errors.append('fail_to_pass must name inventory cases')
@@ -334,6 +440,13 @@ def check_verdict(v,rec):
     if set(f2p)&set(p2p):errors.append('F2P and P2P overlap')
     oracle=v.get('oracle','runtime')
     if oracle not in ('runtime','compile','config'):errors.append('unknown oracle')
+    blocked={name:available[name]['before_compile']['required_interfaces'] for name in chosen
+             if available[name]['before_compile'].get('status')=='source_blocked'}
+    if oracle=='runtime' and blocked:
+        errors.append('runtime oracle contradicts required interfaces absent from the base: '+
+                      ', '.join(sorted({s for symbols in blocked.values() for s in symbols})))
+    if any(case in p2p for name in blocked for case in case_names(available[name])):
+        errors.append('P2P cases cannot run before a required-interface build failure; omit P2P for blocked units')
     if oracle=='compile':
         symbols=v.get('compile_symbols')
         selected_sources={p for name in chosen for p in available[name]['sources']}

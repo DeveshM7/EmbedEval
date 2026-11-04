@@ -191,10 +191,12 @@ The implemented decision schema uses `pr`, `verdict` (`accept`, `reject`,
 `hold`), and `reason` for rejects/holds. Accepts require:
 
 - `units`: nonempty list of exact affected `test_inventory` unit IDs.
-- `profile`: optional `native`, `cooja`, or `script`; selected units must match.
+- `profile`: `native`, `cooja`, or `script`; selected units must match.
 - `fail_to_pass`: exact case IDs; native IDs are `unit_id::test_symbol`,
   while script/scenario IDs equal their unit ID.
-- `pass_to_pass`: relevant unaffected case IDs, or an empty list.
+- `pass_to_pass`: relevant unaffected case IDs that actually execute and pass
+  before and after, or an empty list. A case in a binary that cannot build
+  before cannot be P2P, including under compile/config oracles.
 - `oracle`: `runtime` (default), `compile`, or `config`.
 - `problem_statement`, `causal_chain`, and `change_type`: nonempty strings.
 - Compile oracles also require `compile_symbols`, drawn from the record's
@@ -208,6 +210,27 @@ bodies remain holds until compiler evidence establishes the selected profile.
 Source-unconditional bodies are recorded explicitly. Observations can investigate
 unknown bodies but do not turn missing execution into failure. Records carry an
 enrichment version and required fields; stale records must be re-enriched.
+
+Keep body inclusion, dependency closure, build success and execution separate.
+Source-unconditional body evidence checks definitions, assertions, registration
+and calls; configuration guards elsewhere may still change the result. Static
+dependency edges are evidence of inputs, not proof that Make builds the target.
+The before snapshot contains base production plus the fixed upstream protected
+tests/support. `before_compile.status=source_blocked` identifies direct calls to
+new production functions absent at base; a runtime oracle contradicts that
+evidence. `unknown` does not establish build success. A submodule required by
+the fixed tests but absent from the base gitlinks/configuration is a setup hold
+until the runner can represent it without copying production into before.
+
+A source-blocked unit can qualify for a semantic compile oracle only when that
+missing interface is the PR's purpose. An incidental new fixture helper does
+not become a valid oracle merely because it prevents compilation. Undefined
+behavior or a possible crash is also insufficient: trace the supplied input to
+an assertion, checked result or observed attributable failure. Do not infer a
+detecting assertion from a packet runner that only checks process completion.
+Generation mechanically requires every inventoried case of the selected units
+to pass after (`after_required`), even when P2P is empty; this does not claim that
+those cases executed before.
 
 Illustrative schema only; every ID below is a placeholder, never an execution
 claim or an allowed substitute for actual inventory values:
@@ -511,3 +534,22 @@ These changes do not yet resolve the legacy `Makefile.script-test` executor,
 compiler-backed guard resolution, state-dependent dependency initialization or
 all CI profiles. Oracle contradictions and instructions are the next work;
 no improved model accuracy is claimed from these implementation checks.
+
+### Version-6 oracle consistency and body evidence
+
+The before snapshot now carries source-derived new-function requirements and
+base gitlink/configuration availability. The checker prevents runtime plans
+from contradicting a known required-interface build failure and prevents P2P
+claims from a blocked unit. Separate unblocked units can still supply P2P.
+The runner retains all observed named results, and validation requires every
+inventoried case in the selected units to pass after, independently of the
+model's P2P selection. Original pilot receipts are preserved.
+
+Native body evidence checks guards overlapping definitions, assertions,
+registration or invocation rather than treating every configuration guard as
+a disabled body. This permits source-unconditional heapmem bodies while
+retaining holds for guarded cases. It does not establish target buildability.
+Verification: 55 local Contiki checks and nine cluster checks pass. Refreshed
+development records identify the CBOR API and AES fixture-helper build
+requirements without conflating their semantic purposes. The legacy packet
+executor remains an inventory gap. No new model accuracy result is claimed yet.

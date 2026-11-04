@@ -12,6 +12,8 @@ def record():
           'sources':['tests/08-native-runs/test-json/test-json.c'],
           'cases':[{'id':'json_test','description':'JSON test'}],
           'dependency_evidence':{'method':'static-source-closure','edges':[],'unresolved':[],'build_verified':False},
+          'before_compile':{'status':'unknown','required_interfaces':[]},
+          'before_dependencies':{'missing_submodules':[]},
           'profile_evidence':{'enabled':True,'method':'source-unconditional',
                               'sources':['tests/08-native-runs/test-json/test-json.c'],'guards':[]}}
     return {'number':1,'title':'JSON fix','body':'','url':'https://example.test/1',

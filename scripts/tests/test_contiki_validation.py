@@ -22,12 +22,17 @@ class ContikiValidationTest(unittest.TestCase):
     def test_config_oracle_cannot_claim_unexecuted_pass_to_pass(self):
         self.check_invalid_pass_to_pass('config', 2, '')
 
-    def check_invalid_pass_to_pass(self, oracle, before_rc, before_status):
+    def test_after_only_guard_is_required_without_claiming_p2p(self):
+        self.check_invalid_pass_to_pass('runtime',1,'  failed unit::fix\n',
+                                        p2p=[],after_status='  passed unit::fix\n  failed unit::stable\n')
+
+    def check_invalid_pass_to_pass(self, oracle, before_rc, before_status, p2p=None, after_status=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'instance.json').write_text(json.dumps({
                 'profile': 'native', 'oracle': oracle,
-                'fail_to_pass': ['unit::fix'], 'pass_to_pass': ['unit::stable']}))
+                'fail_to_pass': ['unit::fix'], 'pass_to_pass': ['unit::stable'] if p2p is None else p2p,
+                'after_required':['unit::fix','unit::stable']}))
             image = root / 'image.sif'
             image.touch()
             fix = root / 'fix.diff'
@@ -35,7 +40,7 @@ class ContikiValidationTest(unittest.TestCase):
             def output(status):
                 return '--- contiki-ng: results\n' + status + '--- end\n'
             before = output(before_status)
-            after = output('  passed unit::fix\n  passed unit::stable\n')
+            after = output(after_status if after_status is not None else '  passed unit::fix\n  passed unit::stable\n')
             results = [SimpleNamespace(returncode=rc, stdout=out, stderr='')
                        for rc, out in ((before_rc, before), (0, ''), (0, after))]
             with (patch.object(pipeline.instances, 'instance_dir', return_value=root),

@@ -3,6 +3,9 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import json
+import tempfile
+from unittest.mock import patch
 
 
 RUNNER = (Path(__file__).resolve().parents[2] / 'templates' / 'contiki-ng'
@@ -13,6 +16,19 @@ spec.loader.exec_module(runner)
 
 
 class NativeParserTests(unittest.TestCase):
+    def test_unselected_failure_is_not_hidden_by_empty_p2p_list(self):
+        unit={'id':'unit','kind':'native'}
+        with tempfile.TemporaryDirectory() as tmp:
+            config=Path(tmp)/'instance.json'
+            config.write_text(json.dumps({'units':[unit],'observe':False,
+                'fail_to_pass':['unit::fix'],'pass_to_pass':[],
+                'after_required':['unit::fix','unit::existing']}))
+            with (patch.object(runner,'CONFIG',config),patch.object(runner,'LOGS',Path(tmp)),
+                  patch.object(runner,'build_native',return_value=True),
+                  patch.object(runner,'run_native',return_value=({'unit::fix':'passed','unit::existing':'failed'},True)),
+                  patch('builtins.print')):
+                self.assertEqual(runner.main(),1)
+
     def test_current_format_maps_only_completed_named_cases(self):
         output = ('Unit test: first case\nResult: success\n'
                   'Unit test: second case\nResult: failure\n'

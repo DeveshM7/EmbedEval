@@ -114,6 +114,7 @@ def generate(pr,verdict,out_root,observe=False,observed=None,profile=None):
     (dest/'test_patch.diff').write_text(patch)
     check_applies(patch,rec['base_commit'],dest,candidates.clone())
     cfg['submodules']=sorted({p for u in cfg['units'] for p in u.get('submodules',[])})
+    cfg['after_required']=[name for unit in cfg['units'] for name in candidates.case_names(unit)]
     cfg['enrich_version']=candidates.ENRICH_VERSION
     (dest/'instance.json').write_text(json.dumps(cfg,indent=2)+'\n')
     shutil.copyfile(TEMPLATES/'run_tests.py',dest/'run_tests.py')
@@ -123,6 +124,7 @@ def generate(pr,verdict,out_root,observe=False,observed=None,profile=None):
     meta={'instance_id':iid,'project':'contiki-ng','pipeline':'contiki-ng','repo':candidates.REPO,
           'base_commit':rec['base_commit'],'fix_commit':rec['fix_commit'],'test_commit':rec['fix_commit'],
           'problem_statement':statement,'fail_to_pass':cfg['fail_to_pass'],'pass_to_pass':cfg['pass_to_pass'],
+          'after_required':cfg['after_required'],
           'files_changed_by_fix':rec['source_files'],'pr_url':rec['url'],'run_command':'run_tests',
           'apptainer_image':iid+'.sif','generated':True,'oracle':cfg['oracle'],'architecture':'x86_64',
           'observation_only':bool(observed and verdict is None)}
@@ -202,7 +204,7 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
                 signal=before['rc']==2 and bool(compile_attribution(out1,cfg.get('compile_symbols',[])))
             else:
                 signal=before['rc']==2 and bool(config_attribution(out1,cfg.get('config_diagnostics',[])))
-            passes=all(after['cases'].get(n)=='passed' for n in f2p+p2p)
+            passes=all(after['cases'].get(n)=='passed' for n in cfg.get('after_required',f2p+p2p))
             before_passes=all(before['cases'].get(n)=='passed' for n in p2p)
             report['valid']=bool(f2p) and signal and before_passes and after['rc']==0 and passes
             report['reason']='attributable before failure and named after passes' if report['valid'] else 'oracle or required named case evidence missing'

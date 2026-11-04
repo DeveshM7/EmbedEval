@@ -283,8 +283,9 @@ def main():
     if build_only:
         return 2 if build_failed else 0
     if not cfg.get('observe'):
-        expected = cfg.get('fail_to_pass', []) + cfg.get('pass_to_pass', [])
-        statuses = {name: statuses.get(name, 'not_run') for name in expected}
+        expected = cfg.get('after_required', cfg.get('fail_to_pass', []) + cfg.get('pass_to_pass', []))
+        for name in expected:
+            statuses.setdefault(name, 'not_run')
     print('\n--- contiki-ng: results')
     for name, status in statuses.items():
         print(f'  {status} {name}')
