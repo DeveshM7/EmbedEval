@@ -178,7 +178,9 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
                 'base build failed; semantic compile/config attribution required' if before['rc']==2 else 'no attributable runtime F2P or after-state failure')
         else:
             f2p=cfg['fail_to_pass'];p2p=cfg['pass_to_pass'];oracle=cfg.get('oracle','runtime')
-            if oracle=='runtime':signal=before['rc']==1 and all(before['cases'].get(n) in ('failed','error') for n in f2p)
+            if oracle=='runtime':signal=(before['rc']==1
+                and all(before['cases'].get(n) in ('failed','error') for n in f2p)
+                and all(before['cases'].get(n)=='passed' for n in p2p))
             elif oracle=='compile':
                 signal=before['rc']==2 and bool(compile_attribution(out1,cfg.get('compile_symbols',[])))
             else:
@@ -193,7 +195,9 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
                     for i in range(3):
                         result,repeat_out=step('before-repeat-'+str(i+1),['run_tests']);repeats.append(result)
                         if oracle=='runtime':
-                            deterministic &= result['rc']==1 and all(result['cases'].get(n) in ('failed','error') for n in f2p)
+                            deterministic &= (result['rc']==1
+                                and all(result['cases'].get(n) in ('failed','error') for n in f2p)
+                                and all(result['cases'].get(n)=='passed' for n in p2p))
                         elif oracle=='compile':
                             deterministic &= result['rc']==2 and bool(compile_attribution(repeat_out,cfg['compile_symbols']))
                         else:
