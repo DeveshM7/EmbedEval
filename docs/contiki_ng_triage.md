@@ -19,13 +19,13 @@ Detailed research and logs live in `triage/runs/contiki-research/` (ignored).
   accuracy. Use upstream tests only, never authored regression substitutes.
 - Runtime and semantic compile oracles are allowed. A compile failure qualifies
   only when the PR supplies the very interface/build fix that its tests need;
-  incidental incompatibilities do not qualify. Configuration/dependency-only
-  fixes are pending a separate user decision.
-- Research history: first-parent range after
-  `d61cb46e593f1b3f97bb3a4bac9b69008e481c71` through the research pin,
-  starting with verified Contiki-NG PR #30 in June 2017. Earlier imported history
-  contains legacy Contiki PR numbers and must not be assigned NG PR URLs.
-  Full NG history is the proposed campaign window, pending user preference.
+  incidental incompatibilities do not qualify. Attributable configuration/dependency-only
+  fixes are also allowed (user decision, 2026-11-03).
+- Research history: official merged Contiki-NG PRs through the research pin,
+  including merges outside the `develop` first-parent chain and archived merge
+  objects no longer reachable from `develop`. Verify each PR against GitHub
+  metadata; imported legacy Contiki PR numbers must not be assigned NG PR URLs.
+  Full NG history is the confirmed campaign window (user decision, 2026-11-03).
 - Execution: Scholar, Apptainer, workspace
   `/scratch/scholar/zhan5136/embedeval-contiki`. Do not access the OpenThread
   workspace or `~/EmbedEval`. Shared generic images may be read without mutation.
@@ -94,19 +94,19 @@ with seven macOS exclusions (27 combinations). MacOS is out of worker scope.
 | compile-base | example/tool target matrix | Compile profile; toolchain controls pending |
 | compile-arm-ports | board matrix and out-of-tree builds | Cross-toolchain controls pending |
 | renode-simulation | upstream Renode scripts | Uncontrolled; upstream image installs amd64 Renode |
-| script-base | native LC switch/address-labels, memb, visualization | LC and memb executed; visualization dependencies untested |
-| simulation-base | Cooja scenario matrix | Pending Cooja/JDK and mote-toolchain controls |
-| native-runs | native applications and shell runners | Three recent unit suites passed; full matrix untested |
+| script-base | native LC switch/address-labels, memb, visualization | Full current suite completed on x86 control, including visualization Cooja scenario; historical versions untested |
+| simulation-base | Cooja scenario matrix | Native-mote ringbufindex and Sky hello-world passed on current x86 control; remaining scenarios/eras untested |
+| native-runs | native applications and shell runners | Current pure-native subset: 20 runner logs, 158 named cases passed; network/service cases untested |
 | ipv6 | Cooja scenarios | Pending simulator control |
-| ipv6-nbr | native neighbor test | Source inventoried; unexecuted |
+| ipv6-nbr | native neighbor test | Current x86 control passed with named unit result; historical versions untested |
 | ieee802154 | Cooja scenarios | Pending simulator control |
 | rpl-lite | Cooja scenarios | Pending simulator control |
 | rpl-classic | Cooja scenarios | Pending simulator control |
 | tun-rpl-br | Cooja plus host TUN/router scripts | Pending simulator and network privilege fixture |
 | coap-lwm2m | simulations/standalone native and queue mode | External submodule/services; fixture unverified |
-| packet-parsing | native packet injector, four shell consumers | Source inventoried; unexecuted |
+| packet-parsing | native packet injector, four shell consumers | Current x86 suite completed; historical profile coverage bounded |
 | security-protocols | Cooja and crypto dependencies | Pending simulator/submodule controls |
-| nat64-standalone | native application plus host echo fixture | Source inventoried; unexecuted |
+| nat64-standalone | native application plus host echo fixture | Current x86 UDP echo round trip passed; historical versions untested |
 
 Within native-runs, MQTT, ping, CoAP, SNMP and IP64 TAP scripts have network,
 service or privilege requirements that the pure native units do not. Native
@@ -114,13 +114,20 @@ startup can warn that TUN is unavailable yet successfully execute pure units;
 that does not establish support for network cases. Never blanket-exclude all
 native tests for this warning, or treat it as a regression oracle.
 
-Historical CI snapshots are recorded at all 318 test-touching bases, covering
-Travis, GitHub Actions, runner and Dockerfile changes. The current Dockerfile
+Historical CI, scenario and Makefile inputs are recorded at all 341 test-touching
+PR bases. Normalized CI blobs and extracted scenario build commands are research
+inputs, not an executable historical profile selector. The current Dockerfile
 uses Ubuntu 22.04 and hard-coded x86 binaries for Java, MSP430, ARM tools and
 Renode. It cannot be assumed to run on Spark ARM64. Current Cooja submodule is
 `fabff3ee41eeeb6f3de7bd11f7c9cdf0a7d7dfc4` with Java toolchain 25; historical
 Ant/Gradle and submodule versions must be resolved per base. No whole-history
-image/toolchain compatibility claim is established.
+image/toolchain compatibility claim is established. A separate x86_64 control
+used an Apptainer SIF converted from the current upstream Dockerfile image;
+the local SIF file has SHA256
+`8fb5b6fea745e0aba4c69a860c476f51549a164036a7a3f88c0ccb20e22702c6`
+ran Java 25.0.3, GCC 11.4.0 and MSP430 GCC 4.7.4. The two current Cooja
+scenarios passed, and a user-network-namespace probe exited zero; neither
+establishes support for other simulator, network, or historical recipes.
 
 Research native controls used an existing read-only Ubuntu 24.04 ARM64 image,
 SHA256 `9f5a1ffa170250cd051e5adc54115917efd6a3780373c66c199f64efc977f287`,
@@ -135,12 +142,15 @@ Unsupported profiles remain holds, not invalid PRs.
 
 ## PR boundaries, selection and separation
 
-The inspected range has 1,758 first-parent commits: 1,744 merge commits (1,743
-numbered PRs plus one release merge), 14 unassociated single-parent commits,
-and zero numbered squash/rebase commits. There are three revert-titled commits;
-14 commits rename test paths and 16 delete test paths under modern `tests/`.
-The 318 test-touching count also includes historical `regression-tests/`; it is
-not a hard-filter acceptance count. Release rollups require deduplication.
+The official merged-PR census contains 1,843 PRs with recovered merge objects;
+341 touch `tests/` or historical `regression-tests/`. Of these, 102 merges and
+23 test-touching merges are outside the old first-parent census. Seven recovered
+merge objects are no longer reachable from `develop`; preserve their GitHub
+identity and verify archived base/fix availability before observation. The
+first-parent chain separately contains 1,758 commits: 1,744 merges (1,743
+numbered PRs plus one release merge) and 14 unassociated direct commits. Its
+rename, deletion, and revert flags are mechanical, not hard-filter acceptance
+counts. Release rollups require deduplication.
 
 For ordinary merge PRs, base = merge first parent; fix = complete merge result.
 Check the second-parent history and complete diff for merge-resolution changes.
@@ -183,7 +193,7 @@ hold can be recorded as follows; this is not a launchable verdict:
 123 is an illustrative placeholder. Runtime/compile distinctions, profile,
 compile-symbol provenance, named F2P/P2P and patch separation must round-trip
 through the actual adapter before accepts are permitted. Configuration-only
-oracles must remain holds until policy and schema both support them.
+oracles are authorized, but remain holds until the adapter schema supports them.
 
 High confidence requires source attribution plus compatible observed evidence;
 uncertain dependencies/configuration are holds. Do not spend model calls filling
@@ -192,6 +202,6 @@ selected, not held-out triage-accuracy evidence, and their expected answers must
 stay out of future prompts.
 
 Readiness remains closed: historical profile resolution, remaining profile/era
-controls, complete baseline inventories, guard execution agreement, policy for
-configuration/dependency fixes, adapter/schema integration, and measured model
-and finalization costs are outstanding. No full pass has been launched.
+controls, complete baseline inventories, guard execution agreement,
+adapter/schema integration, and measured model and finalization costs are
+outstanding. No full pass has been launched.
