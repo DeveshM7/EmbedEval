@@ -13,11 +13,60 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 import ledger
+import prepare
 import status
 import submit
 
 
 class ContikiClusterTest(unittest.TestCase):
+    def test_idle_nodes_excludes_maintenance_and_reserved_nodes(self):
+        response = SimpleNamespace(returncode=0,
+                                   stdout="idle 2\nmaint 14\nresv 8\ndown$ 4\nidle~ 3\n",
+                                   stderr="")
+        with patch.object(submit.subprocess, "run", return_value=response) as run:
+            self.assertEqual(submit.idle_nodes("spark-batch"), 2)
+        self.assertEqual(run.call_args.args[0][-2:], ["-o", "%t %D"])
+
+    def test_archive_revision_is_recorded_without_clean_git_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".embedeval-revision").write_text("123abc\n")
+            self.assertEqual(prepare.code_identity(root, "contiki-ng"),
+                             {"commit": "123abc", "dirty": None, "archive": True})
+
+    def test_freeze_copies_runtime_only_and_hashes_copied_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            required = ("cluster/node_worker.py", "cluster/report.py", "scripts/triage_prs.py",
+                        "scripts/contiki_ng_pipeline.py", "harness/projects.py",
+                        "templates/contiki-ng/apptainer/instance.def.tmpl",
+                        "docs/contiki_ng_triage.md", "triage/models.json", "requirements.txt")
+            for name in required:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name)
+            (root / "cluster/config.yaml").write_text("secret")
+            (root / "scripts/__pycache__").mkdir()
+            (root / "scripts/__pycache__/worker.pyc").write_bytes(b"cache")
+            (root / "scripts/runs").mkdir()
+            (root / "scripts/runs/result.json").write_text("result")
+            (root / ".embedeval-revision").write_text("123abc\n")
+            destination = root / "job-source"
+            manifest = submit.freeze_source(root, destination)
+            self.assertEqual(manifest["revision"], "123abc")
+            for name in required:
+                self.assertIn(name, manifest["files"])
+                self.assertEqual((destination / name).read_text(), name)
+            for name in ("cluster/config.yaml", "scripts/__pycache__/worker.pyc",
+                         "scripts/runs/result.json"):
+                self.assertFalse((destination / name).exists())
+            self.assertEqual(json.loads((destination / "source-manifest.json").read_text()), manifest)
+            (root / ".embedeval-revision").unlink()
+            with patch.object(submit.subprocess, "run", return_value=SimpleNamespace(stdout="git-sha\n")):
+                fallback = submit.freeze_source(root, root / "git-source")
+            self.assertEqual((root / "git-source/.embedeval-revision").read_text(), "git-sha\n")
+            self.assertIn(".embedeval-revision", fallback["files"])
+
     def test_project_ledgers_and_unfinished_runs_are_separate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -104,6 +153,9 @@ class ContikiClusterTest(unittest.TestCase):
             self.assertIn("#SBATCH --mem=120500M", spark)
             self.assertIn("#SBATCH --gres=gpu:1", spark)
             self.assertIn("/spark/venv/bin/python cluster/node_worker.py", spark)
+            source = next((run / "jobs").glob("source-*/source-manifest.json"))
+            self.assertIn("scripts/contiki_ng_pipeline.py", json.loads(source.read_text())["files"])
+            self.assertIn(str(source.parent), cpu + spark)
 
 
 if __name__ == "__main__":

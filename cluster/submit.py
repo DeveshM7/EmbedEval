@@ -22,8 +22,10 @@ number. One job, a hard time limit, nothing resubmitted automatically.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -31,6 +33,9 @@ from pathlib import Path
 
 CLUSTER = Path(__file__).resolve().parent
 REPO = CLUSTER.parent
+SOURCE_DIRS = ("cluster", "scripts", "harness", "templates", "docs")
+SOURCE_FILES = ("triage/models.json", "requirements.txt", ".embedeval-revision")
+SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "runs", "generated", "outputs"}
 # The job's phases share its time limit: triage may take all of it,
 # validation what triage leaves, if at least VALIDATE_MIN (less is not worth
 # starting: a PR takes up to caps.validate_pr). REPORT_MIN is kept for the
@@ -51,9 +56,11 @@ def minutes(hhmmss: str) -> int:
 
 
 def idle_nodes(partition: str) -> int:
-    r = subprocess.run(["sinfo", "-p", partition, "-h", "-t", "idle", "-o", "%D"],
+    r = subprocess.run(["sinfo", "-p", partition, "-h", "-o", "%t %D"],
                        capture_output=True, text=True)
-    return sum(int(x) for x in r.stdout.split() if x.isdigit())
+    return sum(int(parts[1]) for line in r.stdout.splitlines()
+               if len(parts := line.split()) == 2 and parts[0].lower() == "idle"
+               and parts[1].isdigit())
 
 
 def plan_nodes(cfg: dict, work_nodes: int, idle: int) -> tuple[int, int, str]:
@@ -68,6 +75,44 @@ def plan_nodes(cfg: dict, work_nodes: int, idle: int) -> tuple[int, int, str]:
         if idle == 0:
             note = (note + "; " if note else "") + "no node idle: the job will queue until one is free"
     return lowest, wanted, note
+
+
+def freeze_source(source: Path, destination: Path) -> dict:
+    """Copy one job's Contiki runtime code and record the bytes it will run."""
+    destination.mkdir(parents=True, exist_ok=False)
+    files = {}
+    paths = [p for root in SOURCE_DIRS for p in (source / root).rglob("*")]
+    paths += [source / name for name in SOURCE_FILES if (source / name).exists()]
+    for src in sorted(paths):
+        rel = src.relative_to(source)
+        if (not src.is_file() or src.is_symlink() or any(part in SKIP_DIRS for part in rel.parts)
+                or rel == Path("cluster/config.yaml") or src.name.endswith((".pyc", ".pyo"))):
+            continue
+        data = src.read_bytes()
+        target = destination / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        shutil.copymode(src, target)
+        files[rel.as_posix()] = hashlib.sha256(data).hexdigest()
+    required = {"cluster/node_worker.py", "cluster/report.py", "scripts/triage_prs.py",
+                "scripts/contiki_ng_pipeline.py", "harness/projects.py",
+                "templates/contiki-ng/apptainer/instance.def.tmpl", "docs/contiki_ng_triage.md",
+                "triage/models.json", "requirements.txt"}
+    missing = required - files.keys()
+    if missing:
+        raise RuntimeError(f"source freeze missing runtime files: {', '.join(sorted(missing))}")
+    stamp = source / ".embedeval-revision"
+    revision = stamp.read_text().strip() if stamp.exists() else subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True,
+        text=True).stdout.strip()
+    if revision and ".embedeval-revision" not in files:
+        data = (revision + "\n").encode()
+        (destination / ".embedeval-revision").write_bytes(data)
+        files[".embedeval-revision"] = hashlib.sha256(data).hexdigest()
+    manifest = {"revision": revision or None, "files": files,
+                "sha256": hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}
+    (destination / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
 
 
 def main() -> None:
@@ -144,11 +189,17 @@ def main() -> None:
     schedule_cfg = cfg if project == "zephyr" else {**cfg, "slurm": {**s, "nodes_max": min(2, s["nodes_max"])}}
     lowest, wanted, note = plan_nodes(schedule_cfg, work, idle)
 
-    stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
+    stamp = (f"{datetime.now():%Y%m%d-%H%M%S%f}" if project == "contiki-ng"
+             else f"{datetime.now():%Y%m%d-%H%M%S}")
     jobs = run / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
     frozen = jobs / f"config-{stamp}.json"
     frozen.write_text(json.dumps(cfg, indent=2) + "\n")
+    source_root = REPO
+    source_manifest = None
+    if project == "contiki-ng":
+        source_root = jobs / f"source-{stamp}"
+        source_manifest = freeze_source(REPO, source_root)
     script = jobs / f"{args.mode}-{stamp}.sbatch"
     template = "pipeline.sbatch" if args.mode == "pipeline" else "phase.sbatch"
     script.write_text((CLUSTER / "templates" / template).read_text().format(
@@ -156,7 +207,7 @@ def main() -> None:
         cpus=cpus, gres=s["gres"] if args.mode in ("pipeline", "triage") else "",
         gres_line=f"#SBATCH --gres={s['gres']}" if args.mode in ("pipeline", "triage") else "",
         mem=mem, time_limit=s["time_limit"], phase=args.mode,
-        job_name=job_name, name=run.name, run=run, repo=REPO, config=frozen, python=python,
+        job_name=job_name, name=run.name, run=run, repo=source_root, config=frozen, python=python,
         limit_min=minutes(s["time_limit"]), report_min=REPORT_MIN, validate_min=VALIDATE_MIN,
         stamp=stamp))
 
@@ -166,6 +217,8 @@ def main() -> None:
           + (f"\n  note: {note}" if note else ""))
     print(f"  limit: {s['time_limit']}; {args.mode} runs until {REPORT_MIN} min remain for report")
     print(f"  job script: {script}")
+    if source_manifest:
+        print(f"  source: {source_root} (sha256 {source_manifest['sha256']})")
     forecast = subprocess.run(["sbatch", "--test-only", str(script)], capture_output=True, text=True)
     lines = (forecast.stderr or forecast.stdout).strip().splitlines()
     print(f"  forecast: {lines[-1] if lines else '?'}")
@@ -179,6 +232,8 @@ def main() -> None:
     with open(jobs / "submitted.jsonl", "a") as fh:
         fh.write(json.dumps({"job": job, "script": script.name, "submitted": stamp,
                              "nodes": f"{lowest}-{wanted}", "mode": args.mode,
+                             "source": str(source_root) if source_manifest else None,
+                             "source_sha256": source_manifest["sha256"] if source_manifest else None,
                              "triage": len(triage_left),
                              "validate": len(validate_left)}) + "\n")
     print(f"  submitted: job {job}; log {jobs}/job-{job}.out")

@@ -939,6 +939,11 @@ def git_state() -> dict:
                           capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(REPO_ROOT), "status", "--porcelain"],
                            capture_output=True, text=True).stdout.strip()
+    if not head and (REPO_ROOT / ".embedeval-revision").exists():
+        revision = (REPO_ROOT / ".embedeval-revision").read_text().strip()
+        snapshot = REPO_ROOT / "source-manifest.json"
+        return {"commit": revision, "dirty": None, "archive": True,
+                "source_sha256": json.loads(snapshot.read_text()).get("sha256") if snapshot.exists() else None}
     return {"commit": head, "dirty": bool(dirty)}
 
 

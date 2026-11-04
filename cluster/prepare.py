@@ -50,6 +50,20 @@ import status  # noqa: E402
 PY = sys.executable
 
 
+def code_identity(repo: Path, project: str) -> dict:
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                              text=True).stdout.strip()
+
+    git_root = git("rev-parse", "--show-toplevel")
+    archive = project == "contiki-ng" and (not git_root or Path(git_root).resolve() != repo.resolve())
+    if archive:
+        stamp = repo / ".embedeval-revision"
+        return {"commit": (stamp.read_text().strip() or None) if stamp.exists() else None,
+                "dirty": None, "archive": True}
+    return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))}
+
+
 def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
@@ -253,13 +267,11 @@ def main() -> None:
     log(f"commits: {len(shas)} present ({fetched})")
 
     # 6. the manifest
-    git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
-                                    text=True).stdout.strip()
     manifest = {
         "name": args.name, "project": project,
         "prepared": datetime.now().isoformat(timespec="seconds"),
         "source": source,
-        "code": {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))},
+        "code": code_identity(REPO, project),
         "config": {k: v for k, v in cfg.items() if k != "derived"},
         "environment": env,
         "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
