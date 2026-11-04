@@ -47,6 +47,10 @@ hand, and most of them threw good instances away:
 So the rule is: a filter belongs here only if it cannot reject any of the
 eight. `selftest` enforces exactly that -- run it after any change.
 
+EMBEDEVAL_PROJECT picks the project (default zephyr; see PROJECTS). A RIOT
+run needs --run-dir, and has fetch, filter and selftest only: enrich is written
+for Zephyr, and RIOT's LLM stage comes after the quick check.
+
 Requires the `gh` CLI, authenticated. Read-only.
 """
 
@@ -68,15 +72,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import layout  # noqa: E402  (first: reads --run-dir)
 import zephyr_env  # noqa: E402
 
-REPO = "zephyrproject-rtos/zephyr"
+# What differs per project. known_good: instances already validated by hand;
+# selftest asserts every one survives the filters. non_source: paths that are
+# never the fix itself; a PR touching only these has nothing for an agent to
+# repair. backports: drop PRs that re-apply a fix to a release branch, or the
+# benchmark holds the same problem twice.
+PROJECTS = {
+    "zephyr": {
+        "repo": "zephyrproject-rtos/zephyr",
+        "non_source": ("tests/", "doc/", ".github/", "samples/"),
+        "non_source_suffixes": (),
+        "backports": False,
+        "known_good": [33690, 43405, 62109, 65697, 74435, 82272, 85079, 89534],
+    },
+    "riot": {
+        "repo": "RIOT-OS/RIOT",
+        "non_source": ("tests/", "doc/", ".github/", "examples/", "dist/", "fuzzing/"),
+        "non_source_suffixes": (".md", ".txt"),
+        "backports": True,
+        "known_good": [17607, 20197, 20857],
+    },
+}
+PROJECT = os.environ.get("EMBEDEVAL_PROJECT", "zephyr")
+if PROJECT not in PROJECTS:
+    sys.exit(f"EMBEDEVAL_PROJECT={PROJECT!r}: known projects are {', '.join(PROJECTS)}")
+_CONFIG = PROJECTS[PROJECT]
+REPO = _CONFIG["repo"]
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # With a shared folder (EMBEDEVAL_SHARED, set for every cluster/ run), what
 # GitHub says about a merged PR is fetched once for all runs: the fetch cache
 # and the enriched records live there, and each run copies the enriched
 # records it uses into its own enriched/.
 _SHARED = os.environ.get("EMBEDEVAL_SHARED")
-CACHE = Path(_SHARED) / "github" / "prs" if _SHARED else layout.candidates() / "cache"
-SHARED_ENRICHED = Path(_SHARED) / "github" / "enriched" if _SHARED else None
+# PR numbers are per repository, so each other project has its own folder.
+_GITHUB = Path(_SHARED) / "github" if _SHARED else None
+if _GITHUB and PROJECT != "zephyr":
+    _GITHUB = _GITHUB / PROJECT
+CACHE = _GITHUB / "prs" if _GITHUB else layout.candidates() / "cache"
+SHARED_ENRICHED = _GITHUB / "enriched" if _GITHUB else None
 FETCHED = layout.candidates() / "fetched.json"   # the PRs of this run's fetch
 OUT = layout.candidates() / "candidates.jsonl"
 ENRICHED = layout.enriched()
@@ -92,13 +125,16 @@ def write_atomic(path: Path, text: str) -> None:
     tmp.write_text(text)
     tmp.replace(path)
 
-# Paths that are never the fix itself. A PR touching only these has nothing
-# for an agent to repair.
-NON_SOURCE_PREFIXES = ("tests/", "doc/", ".github/", "samples/")
+NON_SOURCE_PREFIXES = _CONFIG["non_source"]
+NON_SOURCE_SUFFIXES = _CONFIG["non_source_suffixes"]
 
-# The eight instances already validated by hand. selftest asserts every one
-# survives the filters; if one does not, the filter is wrong, not the PR.
-KNOWN_GOOD = [33690, 43405, 62109, 65697, 74435, 82272, 85079, 89534]
+# If one of these does not survive the filters, the filter is wrong, not the PR.
+KNOWN_GOOD = _CONFIG["known_good"]
+BACKPORT_LABEL = "Process: release backport"
+
+
+def is_source(name: str) -> bool:
+    return not name.startswith(NON_SOURCE_PREFIXES) and not name.endswith(NON_SOURCE_SUFFIXES)
 
 
 # ---------------------------------------------------------------- github
@@ -234,6 +270,10 @@ def classify(pr: dict) -> tuple[bool, str]:
     if pr["title"].lower().startswith("revert"):
         return False, "revert"
 
+    if _CONFIG["backports"] and (BACKPORT_LABEL in pr["labels"]
+                                 or "[backport" in pr["title"].lower()):
+        return False, "backport"
+
     if pr.get("files_truncated"):
         # Past GitHub's 3000-file ceiling the list genuinely cannot be
         # completed, so any judgement built on it would be unsound. This is a
@@ -245,7 +285,7 @@ def classify(pr: dict) -> tuple[bool, str]:
     if not tests:
         return False, "touches no tests/"
 
-    source = [n for n in names if not n.startswith(NON_SOURCE_PREFIXES)]
+    source = [n for n in names if is_source(n)]
     if not source:
         return False, "touches no source outside tests/"
 
@@ -256,7 +296,7 @@ def summarise(pr: dict) -> dict:
     """The record handed to the triage stage."""
     names = [f["filename"] for f in pr["files"]]
     tests = [n for n in names if n.startswith("tests/")]
-    source = [n for n in names if not n.startswith(NON_SOURCE_PREFIXES)]
+    source = [n for n in names if is_source(n)]
     return {
         "number": pr["number"],
         "title": pr["title"],
@@ -782,6 +822,12 @@ def main() -> None:
     t.add_argument("--refresh", action="store_true", help="recompute existing blocks")
 
     args = p.parse_args()
+    if PROJECT != "zephyr":
+        if not layout.run_dir():
+            sys.exit(f"{PROJECT}: needs --run-dir, so as not to mix with Zephyr's candidates/")
+        if args.cmd not in ("selftest", "fetch", "filter"):
+            sys.exit(f"{PROJECT}: `{args.cmd}` is written for Zephyr; only selftest, fetch, "
+                     "filter are available")
     {"selftest": cmd_selftest, "fetch": cmd_fetch, "filter": cmd_filter,
      "enrich": cmd_enrich, "enrich-twister": cmd_enrich_twister}[args.cmd](args)
 
