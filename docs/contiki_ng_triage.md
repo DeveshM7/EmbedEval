@@ -234,8 +234,9 @@ stay out of future prompts.
 The native adapter, schema, generator, validator and cluster integration are
 implemented and bounded CPU controls pass. Full-campaign readiness remains
 closed: historical profile resolution, remaining profile/era controls, complete
-baseline inventories, guarded-body execution agreement and model handoff proof
-are outstanding. No full pass has been launched.
+baseline inventories and guarded-body execution agreement are outstanding.
+The bounded model pilot below proves native handoff, not full profile coverage.
+No full pass has been launched.
 
 
 <!-- END TRIAGE INSTRUCTIONS -->
@@ -300,14 +301,78 @@ node. The first batch inference submission was canceled after its forecast
 moved to November 11; no inference occurred and no paid fallback was used.
 `spark-interactive` remains usable with a 60,250 MB maximum memory request.
 The six-control pilot uses one node, 60,000 MB, GPU memory utilization 0.40,
-131,072 context tokens and two concurrent requests. Model settings and inputs
-are frozen in `runs/triage-six-controls/` (triage job 484681, dependent CPU
-validation/comparison job 484682). Handoff remains unverified until those jobs
-finish. No instances have been promoted or published.
+131,072 context tokens and two concurrent requests. Model settings, input
+records, instruction snapshots and source archives are frozen under the run
+folders. No instances have been promoted or published.
 
 Fresh-grader control job 484672 rebuilt the JSON image independently and applied
 only the upstream production fix on a fresh node-local overlay: all six cases
 passed. A separate protected-test patch was rejected before container execution.
 Results are under `research/gold-grader-control/` in the Scholar workspace. This
-is an upstream-gold control, not an agent attempt. The final local verification
-has 24 pipeline/runner/grading checks and nine cluster checks passing.
+is an upstream-gold control, not an agent attempt.
+
+## Qwen six-PR pilot results (2026-11-04)
+
+The actual `qwen38-nvfp4` pilot is complete. The sample is intentionally
+source-reviewed, not held out; coarse accept/non-accept agreement is not an
+accuracy estimate. Expected answers and this reporting section are excluded
+from model instructions. Schema repairs use the existing automatic checker;
+no model decision was manually changed or retried to improve its label.
+
+| PR | Model decision | Selected oracle | Final validation of untouched plan |
+| --- | --- | --- | --- |
+| #3246 | accept | runtime | VALID: four named F2P, two P2P; three repeated before runs agree |
+| #3020 | accept | runtime | INVALID: base compilation fails on the added API; runtime failure was not observed |
+| #3195 | accept | compile | INVALID: the declared P2P case cannot execute in the failing base build |
+| #1183 | hold | none | No eligible inventoried unit; no automatic build |
+| #1170 | hold | none | Correctly identifies the incidental hex-decoding dependency; no automatic build |
+| #255 | accept | runtime | VALID: one named F2P, five P2P; three repeated before runs agree |
+
+All six coarse decisions match the selected source-reviewed expectations, but
+only **two of four accepted plans validate**. #1183's hold is due to missing
+inventory, not recognition of its observed non-detection. #3020 remains a known
+valid semantic-compile control under the earlier manual plan; its model-selected
+runtime plan fails. #3195's source-attributed compile failure and after passes
+do not establish its additional before-pass claim. Neither model plan was
+repaired to inflate the valid count. The model pilot yields two native/runtime
+instances and no validated model-selected compile instance.
+
+Main model job 484781 produced five decisions after Python bootstrap (484681)
+and missing-MCP client failures (484768), both before any model reply. MCP is
+now an explicit dependency and client setup requires a successful loopback HTTP
+completion preflight. The client preflight is infrastructure verification, not
+a benchmark testcase or model inference. Original error traces remain archived.
+
+#1170 initially exceeded context before a reply: its raw rendered record has
+about 738k tokenizer tokens, dominated by six enormous hex literals. The generic
+renderer now replaces only oversized hex literals with length, SHA256 and short
+samples; original source and benchmark patches remain unchanged and available
+through source tools. The repaired view is about 40k tokens. Supplemental model
+job 484789 produced its hold; the two enriched records are byte-for-byte equal.
+The other five model decisions were retained. Supplemental CPU job 484790
+correctly found no accepted instance to build.
+
+CPU job 484782 automatically generated and validated all four accepts. The pilot
+exposed a validator gap: compile/config plans could claim P2P without observed
+before passes. The gate now requires actual before passes for every declared
+P2P case, under every oracle, including repeated before runs. Job 484793 reran
+only the affected #3195 plan using the stricter validator and rejected it. Its
+earlier permissive receipt is archived under `jobs/p2p-policy-repair-3195/`;
+the latest receipt and ledger outcome supersede it. A malformed operational
+helper submission (484792) was canceled before execution and replaced.
+
+Successful inference took 3.2–23.6 minutes per main-sample PR (about nine minutes
+mean), plus a 5.3-minute warm-cache server start; #1170 took another 9.9 minutes
+after context repair. CPU build/validation took roughly five minutes per plan.
+The two shared running-job limit was respected. No paid APIs, full campaign,
+agent attempts, promotion, publication or push were performed.
+
+Evidence is in Scholar's `runs/triage-six-controls/` and
+`runs/triage-context-repair/`. `pilot-final-audit.json` and
+`pilot-final-audit.md` join the six decisions without overwriting the original
+context error. The audit checks schema validity, successful replies, prompt
+separation, unchanged accepted selections, matching recipe fingerprints,
+before/after case evidence and three deterministic before repeats for valid
+instances. Local verification: 30 pipeline/runner/grading checks and nine
+cluster checks pass. The pilot supports using triage with validation as the
+gate; it does not certify full-history campaign readiness.
