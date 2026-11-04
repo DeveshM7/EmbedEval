@@ -432,7 +432,7 @@ inspection of what the build checks and whether its failure is attributable.
 | Gap | Pinned source evidence | Consequence |
 | --- | --- | --- |
 | Incomplete native consumer closure | AES test C includes `test-vectors.c`; Make automatically includes local `project-conf.h` | Vector/header/unit-Makefile changes can miss their consumer because inventory currently lists too few inputs |
-| Transitive script fixtures absent | `20-packet-parsing/02-test-sicslowpan.sh` sources `packet-injector.sh`, which loads `packet-injector/$TEST_PROTOCOL-data/*` | Packet-only changes can select no unit, as in the development control |
+| Legacy script discovery and protocol-specific fixture closure | The older packet suite includes `Makefile.script-test`; modern wrappers source `packet-injector.sh`, which loads `packet-injector/$TEST_PROTOCOL-data/*` | The development control has no legacy consumer; modern inventory previously associated every protocol's data with every runner |
 | Missing native submodule dependency | `08-native-runs/18-ecc/Makefile` adds `os/services/ecc`; its `Makefile.ecc` adds `os/net/security/micro-ecc` | Inventory predicts enabled native tests but generated native units request no submodule |
 | Script wrapper hides another executor | `06-script-base/code-result-visualization/Makefile` invokes the simulation runner; its shell check invokes an analyzer under `examples/benchmarks/` | A script entry needs Cooja, analyzer code and generated output, not just its top-level shell file |
 | C string concatenation is misparsed | `13-ieee802154/code-6tisch/test-sixp.c` uses adjacent string literals for distinct case descriptions | The current registration regex truncates descriptions and produces collisions |
@@ -476,9 +476,38 @@ target buildability and execution evidence; none can substitute for the others.
 
 Additional source audit findings: custom framer failure reports use
 `FAILED - description (exit at N)`, while the runner currently recognizes only
-the older `description: exit at LN` suffix. The enricher also silently clips
-production diffs at 120,000 characters. Both need explicit handling before
-unseen-pilot confidence can be assessed. Testing infrastructure itself can be a
+the older `description: exit at LN` suffix. The enricher also silently clipped
+production diffs at 120,000 characters. Both are addressed by the version-5
+changes below. Testing infrastructure itself can be a
 PR's fix target, so a test-root-only change must not be presumed either a valid
 production task or an intrinsically invalid PR; fixed-test/editable-fix separation
 must be representable first.
+
+### Version-5 input improvements
+
+Enrichment now records application Makefiles and local configuration, recursive
+local C includes (including C vector tables), explicit project sources, module
+Makefiles/macros and source-derived submodule dependencies. Shell dependencies
+include sourced/executed wrappers and statically resolved input globs; packet
+data is associated with its protocol consumer. Cooja source references bring
+their application Makefiles/configuration, without automatically changing those
+files' protected-versus-production role. Dependency edges, unresolved supported
+expressions and `build_verified: false` keep source-derived closure separate
+from an observed build. This is not a general Make or shell interpreter.
+
+C testcase parsing now joins adjacent string literals and ignores macro-looking
+text inside comments/strings. Genuine duplicate runtime descriptions remain
+unsupported for individual native case attribution rather than inventing unique
+names. The runner recognizes the framer's parenthesized failure location.
+Enrichment retains the full production diff; bounded model previews explicitly
+report omitted content and hashes instead of silently destroying the record.
+Old enriched inputs require re-enrichment; frozen prior pilot artifacts remain
+unchanged. Current local verification has 41 pipeline/runner/input checks and
+nine cluster checks passing. Source checks confirm the ECC dependency, exactly
+one protocol consumer for a packet fixture and deterministic inventory output
+across Python hash seeds.
+
+These changes do not yet resolve the legacy `Makefile.script-test` executor,
+compiler-backed guard resolution, state-dependent dependency initialization or
+all CI profiles. Oracle contradictions and instructions are the next work;
+no improved model accuracy is claimed from these implementation checks.

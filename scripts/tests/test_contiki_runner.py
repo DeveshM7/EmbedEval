@@ -37,6 +37,10 @@ class NativeParserTests(unittest.TestCase):
     def test_no_result_is_not_a_fabricated_failure(self):
         self.assertEqual(runner.parse_native('Unit test: pending\ncrashed\n'), ({}, False))
 
+    def test_framer_parenthesized_exit_keeps_case_identity(self):
+        self.assertEqual(runner.parse_native('=check-me= FAILED   - frame parse (exit at 203)\n=check-me= DONE\n'),
+                         ({'frame parse':'failed'},True))
+
     def test_ignores_output_after_completion(self):
         self.assertEqual(runner.parse_native('=check-me= DONE\n'
                                              'Unit test: spurious\nResult: failure\n'),

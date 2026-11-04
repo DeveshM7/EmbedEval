@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Source-derived Contiki-NG PR discovery and runnable inventory."""
 from __future__ import annotations
-import argparse, json, posixpath, re, subprocess
+import argparse, ast, json, posixpath, re, subprocess
 from pathlib import Path
 import layout
+from functools import lru_cache
+from contiki_ng_inputs import closure
 
 REPO='https://github.com/contiki-ng/contiki-ng'
-ENRICH_VERSION=4
+ENRICH_VERSION=5
 TEST_ROOTS=('tests/','regression-tests/')
 SUPPORTED_SIM_SUITES=('07-simulation-base','09-ipv6','13-ieee802154','21-security-protocols')
 
@@ -64,9 +66,22 @@ def find_pr(pr):
     return {'body':None,**found,'base_commit':parents[0],'fix_commit':found['merge_commit_sha']}
 
 def files_at(rev): return git('ls-tree','-r','--name-only',rev).splitlines()
+def c_tokens(source):
+    pattern=r'/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[A-Za-z_]\w*|\S'
+    return [m[0] for m in re.finditer(pattern,source) if not m[0].startswith(('/*','//'))]
+
 def cases(source):
-    registered=dict(re.findall(r'UNIT_TEST_REGISTER\s*\(\s*(\w+)\s*,\s*"([^"]*)"',source))
-    invoked=re.findall(r'UNIT_TEST_RUN\s*\(\s*(\w+)\s*\)',source)
+    tokens=c_tokens(source);registered={};invoked=[]
+    for i,token in enumerate(tokens):
+        if tokens[i+1:i+2]!=['('] or i+3>=len(tokens):continue
+        name=tokens[i+2]
+        if not re.fullmatch(r'[A-Za-z_]\w*',name):continue
+        if token=='UNIT_TEST_RUN' and tokens[i+3]==')':invoked.append(name)
+        if token!='UNIT_TEST_REGISTER' or tokens[i+3]!=',':continue
+        j=i+4;parts=[]
+        while j<len(tokens) and tokens[j].startswith('"'):
+            parts.append(ast.literal_eval(tokens[j]));j+=1
+        if parts and j<len(tokens) and tokens[j]==')':registered[name]=''.join(parts)
     return [{'id':n,'description':registered[n]} for n in dict.fromkeys(invoked) if n in registered]
 
 def logical_lines(text): return re.sub(r'\\\n',' ',text).splitlines()
@@ -79,14 +94,16 @@ def suite_entries(text):
 
 def inventory(rev):
     paths=files_at(rev); units=[]; holds=[]
+    @lru_cache(maxsize=None)
+    def read(path):return show(rev,path) or ''
     # Native unit Makefiles are authoritative, including old units later run by Cooja.
     for path in paths:
         if not path.startswith(TEST_ROOTS) or not path.endswith('/Makefile'): continue
-        directory=posixpath.dirname(path); make=show(rev,path) or ''
+        directory=posixpath.dirname(path); make=read(path)
         sources=[p for p in paths if posixpath.dirname(p)==directory and p.endswith('.c')]
         native=[]
         for source in sources:
-            entries=cases(show(rev,source) or '')
+            entries=cases(read(source))
             if entries:native.append((source,entries))
         if not native: continue
         projects=re.search(r'^\s*CONTIKI_PROJECT\s*[:?+]?=\s*(.*)',make,re.M)
@@ -95,7 +112,7 @@ def inventory(rev):
             rule=re.search(r'^all:\s*(.*)',make,re.M); targets=rule[1].split() if rule else []
         options=[[]]
         suite=posixpath.dirname(directory)
-        suite_make=show(rev,suite+'/Makefile') or ''
+        suite_make=read(suite+'/Makefile')
         matching=[entry for entry in suite_entries(suite_make) if entry.startswith(directory+'/native:')]
         if matching:
             options=[]
@@ -115,17 +132,18 @@ def inventory(rev):
                 runners=[posixpath.normpath(suite+'/'+e.split(':')[1]) for e in matching if e.split(':')[1].startswith('./')]
                 consumers=[source,*runners]
                 if matching:consumers.append(suite+'/Makefile')
-                consumer_text='\n'.join([make,suite_make,*(show(rev,p) or '' for p in runners)])
+                consumer_text='\n'.join([make,suite_make,*(read(p) for p in runners)])
                 for helper in ('tests/utils.sh','tests/Makefile.compile-test','regression-tests/Makefile.compile-test'):
                     if helper.split('/')[-1] in consumer_text:
                         consumers.append(helper)
                 units.append({'id':directory+'/'+binary+suffix,'kind':'native','profile':'native',
+                              'case_source':source,
                               'directory':directory,'binary':binary,'suite_directory':suite,
                               'make_options':opts,'sources':list(dict.fromkeys(consumers)), 'cases':entries,'submodules':[]})
     native_directories={u['directory'] for u in units}
     for path in paths:
         if not path.startswith(TEST_ROOTS) or not path.endswith('/Makefile'): continue
-        suite=posixpath.dirname(path);text=show(rev,path) or ''
+        suite=posixpath.dirname(path);text=read(path)
         if not re.search(r'^\s*RUN_FILE\s*[:?+]?=\s*1',text,re.M):continue
         root_match=re.search(r'^\s*EXAMPLESDIR\s*[:?+]?=\s*(.*)',text,re.M)
         example_root=root_match[1].strip() if root_match else '.'
@@ -137,7 +155,8 @@ def inventory(rev):
             directory=posixpath.normpath(suite+'/'+example_root+'/'+fields[0].rsplit('/',1)[0])
             if directory in native_directories:continue
             runner=posixpath.normpath(suite+'/'+fields[1])
-            source_paths=[p for p in paths if p.startswith(directory+'/')]+[runner,path]
+            source_paths=[p for p in paths if posixpath.dirname(p)==directory and
+                          (p.endswith(('.c','.h')) or Path(p).name.startswith('Makefile'))]+[runner,path]
             supported=Path(suite).name in ('06-script-base','10-ipv6-nbr','20-packet-parsing')
             units.append({'id':suite+'::'+entry,'kind':'script','profile':'script',
                           'directory':directory,'suite_directory':suite,'entry':entry,
@@ -149,7 +168,7 @@ def inventory(rev):
         if not path.startswith(TEST_ROOTS) or not path.endswith('.csc'):continue
         suite=posixpath.dirname(path)
         if '/code' in suite: continue
-        try: tree=ET.fromstring(show(rev,path))
+        try: tree=ET.fromstring(read(path))
         except ET.ParseError:
             holds.append({'source':path,'reason':'unparseable scenario'});continue
         refs=[]
@@ -166,13 +185,20 @@ def inventory(rev):
                       'submodules':['tools/cooja','os/net/security/mbedtls','os/net/security/micro-ecc'],
                       'supported':supported,'hold_reason':None if supported else 'profile needs worker control'})
     for unit in units:
+        unit.update(closure(unit,paths,read))
         sources=[p for p in unit['sources'] if p.endswith('.c') and p.startswith(TEST_ROOTS)]
         guards=[{'source':p,'line':i,'directive':line.strip()} for p in sources
-                for i,line in enumerate((show(rev,p) or '').splitlines(),1)
+                for i,line in enumerate(read(p).splitlines(),1)
                 if re.match(r'\s*#\s*(?:if|ifdef|ifndef|elif)\b',line)]
         unit['profile_evidence']={'enabled':True if unit['kind']=='native' and sources and not guards else None,
                                   'method':'source-unconditional' if unit['kind']=='native' and sources and not guards else 'compiler-proof-pending',
                                   'sources':sources,'guards':guards}
+        descriptions=[case['description'] for case in unit['cases']]
+        if unit['kind']=='native' and len(set(descriptions))!=len(descriptions):
+            unit['supported']=False
+            unit['hold_reason']='duplicate runtime descriptions cannot identify individual cases'
+            unit['profile_evidence']['enabled']=None
+            holds.append({'source':unit['id'],'reason':unit['hold_reason']})
     return units,holds
 
 def select_tests(rec,profile=None):
@@ -254,8 +280,10 @@ def stale_record(rec):
     if not isinstance(rec['test_inventory'],list) or not isinstance(rec['test_files'],list) or not isinstance(rec['source_files'],list):return True
     if any(not isinstance(p,str) for p in rec['test_files']+rec['source_files']):return True
     if not isinstance(rec['profiles'],dict) or not isinstance(rec['compile_requirements'],list):return True
-    return any(not isinstance(u,dict) or not all(k in u for k in ('id','kind','profile','sources','cases','profile_evidence'))
+    return any(not isinstance(u,dict) or not all(k in u for k in ('id','kind','profile','sources','cases','profile_evidence','dependency_evidence'))
                or not isinstance(u['profile_evidence'],dict) or not isinstance(u['sources'],list)
+               or not isinstance(u['dependency_evidence'],dict)
+               or not all(k in u['dependency_evidence'] for k in ('method','edges','unresolved','build_verified'))
                or any(not isinstance(p,str) for p in u['sources'])
                or not isinstance(u['cases'],list) for u in rec['test_inventory'])
 
@@ -275,7 +303,7 @@ def enrich(pr):
                         'cooja':{'architecture':'x86_64','seed':1,'run_count':1},
                         'script':{'architecture':'x86_64','target':'native'}},
             'test_patch':test_patch,
-            'production_diff':production_diff[:120000],
+            'production_diff':production_diff,
             'compile_requirements':compile_requirements(base,production_diff,test_patch),
             'nested_merge_count':max(0,len(nested)-1),
             'ci_sources':{p:show(base,p) for p in ('.github/workflows/build.yml','.travis.yml') if show(base,p)}}

@@ -24,9 +24,16 @@ def render_record(rec):
             omissions.append({'field':field,'hex_characters':len(value),'sha256':digest})
             return '"'+value[:128]+f' [PROMPT ONLY: {len(value)-256} hex characters omitted; sha256={digest}] '+value[-128:]+'"'
         payload[field]=re.sub(r'"([0-9a-fA-F]{4096,})"',summarize,payload[field])
+    if len(payload['production_diff'])>120000:
+        text=payload['production_diff']
+        omitted=len(text)-100000
+        payload['production_diff']=text[:60000]+f'\n[PROMPT ONLY: {omitted} characters omitted; read full source at base/merge]\n'+text[-40000:]
+        omissions.append({'field':'production_diff','kind':'diff-preview',
+                          'omitted_characters':omitted,
+                          'sha256':hashlib.sha256(rec['production_diff'].encode()).hexdigest()})
     if omissions:
         payload['prompt_omissions']=omissions
-        payload['prompt_omission_note']='Only oversized hex literals are summarized. Original patches are unchanged; use read_file at base/merge for full upstream data.'
+        payload['prompt_omission_note']='Prompt omissions are explicitly listed. Original patches are unchanged; use read_file at base/merge for full upstream data.'
     return json.dumps(payload,indent=2)
 
 def checked_observation(prior,receipt,rec,available):

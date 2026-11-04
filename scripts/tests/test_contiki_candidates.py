@@ -11,6 +11,7 @@ def record():
     unit={'id':'tests/08-native-runs/test-json/test-json','kind':'native','profile':'native',
           'sources':['tests/08-native-runs/test-json/test-json.c'],
           'cases':[{'id':'json_test','description':'JSON test'}],
+          'dependency_evidence':{'method':'static-source-closure','edges':[],'unresolved':[],'build_verified':False},
           'profile_evidence':{'enabled':True,'method':'source-unconditional',
                               'sources':['tests/08-native-runs/test-json/test-json.c'],'guards':[]}}
     return {'number':1,'title':'JSON fix','body':'','url':'https://example.test/1',
@@ -46,6 +47,16 @@ class CandidatesTests(unittest.TestCase):
         self.assertEqual(rendered['test_patch'],rec['test_patch'])
         self.assertNotIn('prompt_omissions',rendered)
 
+    def test_large_production_preview_does_not_destroy_source_record(self):
+        rec=record();original='begin\n'+'source line;\n'*11000+'end\n'
+        rec['production_diff']=original
+        rendered=json.loads(pipeline.render_record(rec))
+        self.assertEqual(rec['production_diff'],original)
+        self.assertTrue(rendered['production_diff'].startswith('begin\n'))
+        self.assertTrue(rendered['production_diff'].endswith('end\n'))
+        self.assertEqual(rendered['prompt_omissions'][0]['kind'],'diff-preview')
+        self.assertIn('read full source',rendered['production_diff'])
+
     def test_multiline_suite_keeps_options_on_their_own_entry(self):
         text='EXAMPLES = \\\nexamples/mqtt/native:./mqtt.sh:DEFINES=MQTT=1 \\\ntests/json/native:./json.sh \\\ntests/heap/native:./heap.sh:DEFINES=HEAPMEM_DEBUG=0 \\\ntests/heap/native:./heap.sh:DEFINES=HEAPMEM_DEBUG=1\n'
         entries=c.suite_entries(text)
@@ -64,6 +75,29 @@ class CandidatesTests(unittest.TestCase):
     def test_only_invoked_registered_cases_enter_inventory(self):
         source='UNIT_TEST_REGISTER(real, "Real"); UNIT_TEST_REGISTER(dead, "Dead"); UNIT_TEST_RUN(real);'
         self.assertEqual(c.cases(source),[{'id':'real','description':'Real'}])
+
+    def test_adjacent_c_string_literals_keep_distinct_descriptions(self):
+        source=('UNIT_TEST_REGISTER(first,"prefix " "first"); '
+                'UNIT_TEST_REGISTER(second,"prefix " "second"); '
+                'UNIT_TEST_RUN(first); UNIT_TEST_RUN(second);')
+        self.assertEqual(c.cases(source),[{'id':'first','description':'prefix first'},
+                                         {'id':'second','description':'prefix second'}])
+
+    def test_comments_and_string_contents_do_not_invoke_cases(self):
+        source=('UNIT_TEST_REGISTER(real,"Real"); UNIT_TEST_REGISTER(dead,"Dead"); '
+                '/* UNIT_TEST_RUN(dead); */ printf("UNIT_TEST_RUN(dead)"); UNIT_TEST_RUN(real);')
+        self.assertEqual(c.cases(source),[{'id':'real','description':'Real'}])
+
+    def test_ambiguous_runtime_descriptions_are_not_automatic_native_units(self):
+        path='tests/native/unit/test.c'
+        files={path:'UNIT_TEST_REGISTER(a,"same"); UNIT_TEST_REGISTER(b,"same"); UNIT_TEST_RUN(a); UNIT_TEST_RUN(b);',
+               'tests/native/unit/Makefile':'CONTIKI_PROJECT = test'}
+        with (patch.object(c,'files_at',return_value=list(files)),
+              patch.object(c,'show',side_effect=lambda rev,p:files.get(p))):
+            units,holds=c.inventory('a'*40)
+        self.assertFalse(units[0]['supported'])
+        self.assertEqual(c.select_tests({'test_files':[path],'test_inventory':units}),[])
+        self.assertIn('duplicate runtime descriptions',holds[0]['reason'])
 
     def test_hyphenated_identity_round_trip(self):
         self.assertEqual(instances.split_instance('contiki-ng__contiki-ng-3246'),('contiki-ng','3246'))

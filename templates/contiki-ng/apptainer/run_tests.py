@@ -20,7 +20,7 @@ RUN_TIMEOUT = 300
 
 UNIT_LINE = re.compile(r'^Unit test: (.+?)\s*$')
 RESULT_LINE = re.compile(r'^Result: (success|failure)\s*$')
-LEGACY_LINE = re.compile(r'^=check-me= (SUCCEEDED|FAILED)\s+- (.+?)(?:: exit at L\d+)?\s*$')
+LEGACY_LINE = re.compile(r'^=check-me= (SUCCEEDED|FAILED)\s+- (.+?)\s*$')
 DONE_LINE = re.compile(r'^=check-me= DONE\s*$')
 COOJA_LINE = re.compile(r'\bTEST (OK|FAILED)\b')
 SCRIPT_SUCCESS = re.compile(r'^=check-me= SUCCEEDED - (.+?)\s*$')
@@ -45,7 +45,10 @@ def parse_native(text):
             continue
         match = LEGACY_LINE.match(line)
         if match:
-            cases[match.group(2)] = 'passed' if match.group(1) == 'SUCCEEDED' else 'failed'
+            description = match.group(2)
+            if match.group(1) == 'FAILED':
+                description = re.sub(r'(?:: exit at L\d+|\s+\(exit at \d+\))$', '', description)
+            cases[description] = 'passed' if match.group(1) == 'SUCCEEDED' else 'failed'
             pending = None
             continue
         if DONE_LINE.match(line):
