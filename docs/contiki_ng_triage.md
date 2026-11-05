@@ -736,3 +736,27 @@ against measured references without treating that comparison as validation.
 `cluster/report.py --scorecard` passes the project's scoring selector.
 Local checks: 61 Contiki checks and 11 cluster checks pass, including separate
 gold selection, the 7/8 split, pending-reference gating and abstention scoring.
+
+### Gold-15 model run and full-pool launch (2026-11-05)
+
+Jobs 484920 (triage) and 484921 (validation of untouched accepts) ran all 15
+gold controls from frozen source `03e1c35` with `qwen38-nvfp4`. All 15 decisions
+match the labels: 7 accepts, 8 rejects, no holds or errors. All seven accepted
+plans validated with three agreeing before repeats. No selected F2P case passed
+before and no selected P2P case failed: F2P recall is 18/19 (#3261 omitted
+`test_attribute_filter`), and P2P lists are conservative subsets (allowed, since
+`after_required` checks every selected-unit case). #2830 selected both heapmem
+variants and validated. These are known development controls, so this is
+evidence that the earlier over-claiming error is fixed, not unseen accuracy.
+Triage took 1.9–21.6 minutes per PR.
+
+The full hard-filter pool (341 census PRs) was prepared as `full-341-v7`, with
+`--redo` so earlier pilot outcomes do not suppress candidates. The 15 gold PRs
+keep their gold-run results (identical instructions) and are not re-triaged; #52's
+stale reservation by the terminal observation-only v6 audit was overridden with a
+recorded manifest backup. Triage job 484942 uses 8 Spark nodes. `submit.py` caps
+non-Zephyr projects at two nodes, so the frozen job script was copied with only
+`-N` changed, after canceling a 2-node submission (484941) before any triage.
+Validation job 484943 uses 4 CPU nodes with four validations per node. The v7
+evaluation PRs are part of this pool; their outcomes are scored against the frozen
+source expectations, not used to tune this run.
