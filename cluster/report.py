@@ -31,15 +31,48 @@ import ledger  # noqa: E402
 import status  # noqa: E402
 
 
-def outcome(entry: dict, st: dict) -> tuple[str, str]:
+def observation_outcome(run: Path, pr: int, st: dict) -> tuple[str, str]:
+    """An observation-only run's PR: observed, finalized, then given a model
+    problem statement. VALID only once it is promotable. None of the other
+    outcomes settle the PR in the ledger: a triage run may still find another
+    oracle for it."""
+    o = st.get("observe")
+    if not o:
+        return "observation: not yet", ""
+    if o["state"] != "done":
+        return f"observation: {o['state']}", o.get("note", "")
+    observed = status.receipt(run, "instances", pr, "observed.json")
+    if not observed:
+        return "observation: not observable", o.get("note", "")
+    if not observed.get("valid"):
+        return "observation: no fail-to-pass", observed.get("reason", "")
+    f = st.get("finalize")
+    if not f:
+        return "observed, finalize not yet", ""
+    if f["state"] != "done":
+        return "finalize: failed", f.get("outcome", "")
+    if f["outcome"] != "VALID":
+        return ("finalize: hold" if f["outcome"] == "HOLD" else "finalize: INVALID"), f["outcome"]
+    meta = status.receipt(run, "finalized", pr, "metadata.json")
+    if not (meta.get("problem_statement") or "").strip():
+        s = st.get("statement")
+        return ("VALID, statement failed" if s and s["state"] != "done" else "VALID, statement not yet"), ""
+    return "VALID", f"observation-backed; statement by {(meta.get('statement_provenance') or {}).get('model', '?')}"
+
+
+def outcome(entry: dict, st: dict, run: Path | None = None, observe_only: bool = False) -> tuple[str, str]:
     """(where the PR ended up, detail)."""
     if entry["stage"] != "to triage":
         return entry["stage"], entry.get("note", "")
+    if observe_only:
+        return observation_outcome(run, entry["pr"], st)
     t = st.get("triage")
     if not t:
         return "triage: not yet", ""
     if t["state"] != "done":
         return f"triage: {t['state']}", t.get("note", "")
+    if not isinstance(t.get("verdict"), str):          # the model nested its answer
+        return "triage: malformed verdict", "the verdict field is not accept/reject/hold"
     if t.get("verdict") != "accept":
         return f"triage: {t.get('verdict')}", t.get("note", "")
     v = st.get("validate")
@@ -55,18 +88,25 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
 
 
 ORDER = ["in ledger", "in another run", "fetch failed", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "triage: server failed",
-         "triage: cap", "triage: failed", "triage: error", "triage: reject", "triage: not yet",
+         "triage: cap", "triage: failed", "triage: error", "triage: malformed verdict", "triage: reject", "triage: not yet",
          "accepted, validation not yet", "validation: skipped", "validation: failed",
+         "observation: not yet", "observation: cap", "observation: failed", "observation: not observable",
+         "observation: no fail-to-pass", "observed, finalize not yet", "finalize: failed",
+         "finalize: hold", "finalize: INVALID", "VALID, statement not yet", "VALID, statement failed",
          "INVALID", "VALID"]
 
 
 def build(run: Path) -> dict:
     m = status.manifest(run)
+    observe_only = bool(m.get("observe_only"))
     rows = []
     for e in m["prs"]:
         st = status.read(run, e["pr"])
-        where, detail = outcome(e, st)
+        where, detail = outcome(e, st, run, observe_only)
+        folder = ("finalized" if observe_only else "instances") if where == "VALID" else None
         rows.append({"pr": e["pr"], "outcome": where, "detail": detail,
+                     "instance": str(run / folder / f"contiki-ng__contiki-ng-{e['pr']}")
+                     if folder and m.get("project") == "contiki-ng" else None,
                      "observe": (st.get("observe") or {}).get("state"),
                      "triage_min": (st.get("triage") or {}).get("minutes"),
                      "validate_min": (st.get("validate") or {}).get("minutes"),
@@ -89,7 +129,7 @@ def to_ledger(run: Path, prs: set[int] | None = None) -> tuple[int, Path]:
     rows = []
     for e in m["prs"]:
         if prs is None or e["pr"] in prs:
-            where, detail = outcome(e, status.read(run, e["pr"]))
+            where, detail = outcome(e, status.read(run, e["pr"]), run, bool(m.get("observe_only")))
             rows.append({"pr": e["pr"], "outcome": where, "detail": detail})
     book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
     n = ledger.record(book, m["name"], m["code"]["commit"],
@@ -137,6 +177,10 @@ def main() -> None:
     if rep["observations"]:
         print("  observed: " + ", ".join(f"{v} {k}" for k, v in rep["observations"].items()))
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
+    if rep["project"] == "contiki-ng" and rep["valid"]:
+        source = "finalized" if status.manifest(run).get("observe_only") else "instances"
+        print(f"  promote (after review): python scripts/promote_instance.py --source "
+              f"{run / source} " + " ".join(f"contiki-ng__contiki-ng-{p}" for p in rep["valid"]))
     print(f"  -> {run / 'report.md'}")
     n, book = to_ledger(run)      # normally already there: workers record as PRs settle
     print(f"  ledger: {n} new settled outcomes -> {book}")

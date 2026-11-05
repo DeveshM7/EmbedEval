@@ -451,7 +451,12 @@ def main() -> None:
         verdict = json.loads(Path(args.triage).read_text()) if args.triage else None
         if not (args.observe or args.from_observed or verdict):
             p.error("--triage, --observe or --from-observed required")
-        inst = generate_contiki(args.pr, verdict, Path(args.out), args.observe, args.from_observed, args.profile)
+        from contiki_ng_pipeline import NotObservable
+        try:
+            inst = generate_contiki(args.pr, verdict, Path(args.out), args.observe, args.from_observed, args.profile)
+        except NotObservable as e:
+            print(f"  not observable: {e}")
+            sys.exit(3)
         print(f"  wrote {layout.show(inst)}")
         return
 

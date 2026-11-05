@@ -59,6 +59,112 @@ class ContikiClusterTest(unittest.TestCase):
             self.assertEqual(status.read(run, 52)['observe']['state'], 'failed')
             self.assertEqual(status.observe_todo(run), [52])  # a later job can retry
 
+    def test_manifest_observe_profile_reaches_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / 'manifest.json').write_text(json.dumps({'prs': [
+                {'pr': 52, 'stage': 'to triage', 'observe_profile': 'native'},
+                {'pr': 53, 'stage': 'to triage'}]}))
+            calls = []
+            with (patch.object(node_worker, 'LOGS', run / 'logs', create=True),
+                  patch.object(node_worker, 'ME', 'test-node0', create=True),
+                  patch.object(node_worker, 'N', 0, create=True),
+                  patch.object(node_worker, 'step', side_effect=lambda cmd, *a: calls.append(cmd) or 1),
+                  patch.object(node_worker, 'sweep'),
+                  patch.object(node_worker.report, 'to_ledger')):
+                node_worker.observe({'caps': {'validate_pr': 30, 'build': 10},
+                                     'parallel': {'validate_per_node': 1}}, run,
+                                    {'EMBEDEVAL_WORK': str(run / 'work')}, 30)
+            generate = {c[c.index('--pr') + 1]: c for c in calls if 'scripts/generate_instance.py' in c}
+            self.assertEqual(generate['52'][-2:], ['--profile', 'native'])
+            self.assertNotIn('--profile', generate['53'])
+
+    def test_observed_valid_pr_is_finalized_and_then_needs_a_statement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / 'manifest.json').write_text(json.dumps({'prs': [{'pr': 7, 'stage': 'to triage'}]}))
+            iid = 'contiki-ng__contiki-ng-7'
+            calls = []
+            def fake_step(cmd, log, cap, env):
+                calls.append((cmd, env.get('EMBEDEVAL_INSTANCES_DIR')))
+                script = cmd[1]
+                if script == 'scripts/validate_instance.py' and not env.get('EMBEDEVAL_INSTANCES_DIR'):
+                    (run / 'instances' / iid).mkdir(parents=True)
+                    (run / 'instances' / iid / 'observed.json').write_text('{"valid": true}')
+                if script == 'scripts/validate_instance.py' and env.get('EMBEDEVAL_INSTANCES_DIR'):
+                    d = run / 'finalized' / iid
+                    d.mkdir(parents=True)
+                    (d / 'validation.json').write_text('{"valid": true}')
+                    (d / 'metadata.json').write_text('{"problem_statement": null}')
+                return 0
+            with (patch.object(node_worker, 'LOGS', run / 'logs', create=True),
+                  patch.object(node_worker, 'ME', 'test-node0', create=True),
+                  patch.object(node_worker, 'N', 0, create=True),
+                  patch.object(node_worker, 'step', side_effect=fake_step),
+                  patch.object(node_worker, 'sweep'),
+                  patch.object(node_worker.report, 'to_ledger')):
+                node_worker.observe({'caps': {'validate_pr': 30, 'build': 10},
+                                     'parallel': {'validate_per_node': 1}}, run,
+                                    {'EMBEDEVAL_WORK': str(run / 'work')}, 60)
+            fromobs = [c for c, e in calls if '--from-observed' in c]
+            self.assertEqual(len(fromobs), 1)
+            self.assertEqual(fromobs[0][fromobs[0].index('--out') + 1], str(run / 'finalized'))
+            self.assertEqual(status.read(run, 7)['finalize']['outcome'], 'VALID')
+            self.assertEqual(status.finalize_todo(run), [])
+            self.assertEqual(status.statement_todo(run), [7])
+
+    def test_not_observable_generation_is_final(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / 'manifest.json').write_text(json.dumps({'observe_only': True, 'prs': [
+                {'pr': 5, 'stage': 'to triage', 'observe_profile': 'cooja'}]}))
+            with (patch.object(node_worker, 'LOGS', run / 'logs', create=True),
+                  patch.object(node_worker, 'ME', 'test-node0', create=True),
+                  patch.object(node_worker, 'N', 0, create=True),
+                  patch.object(node_worker, 'step', side_effect=lambda cmd, *a: 3 if 'generate' in cmd[1] else 0),
+                  patch.object(node_worker, 'sweep'),
+                  patch.object(node_worker.report, 'to_ledger')):
+                node_worker.observe({'caps': {'validate_pr': 30, 'build': 10},
+                                     'parallel': {'validate_per_node': 1}}, run,
+                                    {'EMBEDEVAL_WORK': str(run / 'work')}, 30)
+            self.assertEqual(status.read(run, 5)['observe']['state'], 'done')
+            self.assertEqual(status.observe_todo(run), [])
+            self.assertEqual(status.triage_todo(run), [])   # observation runs hold nothing for triage
+
+    def test_report_follows_observation_runs_to_promotable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            prs = list(range(1, 8))
+            (run / 'manifest.json').write_text(json.dumps({'name': 'obs', 'project': 'contiki-ng',
+                'observe_only': True, 'code': {'commit': 'x'},
+                'environment': {'EMBEDEVAL_SHARED': str(run / 'shared')},
+                'prs': [{'pr': p, 'stage': 'to triage'} for p in prs]}))
+            def put(folder, pr, name, data):
+                d = run / folder / f'contiki-ng__contiki-ng-{pr}'
+                d.mkdir(parents=True, exist_ok=True)
+                (d / name).write_text(json.dumps(data))
+            status.write_stage(run, 2, 'observe', {'state': 'done', 'note': 'not observable'})
+            for pr in (3, 4, 5, 6, 7):
+                status.write_stage(run, pr, 'observe', {'state': 'done'})
+            put('instances', 3, 'observed.json', {'valid': False, 'reason': 'no attributable runtime F2P'})
+            for pr in (4, 5, 6, 7):
+                put('instances', pr, 'observed.json', {'valid': True})
+            status.write_stage(run, 5, 'finalize', {'state': 'done', 'outcome': 'INVALID: x'})
+            for pr in (6, 7):
+                status.write_stage(run, pr, 'finalize', {'state': 'done', 'outcome': 'VALID'})
+            put('finalized', 6, 'metadata.json', {'problem_statement': ''})
+            put('finalized', 7, 'metadata.json', {'problem_statement': 'Ping fails.',
+                                                   'statement_provenance': {'model': 'qwen38-nvfp4'}})
+            rep = report.build(run)
+            got = {r['pr']: r['outcome'] for r in rep['rows']}
+            self.assertEqual(got, {1: 'observation: not yet', 2: 'observation: not observable',
+                                   3: 'observation: no fail-to-pass', 4: 'observed, finalize not yet',
+                                   5: 'finalize: INVALID', 6: 'VALID, statement not yet', 7: 'VALID'})
+            self.assertEqual(rep['valid'], [7])
+            self.assertTrue(rep['rows'][6]['instance'].endswith('finalized/contiki-ng__contiki-ng-7'))
+            n, _ = report.to_ledger(run)
+            self.assertEqual(n, 1)       # only the promotable instance settles its PR
+
     def test_observation_resume_retries_failures_but_keeps_receipts(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

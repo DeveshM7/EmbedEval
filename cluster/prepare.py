@@ -97,11 +97,19 @@ def main() -> None:
                    help="also take PRs the ledger has already settled in an earlier run")
     p.add_argument("--until", help="with --since: merged on or before this date")
     p.add_argument("--config", help="default: cluster/config.yaml")
+    p.add_argument("--observe-only", action="store_true",
+                   help="Contiki: a model-free observation run (observe/finalize/statement jobs); "
+                        "it never holds PRs for triage")
+    p.add_argument("--observe-profile", choices=("native", "cooja", "script"),
+                   help="with --observe-only: observe every PR under this profile, so PRs whose "
+                        "units span profiles are covered by one run per profile")
     args = p.parse_args()
     if args.since and not args.until:
         p.error("--since needs --until")
     if args.no_filter and not args.pr:
         p.error("--no-filter goes with --pr")
+    if args.observe_profile and not args.observe_only:
+        p.error("--observe-profile goes with --observe-only")
 
     cfg = cluster_config.load_or_exit(args.config)
     project = cfg["project"]
@@ -275,7 +283,10 @@ def main() -> None:
         "config": {k: v for k, v in cfg.items() if k != "derived"},
         "environment": env,
         "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
+                | ({"observe_profile": args.observe_profile}
+                   if args.observe_profile and stage[pr] == "to triage" else {})
                 for pr in prs],
+        **({"observe_only": True} if args.observe_only else {}),
         "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
         "missing_sdk_images": ([f"{sdk} (Python {py})" for py, sdk, _ in missing
                                 if not au.sdk_image(sdk, py).exists()] if project == "zephyr" else []),
@@ -290,7 +301,7 @@ def main() -> None:
         print(f"    {n:>5}  {s}")
     if manifest["missing_sdk_images"]:
         print(f"  WARNING: SDK images could not be built: {manifest['missing_sdk_images']}")
-    mode = "triage" if project == "contiki-ng" else "pipeline"
+    mode = ("observe" if args.observe_only else "triage") if project == "contiki-ng" else "pipeline"
     print(f"\nnext: python cluster/submit.py {mode} --run {args.name}")
 
 

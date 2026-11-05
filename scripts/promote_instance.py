@@ -64,14 +64,17 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("instance", nargs="*")
     p.add_argument("--all", action="store_true", help="every valid instance in generated/")
+    p.add_argument("--source", type=Path, default=GENERATED,
+                   help="folder holding the instances (default: generated/; a Contiki "
+                        "observation run's are in <run>/finalized/)")
     args = p.parse_args()
-    ids = (sorted(d.name for d in GENERATED.iterdir() if (d / "validation.json").exists())
+    ids = (sorted(d.name for d in args.source.iterdir() if (d / "validation.json").exists())
            if args.all else args.instance)
     if not ids:
         p.error("give instance ids or --all")
     ok = 0
     for iid in ids:
-        done, msg = promote(iid)
+        done, msg = promote(iid, args.source)
         ok += done
         print(f"  [{'ok  ' if done else 'skip'}] {iid}: {msg}")
     print(f"\n  {ok}/{len(ids)} promoted")

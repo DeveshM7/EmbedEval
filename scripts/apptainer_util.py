@@ -24,6 +24,7 @@ default work root, where the shared images have always been.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -228,6 +229,11 @@ def build(image: Path, definition: Path, build_args: dict, log: Path,
             fh.flush()
             try:
                 rc = _run_build(cmd, fh, build_env(tmp), definition.parent, timeout_min * 60)
+                if rc and I386_REFUSAL in Path(log).read_text(errors="replace"):
+                    fh.write("=== the base is a 32-bit userland: building through a sandbox\n")
+                    fh.flush()
+                    rc = _build_via_sandbox(partial, definition, build_args, fh, build_env(tmp),
+                                            tmp, timeout_min * 60)
             finally:
                 _stop(_holders(tmp))     # e.g. a detached fakeroot daemon
                 try:
@@ -242,6 +248,66 @@ def build(image: Path, definition: Path, build_args: dict, log: Path,
             partial.unlink()
         print(f"    build attempt {attempt} failed (rc={rc}); log: {log}")
     return False
+
+
+I386_REFUSAL = "image targets '386', cannot run on 'amd64'"
+
+
+def parse_definition(text: str, build_args: dict) -> dict:
+    """The parts of a localimage recipe that _build_via_sandbox needs: the base
+    image, %files pairs and the %post, %environment and %labels bodies."""
+    header, sections, current = {}, {}, None
+    for line in text.splitlines():
+        if line.startswith("%"):
+            current = line[1:].split()[0]
+            sections[current] = []
+        elif current is None:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                header[key.strip()] = value.strip()
+        else:
+            sections[current].append(line)
+    base = header.get("From", "")
+    for key, value in build_args.items():
+        base = base.replace("{{ " + key + " }}", str(value))
+    files = [tuple(l.split()) for l in sections.get("files", []) if l.split()]
+    labels = dict(l.split(None, 1) for l in sections.get("labels", []) if len(l.split(None, 1)) == 2)
+    return {"base": base, "files": files, "post": "\n".join(sections.get("post", [])),
+            "environment": "\n".join(sections.get("environment", [])), "labels": labels}
+
+
+def _build_via_sandbox(partial: Path, definition: Path, build_args: dict, fh, env: dict,
+                       tmp: Path, timeout: int) -> int | str:
+    """What `apptainer build` does for a localimage recipe, for a 32-bit base:
+    Apptainer refuses to run %post (even under fakeroot) in an i386 userland
+    on amd64, but runs it as the user in a writable sandbox. %post needs no
+    root here: it only writes the checkout and files the sandbox's owner owns."""
+    spec = parse_definition(definition.read_text(), build_args)
+    rootfs = tmp / "rootfs"
+    steps = [["apptainer", "build", "--sandbox", str(rootfs), spec["base"]]]
+    rc = _run_build(steps[0], fh, env, definition.parent, timeout)
+    if rc:
+        return rc
+    for src, dst in spec["files"]:
+        target = rootfs / dst.lstrip("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(definition.parent / src, target)
+    script = rootfs / "opt" / "embedeval" / ".post.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(spec["post"] + "\n")
+    rc = _run_build(["apptainer", "exec", "--writable", "--pwd", "/", str(rootfs),
+                     "/bin/sh", "-e", "/opt/embedeval/.post.sh"], fh, env, definition.parent, timeout)
+    script.unlink(missing_ok=True)
+    if rc:
+        return rc
+    meta = rootfs / ".singularity.d"
+    (meta / "env").mkdir(parents=True, exist_ok=True)
+    (meta / "env" / "90-environment.sh").write_text("#!/bin/sh\n" + spec["environment"] + "\n")
+    labels = meta / "labels.json"
+    known = json.loads(labels.read_text()) if labels.exists() else {}
+    labels.write_text(json.dumps({**known, **spec["labels"]}, indent=2) + "\n")
+    return _run_build(["apptainer", "build", "--force", str(partial), str(rootfs)],
+                      fh, env, definition.parent, timeout)
 
 
 def ensure_base_images(py: str, sdk: str, sdk_archive: str, logdir: Path) -> Path:
@@ -272,6 +338,74 @@ def ensure_openthread_base(logdir: Path) -> Path:
     return img
 
 
+_I386: dict[Path, bool] = {}
+
+
+def is_i386_sif(image: Path) -> bool:
+    """Whether a SIF holds a 32-bit (i386) userland (older Contiki CI eras)."""
+    image = Path(image)
+    if image.is_dir() or image.suffix != ".sif" or not image.exists():
+        return False
+    if image not in _I386:
+        listing = subprocess.run(["apptainer", "sif", "list", str(image)], capture_output=True,
+                                 text=True).stdout
+        _I386[image] = "/386)" in listing
+    return _I386[image]
+
+
+def local_sandbox_root() -> Path:
+    """Node-local, never NFS: see runnable_image."""
+    import getpass, tempfile
+    return Path(os.environ.get("EMBEDEVAL_LOCAL_SANDBOXES")
+                or Path(tempfile.gettempdir()) / f"embedeval-sandboxes-{getpass.getuser()}")
+
+
+def local_sandbox(image: Path) -> Path:
+    import hashlib
+    st = Path(image).stat()
+    key = hashlib.sha256(f"{Path(image).resolve()}:{st.st_size}:{st.st_mtime_ns}".encode()).hexdigest()[:12]
+    return local_sandbox_root() / f"{Path(image).stem}-{key}"
+
+
+def runnable_image(image: Path) -> Path:
+    """The image to exec. A 32-bit userland cannot run from its SIF here: the
+    SIF is FUSE-mounted with 64-bit inode numbers, so its 32-bit stat() calls
+    fail with EOVERFLOW (the i386 JVM reports its own libjvm.so missing). Such
+    an image runs from a sandbox extracted once on node-local disk."""
+    if not is_i386_sif(image):
+        return Path(image)
+    target = local_sandbox(image)
+    if (target / ".embedeval-complete").exists():
+        return target
+    import fcntl
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target.with_suffix(".lock"), "w") as lock:
+        fcntl.lockf(lock, fcntl.LOCK_EX)
+        if not (target / ".embedeval-complete").exists():
+            partial = target.with_name(target.name + ".partial")
+            shutil.rmtree(partial, ignore_errors=True)
+            env = {**os.environ, "APPTAINER_TMPDIR": str(target.parent)}
+            r = subprocess.run(["apptainer", "build", "--sandbox", str(partial), str(image)],
+                               capture_output=True, text=True, env=env, timeout=3600)
+            if r.returncode:
+                raise RuntimeError(f"could not extract {image} to {partial}: {r.stderr[-500:]}")
+            shutil.rmtree(target, ignore_errors=True)
+            partial.rename(target)
+            (target / ".embedeval-complete").touch()
+    return target
+
+
+def remove_local_sandbox(image: Path) -> list[Path]:
+    """Delete an image's node-local sandboxes (only under local_sandbox_root)."""
+    root = local_sandbox_root().resolve()
+    gone = []
+    for d in root.glob(f"{Path(image).stem}-*") if root.is_dir() else []:
+        if d.resolve().parent == root and not d.name.endswith(".lock"):
+            shutil.rmtree(d, ignore_errors=True)
+            gone.append(d)
+    return gone
+
+
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
               overlay: Path | None = None, env: dict | None = None) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
@@ -284,7 +418,7 @@ def exec_args(image: Path, binds: dict[Path, str] | None = None,
         cmd += ["--bind", f"{src}:{dst}"]
     for k, v in (env or {}).items():
         cmd += ["--env", f"{k}={v}"]
-    return cmd + [str(image)]
+    return cmd + [str(runnable_image(image))]
 
 
 # The files an instance image is built from. Their fingerprint is recorded in
@@ -328,19 +462,26 @@ def remove(target: Path) -> bool:
     return True
 
 
-def ensure_contiki_ng_base(logdir: Path | None = None) -> Path:
+CONTIKI_NG_CURRENT_IMAGE = "dcf5962b018eabbc69bbbc3d67bd74e586c605b9b367d92adc51906c0c90ff05"
+
+
+def ensure_contiki_ng_base(logdir: Path | None = None, tag: str | None = None) -> Path:
+    """The upstream CI image: the current one (or its EMBEDEVAL_CONTIKI_NG_IMAGE
+    override), or an older era image named by tag, pulled once into shared/."""
     import platform
     if platform.machine() not in ("x86_64", "amd64"):
         raise RuntimeError("Contiki-NG CI image requires an x86_64 build worker")
-    override = os.environ.get("EMBEDEVAL_CONTIKI_NG_IMAGE")
-    image = Path(override).expanduser().resolve() if override else shared_path("images", "contiki-ng-ci-dcf5962b-x86_64.sif")
+    tag = tag or CONTIKI_NG_CURRENT_IMAGE
+    override = os.environ.get("EMBEDEVAL_CONTIKI_NG_IMAGE") if tag == CONTIKI_NG_CURRENT_IMAGE else None
+    image = Path(override).expanduser().resolve() if override else shared_path("images", "contiki-ng-ci-dcf5962b-x86_64.sif" if tag == CONTIKI_NG_CURRENT_IMAGE
+                                                        else f"contiki-ng-ci-{tag[:9]}-x86_64.sif")
     if image.exists():
         return image
     if override:
         raise RuntimeError(f"Contiki-NG image override does not exist: {image}")
     image.parent.mkdir(parents=True, exist_ok=True)
     partial = image.with_suffix(".partial.sif")
-    source = "docker://contiker/contiki-ng:dcf5962b018eabbc69bbbc3d67bd74e586c605b9b367d92adc51906c0c90ff05"
+    source = f"docker://contiker/contiki-ng:{tag}"
     logs = logdir or path("logs", "bases", "x").parent
     logs.mkdir(parents=True, exist_ok=True)
     with (logs / "contiki-ng-pull.log").open("w") as fh:
@@ -348,5 +489,25 @@ def ensure_contiki_ng_base(logdir: Path | None = None) -> Path:
                            stdout=fh, stderr=subprocess.STDOUT, env=build_env(), timeout=2400)
     if r.returncode:
         raise RuntimeError("Contiki-NG CI image pull failed; inspect contiki-ng-pull.log")
+    with (logs / "contiki-ng-pull.log").open("a") as fh:
+        _amd64_sif(partial, fh)
     partial.replace(image)
     return image
+
+
+def _amd64_sif(sif: Path, log) -> None:
+    """Older CI images are 32-bit (i386) userlands. They run on x86_64, but
+    Apptainer refuses to build on an image whose SIF says '386'; repack such
+    an image through a sandbox so its SIF records amd64. Files are unchanged."""
+    listing = subprocess.run(["apptainer", "sif", "list", str(sif)], capture_output=True, text=True).stdout
+    if "/386)" not in listing:
+        return
+    import tempfile
+    env = build_env()
+    with tempfile.TemporaryDirectory(dir=env["APPTAINER_TMPDIR"]) as tmp:
+        sandbox, repacked = Path(tmp) / "rootfs", Path(tmp) / "repacked.sif"
+        for cmd in (["apptainer", "build", "--sandbox", str(sandbox), str(sif)],
+                    ["apptainer", "build", str(repacked), str(sandbox)]):
+            if subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, timeout=3600).returncode:
+                raise RuntimeError(f"repacking the i386 image {sif.name} failed; see the pull log")
+        shutil.move(str(repacked), str(sif))

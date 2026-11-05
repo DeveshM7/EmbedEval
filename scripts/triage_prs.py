@@ -749,26 +749,12 @@ PROJECT = "zephyr"
 # ---------------------------------------------------------------- one PR
 
 
-def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) -> dict:
+def converse(messages: list, rec: dict, check, kw: dict, trace: dict) -> tuple:
+    """Talk to the served model until it returns an answer that passes check
+    (a list of issues), or the tool/repair budgets run out. Tool rounds read
+    upstream source at the record's commits. Fills trace; returns (answer, issues)."""
     import litellm
-
-    rec = json.loads((ENRICHED / f"{pr}.json").read_text())
-    render, check = PROJECTS[PROJECT]["render"], PROJECTS[PROJECT]["check"]
-    sampling = dict(prof.get("sampling", {}))
-    extra = {k: sampling.pop(k) for k in ("top_k", "min_p") if k in sampling}
-    kw = dict(model=f"openai/{profile}", api_base=api_base, api_key="local",
-              timeout=REQUEST_TIMEOUT, num_retries=0,
-              max_tokens=prof.get("max_tokens", 32768), **sampling)
-    if extra:
-        kw["extra_body"] = extra
-
-    messages = [{"role": "system", "content": instruction_text()},
-                {"role": "user", "content": "Enriched PR record:\n\n" + render(rec)
-                 + f"\n\n---\nYou may use up to {MAX_TOOL_ROUNDS} tool rounds for this PR."}]
-    trace = {"pr": pr, "profile": profile, "turns": [], "repairs": [], "error": None,
-             "tool_calls": 0, "budget_hit": False}
-    verdict, issues, repairs, rounds, t0 = None, ["no reply"], 0, 0, time.time()
-
+    verdict, issues, repairs, rounds = None, ["no reply"], 0, 0
     try:
         for turn in range(MAX_TURNS):
             t = time.time()
@@ -811,7 +797,7 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
                 continue
 
             verdict = parse_verdict(msg.content)
-            issues = check(verdict, rec)
+            issues = check(verdict)
             if not issues or repairs >= MAX_REPAIRS:
                 break
             repairs += 1
@@ -823,6 +809,33 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
     except Exception as e:                      # one PR failing must not stop the run
         trace["error"] = f"{type(e).__name__}: {e}"
 
+    return verdict, issues
+
+
+def model_kw(profile: str, prof: dict, api_base: str) -> dict:
+    """litellm arguments for the served model with its card's sampling."""
+    sampling = dict(prof.get("sampling", {}))
+    extra = {k: sampling.pop(k) for k in ("top_k", "min_p") if k in sampling}
+    kw = dict(model=f"openai/{profile}", api_base=api_base, api_key="local",
+              timeout=REQUEST_TIMEOUT, num_retries=0,
+              max_tokens=prof.get("max_tokens", 32768), **sampling)
+    if extra:
+        kw["extra_body"] = extra
+    return kw
+
+
+def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) -> dict:
+    rec = json.loads((ENRICHED / f"{pr}.json").read_text())
+    render, check = PROJECTS[PROJECT]["render"], PROJECTS[PROJECT]["check"]
+    kw = model_kw(profile, prof, api_base)
+
+    messages = [{"role": "system", "content": instruction_text()},
+                {"role": "user", "content": "Enriched PR record:\n\n" + render(rec)
+                 + f"\n\n---\nYou may use up to {MAX_TOOL_ROUNDS} tool rounds for this PR."}]
+    trace = {"pr": pr, "profile": profile, "turns": [], "repairs": [], "error": None,
+             "tool_calls": 0, "budget_hit": False}
+    t0 = time.time()
+    verdict, issues = converse(messages, rec, lambda v: check(v, rec), kw, trace)
     trace["seconds"] = round(time.time() - t0, 1)
     trace["issues"] = issues
     trace["messages"] = messages
@@ -834,6 +847,86 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
     return {"pr": pr, "verdict": out.get("verdict"), "seconds": trace["seconds"],
             "turns": len(trace["turns"]), "tool_calls": trace["tool_calls"],
             "budget_hit": trace["budget_hit"], "issues": issues, "error": trace["error"]}
+
+
+STATEMENT_REQUEST = """This PR is already a validated benchmark instance: model-free
+observation found that the upstream tests below fail before the production fix
+and pass after it, in the selected units. You are not triaging it. Write only
+what an agent will see in place of the PR text, following the instructions'
+problem-statement rules: describe the observable misbehavior an issue report
+would describe, never the fix, its diff or code it adds.
+
+Observed fail-to-pass: {f2p}
+Observed pass-to-pass: {p2p}
+
+Reply with the JSON object only:
+{{"pr": {pr}, "problem_statement": "...", "causal_chain": "...", "change_type": "..."}}"""
+
+
+def check_statement(v, rec: dict) -> list[str]:
+    """The statement fields, and no line of the production fix quoted in them."""
+    if not isinstance(v, dict):
+        return ["the reply must be one JSON object"]
+    issues = []
+    if v.get("pr") != rec["number"]:
+        issues.append(f"`pr` must be {rec['number']}")
+    for field in ("problem_statement", "causal_chain", "change_type"):
+        if not isinstance(v.get(field), str) or not v[field].strip():
+            issues.append(f"`{field}` must be a nonempty string")
+    statement = v.get("problem_statement") if isinstance(v.get("problem_statement"), str) else ""
+    fix = rec.get("production_diff") or ""
+    added = {line[1:].strip() for line in fix.splitlines()
+             if line.startswith("+") and not line.startswith("+++")}
+    if any(len(line) >= 25 and line in statement for line in added):
+        issues.append("`problem_statement` quotes the production fix; describe the behavior instead")
+    return issues
+
+
+def statement_one(folder: Path, profile: str, prof: dict, api_base: str, out_dir: Path) -> dict:
+    """Ask the served model for the problem statement of a validated
+    observation-only instance; write it into the instance's metadata.json,
+    which the recipe fingerprint does not cover."""
+    meta = json.loads((folder / "metadata.json").read_text())
+    pr = int(meta["instance_id"].rsplit("-", 1)[1])
+    rec = json.loads((ENRICHED / f"{pr}.json").read_text())
+    request = STATEMENT_REQUEST.format(pr=pr, f2p=json.dumps(meta["fail_to_pass"]),
+                                       p2p=json.dumps(meta["pass_to_pass"]))
+    messages = [{"role": "system", "content": instruction_text()},
+                {"role": "user", "content": "Enriched PR record:\n\n" + PROJECTS[PROJECT]["render"](rec)
+                 + "\n\n---\n" + request
+                 + f"\n\nYou may use up to {MAX_TOOL_ROUNDS} tool rounds."}]
+    trace = {"pr": pr, "profile": profile, "mode": "statement", "turns": [], "repairs": [],
+             "error": None, "tool_calls": 0, "budget_hit": False}
+    t0 = time.time()
+    answer, issues = converse(messages, rec, lambda v: check_statement(v, rec),
+                              model_kw(profile, prof, api_base), trace)
+    trace.update(seconds=round(time.time() - t0, 1), issues=issues, messages=messages)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = out_dir / f"{pr}.statement.trace.json"
+    trace_path.write_text(json.dumps(trace, indent=2, default=str))
+    if issues:
+        return {"pr": pr, "ok": False, "issues": issues, "error": trace["error"]}
+    meta.update(problem_statement=answer["problem_statement"].strip(),
+                causal_chain=answer["causal_chain"].strip(), change_type=answer["change_type"].strip(),
+                statement_provenance={"model": profile, "mode": "observation statement",
+                                      "trace": str(trace_path),
+                                      "prompt_sha256": hashlib.sha256(messages[0]["content"].encode()).hexdigest()[:16]})
+    (folder / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return {"pr": pr, "ok": True, "issues": [], "error": None}
+
+
+def cmd_statement(args) -> None:
+    use_project(args.project)
+    profiles = json.loads((TRIAGE / "models.json").read_text())
+    if args.profile not in profiles or args.profile.startswith("_"):
+        sys.exit(f"unknown profile {args.profile!r}")
+    folder = Path(args.instance)
+    receipt = json.loads((folder / "validation.json").read_text())
+    if not receipt.get("valid"):
+        sys.exit(f"{folder.name}: not a valid instance")
+    s = statement_one(folder, args.profile, profiles[args.profile], args.api_base, RUNS)
+    print(f"  {s['pr']}: {'statement written' if s['ok'] else 'no statement: ' + '; '.join(s['issues'])}")
+    sys.exit(0 if s["ok"] else 1)
 
 
 # ---------------------------------------------------------------- scoring
@@ -1090,8 +1183,15 @@ def main() -> None:
     e.add_argument("--project", choices=("zephyr", "contiki-ng"), default="zephyr")
     e.add_argument("run_dir", nargs="?", help="default: the latest run")
 
+    st = sub.add_parser("statement", help="model-written problem statement for a validated "
+                                          "observation-only instance")
+    st.add_argument("--project", choices=("contiki-ng",), default="contiki-ng")
+    st.add_argument("--profile", required=True, help="entry in triage/models.json")
+    st.add_argument("--instance", required=True, help="the finalized instance folder")
+    st.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
+
     args = p.parse_args()
-    {"run": cmd_run, "eval": cmd_eval}[args.cmd](args)
+    {"run": cmd_run, "eval": cmd_eval, "statement": cmd_statement}[args.cmd](args)
 
 
 if __name__ == "__main__":

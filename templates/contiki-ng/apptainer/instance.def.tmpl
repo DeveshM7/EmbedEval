@@ -25,16 +25,32 @@ From: {{ BASE_IMAGE }}
     git apply /opt/embedeval/test_patch.diff
 
     # The instance profile lists the submodules needed by its selected tests.
+    # Only gitlinks present at this base are initialized: older bases predate
+    # e.g. os/net/security/mbedtls, and their tests cannot depend on it.
     python3 - <<'PY'
 import json
+import shutil
 import subprocess
 
 with open('/opt/embedeval/instance.json') as stream:
     config = json.load(stream)
-paths = dict.fromkeys(path for unit in config['units'] for path in unit.get('submodules', []))
+paths = dict.fromkeys([*(path for unit in config['units'] for path in unit.get('submodules', [])),
+                       *config.get('submodules', [])])
 for path in paths:
-    subprocess.run(['git', 'submodule', 'update', '--init', '--depth', '1', '--', path],
-                   cwd='/testbed', check=True)
+    entry = subprocess.run(['git', 'ls-files', '--stage', '--', path], cwd='/testbed',
+                           stdout=subprocess.PIPE,
+                           check=True).stdout.decode()
+    if not entry.startswith('160000 '):
+        print('submodule ' + path + ' is not a gitlink at this base; skipped')
+        continue
+    # Recursive: Ant-era Cooja nests MSPSim. Old git (16.04 images) cannot
+    # fetch a pinned commit shallowly, so fall back to a full fetch.
+    shallow = ['git', 'submodule', 'update', '--init', '--recursive', '--depth', '1', '--', path]
+    if subprocess.run(shallow, cwd='/testbed').returncode:
+        subprocess.run(['git', 'submodule', 'deinit', '-f', '--', path], cwd='/testbed')
+        shutil.rmtree('/testbed/.git/modules/' + path, ignore_errors=True)
+        subprocess.run(['git', 'submodule', 'update', '--init', '--recursive', '--', path],
+                       cwd='/testbed', check=True)
 PY
 
     mkdir -p /testbed/.embedeval/logs

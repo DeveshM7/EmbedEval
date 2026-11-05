@@ -3,6 +3,7 @@
 
 import json
 import os
+import platform
 import re
 import selectors
 import signal
@@ -22,9 +23,11 @@ UNIT_LINE = re.compile(r'^Unit test: (.+?)\s*$')
 RESULT_LINE = re.compile(r'^Result: (success|failure)\s*$')
 LEGACY_LINE = re.compile(r'^=check-me= (SUCCEEDED|FAILED)\s+- (.+?)\s*$')
 DONE_LINE = re.compile(r'^=check-me= DONE\s*$')
-COOJA_LINE = re.compile(r'\bTEST (OK|FAILED)\b')
+COOJA_LINE = re.compile(r'\bTEST (OK|FAIL(?:ED)?)\b')   # Ant-era simexec writes TEST FAIL
 SCRIPT_SUCCESS = re.compile(r'^=check-me= SUCCEEDED - (.+?)\s*$')
 SCRIPT_FAILURE = re.compile(r'^=check-me= FAILED - (.+?)\s*$')
+CRASH_FRAME = re.compile(r'^#\d+\s+(?:0x[0-9a-fA-F]+ in )?unit_test_function_(\w+) \(', re.M)
+CRASH_TIMEOUT = 120
 
 
 def parse_native(text):
@@ -60,7 +63,7 @@ def parse_native(text):
 def parse_cooja(text):
     """Require an explicit simulator verdict in a fresh COOJA.testlog."""
     verdicts = COOJA_LINE.findall(text)
-    if 'FAILED' in verdicts:
+    if 'FAILED' in verdicts or 'FAIL' in verdicts:
         return 'failed'
     return 'passed' if 'OK' in verdicts else 'not_run'
 
@@ -70,6 +73,11 @@ def cooja_build_failed(rc, verdict, output):
             and re.search(r'Compilation failed|Compilation process returned error code|'
                           r'Execution failed for task [\'\"]:compile|\bcompileJava FAILED\b',
                           output, re.IGNORECASE) is not None)
+
+
+# Cooja could not build a mote or load the simulation, so no scenario ran.
+# Ant-era simexec reports this as TEST FAIL; it is never a runtime failure.
+COOJA_LOAD_FAILURE = re.compile(r'Mote type creation (?:error|failed)|Exception when loading simulation')
 
 
 def parse_script(text, entry, summary=''):
@@ -97,15 +105,16 @@ def parse_script(text, entry, summary=''):
 
 def log_path(unit, phase):
     safe = re.sub(r'[^A-Za-z0-9_.-]', '_', unit['id'])
-    return LOGS / f'{safe}.{phase}.log'
+    return LOGS / '{}.{}.log'.format(safe, phase)
 
 
 def run_logged(cmd, path, cwd=TESTBED, env=None, timeout=BUILD_TIMEOUT):
     print('$ ' + ' '.join(cmd), flush=True)
     try:
-        result = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True,
-                                text=True, errors='replace', timeout=timeout)
-        output = (result.stdout or '') + (result.stderr or '')
+        # Bytes, decoded here: the oldest CI images run Python 3.5.
+        result = subprocess.run(cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=timeout)
+        output = (result.stdout + result.stderr).decode(errors='replace')
         rc = result.returncode
     except subprocess.TimeoutExpired as exc:
         output = exc.stdout or b''
@@ -125,8 +134,8 @@ def run_logged(cmd, path, cwd=TESTBED, env=None, timeout=BUILD_TIMEOUT):
 def native_binary(unit):
     directory = TESTBED / unit['directory']
     binary = unit['binary']
-    for candidate in (directory / 'build/native' / f'{binary}.native',
-                      directory / f'{binary}.native'):
+    for candidate in (directory / 'build/native' / (binary + '.native'),
+                      directory / (binary + '.native')):
         if candidate.is_file():
             return candidate
     return None
@@ -136,7 +145,7 @@ def run_native_binary(binary, path, cwd=None):
     """Read output until DONE, process exit, or timeout; then stop the event loop."""
     cmd = ['stdbuf', '-oL', '-eL', str(binary)]
     print('$ ' + ' '.join(cmd), flush=True)
-    process = subprocess.Popen(cmd, cwd=cwd or binary.parent, stdout=subprocess.PIPE,
+    process = subprocess.Popen(cmd, cwd=str(cwd or binary.parent), stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, start_new_session=True)
     chunks = []
     line_buffer = b''
@@ -196,32 +205,94 @@ def build_native(unit):
     return rc == 0 and native_binary(unit) is not None
 
 
+def crashed_case(text):
+    """The registered case of the innermost unit_test_function_<name> frame
+    after a signal in a gdb backtrace, or None."""
+    _, signalled, trace = text.partition('received signal')
+    if not signalled:
+        return None
+    match = CRASH_FRAME.search(trace)
+    return match.group(1) if match else None
+
+
+def attribute_crash(unit, binary):
+    """Rerun a binary that a signal killed under gdb, once. The framework
+    reports a case only after its body returns, so a crash leaves no name in
+    the output; the backtrace names the case whose body was running."""
+    cmd = ['timeout', '-k', '5', str(CRASH_TIMEOUT), 'gdb', '-q', '-batch', '-nx',
+           '-ex', 'run', '-ex', 'bt', '--args', str(binary)]
+    _, output = run_logged(cmd, log_path(unit, 'crash'), cwd=TESTBED / unit['directory'],
+                           timeout=CRASH_TIMEOUT + 30)
+    return crashed_case(output)
+
+
 def run_native(unit):
     expected = {case['description']: unit['id'] + '::' + case['id']
                 for case in unit.get('cases', [])}
-    output, stopped, timed_out, rc = run_native_binary(native_binary(unit),
+    binary = native_binary(unit)
+    output, stopped, timed_out, rc = run_native_binary(binary,
                                                        log_path(unit, 'run'), TESTBED / unit['directory'])
     observed, parsed_done = parse_native(output)
     complete = stopped and parsed_done
     if not complete:
-        print(f"{unit['id']}: native completion marker missing (exit={rc}, timeout={timed_out})")
+        print('{}: native completion marker missing (exit={}, timeout={})'.format(unit['id'], rc, timed_out))
     statuses = {identifier: observed.get(description, 'not_run')
                 for description, identifier in expected.items()}
+    if not complete and not timed_out and rc is not None and rc < 0:
+        name = attribute_crash(unit, binary)
+        identifier = unit['id'] + '::' + name if name else None
+        if identifier in statuses and statuses[identifier] == 'not_run':
+            statuses[identifier] = 'error'
+            print('{}: signal {} inside case {} (gdb backtrace); later cases did not run'
+                  .format(unit['id'], -rc, name))
+        else:
+            print('{}: signal {} not attributable to a registered case'.format(unit['id'], -rc))
     return statuses, complete
+
+
+def cooja_java_home():
+    """A JDK whose include/jni.h Cooja's native motes compile against: the
+    image's own JAVA_HOME, else /usr/local (current images), else the JDK that
+    javac resolves to (2022 images set no JAVA_HOME at all)."""
+    import shutil
+    candidates = [os.environ.get('JAVA_HOME'), '/usr/local']
+    javac = shutil.which('javac')
+    if javac:
+        candidates.append(str(Path(os.path.realpath(javac)).parent.parent))
+    for home in candidates:
+        if home and (Path(home) / 'include' / 'jni.h').exists():
+            return home
+    return None
 
 
 def run_cooja(unit):
     suite = TESTBED / unit['suite_directory']
-    for old in suite.rglob('COOJA.testlog'):
+    stem = unit['scenario'][:-len('.csc')]
+    # Current Cooja writes COOJA.testlog; Ant-era simexec leaves the verdict in
+    # <scenario>.testlog (and the script log in <scenario>.<seed>.scriptlog).
+    for old in [*suite.rglob('COOJA.testlog'), *suite.glob(stem + '.testlog'),
+                *suite.glob(stem + '.*.scriptlog'), *suite.glob(stem + '.*.coojalog')]:
         old.unlink()
-    env = {**os.environ, 'JAVA_HOME': '/usr/local',
+    home = cooja_java_home()
+    java_home = {'JAVA_HOME': home} if home else {}
+    # A 32-bit JVM sizes its default heap from the host's memory; on a large
+    # node that reservation takes the address the class-data archive needs, and
+    # the era's simexec.sh forces -Xshare:on ("Unable to use shared archive").
+    # 512 MB is the heap Ant-era Cooja's own build files use.
+    java_options = {}
+    if platform.architecture()[0] == '32bit':
+        java_options['JAVA_TOOL_OPTIONS'] = (os.environ.get('JAVA_TOOL_OPTIONS', '') + ' -Xmx512m').strip()
+    env = {**os.environ, **java_home, **java_options,
            'GRADLE_USER_HOME': str(TESTBED / '.embedeval' / 'gradle')}
-    cmd = ['make', '-C', str(suite), f"TESTS={unit['scenario']}",
+    cmd = ['make', '-C', str(suite), 'TESTS=' + unit['scenario'],
            'BASESEED=1', 'RUNCOUNT=1', 'NUMCORES=4']
     rc, output = run_logged(cmd, log_path(unit, 'run'), env=env)
-    logs = list(suite.rglob('COOJA.testlog'))
+    logs = list(suite.rglob('COOJA.testlog')) + list(suite.glob(stem + '.testlog'))
     verdict = parse_cooja('\n'.join(p.read_text(errors='replace') for p in logs))
-    compile_failed = cooja_build_failed(rc, verdict, output)
+    if COOJA_LOAD_FAILURE.search(output):
+        verdict, compile_failed = 'not_run', True
+    else:
+        compile_failed = cooja_build_failed(rc, verdict, output)
     if rc == 'timeout' and verdict == 'not_run':
         verdict = 'timeout'
     elif rc != 0 and verdict == 'passed':
@@ -232,9 +303,10 @@ def run_cooja(unit):
 def run_script(unit):
     suite = TESTBED / unit['suite_directory']
     summary = suite / 'summary'
-    summary.unlink(missing_ok=True)
+    if summary.exists():
+        summary.unlink()
     cmd = ['make', '-C', str(suite),
-           f"EXAMPLES={unit['entry']}"]
+           'EXAMPLES=' + unit['entry']]
     rc, output = run_logged(cmd, log_path(unit, 'run'))
     summary_text = summary.read_text(errors='replace') if summary.exists() else ''
     verdict = parse_script(output, unit['entry'], summary_text)
@@ -256,7 +328,7 @@ def main():
         kind = unit['kind']
         if kind == 'native':
             if not build_native(unit):
-                print(f"{unit['id']}: native build failed; see {log_path(unit, 'build')}")
+                print('{}: native build failed; see {}'.format(unit['id'], log_path(unit, 'build')))
                 build_failed = True
                 statuses.update({unit['id'] + '::' + case['id']: 'not_run'
                                  for case in unit.get('cases', [])})
@@ -266,20 +338,20 @@ def main():
                 statuses.update(result)
                 incomplete |= not complete
         elif build_only:
-            print(f"{unit['id']}: {kind} builds when run; not precompiled")
+            print('{}: {} builds when run; not precompiled'.format(unit['id'], kind))
         elif kind == 'cooja':
             result, complete, compile_failed = run_cooja(unit)
             statuses.update(result)
             incomplete |= not complete
             if compile_failed:
-                print(f"{unit['id']}: Cooja build failed; see {log_path(unit, 'run')}")
+                print('{}: Cooja build failed; see {}'.format(unit['id'], log_path(unit, 'run')))
                 build_failed = True
         elif kind == 'script':
             result, complete = run_script(unit)
             statuses.update(result)
             incomplete |= not complete
         else:
-            raise ValueError(f'unknown unit kind: {kind}')
+            raise ValueError('unknown unit kind: ' + kind)
     if build_only:
         return 2 if build_failed else 0
     if not cfg.get('observe'):
@@ -288,7 +360,7 @@ def main():
             statuses.setdefault(name, 'not_run')
     print('\n--- contiki-ng: results')
     for name, status in statuses.items():
-        print(f'  {status} {name}')
+        print('  {} {}'.format(status, name))
     print('--- end ---')
     if build_failed:
         print('==> run_tests: Build failure')

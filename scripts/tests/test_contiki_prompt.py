@@ -27,3 +27,22 @@ class ContikiPromptTest(unittest.TestCase):
               patch.object(Path, 'read_text', return_value='unbounded report')):
             with self.assertRaisesRegex(ValueError, 'reporting boundary'):
                 triage_prs.instruction_text()
+
+
+class StatementCheckTests(unittest.TestCase):
+    REC = {'number': 9, 'production_diff': '+++ b/os/lib/x.c\n+    if(len > sizeof(buf)) { return -1; }\n'}
+
+    def check(self, **v):
+        import triage_prs
+        return triage_prs.check_statement({'pr': 9, 'problem_statement': 'Long input overflows the buffer.',
+                                           'causal_chain': 'c', 'change_type': 'bugfix', **v}, self.REC)
+
+    def test_complete_behavioral_statement_passes(self):
+        self.assertEqual(self.check(), [])
+
+    def test_missing_fields_wrong_pr_and_quoted_fix_are_issues(self):
+        self.assertTrue(any('causal_chain' in i for i in self.check(causal_chain='')))
+        self.assertTrue(any('`pr`' in i for i in self.check(pr=8)))
+        self.assertTrue(any('quotes the production fix' in i for i in
+                            self.check(problem_statement='Add if(len > sizeof(buf)) { return -1; } to x.c')))
+

@@ -206,6 +206,15 @@ The implemented decision schema uses `pr`, `verdict` (`accept`, `reject`,
   before cannot be P2P, including under compile/config oracles.
 - `oracle`: `runtime` (default), `compile`, or `config`.
 - `problem_statement`, `causal_chain`, and `change_type`: nonempty strings.
+  `problem_statement` is what the agent sees in place of the PR text: an issue a
+  user could file, giving the observable symptom of the unfixed code, the
+  conditions that trigger it (inputs, configuration, network sequence) and the
+  required behavior. Never the fix: no function, file or line to edit, no code,
+  identifiers or constants from the production diff, no description of the
+  implementation or of the missing check. Restate implementation-style titles
+  as behavior. For a compile oracle, name the new interface only as the tests
+  use it. The same rules apply when an observation-validated instance asks
+  for a statement alone (`triage_prs.py statement`).
 - Compile oracles also require `compile_symbols`, drawn from the record's
   verified absent-at-base `compile_requirements`, plus `oracle_attribution`.
   Missing test utilities remain incidental unless they implement the PR purpose.
@@ -315,6 +324,36 @@ the user namespace returns permission denied; those selections are infrastructur
 holds. Current automatic accepts require source-unconditional native bodies;
 Cooja/script observations are supported, while guarded/scenario accepts need
 additional compiled-body evidence. No full-history campaign is certified yet.
+
+### Observation-backed instances
+
+`observe` jobs run every supported affected unit before and after the fix with
+no model plan. A PR that observes valid is finalized in the same slot: generated
+from its observation into `<run>/finalized/`, built and validated with three
+before repeats (status stage `finalize`). A PR whose units span profiles is
+observed under the manifest entry's `observe_profile`, one run per profile.
+`statement` jobs (Spark) then ask the served model for the problem statement of
+each finalized VALID instance (`triage_prs.py statement`): the record, the
+observed F2P/P2P names and the statement rules above. Code checks the fields
+and rejects statements quoting the production diff; the result goes into
+`metadata.json` with model provenance, outside the recipe fingerprint.
+`submit.py --after JOB` chains jobs so at most two run. `report.py` follows an
+observation run's PRs through `observation`, `finalize` and statement outcomes;
+only a promotable instance is VALID and settles its PR in the ledger. Promote
+reviewed instances with `promote_instance.py --source <run>/finalized`.
+
+Cooja instances record `ci_image`, the upstream CI image of their base's era
+(`COOJA_ERA_IMAGES`): the current image's Java 25/Gradle cannot build Ant-era
+(to 2022-11) or early Gradle-era Cooja. The 2019 image is 32-bit Ubuntu 16.04
+with Python 3.5, so `run_tests.py` and the image `%post` avoid newer syntax.
+Only submodules that are gitlinks at the base are initialized.
+
+Native runner details: a binary killed by a signal is rerun once under gdb and
+the innermost `unit_test_function_<name>` frame marks that registered case
+`error` (later cases stay `not_run`); a timeout is never attributed. Compile
+oracles also accept a missing header when the fix creates it and its added lines
+declare a plan symbol. Before repeats `make clean` the native units first, so a
+binary built from fix-created files cannot pass for the before state.
 
 ## Integration proof (2026-11-04)
 
@@ -760,3 +799,78 @@ non-Zephyr projects at two nodes, so the frozen job script was copied with only
 Validation job 484943 uses 4 CPU nodes with four validations per node. The v7
 evaluation PRs are part of this pool; their outcomes are scored against the frozen
 source expectations, not used to tune this run.
+
+## Full-341 campaign results (2026-11-05)
+
+All 341 hard-filter PRs went through the pipeline (`prepare.py` / `submit.py` /
+`report.py`); results are in ignored `triage/runs/contiki-full-341/<run>/`
+(synced from Scholar `runs/`). Promotion is pending review; nothing is pushed.
+
+| Run | What | Outcome |
+| --- | --- | --- |
+| `gold-triage-15` | Qwen triage + validation of the 15 gold PRs | 7 VALID (all 7 gold accepts) |
+| `full-341-v7` | Qwen triage of the other 326, validation of 30 accepts | 151 reject, 133 hold, 1 malformed verdict, 10 context errors (9 release rollups), 1 cap; of 30 accepts: 15 VALID, 10 INVALID, 2 hold, 3 not generable |
+| `c341-retriage15` | Fresh Qwen triage + validation of those 15 non-valid accepts after the validator/runner fixes | 6 VALID (all new-library compile oracles) |
+| `c341-obs-native` | Model-free observation, native profile, all PRs | 59 observed, 10 VALID (9 duplicate triage instances; new: #3198 via crash attribution) |
+| `c341-obs-cooja3` | Observation, Cooja profile, era CI images | 68 observed, 11 VALID (new: 10) |
+| `c341-obs-script` | Observation, script profile | 7 observed, none flip |
+
+Superseded diagnostic runs (`full-341-observe*`, `full-341-attribution`,
+`c341-obs-cooja`, `c341-obs-cooja2`) stay on Scholar only; their failures fed
+the fixes below and none of their instances are used.
+
+**Promotable: 38 instances** (each passes `promote_instance.py`'s checks:
+valid receipt, matching recipe fingerprint, three agreeing before repeats,
+non-empty problem statement). Duplicates resolve to the triage-run instance.
+
+| Oracle / profile | Count | PRs |
+| --- | --- | --- |
+| compile / native | 16 | 226, 561, 1653, 2173, 2203, 2830, 2974, 3000, 3020, 3054, 3096, 3121, 3132, 3195, 3254, 3272 |
+| runtime / native | 12 | 255, 2186, 3197, 3198, 3202, 3230, 3246, 3250, 3256, 3261, 3266, 3286 |
+| runtime / cooja | 10 | 385, 401, 533, 1205, 1239, 1417, 1516, 1518, 3171, 3212 |
+
+Promote after review (from the repository root):
+
+```sh
+R=triage/runs/contiki-full-341
+python scripts/promote_instance.py --source $R/gold-triage-15/instances $(printf 'contiki-ng__contiki-ng-%s ' 255 2830 3020 3195 3202 3246 3261)
+python scripts/promote_instance.py --source $R/full-341-v7/instances $(printf 'contiki-ng__contiki-ng-%s ' 561 2173 2186 2203 3096 3121 3132 3197 3230 3250 3254 3256 3266 3286)
+python scripts/promote_instance.py --source $R/c341-retriage15/instances $(printf 'contiki-ng__contiki-ng-%s ' 226 1653 2974 3000 3054 3272)
+python scripts/promote_instance.py --source $R/c341-obs-native/finalized contiki-ng__contiki-ng-3198
+python scripts/promote_instance.py --source $R/c341-obs-cooja3/finalized $(printf 'contiki-ng__contiki-ng-%s ' 385 401 533 1205 1239 1417 1516 1518 3171 3212)
+```
+
+Review notes:
+
+- #1895 validated (compile) but is held out: its fix is the unit-test reporting
+  framework itself, so an agent patch could fake passes.
+- Problem statements of the 11 observation-only instances (#3198 and the
+  Cooja ten) were written by Qwen in `statement` jobs; the rest come from
+  triage verdicts. Statements for #3197, #3230 and #3256 lean toward naming
+  the missing check; #533's oracle is a uniform node-ID boot banner the
+  scenario scripts wait for; #1518 is effectively a feature (root-specific
+  Orchestra schedule). Rerun the statement phase with a stricter check if wanted.
+- Pre-2022 Cooja instances are 32-bit userlands; `apptainer_util.exec_args`
+  runs them from a node-local sandbox (64-bit SIF inodes break 32-bit stat).
+  Graders must exec instances through `exec_args`, as the harness does.
+- Triage on native: observation found no runtime PR that triage missed. Of
+  the 15 full-run accepts that did not validate, 10 were validator/runner gaps
+  (fixed; re-triage recovered 6) and about 5 were plan errors.
+
+Fixes made during the campaign (all in tracked code, unit-tested): missing-
+header compile attribution; gdb crash attribution for native signals; `make
+clean` before before-repeats; per-base Cooja CI images (Ant buckets, then the
+newest image on or before the base); a sandbox build path and node-local
+execution for i386 images; Python 3.5-compatible runner; gitlink-checked
+recursive submodules with a full-fetch fallback and the old `tools/mspsim`
+gitlink; Ant-era verdict files (`<scenario>.testlog`, `TEST FAIL`) with
+mote-load failures classified as build failures; a 512 MB heap for 32-bit
+JVMs (the era's `simexec.sh` forces `-Xshare:on`); JAVA_HOME resolved to a JDK
+with `jni.h`. Pipeline: observe jobs finalize, `statement` phase, `--observe-only`
+/ `--observe-profile` runs, `submit.py --after` chaining, report outcomes.
+
+Out of scope or unrecovered: ARM/NXP cross-compile matrices (56 holds; mostly
+build-only example additions), `tun-rpl-br` and MQTT/SNMP/CoAP/LwM2M service
+fixtures, doxygen, release rollups (context-window errors), #2666 (its fix
+bumps the Cooja submodule, which applying a gitlink diff does not check out),
+and compile/config oracles that observation cannot credit.

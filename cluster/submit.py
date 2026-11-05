@@ -118,10 +118,12 @@ def freeze_source(source: Path, destination: Path) -> dict:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("mode", choices=["pipeline", "triage", "observe", "validate"])
+    p.add_argument("mode", choices=["pipeline", "triage", "observe", "validate", "statement"])
     p.add_argument("--run", required=True, help="run name (folder under runs/) or path")
     p.add_argument("--config", help="default: cluster/config.yaml")
     p.add_argument("--dry-run", action="store_true", help="write the job script, do not submit")
+    p.add_argument("--after", metavar="JOB", help="start only once this Slurm job has ended (a chain "
+                   "keeps at most two jobs running)")
     p.add_argument("--idle", type=int, help="assume this many idle nodes (testing)")
     args = p.parse_args()
 
@@ -135,8 +137,8 @@ def main() -> None:
     if project == "zephyr" and args.mode != "pipeline":
         sys.exit("Zephyr runs use pipeline mode")
     if project == "contiki-ng" and args.mode == "pipeline":
-        sys.exit("Contiki-NG requires separate triage, observe, or validate jobs")
-    if project == "contiki-ng" and args.mode != "triage" and not cfg["slurm"]["build_partition"]:
+        sys.exit("Contiki-NG requires separate triage, observe, validate or statement jobs")
+    if project == "contiki-ng" and args.mode in ("observe", "validate") and not cfg["slurm"]["build_partition"]:
         sys.exit("slurm.build_partition must name an x86 CPU partition")
 
     s, par = cfg["slurm"], cfg["parallel"]
@@ -156,37 +158,49 @@ def main() -> None:
                            capture_output=True, text=True)
         live = [l for l in q.stdout.splitlines() if l.strip() and not l.endswith("COMPLETING")]
     else:
-        q = subprocess.run(["squeue", "-h", "--me", "-o", "%i %T %j"],
+        q = subprocess.run(["squeue", "-h", "--me", "-o", "%i %T %.200j"],
                            capture_output=True, text=True)
         live = [l for l in q.stdout.splitlines()
-                if "embedeval-contiki-" in l and " COMPLETING " not in f" {l} "]
+                if l.split()[-1] in {f"embedeval-contiki-{run.name}-{m}"
+                                     for m in ("triage", "observe", "validate", "statement")}
+                and " COMPLETING " not in f" {l} "]
         running = [l for l in q.stdout.splitlines() if len(l.split()) >= 2 and l.split()[1] in ("RUNNING", "CONFIGURING")]
-        if len(running) >= 2:
+        if len(running) >= 2 and not args.after:   # a chained job waits for its predecessor
             sys.exit("Both shared Scholar job slots are occupied; wait for a running job to finish")
-    if live:
+    if live and not args.after:          # a chained job starts only after the one it follows
         sys.exit(f"run {run.name} already has a job ({'; '.join(live)}); wait for it to "
                  "end, or scancel it, then submit again")
 
     triage_left, validate_left = status.triage_todo(run), status.validate_todo(run)
-    observe_left = status.observe_todo(run) if project == "contiki-ng" else []
+    # Observation jobs also finalize what observed valid; statements are model work.
+    observe_left = (list(dict.fromkeys(status.observe_todo(run) + status.finalize_todo(run)))
+                    if project == "contiki-ng" else [])
+    statement_left = status.statement_todo(run) if project == "contiki-ng" else []
     counts = {"triage": len(triage_left), "observe": len(observe_left),
-              "validate": len(validate_left)}
+              "validate": len(validate_left), "statement": len(statement_left)}
     if (not triage_left and not validate_left) if args.mode == "pipeline" else not counts[args.mode]:
-        print(f"nothing left to {args.mode} in {run.name}. "
-              f"Report: python cluster/report.py --run {run.name}")
-        return
+        if not args.after:
+            print(f"nothing left to {args.mode} in {run.name}. "
+                  f"Report: python cluster/report.py --run {run.name}")
+            return
+        # Chained behind the job that creates this work: size it by the run.
+        counts[args.mode] = sum(1 for e in status.manifest(run)["prs"] if e["stage"] == "to triage")
+        print(f"  --after {args.after}: no {args.mode} work yet; sized for the run's "
+              f"{counts[args.mode]} PRs")
     work = (max(math.ceil(len(triage_left) / par["triage_per_node"]),
                 math.ceil(len(validate_left) / par["validate_per_node"]))
             if args.mode == "pipeline" else
-            math.ceil(counts[args.mode] / par["triage_per_node" if args.mode == "triage" else "validate_per_node"]))
-    partition = s["partition"] if args.mode in ("pipeline", "triage") else s["build_partition"]
+            math.ceil(counts[args.mode] / par["triage_per_node" if args.mode in ("triage", "statement")
+                                              else "validate_per_node"]))
+    model_phase = args.mode in ("pipeline", "triage", "statement")
+    partition = s["partition"] if model_phase else s["build_partition"]
     cpu_phase = project == "contiki-ng" and args.mode in ("observe", "validate")
     cpus = s["build_cpus_per_node"] if cpu_phase else s["cpus_per_node"]
     mem = s["build_mem"] if cpu_phase else s["mem"]
     python = (sys.executable if project == "zephyr" else
               s["build_python"] if cpu_phase else s["triage_python"])
     idle = args.idle if args.idle is not None else idle_nodes(partition)
-    schedule_cfg = cfg if project == "zephyr" else {**cfg, "slurm": {**s, "nodes_max": min(2, s["nodes_max"])}}
+    schedule_cfg = cfg
     lowest, wanted, note = plan_nodes(schedule_cfg, work, idle)
 
     stamp = (f"{datetime.now():%Y%m%d-%H%M%S%f}" if project == "contiki-ng"
@@ -204,8 +218,8 @@ def main() -> None:
     template = "pipeline.sbatch" if args.mode == "pipeline" else "phase.sbatch"
     script.write_text((CLUSTER / "templates" / template).read_text().format(
         partition=partition, nodes=f"{lowest}-{wanted}" if lowest < wanted else wanted,
-        cpus=cpus, gres=s["gres"] if args.mode in ("pipeline", "triage") else "",
-        gres_line=f"#SBATCH --gres={s['gres']}" if args.mode in ("pipeline", "triage") else "",
+        cpus=cpus, gres=s["gres"] if model_phase else "",
+        gres_line=f"#SBATCH --gres={s['gres']}" if model_phase else "",
         mem=mem, time_limit=s["time_limit"], phase=args.mode,
         job_name=job_name, name=run.name, run=run, repo=source_root, config=frozen, python=python,
         limit_min=minutes(s["time_limit"]), report_min=REPORT_MIN, validate_min=VALIDATE_MIN,
@@ -225,7 +239,9 @@ def main() -> None:
     if args.dry_run:
         print("  --dry-run: not submitted")
         return
-    r = subprocess.run(["sbatch", "--parsable", str(script)], capture_output=True, text=True)
+    r = subprocess.run(["sbatch", "--parsable",
+                        *([f"--dependency=afterany:{args.after}"] if args.after else []), str(script)],
+                       capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"sbatch failed: {r.stderr.strip()}")
     job = r.stdout.strip().split(";")[0]
@@ -234,6 +250,7 @@ def main() -> None:
                              "nodes": f"{lowest}-{wanted}", "mode": args.mode,
                              "source": str(source_root) if source_manifest else None,
                              "source_sha256": source_manifest["sha256"] if source_manifest else None,
+                             "after": args.after,
                              "triage": len(triage_left),
                              "validate": len(validate_left)}) + "\n")
     print(f"  submitted: job {job}; log {jobs}/job-{job}.out")

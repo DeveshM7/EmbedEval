@@ -26,6 +26,7 @@ Images go under the work root, never into the repo.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -63,7 +64,8 @@ def build_apptainer(instance_id: str, dry_run: bool = False) -> bool:
     start = time.time()
     try:
         bases = au.path("logs", "bases", "x").parent
-        base = (au.ensure_contiki_ng_base(bases) if meta.get("pipeline") == "contiki-ng" else
+        base = (au.ensure_contiki_ng_base(bases, json.loads((d / "instance.json").read_text()).get("ci_image"))
+                if meta.get("pipeline") == "contiki-ng" else
                 au.ensure_openthread_base(bases) if cmake else
                 au.ensure_base_images(meta["python_version"], meta["sdk_version"],
                                       meta["sdk_archive"], bases))

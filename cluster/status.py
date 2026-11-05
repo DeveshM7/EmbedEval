@@ -72,8 +72,12 @@ def validate_needed(run: Path, pr: int) -> bool:
 
 
 def triage_todo(run: Path) -> list[int]:
-    """PRs that reached triage and have no triage outcome yet."""
-    return [e["pr"] for e in manifest(run)["prs"]
+    """PRs that reached triage and have no triage outcome yet (none in an
+    observation-only run)."""
+    m = manifest(run)
+    if m.get("observe_only"):
+        return []
+    return [e["pr"] for e in m["prs"]
             if e["stage"] == "to triage" and triage_needed(run, e["pr"])]
 
 
@@ -82,6 +86,33 @@ def observe_todo(run: Path) -> list[int]:
     return [e["pr"] for e in manifest(run)["prs"]
             if e["stage"] == "to triage"
             and read(run, e["pr"]).get("observe", {}).get("state") != "done"]
+
+
+def receipt(run: Path, folder: str, pr: int, name: str) -> dict:
+    """A Contiki instance file of the run (instances/ or finalized/), or {}."""
+    f = Path(run) / folder / f"contiki-ng__contiki-ng-{pr}" / name
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def finalize_todo(run: Path) -> list[int]:
+    """Observed-valid Contiki PRs not yet finalized (generated from the
+    observation into <run>/finalized/, built and validated with repeats)."""
+    return [e["pr"] for e in manifest(run)["prs"]
+            if e["stage"] == "to triage"
+            and read(run, e["pr"]).get("observe", {}).get("state") == "done"
+            and receipt(run, "instances", e["pr"], "observed.json").get("valid") is True
+            and read(run, e["pr"]).get("finalize", {}).get("state") != "done"]
+
+
+def statement_todo(run: Path) -> list[int]:
+    """Finalized VALID instances whose metadata has no problem statement yet."""
+    out = []
+    for e in manifest(run)["prs"]:
+        if (receipt(run, "finalized", e["pr"], "validation.json").get("valid") is True
+                and not (receipt(run, "finalized", e["pr"], "metadata.json")
+                         .get("problem_statement") or "").strip()):
+            out.append(e["pr"])
+    return out
 
 
 def accepted(run: Path) -> list[int]:

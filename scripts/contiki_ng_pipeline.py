@@ -65,6 +65,46 @@ def checked_observation(prior,receipt,rec,available):
         raise ValueError('observation lacks named runtime fail-before/pass-after evidence')
     return cfg,meta
 
+# Upstream CI images (docker.io/contiker/contiki-ng) for Cooja, by base commit
+# date. Ant era (to 2022-11): the last image of each Java era, i386 before 2022.
+# Gradle era: the newest image published on or before the base, since each
+# Gradle wrapper runs only on the Java of its time (tags recorded 2026-11-05).
+COOJA_ERA_IMAGES=(('0000-00-00','5310e7a'),                                         # Ant, Java 8 (2019-10)
+                  ('2020-01-01','66cbc3434'),                                       # Ant, Java 8 (2021-04)
+                  ('2022-01-01','d0c6c3ce8ec9aecfdaa95cc5222e19d1ce3eeaadfdd6727b0fa757e10e5c7f17'))  # Ant, Java 11
+GRADLE_ERA_START='2022-12-01'
+GRADLE_ERA_IMAGES=(('2022-12-02','149f1452f352781d937f1f5792df9c85b7aaeb706aed857d3125333f64d5410f'),
+                   ('2022-12-07','fc6fffa82f19351e3de2135d5a1eeff22e4ba1322f53200a8a3d81b40856aeac'),
+                   ('2023-06-07','85035503fab4d3b1bc80b7ccf746d3ca1a93a6ee78abe707f8a3347929210595'),
+                   ('2023-06-19','a33da7fb057707eda4c3e34d7723d1a5269de3ac2015e2e187b8c7cf4f504679'),
+                   ('2023-07-05','5f7b39908d617b353d4e8c1a4e6125d0ce32941244aded3024db91f5f4bd3b8d'),
+                   ('2023-07-20','2df41a8f187031d4ed5176bc0f788e71310e58bd3fa4581b8faf7eb6875ca2d9'),
+                   ('2023-07-24','f4af71088124d270aa3e935abb56796761c4dd114efcaa5c63cb98e42475102c'),
+                   ('2023-08-14','82fdb2217e9649ed4b74bd73de3067001195fc10e980a8cc661644a35fcc925a'),
+                   ('2023-08-16','73287ff991dddc4ac06b5c23bf06e54e90e6810b478e86dc8fd2c116e5da98bc'),
+                   ('2023-08-30','8f38c24bc0c292a0115b36eb9aad1efa4dddfd5aeecc12693c30cc170fc65a54'),
+                   ('2023-09-09','904f00f7dc1c51579f75b449f7bd3252204527e96372dca8b4b37173871c149b'),
+                   ('2023-09-20','f29f243e96614a0c7b478ec6d9b9b826f1faba36611233936611f97360e542e0'),
+                   ('2023-10-04','0ffd8e618644674352d2ccf3fec8ae5c24de912f24082005a0b4f118f255059f'),
+                   ('2023-10-13','d027656a33abf9dc2be7e03d0e85f18442abac8c8136a5874c27781bd9967dc2'),
+                   ('2023-11-08','1918f72fa63b70e5fd6c63792b77d596b38ccab28a46c2013b0f88ba4e3faf88'),
+                   ('2023-12-22','e6d13e03c458962df9bdeba46547a7aea51c3dff89b966623fd777ce56649e73'),
+                   ('2023-12-27','3366352bfc0502a9e69b6b505735ff30682b904cd2d79ad3d5a5686756241654'),
+                   ('2024-02-14','006114161f257f5190982b85670c87e5cf4069eb4a4c66ff38fc7f56098f556e'),
+                   ('2024-05-06','a957f8bb66c7e7d683a24db1e352a8f2b5280e6d07661e40a42ef5640d101d13'),
+                   ('2024-09-02','c9a0e2c8af3f6fa0feb88bb642c471fb72c2ba952f4eae404d993712d603ee44'),
+                   ('2024-11-06','9eb427ae8fb01c22b71f5abbce789626ea9f92216c5e245476f48be8ee843a3b'),
+                   ('2026-06-22','3f04d86f92db43e3ee1abdb2d3e4e5a5dd63ad5f49f6da2d4d7ced891be67aaf'),
+                   ('2026-07-10',au.CONTIKI_NG_CURRENT_IMAGE))
+
+def cooja_era_image(base_date):
+    if base_date>=GRADLE_ERA_START:
+        return [tag for day,tag in GRADLE_ERA_IMAGES if day<=base_date][-1]
+    return [tag for start,tag in COOJA_ERA_IMAGES if start<=base_date][-1]
+
+class NotObservable(ValueError):
+    """Deterministic: this PR has nothing to observe under the requested profile."""
+
 def generate(pr,verdict,out_root,observe=False,observed=None,profile=None):
     from generate_instance import check_applies
     rec=json.loads((candidates.enriched_dir()/f'{pr}.json').read_text())
@@ -84,13 +124,13 @@ def generate(pr,verdict,out_root,observe=False,observed=None,profile=None):
         else:
             statement=None
     elif observe:
-        if not available:raise ValueError('no supported affected upstream runnable unit; candidate held')
+        if not available:raise NotObservable('no supported affected upstream runnable unit; candidate held')
         profiles={u['profile'] for u in available.values()}
         if profile is None:
-            if len(profiles)!=1:raise ValueError('observation requires an explicit profile for mixed affected units')
+            if len(profiles)!=1:raise NotObservable('observation requires an explicit profile for mixed affected units')
             profile=next(iter(profiles))
-        if profile not in rec['profiles']:raise ValueError('unknown observation profile')
-        if rec['nested_merge_count']:raise ValueError('release/merged-PR rollup needs attribution review')
+        if profile not in rec['profiles']:raise NotObservable('unknown observation profile')
+        if rec['nested_merge_count']:raise NotObservable('release/merged-PR rollup needs attribution review')
         cfg={'observe':True,'units':list(available.values()),'profile':profile,
              'fail_to_pass':[],'pass_to_pass':[],'oracle':'runtime'}
         statement=None
@@ -115,6 +155,11 @@ def generate(pr,verdict,out_root,observe=False,observed=None,profile=None):
     (dest/'test_patch.diff').write_text(patch)
     check_applies(patch,rec['base_commit'],dest,candidates.clone())
     cfg['submodules']=sorted({p for u in cfg['units'] for p in u.get('submodules',[])})
+    if any(u.get('kind')=='cooja' for u in cfg['units']):
+        cfg['ci_image']=cooja_era_image(candidates.git('log','-1','--format=%cs',rec['base_commit']).strip())
+        # Before Cooja nested it, MSPSim (Sky/Z1 motes) was its own gitlink; the
+        # image initializes it only where it is one at the base.
+        cfg['submodules']=sorted({*cfg['submodules'],'tools/mspsim'})
     cfg['after_required']=[name for unit in cfg['units'] for name in candidates.case_names(unit)]
     cfg['enrich_version']=candidates.ENRICH_VERSION
     (dest/'instance.json').write_text(json.dumps(cfg,indent=2)+'\n')
@@ -148,6 +193,26 @@ def fix_patch(meta):
     if not files or any(p.startswith(candidates.TEST_ROOTS) for p in files):
         raise ValueError('no disjoint production fix')
     return candidates.git('diff','--binary',meta['base_commit'],meta['fix_commit'],'--',*files)
+
+MISSING_HEADER=re.compile(r'fatal error: ([\w./+-]+\.h): No such file or directory')
+
+def header_attribution(output,symbols,patch):
+    """A missing header that the fix creates and whose added lines declare a
+    compile symbol. GCC stops at the #include, so the symbols themselves never
+    reach the base build log."""
+    created={};path=None;new=False
+    for line in patch.splitlines():
+        if line.startswith('--- '):new=line=='--- /dev/null';path=None
+        elif line.startswith('+++ b/'):
+            path=line[6:] if new else None
+            if path:created[path]=[]
+        elif path and line.startswith('+'):created[path].append(line[1:])
+    for header in dict.fromkeys(MISSING_HEADER.findall(output)):
+        for created_path,lines in created.items():
+            if created_path!=header and not created_path.endswith('/'+header):continue
+            text='\n'.join(lines)
+            if any(re.search(r'(?<!\w)'+re.escape(s)+r'(?!\w)',text) for s in symbols):return header
+    return None
 
 def config_attribution(output,diagnostics):
     failure_lines=[line for line in output.splitlines() if re.search(r'error:|fatal error:|undefined reference|make(?:\[\d+\])?: \*\*\*|failed',line,re.I)]
@@ -207,7 +272,7 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
             if oracle=='runtime':signal=(before['rc']==1
                 and all(before['cases'].get(n) in ('failed','error') for n in f2p))
             elif oracle=='compile':
-                signal=before['rc']==2 and bool(compile_attribution(out1,cfg.get('compile_symbols',[])))
+                signal=before['rc']==2 and bool(compile_attribution(out1,cfg.get('compile_symbols',[])) or header_attribution(out1,cfg.get('compile_symbols',[]),patch))
             else:
                 signal=before['rc']==2 and bool(config_attribution(out1,cfg.get('config_diagnostics',[])))
             passes=all(after['cases'].get(n)=='passed' for n in cfg.get('after_required',f2p+p2p))
@@ -217,6 +282,12 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
             if report['valid']:
                 repeat,out=step('before-repeat-reset',['git','-C','/testbed','apply','-R','/embedeval-run/fix.diff'])
                 deterministic=repeat['rc']==0; repeats=[]
+                # Files the fix created are gone again, but make would keep the
+                # binary built from them: rebuild the native units from scratch.
+                for unit in cfg['units']:
+                    if deterministic and unit.get('kind')=='native':
+                        cleaned,_=step('before-repeat-clean',['make','-C','/testbed/'+unit['directory'],'TARGET=native','clean'])
+                        deterministic=cleaned['rc']==0
                 if deterministic:
                     for i in range(3):
                         result,repeat_out=step('before-repeat-'+str(i+1),['run_tests']);repeats.append(result)
@@ -224,7 +295,7 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
                             deterministic &= (result['rc']==1
                                 and all(result['cases'].get(n) in ('failed','error') for n in f2p))
                         elif oracle=='compile':
-                            deterministic &= result['rc']==2 and bool(compile_attribution(repeat_out,cfg['compile_symbols']))
+                            deterministic &= result['rc']==2 and bool(compile_attribution(repeat_out,cfg['compile_symbols']) or header_attribution(repeat_out,cfg['compile_symbols'],patch))
                         else:
                             deterministic &= result['rc']==2 and bool(config_attribution(repeat_out,cfg['config_diagnostics']))
                         deterministic &= all(result['cases'].get(n)=='passed' for n in p2p)
