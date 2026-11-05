@@ -664,6 +664,14 @@ was frozen before PR diff review or model/observation outcomes. This deliberatel
 tests source selection and coverage, not population accuracy. Source enrichment
 is complete; no model run or validation for this sample has started.
 
+Source expectations were frozen on 2026-11-05 before any model or observation
+outcome (`source-expectations.json`, SHA256
+`89811b3432fe85505ecaebf157b0d6d049564eca9f0c55ab3ae25dfc74eaf13f`): #3250 runtime
+accept (all five LwM2M TLV cases F2P), #3011 cosmetic reject, #3098 and #2192 no
+production patch, #3229 release-rollup hold. #1895 is a hold pending a policy
+decision: its new unit-test API is the PR purpose, but the editable fix is the
+framework that reports test results.
+
 Confidence assessment must retain the strict plan criterion: exact selected
 F2P/P2P names, semantic oracle attribution, correct profile and protected input
 separation, after passes and repeated before evidence. Coarse accept/hold
