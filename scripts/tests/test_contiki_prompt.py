@@ -17,7 +17,9 @@ class ContikiPromptTest(unittest.TestCase):
         self.assertIn('compile_symbols', prompt)
         self.assertIn('fail_to_pass', prompt)
         self.assertNotIn('## Integration proof', prompt)
-        for pr in ('#3246', '#3020', '#3195', '#1183', '#1170', '#255'):
+        for pr in ('#3246', '#3020', '#3195', '#1183', '#1170', '#255',
+                   '#3202', '#3261', '#2830', '#384', '#958', '#1769',
+                   '#2587', '#3251', '#3057', '#422'):
             self.assertNotIn(pr, prompt)
 
     def test_missing_boundary_fails_closed(self):

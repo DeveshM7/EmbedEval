@@ -268,6 +268,12 @@ mechanically obtainable inventory gaps. Research controls are intentionally
 selected, not held-out triage-accuracy evidence, and their expected answers must
 stay out of future prompts.
 
+Use `reject` when source evidence proves that the PR cannot form an instance
+under this contract: no disjoint production fix, cosmetic changes without a
+detecting oracle, or a required incidental build break unrelated to the fix's
+purpose with no eligible alternative consumer. Use `hold` for unresolved facts
+or unsupported setup/profiles. A hold is an abstention, not a correct rejection.
+
 The native adapter, schema, generator, validator and cluster integration are
 implemented and bounded CPU controls pass. Full-campaign readiness remains
 closed: historical profile resolution, remaining profile/era controls, complete
@@ -667,3 +673,44 @@ Known development controls must work, and a fresh evaluation must provide
 multiple independently validated accepts; a batch of holds cannot establish
 reliability. Any unresolved systematic case-selection error keeps confidence
 open. Do not present a small selected sample as whole-pool accuracy.
+
+### Fifteen-PR gold development set
+
+The user requested seven accepts and eight rejects. These are known development
+controls, separate from the six-PR version-7 evaluation above. Existing #3202
+and #3261 evaluation results are preserved; their reuse as gold references does
+not turn later scores into unseen accuracy. The label file and source audits
+are in `triage/runs/contiki-gold-15/`, never model inputs. Exact binary labels
+are scored separately from abstentions and exact instance-plan validity.
+
+| PR | Gold label | Basis |
+| --- | --- | --- |
+| #255 | accept, runtime | Valid upstream list regression and repeated-before receipts |
+| #3020 | accept, compile | Valid signed-CBOR API compile oracle |
+| #3195 | accept, compile | Valid CBOR accessor/skip API compile oracle |
+| #3246 | accept, runtime | Four JSON F2P cases; revised model plan validated in job 484902 |
+| #3202 | accept, runtime | Independent Antelope observation and validated model plan |
+| #3261 | accept, runtime | Independent CoAP F2P/P2P; gold reference repeat verification pending |
+| #2830 | accept, compile candidate | New calloc API is the tested purpose; gold build verification pending |
+| #384 | reject | Test-only output formatting; no disjoint production fix |
+| #958 | reject | Test-only timing changes; no disjoint production fix |
+| #1769 | reject | Protected helper-only change; no disjoint production fix |
+| #2587 | reject | Test-only build registration; no disjoint production fix |
+| #3251 | reject | Protected failure-reporting change; no supplied detecting production task |
+| #3057 | reject | Test-only brace changes; no production fix |
+| #422 | reject | Cosmetic production edits; C token streams match except braces around unchanged single return statements |
+| #1170 | reject | Only supported consumer requires an incidental vector-decoding helper absent at base; the intended fix is AES length handling |
+
+Eight reject labels have source audits with original patch hashes. Six have no
+production patch under the protected-test boundary; this is a selection bias,
+not a representative negative distribution. #422 adds a cosmetic production
+control, and #1170 adds the explicitly disallowed incidental compile category.
+Unsupported profiles and infrastructure errors are not gold rejects. The set
+is not fully finalized until the two pending positive checks finish.
+
+Job 484913 validates explicit reference plans for #2830 and #3261. These are
+gold-reference verification, not new model successes. The latter uses the
+independent observed case lists; its original incorrect model plan remains
+invalid in the frozen evaluation. The new JSON pilot's successful validation
+also exercises persistent phase-specific raw logs. No new model pass over the
+15 gold cases has started yet.
