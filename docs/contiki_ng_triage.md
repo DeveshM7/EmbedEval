@@ -194,6 +194,13 @@ The implemented decision schema uses `pr`, `verdict` (`accept`, `reject`,
 - `profile`: `native`, `cooja`, or `script`; selected units must match.
 - `fail_to_pass`: exact case IDs; native IDs are `unit_id::test_symbol`,
   while script/scenario IDs equal their unit ID.
+  Select the smallest justified detecting set. A new or edited case need not
+  fail before. For each selected runtime case, the causal chain must trace its
+  actual input and assertion through base behavior and explain why the checked
+  result fails. A memory-safety fix can leave a case's numeric result unchanged;
+  a safer implementation alone does not prove that case's assertion flips.
+  Omit uncertain F2P claims; all cases in the selected units are checked after
+  independently of this list.
 - `pass_to_pass`: relevant unaffected case IDs that actually execute and pass
   before and after, or an empty list. A case in a binary that cannot build
   before cannot be P2P, including under compile/config oracles.

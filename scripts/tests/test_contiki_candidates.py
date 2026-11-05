@@ -59,6 +59,16 @@ class CandidatesTests(unittest.TestCase):
         self.assertEqual(rendered['prompt_omissions'][0]['kind'],'diff-preview')
         self.assertIn('read full source',rendered['production_diff'])
 
+    def test_large_test_diff_has_an_explicit_preview_without_losing_original(self):
+        rec=record();original='start\n'+'+ assert(value);\n'*12000+'end\n'
+        rec['test_patch']=original
+        rendered=json.loads(pipeline.render_record(rec))
+        self.assertEqual(rec['test_patch'],original)
+        self.assertLess(len(rendered['test_patch']),101000)
+        self.assertEqual(rendered['prompt_omissions'][0]['field'],'test_patch')
+        self.assertTrue(rendered['test_patch'].startswith('start\n'))
+        self.assertTrue(rendered['test_patch'].endswith('end\n'))
+
     def test_multiline_suite_keeps_options_on_their_own_entry(self):
         text='EXAMPLES = \\\nexamples/mqtt/native:./mqtt.sh:DEFINES=MQTT=1 \\\ntests/json/native:./json.sh \\\ntests/heap/native:./heap.sh:DEFINES=HEAPMEM_DEBUG=0 \\\ntests/heap/native:./heap.sh:DEFINES=HEAPMEM_DEBUG=1\n'
         entries=c.suite_entries(text)
