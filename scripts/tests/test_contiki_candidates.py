@@ -14,6 +14,8 @@ def record():
           'dependency_evidence':{'method':'static-source-closure','edges':[],'unresolved':[],'build_verified':False},
           'before_compile':{'status':'unknown','required_interfaces':[]},
           'before_dependencies':{'missing_submodules':[]},
+          'execution_evidence':{'method':'source','native_entries':[],
+                                'simulation_consumers':[],'build_verified':False},
           'profile_evidence':{'enabled':True,'method':'source-unconditional',
                               'sources':['tests/08-native-runs/test-json/test-json.c'],'guards':[]}}
     return {'number':1,'title':'JSON fix','body':'','url':'https://example.test/1',
@@ -21,7 +23,7 @@ def record():
             'test_inventory':[unit],'test_files':unit['sources'],'source_files':['os/lib/json.c'],
             'test_patch':'diff --git a/tests/x b/tests/x\n+assert(x);',
             'production_diff':'diff --git a/os/lib/json.c b/os/lib/json.c',
-            'profiles':{'native':{}},'inventory_holds':[],'nested_merge_count':0,
+            'profiles':{'native':{}},'inventory_holds':[],'nested_merge_count':0,'ci_sources':{},
             'compile_requirements':[{'symbol':'json_parse_new','kind':'function','at_base':False,
                                      'production_file':'os/lib/json.c','test_files':unit['sources']}]}
 
@@ -32,6 +34,24 @@ def verdict(oracle='runtime'):
             'causal_chain':'New vector exercises the parser','change_type':'bugfix'}
 
 class CandidatesTests(unittest.TestCase):
+    def test_ci_sources_are_visible_in_model_preview(self):
+        rec=record();rec['ci_sources']={'.github/workflows/build.yml':'run: make -C tests/native'}
+        self.assertEqual(json.loads(pipeline.render_record(rec))['ci_sources'],rec['ci_sources'])
+
+    def test_native_registration_and_simulation_consumers_remain_distinct(self):
+        source='tests/native/unit/test.c'
+        files={source:'UNIT_TEST_REGISTER(check,"Check"); UNIT_TEST(check) {} UNIT_TEST_RUN(check);',
+               'tests/native/unit/Makefile':'CONTIKI_PROJECT = test',
+               'tests/native/Makefile':'EXAMPLES = tests/native/unit/native:./unit.sh',
+               'tests/sim/test.csc':'<simconf><simulation><motetype><source>[CONTIKI_DIR]/'+source+'</source></motetype></simulation></simconf>'}
+        with (patch.object(c,'files_at',return_value=list(files)),
+              patch.object(c,'show',side_effect=lambda rev,p:files.get(p))):
+            units,_=c.inventory('a'*40)
+        evidence=next(u for u in units if u['kind']=='native')['execution_evidence']
+        self.assertEqual(evidence['native_entries'],['tests/native/unit/native:./unit.sh'])
+        self.assertEqual(evidence['simulation_consumers'],['tests/sim/test.csc'])
+        self.assertFalse(evidence['build_verified'])
+
     def test_prompt_summarizes_large_hex_data_without_changing_patch(self):
         rec=record()
         original='+  "'+'ab'*5000+'",\n+assert(check_result());\n'

@@ -15,6 +15,7 @@ def render_record(rec):
     payload={k:rec[k] for k in ('number','title','body','base_commit','fix_commit','test_files',
         'source_files','profiles','inventory_holds','test_patch','production_diff','nested_merge_count','compile_requirements')}
     payload['test_inventory']=candidates.select_tests(rec)
+    payload['ci_sources']=rec.get('ci_sources',{})
     payload['inventory_note']='Only affected supported runnable units; absent or guarded selections must be held.'
     omissions=[]
     for field in ('test_patch','production_diff'):

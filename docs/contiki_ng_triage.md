@@ -219,6 +219,11 @@ unknown bodies but do not turn missing execution into failure. Records carry an
 enrichment version and required fields; stale records must be re-enriched.
 
 Keep body inclusion, dependency closure, build success and execution separate.
+Native `execution_evidence` lists matching upstream Make registrations and
+simulation scenarios that reference the testcase source. `ci_sources` gives
+upstream CI at base. These are source facts, not build or execution receipts;
+an empty registration list is unknown rather than proof that no valid profile
+exists. A testcase used by Cooja is not automatically buildable for native.
 Source-unconditional body evidence checks definitions, assertions, registration
 and calls; configuration guards elsewhere may still change the result. Static
 dependency edges are evidence of inputs, not proof that Make builds the target.
@@ -629,3 +634,16 @@ while preserving full original records and omission hashes. #29's preview is
 Local checks now total 56 Contiki and ten cluster tests passing. Confidence in
 whole-pool triage remains unestablished, especially coverage and exact case
 selection; a successful known-control rerun alone would not establish it.
+
+### Version-7 CI provenance inputs
+
+The model preview now includes the already-collected CI files at the candidate
+base. Native units separately record matching Make registrations and simulation
+scenarios referencing their source. This exposes the distinction observed in
+the source audit: JSON and both heapmem variants have native registrations,
+whereas framer-negative has a Cooja consumer and no native registration. The
+facts do not assert build success or make a missing registration an exclusion.
+Version-6 enriched records must be refreshed for this input version. Current
+verification: 58 Contiki checks pass, including CI preview preservation and
+separate native/scenario provenance. The running #3246 development pilot remains
+frozen at `568f445`; no version-7 model result is claimed.

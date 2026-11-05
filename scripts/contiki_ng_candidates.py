@@ -8,7 +8,7 @@ from functools import lru_cache
 from contiki_ng_inputs import closure
 
 REPO='https://github.com/contiki-ng/contiki-ng'
-ENRICH_VERSION=6
+ENRICH_VERSION=7
 TEST_ROOTS=('tests/','regression-tests/')
 SUPPORTED_SIM_SUITES=('07-simulation-base','09-ipv6','13-ieee802154','21-security-protocols')
 
@@ -272,6 +272,15 @@ def inventory(rev):
                       'submodules':['tools/cooja','os/net/security/mbedtls','os/net/security/micro-ecc'],
                       'supported':supported,'hold_reason':None if supported else 'profile needs worker control'})
     for unit in units:
+        if unit['kind']=='native':
+            suite_make=read(unit['suite_directory']+'/Makefile')
+            unit['execution_evidence']={
+                'method':'upstream-make-registration-and-scenario-references',
+                'native_entries':[entry for entry in suite_entries(suite_make)
+                                  if entry.startswith(unit['directory']+'/native:')],
+                'simulation_consumers':[other['id'] for other in units
+                                        if other['kind']=='cooja' and unit['case_source'] in other['sources']],
+                'build_verified':False}
         unit.update(closure(unit,paths,read))
         sources=[p for p in unit['sources'] if p.endswith('.c') and p.startswith(TEST_ROOTS)]
         guards=[{'source':p,'line':i,'directive':line.strip()} for p in sources
@@ -364,11 +373,11 @@ def compile_requirements(base,production_diff,test_patch):
 def stale_record(rec):
     required=('number','title','body','url','base_commit','fix_commit','test_inventory',
               'test_files','source_files','test_patch','production_diff','profiles',
-              'inventory_holds','nested_merge_count','compile_requirements')
+              'inventory_holds','nested_merge_count','compile_requirements','ci_sources')
     if not isinstance(rec,dict) or rec.get('enrich_version')!=ENRICH_VERSION or any(k not in rec for k in required):return True
     if not isinstance(rec['test_inventory'],list) or not isinstance(rec['test_files'],list) or not isinstance(rec['source_files'],list):return True
     if any(not isinstance(p,str) for p in rec['test_files']+rec['source_files']):return True
-    if not isinstance(rec['profiles'],dict) or not isinstance(rec['compile_requirements'],list):return True
+    if not isinstance(rec['profiles'],dict) or not isinstance(rec['compile_requirements'],list) or not isinstance(rec['ci_sources'],dict):return True
     return any(not isinstance(u,dict) or not all(k in u for k in ('id','kind','profile','sources','cases','profile_evidence','dependency_evidence','before_compile','before_dependencies'))
                or not isinstance(u['profile_evidence'],dict) or not isinstance(u['sources'],list)
                or not isinstance(u['dependency_evidence'],dict)
@@ -377,6 +386,8 @@ def stale_record(rec):
                or not isinstance(u['before_compile'].get('required_interfaces'),list)
                or not isinstance(u['before_dependencies'],dict)
                or not isinstance(u['before_dependencies'].get('missing_submodules'),list)
+               or (u['kind']=='native' and (not isinstance(u.get('execution_evidence'),dict)
+                   or not all(k in u['execution_evidence'] for k in ('method','native_entries','simulation_consumers','build_verified'))))
                or any(not isinstance(p,str) for p in u['sources'])
                or not isinstance(u['cases'],list) for u in rec['test_inventory'])
 
