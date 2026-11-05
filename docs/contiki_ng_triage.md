@@ -582,3 +582,31 @@ at most two running jobs and automatically validates untouched model accepts.
 Every phase has a source snapshot/hash and a two-hour wall limit. Previous pilot
 artifacts remain intact. Model, infrastructure, coverage, oracle choice and
 named-case selection must be assessed separately when these jobs finish.
+
+### Version-6 pilot results and operational follow-up
+
+All five jobs completed with exit code zero; this does not mean all instance
+plans validated. Development accepted four and validated three: #255 runtime,
+#3020 compile and #3195 compile. #3246 incorrectly included `test_long_fraction`
+as F2P although it passed before. The two holds were #1170 (incidental helper)
+and #1183 (legacy executor/causal uncertainty).
+
+Evaluation accepted three and validated one (#3202, runtime). Independent
+observations found three Antelope F2P cases and six P2P cases. #3261 is also a
+detecting runtime PR (three F2P, two P2P), but its model plan incorrectly labeled
+both already-passing cases F2P. #52 failed the native build in both states at
+unavailable TSCH timing macros: an unsupported profile, not demonstrated PR
+invalidity. Four other decisions were holds (#1410, #2587, #2898, #3251);
+#29 exhausted the 131072-token context before a reply. These results do not
+establish reliable plan selection or population accuracy. Original plans and
+receipts remain unchanged in the ignored results directories.
+
+The independent audit's #52 generation failed because its mixed profiles
+required an explicit selection. The worker immediately retried the same
+deterministic error until its deadline. Follow-up changes bound each PR to one
+attempt per observation job while retaining retries on later submissions.
+Validation now binds detailed build/run logs into a separate persistent folder
+for each state, including repeats; previously those detailed logs lived only in
+the deleted overlay. Frozen version-6 runs are unchanged and cannot retroactively
+gain those lost details. Local verification: 55 Contiki checks and ten cluster
+checks pass, including state-separated log retention and bounded retries.

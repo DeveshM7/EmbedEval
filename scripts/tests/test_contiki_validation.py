@@ -43,16 +43,32 @@ class ContikiValidationTest(unittest.TestCase):
             after = output(after_status if after_status is not None else '  passed unit::fix\n  passed unit::stable\n')
             results = [SimpleNamespace(returncode=rc, stdout=out, stderr='')
                        for rc, out in ((before_rc, before), (0, ''), (0, after))]
+            current_details = None
+            def exec_args(image, binds, overlay):
+                nonlocal current_details
+                current_details = next((p for p, target in binds.items()
+                                        if target == '/testbed/.embedeval/logs'), None)
+                return []
+            outputs = iter(results)
+            def run(*args, **kwargs):
+                result = next(outputs)
+                if current_details is not None and args[0] == ['run_tests']:
+                    (current_details / 'unit.run.log').write_text(result.stdout)
+                return result
             with (patch.object(pipeline.instances, 'instance_dir', return_value=root),
                   patch.object(pipeline.instances, 'load_metadata', return_value={}),
                   patch.object(pipeline.au, 'instance_image', return_value=image),
                   patch.object(pipeline.au, 'work_root', return_value=root / 'work'),
                   patch.object(pipeline.au, 'recipe_fingerprint', return_value='control'),
-                  patch.object(pipeline.au, 'exec_args', return_value=[]),
-                  patch.object(pipeline.subprocess, 'run', side_effect=results),
+                  patch.object(pipeline.au, 'exec_args', side_effect=exec_args),
+                  patch.object(pipeline.subprocess, 'run', side_effect=run),
                   patch.object(validate_instance, 'compile_attribution', return_value='fix_api'),
                   patch.object(pipeline, 'config_attribution', return_value='config error'),
                   patch.object(validate_instance, '_finish', side_effect=lambda iid, report: report)):
                 result = pipeline.validate('contiki-ng__contiki-ng-1', patch_override=fix)
             self.assertFalse(result['valid'])
             self.assertEqual(result['reason'], 'oracle or required named case evidence missing')
+            # Raw logs survive overlay cleanup and each state has its own file.
+            self.assertNotEqual(result['before']['details'], result['after']['details'])
+            self.assertEqual((Path(result['before']['details']) / 'unit.run.log').read_text(), before)
+            self.assertEqual((Path(result['after']['details']) / 'unit.run.log').read_text(), after)

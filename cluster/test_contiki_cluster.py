@@ -17,9 +17,33 @@ import prepare
 import status
 import submit
 import report
+import node_worker
 
 
 class ContikiClusterTest(unittest.TestCase):
+    def test_failed_observation_is_attempted_once_per_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / 'manifest.json').write_text(json.dumps({'prs': [{'pr': 52, 'stage': 'to triage'}]}))
+            calls = []
+            def failed_step(cmd, *args):
+                calls.append(cmd)
+                if len(calls) > 2:
+                    self.fail('failed generation was immediately retried')
+                return 1
+            with (patch.object(node_worker, 'LOGS', run / 'logs', create=True),
+                  patch.object(node_worker, 'ME', 'test-node0', create=True),
+                  patch.object(node_worker, 'N', 0, create=True),
+                  patch.object(node_worker, 'step', side_effect=failed_step),
+                  patch.object(node_worker, 'sweep'),
+                  patch.object(node_worker.report, 'to_ledger')):
+                node_worker.observe({'caps': {'validate_pr': 30, 'build': 10},
+                                     'parallel': {'validate_per_node': 1}}, run,
+                                    {'EMBEDEVAL_WORK': str(run / 'work')}, 30)
+            self.assertEqual(len(calls), 2)  # generation and cleanup
+            self.assertEqual(status.read(run, 52)['observe']['state'], 'failed')
+            self.assertEqual(status.observe_todo(run), [52])  # a later job can retry
+
     def test_observation_resume_retries_failures_but_keeps_receipts(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

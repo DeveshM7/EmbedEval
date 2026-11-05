@@ -292,8 +292,10 @@ def observe(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         return
     deadline = time.time() + (minutes - 3) * 60
     sweep(Path(env["EMBEDEVAL_WORK"]))
+    attempted = set()
 
     def one(pr: int) -> None:
+        attempted.add(pr)
         start = time.time()
         iid = f"contiki-ng__contiki-ng-{pr}"
         lg = LOGS / f"observe-{pr}.log"
@@ -325,7 +327,10 @@ def observe(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         finally:
             step([PY, "scripts/cleanup_instance.py", iid], lg, 10, env)
 
-    q = claims.Queue(run, "observe", ME, lambda pr: pr in status.observe_todo(run))
+    # Failed/capped observations may resume in a later job, but must not spin
+    # on the same deterministic failure for this job's entire wall time.
+    q = claims.Queue(run, "observe", ME,
+                     lambda pr: pr not in attempted and pr in status.observe_todo(run))
     drain(q, todo, one, cfg["parallel"]["validate_per_node"], deadline - 10 * 60)
 
 

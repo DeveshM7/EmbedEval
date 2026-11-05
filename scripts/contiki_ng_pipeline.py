@@ -172,15 +172,20 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
     cmd=au.exec_args(image,binds={work:'/embedeval-run'},overlay=overlay)
     def step(name,args):
         start=time.monotonic()
+        details=logs/(name+'-details') if args==['run_tests'] else None
+        step_cmd=cmd
+        if details is not None:
+            details.mkdir()
+            step_cmd=au.exec_args(image,binds={work:'/embedeval-run',details:'/testbed/.embedeval/logs'},overlay=overlay)
         try:
-            r=subprocess.run(cmd+args,capture_output=True,text=True,errors='replace',timeout=timeout)
+            r=subprocess.run(step_cmd+args,capture_output=True,text=True,errors='replace',timeout=timeout)
             rc,out=r.returncode,r.stdout+r.stderr
         except subprocess.TimeoutExpired as e:
             rc='timeout';out=(e.stdout or b'');out=out.decode(errors='replace') if isinstance(out,bytes) else out
         (logs/(name+'.log')).write_text(out)
         if verbose:print(out)
         return {'rc':rc,'seconds':round(time.monotonic()-start,3),'cases':parse_results(out),
-                'build_errors':build_errors(out)},out
+                'build_errors':build_errors(out),'details':str(details) if details is not None else None},out
     try:
         before,out1=step('before',['run_tests']);report['before']=before
         patch=Path(patch_override).read_text() if patch_override else fix_patch(meta)
