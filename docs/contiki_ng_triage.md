@@ -647,3 +647,23 @@ Version-6 enriched records must be refreshed for this input version. Current
 verification: 58 Contiki checks pass, including CI preview preservation and
 separate native/scenario provenance. The running #3246 development pilot remains
 frozen at `568f445`; no version-7 model result is claimed.
+
+The next evaluation sample is frozen in
+`triage/runs/contiki-eval-v7/selection.json` (SHA256
+`7c9dd5647ac97d9a353650e2506f3821858fa66d88113eb8836da267f8a43f50`):
+#3229, #3250, #3011, #1895, #3098 and #2192. Selection ranks PRs by SHA256
+within four native-source/production slots, one native-source/no-production
+slot and one script slot, excluding previous controls and evaluation PRs. It
+was frozen before PR diff review or model/observation outcomes. This deliberately
+tests source selection and coverage, not population accuracy. Source enrichment
+is complete; no model run or validation for this sample has started.
+
+Confidence assessment must retain the strict plan criterion: exact selected
+F2P/P2P names, semantic oracle attribution, correct profile and protected input
+separation, after passes and repeated before evidence. Coarse accept/hold
+agreement is insufficient. Review the nonaccepts for missed supported detecting
+instances and count unsupported profiles and infrastructure failures separately.
+Known development controls must work, and a fresh evaluation must provide
+multiple independently validated accepts; a batch of holds cannot establish
+reliability. Any unresolved systematic case-selection error keeps confidence
+open. Do not present a small selected sample as whole-pool accuracy.
