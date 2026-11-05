@@ -690,8 +690,8 @@ are scored separately from abstentions and exact instance-plan validity.
 | #3195 | accept, compile | Valid CBOR accessor/skip API compile oracle |
 | #3246 | accept, runtime | Four JSON F2P cases; revised model plan validated in job 484902 |
 | #3202 | accept, runtime | Independent Antelope observation and validated model plan |
-| #3261 | accept, runtime | Independent CoAP F2P/P2P; gold reference repeat verification pending |
-| #2830 | accept, compile candidate | New calloc API is the tested purpose; gold build verification pending |
+| #3261 | accept, runtime | Independent CoAP F2P/P2P; reference plan valid in job 484913 (three F2P, two P2P) |
+| #2830 | accept, compile | New calloc API is the tested purpose; reference plan valid in job 484913 |
 | #384 | reject | Test-only output formatting; no disjoint production fix |
 | #958 | reject | Test-only timing changes; no disjoint production fix |
 | #1769 | reject | Protected helper-only change; no disjoint production fix |
@@ -705,20 +705,24 @@ Eight reject labels have source audits with original patch hashes. Six have no
 production patch under the protected-test boundary; this is a selection bias,
 not a representative negative distribution. #422 adds a cosmetic production
 control, and #1170 adds the explicitly disallowed incidental compile category.
-Unsupported profiles and infrastructure errors are not gold rejects. The set
-is not fully finalized until the two pending positive checks finish.
+Unsupported profiles and infrastructure errors are not gold rejects.
 
-Job 484913 validates explicit reference plans for #2830 and #3261. These are
+Job 484913 validated explicit reference plans for #2830 (missing `heapmem_calloc`
+before; all seven heapmem cases pass after) and #3261 (three named F2P failures,
+two P2P passes). Both have three agreeing before repeats. These are
 gold-reference verification, not new model successes. The latter uses the
 independent observed case lists; its original incorrect model plan remains
 invalid in the frozen evaluation. The new JSON pilot's successful validation
-also exercises persistent phase-specific raw logs. No new model pass over the
-15 gold cases has started yet.
+also exercises persistent phase-specific raw logs. `finalize-gold.py` then
+checked all seven positive receipts (validity, recipe fingerprints, after passes,
+three agreeing before repeats) and recorded their units, F2P/P2P lists and receipt
+hashes in the tracked dataset, now `_status: finalized`. Reference lists are
+measured plans, not the only acceptable plans.
 
 The tracked scoring dataset is `triage/gold-contiki-ng.json`, separate from
 Zephyr's `triage/gold.json`. `run --project contiki-ng --gold` selects this set
-without including its labels in model messages; it refuses to start while
-reference verification is pending. `eval --project contiki-ng` scores the
+without including its labels in model messages; it refuses to start unless
+the dataset is finalized. `eval --project contiki-ng` scores the
 Contiki labels, reports holds/errors separately, and compares claimed cases
 against measured references without treating that comparison as validation.
 `cluster/report.py --scorecard` passes the project's scoring selector.
