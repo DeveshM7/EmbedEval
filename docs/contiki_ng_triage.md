@@ -617,3 +617,15 @@ for each state, including repeats; previously those detailed logs lived only in
 the deleted overlay. Frozen version-6 runs are unchanged and cannot retroactively
 gain those lost details. Local verification: 55 Contiki checks and ten cluster
 checks pass, including state-separated log retention and bounded retries.
+
+Revision `568f445` tightens the per-case reasoning instruction using the existing
+JSON development control's over-selection failure. A targeted #3246 development
+rerun is job 484901, with untouched-accept validation queued as 484902. It also
+exercises persistent raw logs on Scholar. The original eight-PR evaluation is
+closed and unchanged; its results are not rescored under this new instruction.
+The context repair now explicitly bounds both test and production diff previews
+while preserving full original records and omission hashes. #29's preview is
+217432 characters after this change; no successful model replay is claimed.
+Local checks now total 56 Contiki and ten cluster tests passing. Confidence in
+whole-pool triage remains unestablished, especially coverage and exact case
+selection; a successful known-control rerun alone would not establish it.
