@@ -34,7 +34,7 @@ from pathlib import Path
 CLUSTER = Path(__file__).resolve().parent
 REPO = CLUSTER.parent
 SOURCE_DIRS = ("cluster", "scripts", "harness", "templates", "docs")
-SOURCE_FILES = ("triage/models.json", "requirements.txt", ".embedeval-revision")
+SOURCE_FILES = ("triage/models.json", "triage/gold-contiki-ng.json", "requirements.txt", ".embedeval-revision")
 SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "runs", "generated", "outputs"}
 # The job's phases share its time limit: triage may take all of it,
 # validation what triage leaves, if at least VALIDATE_MIN (less is not worth
@@ -97,7 +97,7 @@ def freeze_source(source: Path, destination: Path) -> dict:
     required = {"cluster/node_worker.py", "cluster/report.py", "scripts/triage_prs.py",
                 "scripts/contiki_ng_pipeline.py", "harness/projects.py",
                 "templates/contiki-ng/apptainer/instance.def.tmpl", "docs/contiki_ng_triage.md",
-                "triage/models.json", "requirements.txt"}
+                "triage/models.json", "triage/gold-contiki-ng.json", "requirements.txt"}
     missing = required - files.keys()
     if missing:
         raise RuntimeError(f"source freeze missing runtime files: {', '.join(sorted(missing))}")

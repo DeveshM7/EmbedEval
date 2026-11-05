@@ -89,7 +89,7 @@ class ContikiClusterTest(unittest.TestCase):
             required = ("cluster/node_worker.py", "cluster/report.py", "scripts/triage_prs.py",
                         "scripts/contiki_ng_pipeline.py", "harness/projects.py",
                         "templates/contiki-ng/apptainer/instance.def.tmpl",
-                        "docs/contiki_ng_triage.md", "triage/models.json", "requirements.txt")
+                        "docs/contiki_ng_triage.md", "triage/models.json", "triage/gold-contiki-ng.json", "requirements.txt")
             for name in required:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
