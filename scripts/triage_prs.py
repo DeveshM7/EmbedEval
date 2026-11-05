@@ -840,7 +840,10 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
 
 
 def gold_file() -> dict:
-    return json.loads((TRIAGE / "gold.json").read_text())
+    name = {"zephyr": "gold.json", "contiki-ng": "gold-contiki-ng.json"}.get(PROJECT)
+    if name is None:
+        raise ValueError(f"no gold set for {PROJECT}")
+    return json.loads((TRIAGE / name).read_text())
 
 
 def load_gold() -> dict[int, str]:
@@ -864,6 +867,14 @@ def secondary(pr: int, v: dict) -> str:
     exp = ((gold_file()["accept"].get(str(pr)) or {}).get("expected"))
     if not exp or v.get("verdict") != "accept":
         return ""
+    if PROJECT == "contiki-ng":
+        checks = [f"{key} {'✓' if v.get(key) == exp.get(key) else '≠ reference'}"
+                  for key in ("profile", "oracle")]
+        for key in ("fail_to_pass", "pass_to_pass"):
+            known, chosen = set(exp.get(key, [])), set(v.get(key, []))
+            checks.append(f"{key} {len(known & chosen)}/{len(chosen)} known"
+                          + (f", {len(chosen - known)} unverified" if chosen - known else ""))
+        return "; ".join(checks) + "; plan validation required"
     norm = lambda b: SAME_BOARD.get(b, b)
     mine = (norm(v.get("platform")), v.get("test_path"), v.get("scenario"))
     if mine == (norm(exp["platform"]), exp["test_path"], exp["scenario"]):
@@ -891,6 +902,7 @@ def previous_verdicts(run_dir: Path) -> dict[int, str]:
 
 
 def cmd_eval(args) -> None:
+    use_project(getattr(args, "project", PROJECT))
     run_dir = (Path(args.run_dir) if args.run_dir
                else RUNS if layout.run_dir() else max(RUNS.iterdir(), key=lambda p: p.name))
     gold, prev = load_gold(), previous_verdicts(run_dir)
@@ -934,9 +946,15 @@ def cmd_eval(args) -> None:
                   f"{r['secondary']} | {r['seconds'] / 60:.1f} min | {r['tool_calls']}"
                   f"{' (budget hit)' if r['budget_hit'] else ''} | {'; '.join(r['issues'])} |")
     md += ["", "Changed since earlier runs: " + (", ".join(changed) if changed else "none")]
+    if PROJECT == "contiki-ng":
+        md += ["", f"Abstentions (hold): {sum(r['got'] == 'hold' for r in rows)}; "
+               f"errors: {sum(r['got'] == 'error' for r in rows)}. "
+               "Gold label agreement does not establish instance-plan validity or unseen accuracy."]
     (run_dir / "scorecard.md").write_text("\n".join(md) + "\n")
     (run_dir / "scorecard.json").write_text(json.dumps(
-        {"run": run_dir.name, "correct": correct, "scored": scored, "rows": rows,
+        {"run": run_dir.name, "project": PROJECT, "correct": correct, "scored": scored, "rows": rows,
+         "abstentions": [r["pr"] for r in rows if r["got"] == "hold"],
+         "errors": [r["pr"] for r in rows if r["got"] == "error"],
          "changed": changed}, indent=2) + "\n")
     print("\n".join(md))
 
@@ -964,8 +982,10 @@ def cmd_run(args) -> None:
         sys.exit(f"unknown profile {args.profile!r}")
     prof = profiles[args.profile]
 
-    if args.gold and PROJECT != "zephyr":
-        sys.exit("--gold is the Zephyr gold set")
+    if args.gold and PROJECT not in ("zephyr", "contiki-ng"):
+        sys.exit(f"no gold set for {PROJECT}")
+    if args.gold and gold_file().get("_status", "finalized") != "finalized":
+        sys.exit("gold reference verification is not finalized")
     prs = list(dict.fromkeys((args.pr or []) + (sorted(load_gold()) if args.gold else [])))
     if not prs:
         sys.exit("give --pr and/or --gold")
@@ -1044,7 +1064,7 @@ def cmd_run(args) -> None:
         print(f"  verdicts in {layout.show(run_dir)}; scorecard: triage_prs.py --run-dir "
               f"{layout.run_dir()} eval")
         return
-    if PROJECT != "zephyr":       # the scorecard is against the Zephyr gold set
+    if PROJECT not in ("zephyr", "contiki-ng"):
         print(f"  verdicts in {layout.show(run_dir)}")
         return
     args.run_dir = str(run_dir)
@@ -1061,12 +1081,13 @@ def main() -> None:
                    help="repository being triaged: picks the instructions, clone, record and checks")
     r.add_argument("--profile", required=True, help="entry in triage/models.json")
     r.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
-    r.add_argument("--gold", action="store_true", help="every PR in triage/gold.json")
+    r.add_argument("--gold", action="store_true", help="every PR in the project's gold set")
     r.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
     r.add_argument("--parallel", type=int, default=4,
                    help="PRs in flight at once; the server takes 4 (--max-num-seqs)")
 
-    e = sub.add_parser("eval", help="score a run against triage/gold.json")
+    e = sub.add_parser("eval", help="score a run against the project's gold set")
+    e.add_argument("--project", choices=("zephyr", "contiki-ng"), default="zephyr")
     e.add_argument("run_dir", nargs="?", help="default: the latest run")
 
     args = p.parse_args()

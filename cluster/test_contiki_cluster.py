@@ -21,6 +21,21 @@ import node_worker
 
 
 class ContikiClusterTest(unittest.TestCase):
+    def test_scorecard_uses_contiki_gold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / 'triage').mkdir()
+            rep = {'run':'gold','prs':0,'funnel':{},'observations':{},'valid':[],
+                   'project':'contiki-ng'}
+            with (patch.object(sys,'argv',['report.py','--run',str(run),'--scorecard']),
+                  patch.object(report,'build',return_value=rep),
+                  patch.object(report,'markdown',return_value=''),
+                  patch.object(report,'to_ledger',return_value=(0,run/'ledger')),
+                  patch.object(report.subprocess,'run') as score,
+                  contextlib.redirect_stdout(io.StringIO())):
+                report.main()
+            self.assertEqual(score.call_args.args[0][-2:],['--project','contiki-ng'])
+
     def test_failed_observation_is_attempted_once_per_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

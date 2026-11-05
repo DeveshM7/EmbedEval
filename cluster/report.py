@@ -141,8 +141,9 @@ def main() -> None:
     n, book = to_ledger(run)      # normally already there: workers record as PRs settle
     print(f"  ledger: {n} new settled outcomes -> {book}")
     if args.scorecard and (run / "triage").exists():
+        project_args = ["--project", "contiki-ng"] if rep["project"] == "contiki-ng" else []
         subprocess.run([sys.executable, str(REPO / "scripts" / "triage_prs.py"), "--run-dir",
-                        str(run), "eval"], cwd=REPO, env=os.environ, stdout=subprocess.DEVNULL)
+                        str(run), "eval", *project_args], cwd=REPO, env=os.environ, stdout=subprocess.DEVNULL)
         print(f"  scorecard -> {run / 'triage' / 'scorecard.md'}")
 
 

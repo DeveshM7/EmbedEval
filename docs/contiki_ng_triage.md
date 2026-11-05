@@ -714,3 +714,13 @@ independent observed case lists; its original incorrect model plan remains
 invalid in the frozen evaluation. The new JSON pilot's successful validation
 also exercises persistent phase-specific raw logs. No new model pass over the
 15 gold cases has started yet.
+
+The tracked scoring dataset is `triage/gold-contiki-ng.json`, separate from
+Zephyr's `triage/gold.json`. `run --project contiki-ng --gold` selects this set
+without including its labels in model messages; it refuses to start while
+reference verification is pending. `eval --project contiki-ng` scores the
+Contiki labels, reports holds/errors separately, and compares claimed cases
+against measured references without treating that comparison as validation.
+`cluster/report.py --scorecard` passes the project's scoring selector.
+Local checks: 61 Contiki checks and 11 cluster checks pass, including separate
+gold selection, the 7/8 split, pending-reference gating and abstention scoring.
