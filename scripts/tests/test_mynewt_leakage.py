@@ -143,6 +143,10 @@ class LeakCheckTest(unittest.TestCase):
         facts = lc.fix_facts(self.up.clone, self.up.meta, self.up.patch,
                              "+    if (x > LIB_LIMIT_FOR_THE_FIX) { return LIB_LIMIT_FOR_THE_FIX; }\n")
         self.assertEqual(facts["fix_lines"], [])
+        # part of a longer line the tests add (808: a continuation line of a call)
+        facts = lc.fix_facts(self.up.clone, self.up.meta, self.up.patch,
+                             "+  y = 1; if (x > LIB_LIMIT_FOR_THE_FIX) { return LIB_LIMIT_FOR_THE_FIX; } z();\n")
+        self.assertEqual(facts["fix_lines"], [])
 
 
 class GoldPatchTest(unittest.TestCase):

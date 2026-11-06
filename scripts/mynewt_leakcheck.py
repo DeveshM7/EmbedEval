@@ -73,8 +73,10 @@ def fix_facts(clone: Path, meta: dict, fix_patch: str, test_patch: str) -> dict:
                 blobs[sha] = path
     base_blobs = set(_git(clone, "ls-tree", "-r", "--object-only", meta["base_commit"]).stdout.split())
     blobs = {sha: p for sha, p in blobs.items() if sha not in base_blobs}
-    tests = {l[1:].strip() for l in test_patch.splitlines() if l.startswith("+")}
-    candidates = [l for l in added_lines(fix_patch) if l not in tests]
+    # the image scan matches a line anywhere in a file, so a fix line that is
+    # part of a line the tests add is the tests' (shown by design), not a clue
+    tests = [l[1:] for l in test_patch.splitlines() if l.startswith("+")]
+    candidates = [l for l in added_lines(fix_patch) if not any(l in t for t in tests)]
     # absent from the base tree as a whole (a line that is already there is no clue)
     present = set()
     if candidates:

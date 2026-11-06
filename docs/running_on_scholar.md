@@ -711,8 +711,8 @@ python cluster/report.py --run mynewt-reval
   on each VALID instance (`evaluate:` in the config: model, steps, minutes, agents per
   node). With a local model it first submits the model server on `partition`
   (`scripts/serve_triage_model.sh`; `--server-job J` uses a running one) and reaches it over
-  an SSH tunnel; node 0 ends the server when every instance is graded. The agent sees the
-  repository at the base commit with the PR's tests, the problem statement and the test
+  an SSH tunnel; the evaluate job ends that server when its workers are done (a
+  continuation job starts its own). The agent sees the repository at the base commit with the PR's tests, the problem statement and the test
   names: not the fix's files, not the history, not the network.
 - **jobs** run a frozen copy of the code (`<run>/jobs/source-<time>/`, with
   `source-manifest.json` hashes), so editing the checkout never changes a queued job.

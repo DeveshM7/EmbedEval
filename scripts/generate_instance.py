@@ -360,6 +360,119 @@ def diff_rows(diff: str) -> list[tuple[str, str, int, str]]:
     return rows
 
 
+C_WORDS = {"int", "void", "char", "long", "short", "unsigned", "signed", "struct", "union", "enum",
+           "const", "volatile", "static", "return", "sizeof", "if", "else", "for", "while", "do",
+           "switch", "case", "break", "continue", "default", "goto", "typedef", "extern", "inline",
+           "define", "include", "ifdef", "ifndef", "endif", "defined", "TEST_ASSERT", "TEST_CASE",
+           "TEST_SUITE", "TEST_CASE_SELF", "TEST_CASE_DECL", "TEST_ASSERT_FATAL"}
+C_SOURCES = (".c", ".cc", ".cpp", ".cxx", ".C", ".h", ".hh", ".hpp")
+
+
+def enclosing_conditions(text: str, row: int) -> list[str]:
+    """The preprocessor conditions (#if/#ifdef/#ifndef/#elif lines) open at line `row`."""
+    stack: list[str] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if number >= row:
+            break
+        d = re.match(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)", line)
+        if not d:
+            continue
+        if d[1] in ("if", "ifdef", "ifndef"):
+            stack.append(line.strip())
+        elif d[1] == "elif" and stack:
+            stack[-1] = line.strip()
+        elif d[1] == "endif" and stack:
+            stack.pop()
+    return stack
+
+
+def derive_compile_expectations(clone: Path, base_commit: str, test_commit: str, fix_commit: str,
+                                fix_paths: list[str], changed: list[str], project: str,
+                                source: str, api: str) -> tuple[dict, dict] | None:
+    """When triage names one (source, API) pair, every pair the before-build
+    can fail on: each identifier the added lines of a changed test source use
+    that the production fix either adds (in its added lines, absent from the
+    base's production tree) or enables (defined at the base inside a
+    preprocessor condition on a macro the fix's production lines change, e.g.
+    Mbed TLS self-tests behind MBEDTLS_ARIA_C). A new build then fails on each
+    of them, at compile or at link, in an order a parallel build does not fix.
+    (expectations, gate proofs), or None when the named pair is neither."""
+    rows = diff_rows(run(["git", "-C", str(clone), "diff", "--unified=0",
+                          f"{base_commit}..{fix_commit}", "--", *fix_paths]).stdout)
+    words = lambda text: set(re.findall(r"\b[A-Za-z_]\w{3,}\b", text)) - C_WORDS
+    added = words("\n".join(t for _, sign, _, t in rows if sign == "+"))
+    macros = {w for w in words("\n".join(t for *_, t in rows)) if re.fullmatch(r"[A-Z][A-Z0-9_]+", w)}
+
+    used: dict[str, set[str]] = {}
+    for path in changed:
+        if is_test_path(path, project) and Path(path).suffix in C_SOURCES:
+            test_rows = diff_rows(run(["git", "-C", str(clone), "diff", "--unified=0",
+                                       f"{base_commit}..{test_commit}", "--", path]).stdout)
+            lines = "\n".join(t for _, sign, _, t in test_rows if sign == "+")
+            # what can fail the build: what the fix adds, and functions the tests call
+            used[path] = words(lines) & (added | set(re.findall(r"\b([A-Za-z_]\w+)\s*\(", lines)))
+    names = sorted(set().union(*used.values()) | {api})
+
+    def production_hits(*grep: str) -> list[tuple[str, int, str]]:
+        """(path, line, text) of one `git grep` over the base's production files."""
+        r = subprocess.run(["git", "-C", str(clone), "grep", "-n", "-I", *grep, base_commit],
+                           capture_output=True, text=True, errors="replace", timeout=300)
+        hits = []
+        for line in r.stdout.splitlines():
+            _, path, number, text = line.split(":", 3)
+            if is_source_path(path, project):
+                hits.append((path, int(number), text))
+        return hits
+
+    # one grep for every name at once; definitions are among the lines it finds
+    mentioned = set()
+    definitions: dict[str, list[tuple[str, int]]] = {}
+    pattern = re.compile(r"^[A-Za-z_][^;=]*?\b(\w+)\s*\(")
+    for path, number, text in production_hits("-w", "-F", *[a for n in names for a in ("-e", n)]):
+        mentioned |= words(text) & set(names)
+        if (Path(path).suffix in (".c", ".cc", ".cpp") and not text.rstrip().endswith(";")
+                and (m := pattern.match(text)) and m[1] in names):
+            definitions.setdefault(m[1], []).append((path, number))
+    texts: dict[str, str] = {}
+    known: dict[str, tuple[str, dict | None] | None] = {}
+    for name in names:
+        known[name] = None
+        if name in added and name not in mentioned:
+            known[name] = ("added", None)
+            continue
+        for path, number in definitions.get(name, []):
+            if path not in texts:
+                texts[path] = subprocess.run(["git", "-C", str(clone), "show", f"{base_commit}:{path}"],
+                                             capture_output=True, text=True, errors="replace").stdout
+            gate = next(((c, sorted(words(c) & macros)) for c in enclosing_conditions(texts[path], number)
+                         if words(c) & macros), None)
+            if gate:
+                known[name] = ("enabled", {"path": path, "line": number, "condition": gate[0],
+                                           "macro": gate[1][0]})
+                break
+
+    if known[api] is None:
+        return None
+    expectations, gates = {}, {}
+    for path, ids in used.items():
+        apis = sorted(n for n in ids if known[n])
+        if apis:
+            expectations[path] = apis
+            gates.update({n: known[n][1] for n in apis if known[n][0] == "enabled"})
+    if api not in expectations.get(source, []):
+        return None
+    return expectations, gates
+
+
+def package_texts(clone: Path, revision: str, path: str) -> list[str]:
+    """The C sources and headers of a test package at a revision."""
+    names = run(["git", "-C", str(clone), "ls-tree", "-r", "--name-only", revision, "--", path],
+                check=False).stdout.split()
+    return [subprocess.run(["git", "-C", str(clone), "show", f"{revision}:{n}"], capture_output=True,
+                           text=True, errors="replace").stdout
+            for n in names if Path(n).suffix in (".c", ".h")]
+
+
 def attached_note_proof(clone: Path, base_commit: str, test_commit: str, fix_commit: str,
                         fix_paths: list[str], path: str, api: str) -> dict:
     """Attest the test rows where GCC may attach a note naming `api`.
@@ -756,6 +869,7 @@ def generate_mynewt(
                                                 f"{test_commit}:test/testutil/src/testutil.c"]).stdout
         if not any(config in observer_config for config in ("tu_config.ts_suite_name", "ts_current_config->ts_suite_name")):
             sys.exit("ERROR: testutil-gdb requires a recognized upstream suite configuration")
+    compile_gates = {}      # API -> the base definition's condition on a macro the fix changes
     if compile_expectations is not None and failure_mode != "compile":
         sys.exit("ERROR: compile_expectations requires compile mode")
     if failure_mode == "compile":
@@ -824,6 +938,11 @@ def generate_mynewt(
                     path in fix_paths and path.endswith("/" + missing_api) and is_source_path(path, project)
                     for path in added):
                 sys.exit("ERROR: included header must be absent at base and added by the production fix")
+        if compile_expectations is None and fix_paths:
+            derived = derive_compile_expectations(clone, base_commit, test_commit, fix_commit, fix_paths,
+                                                  changed, project, compile_test_source, missing_api)
+            if derived and derived[0] != {compile_test_source: [missing_api]}:
+                compile_expectations, compile_gates = derived
         if compile_expectations is not None:
             if not isinstance(compile_expectations, dict) or not compile_expectations or not fix_paths:
                 sys.exit("ERROR: compile_expectations must map changed test sources to production API identifiers")
@@ -878,7 +997,7 @@ def generate_mynewt(
                     if api in (attached_notes.get(path) or []):
                         compile_notes.setdefault(path, {}).update(attached_note_proof(
                             clone, base_commit, test_commit, fix_commit, fix_paths, path, api))
-                    elif not re.search(rf"\b{re.escape(api)}\b", changed_production):
+                    elif api not in compile_gates and not re.search(rf"\b{re.escape(api)}\b", changed_production):
                         # This migration supplies an enum through the upstream
                         # dependency pin, rather than a core header definition.
                         header = dependency_constants.get(api)
@@ -968,6 +1087,22 @@ def generate_mynewt(
                          *([baseline_path] if baseline_path else [])])),
         "compatibility_cflags": triage.get("compatibility_cflags", []),
     })
+    # Cases a TEST_SUITE calls only inside `#if 0` never run: expecting them
+    # would fail every phase. Upstream disables tests this way (e.g. the six
+    # iat2_rat2 cases of ble_sm_sc_test.c, 2017-2019).
+    from triage_mynewt_prs import disabled_cases
+    clone = ensure_clone(project)
+    off = set(disabled_cases(package_texts(clone, test_commit, test_path)))
+    if not set(meta["fail_to_pass"]) - off:
+        sys.exit("ERROR: every fail_to_pass case is one upstream disabled with #if 0")
+    off_base = set(disabled_cases(package_texts(clone, base_commit, baseline_path or test_path)))
+    dropped = sorted((off & (set(meta["fail_to_pass"]) | set(meta["pass_to_pass"])))
+                     | (off_base & set(meta["baseline_tests"])))
+    meta["fail_to_pass"] = [n for n in meta["fail_to_pass"] if n not in off]
+    meta["pass_to_pass"] = [n for n in meta["pass_to_pass"] if n not in off]
+    meta["baseline_tests"] = [n for n in meta["baseline_tests"] if n not in off_base]
+    if dropped:
+        meta["disabled_tests_dropped"] = dropped
     if dependent_unittest:
         meta["test_support_roots"] = list(suites)
     # Test infrastructure can live outside the discovered unittest packages.
@@ -976,6 +1111,8 @@ def generate_mynewt(
         and not any(path.startswith(root) for root in meta["protected_paths"]))
     if compile_expectations is not None:
         meta["compile_expectations"] = compile_expectations
+    if compile_gates:
+        meta["compile_gates"] = compile_gates      # host metadata only: not in bench.json
         if dependency_header_proofs:
             meta["compile_dependency_header_proofs"] = dependency_header_proofs
         if compile_declarations:

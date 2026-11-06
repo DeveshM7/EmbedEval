@@ -374,14 +374,20 @@ try:
     phase = "build"
     # Fresh build and runtime directories prevent stale binaries or simulated flash.
     shutil.rmtree("/project/bin", ignore_errors=True)
+    # One compile at a time: a parallel build reaches other files first in some
+    # runs, so a failing build reported different errors from run to run.
+    # Newt 1.0.0-b1 has no --jobs option.
+    help_text = subprocess.run(["newt", "test", "--help"], cwd="/project", capture_output=True,
+                               text=True, errors="backslashreplace", timeout=30).stdout
+    jobs = ["-j", "1"] if re.search(r"--jobs\b", help_text) else []
     build = subprocess.run(
-        ["newt", "test", "@apache-mynewt-core/" + (args.baseline_test_path or meta["test_path"])],
+        ["newt", "test", *jobs, "@apache-mynewt-core/" + (args.baseline_test_path or meta["test_path"])],
         cwd="/project",
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="backslashreplace",
-        timeout=180,
+        timeout=480,
     )
     output = build.stdout + build.stderr
     print(output, flush=True)

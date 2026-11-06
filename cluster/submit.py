@@ -39,6 +39,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -90,6 +91,21 @@ def plan_nodes(cfg: dict, work_nodes: int, idle: int) -> tuple[int, int, str]:
 SOURCE_DIRS = ("cluster", "scripts", "harness", "templates", "docs")
 SOURCE_FILES = ("triage/models.json", "triage/mynewt_gold.json", "requirements.txt")
 SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "runs", "generated", "outputs"}
+
+
+def server_export(cfg: dict, run: Path, stamp: str) -> str:
+    """sbatch --export for a model-server job: only what the server script
+    reads, as the triage phase gives it (phase.sbatch's `env -i`). Everything
+    else from the submitting shell stays out: the login node's PATH finds an
+    x86 python3 that cannot run on the ARM GPU node."""
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.environ["HOME"],
+           "USER": os.environ["USER"], "LANG": "C.UTF-8", "PORT": "8000",
+           # its own compile cache: never one another server is writing into
+           "EMBEDEVAL_VLLM_CACHE": str(run / "jobs" / f"vllm-cache-{stamp}"),
+           **cluster_config.env_for(cfg)}
+    if any("," in v for v in env.values()):
+        sys.exit(f"a server environment value holds a comma (sbatch --export splits on it): {env}")
+    return ",".join(f"{k}={v}" for k, v in env.items())
 
 
 def freeze_source(source: Path, destination: Path) -> dict:
@@ -163,7 +179,7 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
         if local and not server and not args.dry_run:
             r = subprocess.run(["sbatch", "--parsable", "-p", s["partition"], "-J", f"{name}-server",
                                 f"--mem={s['mem']}", f"--cpus-per-task={s['cpus_per_node']}",
-                                f"--gres={s['gres']}",
+                                f"--gres={s['gres']}", "--export=" + server_export(cfg, run, stamp),
                                 "-o", str(jobs / "server-%j.log"), "-t", s["time_limit"],
                                 *([f"--dependency={deps[0]}"] if deps else []),
                                 str(source / "scripts" / "serve_triage_model.sh"), cfg["evaluate"]["model"]],
@@ -186,7 +202,11 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
         gres_line=f"#SBATCH --gres={s['gres']}" if model_phase else "",
         mem=s["mem"] if model_phase else s["build_mem"], time_limit=s["time_limit"],
         name=name, run=run, repo=source, config=frozen, python=python, phase=mode,
-        limit_min=minutes(s["time_limit"]), report_min=REPORT_MIN, stamp=stamp))
+        limit_min=minutes(s["time_limit"]), report_min=REPORT_MIN, stamp=stamp,
+        # the model server this job started serves it alone (a later job starts its own):
+        # it ends with the workers, not at its own time limit, holding a job slot
+        end_server=(f"scancel {cfg['evaluate_server_job']}\n"
+                    if cfg.get("evaluate_server_owned") else "")))
     print(f"run {run.name}: {len(todo)} PRs to {mode}")
     print(f"  nodes: {lowest}-{wanted} on {partition} ({idle} idle; max {s['nodes_max']})"
           + (f"\n  note: {note}" if note else ""))

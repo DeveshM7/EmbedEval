@@ -17,11 +17,11 @@ and the tests actually run.
 - **NuttX and RIOT** instances are hand-built **Docker** images in
   `docker/instances/`.
 
-- **Mynewt** has 48 validated Apptainer instances under
+- **Mynewt** has 63 validated Apptainer instances under
   `apptainer/instances/mynewt/`, built and run on Linux x86_64 with
   `hw/bsp/native` and `compiler/sim`.
 
-**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT, plus 48 Apache Mynewt.
+**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT, plus 63 Apache Mynewt.
 
 ---
 
@@ -242,7 +242,7 @@ together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 
 ## Apache Mynewt
 
-The 48 promoted instances (`apptainer/instances/mynewt/`) build and run on Linux
+The 63 promoted instances (`apptainer/instances/mynewt/`) build and run on Linux
 x86_64 (historical native builds need multilib). An agent run gets exactly the
 task: mynewt-core at the base commit with the PR's tests committed (history:
 that one commit, fetched `--depth 1`), the problem statement and the test names.
@@ -267,6 +267,10 @@ instructions. Validation records baseline diagnostics, then requires a failure
 attributable to the selected production change and a pass with that change
 applied; runtime, compile, configuration and dependency failures have separate
 evidence rules, and a generic build error or timeout is not a regression oracle.
+A compile oracle accounts for every error of the before-build: when the tests
+need several functions the fix adds (or turns on, behind a configuration macro
+the fix changes), the generator lists each one. `run_tests` builds with
+`newt test -j 1`, so a failing build reports the same errors in every run.
 
 ---
 

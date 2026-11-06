@@ -571,8 +571,9 @@ def mynewt_validate(run: Path, pr: int, lg: Path, left, venv: dict):
 # (harness/run.py: no network, the problem statement and the tests only), grade
 # the patch in a fresh container (harness/evaluate_patches.py), remove the
 # image. A local model is reached through an SSH tunnel to the node of the
-# model-server job (one submit.py started, which node 0 ends when the queue is
-# empty, or a running one named with --server-job, which is left alone). Outputs are the run's: <run>/outputs/mynewt/<model>/<PR>/ (patch,
+# model-server job (one submit.py started, which the job script ends once the
+# workers are done, or a running one named with --server-job, which is left
+# alone). Outputs are the run's: <run>/outputs/mynewt/<model>/<PR>/ (patch,
 # trajectory) and <run>/outputs/grades/<iid>.json.
 
 
@@ -703,9 +704,6 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     finally:
         if tunnel is not None:
             kill_group(tunnel.pid)
-    if server and cfg.get("evaluate_server_owned") and N == 0 and not status.evaluate_todo(run):
-        subprocess.run(["scancel", server])
-        log(f"every instance evaluated: model server job {server} ended")
 
 
 # ---------------------------------------------------------------- main

@@ -151,25 +151,56 @@ def suite_sources(record: dict) -> dict[str, str]:
             if isinstance(entry.get("content"), str)}
 
 
+def without_disabled(text: str) -> str:
+    """`text` without the code `#if 0` switches off (an `#else`/`#elif` branch
+    after it stays). Upstream disables tests this way: a TEST_SUITE body can
+    keep calls to cases inside `#if 0`, and those cases never run."""
+    out, stack = [], []          # per open #if: is the current branch dead (#if 0)?
+    for line in text.splitlines(keepends=True):
+        dead = any(stack)
+        d = re.match(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)", line)
+        if d and d[1] in ("if", "ifdef", "ifndef"):
+            stack.append(d[1] == "if" and re.fullmatch(
+                r"\(?\s*0\s*\)?\s*(?:/\*.*?\*/\s*|//.*)?", d[2].strip()) is not None)
+        elif d and d[1] in ("elif", "else") and stack:
+            stack[-1] = False
+        elif d and d[1] == "endif" and stack:
+            stack.pop()
+        if not dead and not any(stack):
+            out.append(line)
+    return "".join(out)
+
+
+def suite_cases(text: str) -> list[str]:
+    """suite/testcase names a package's sources run: each TEST_SUITE body
+    calls the TEST_CASE functions it runs."""
+    cases = set(re.findall(r"\bTEST_CASE(?:_SELF|_TASK)?\(\s*(\w+)\s*\)", text))
+    names = []
+    for m in re.finditer(r"\bTEST_SUITE\(\s*(\w+)\s*\)\s*\{", text):
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+        for call in re.findall(r"\b(\w+)\s*\(\s*\)\s*;", text[m.end():i]):
+            if call in cases:
+                names.append(f"{m.group(1)}/{call}")
+    return list(dict.fromkeys(names))
+
+
+def disabled_cases(texts: list[str]) -> list[str]:
+    """Cases a TEST_SUITE body calls only inside `#if 0`."""
+    live = set(suite_cases("\n".join(without_disabled(t) for t in texts)))
+    return [n for n in suite_cases("\n".join(texts)) if n not in live]
+
+
 def inventory(record: dict) -> dict[str, list[str]]:
-    """suite/testcase names per test package, computed from the sources: each
-    TEST_SUITE body calls the TEST_CASE functions it runs."""
+    """suite/testcase names per test package, computed from the sources (cases
+    called only inside `#if 0` never run, so they are not listed)."""
     out = {}
     for root, suite in (record.get("test_suites") or {}).items():
         texts = [e["content"] for e in suite.get("files", {}).values()
                  if isinstance(e.get("content"), str)]
-        text = "\n".join(texts)
-        cases = set(re.findall(r"\bTEST_CASE(?:_SELF|_TASK)?\(\s*(\w+)\s*\)", text))
-        names = []
-        for m in re.finditer(r"\bTEST_SUITE\(\s*(\w+)\s*\)\s*\{", text):
-            depth, i = 1, m.end()
-            while i < len(text) and depth:
-                depth += {"{": 1, "}": -1}.get(text[i], 0)
-                i += 1
-            for call in re.findall(r"\b(\w+)\s*\(\s*\)\s*;", text[m.end():i]):
-                if call in cases:
-                    names.append(f"{m.group(1)}/{call}")
-        out[root] = list(dict.fromkeys(names))
+        out[root] = suite_cases("\n".join(without_disabled(t) for t in texts))
     return out
 
 

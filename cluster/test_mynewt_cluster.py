@@ -129,16 +129,24 @@ class PrepareTest(unittest.TestCase):
             self.assertEqual(extra, {42: {"instance": "mynewt__mynewt-42"}})
             self.assertTrue((tmp / "run" / "sources" / "mynewt__mynewt-42" / "observed_before.log").exists())
 
-    def test_only_plain_instance_ids_are_revalidated(self):
+    def test_a_cross_pr_instance_is_keyed_by_its_tests_pr(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            (tmp / "src" / "mynewt__mynewt-42-t50").mkdir(parents=True)
-            (tmp / "src" / "mynewt__mynewt-42-t50" / "metadata.json").write_text("{}")
+            for iid in ("mynewt__mynewt-42-t50", "zephyr__zephyr-7"):
+                (tmp / iid / "src" / iid).mkdir(parents=True)
+                (tmp / iid / "src" / iid / "metadata.json").write_text("{}")
             (tmp / "clone.git" / "objects").mkdir(parents=True)
-            args = SimpleNamespace(instances=str(tmp / "src"), redo=False, pr=None, all=False)
+            cfg = {"derived": {"mynewt_clone": str(tmp / "clone.git")}}
+            stage, extra = {}, None
+            with contextlib.redirect_stdout(io.StringIO()):
+                args = SimpleNamespace(instances=str(tmp / "mynewt__mynewt-42-t50" / "src"), redo=False)
+                prs, _, extra = prepare.plan_mynewt(args, cfg, tmp / "run", {}, tmp / "logs",
+                                                    lambda p: None, stage, {}, {})
+            self.assertEqual(prs, [50])
+            self.assertEqual(extra, {50: {"instance": "mynewt__mynewt-42-t50"}})
+            args = SimpleNamespace(instances=str(tmp / "zephyr__zephyr-7" / "src"), redo=False)
             with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
-                prepare.plan_mynewt(args, {"derived": {"mynewt_clone": str(tmp / "clone.git")}}, tmp / "run",
-                                    {}, tmp / "logs", lambda p: None, {}, {}, {})
+                prepare.plan_mynewt(args, cfg, tmp / "run2", {}, tmp / "logs", lambda p: None, {}, {}, {})
 
 
 class WorkerTest(unittest.TestCase):
@@ -246,6 +254,33 @@ class SubmitTest(unittest.TestCase):
                 self.assertIn("--phase validate", script)
             with self.assertRaises(SystemExit):
                 submit.submit_phase(SimpleNamespace(mode="pipeline", after=None), cfg, run)
+
+    def test_the_model_server_job_gets_a_clean_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = write_run(Path(tmp) / "r", [{"pr": 1, "stage": "to validate", "instance": "mynewt__mynewt-1"}])
+            cfg = config.load()
+            cfg["slurm"].update(build_partition="cpu", partition="spark-interactive")
+            calls = []
+
+            def fake(cmd, **kw):
+                calls.append(cmd)
+                out = "77;scholar\n" if cmd[0] == "sbatch" else ""
+                return SimpleNamespace(stdout=out, stderr="", returncode=0)
+            args = SimpleNamespace(mode="evaluate", after="5", dry_run=False, idle=2, server_job=None)
+            with patch.object(submit.subprocess, "run", side_effect=fake), \
+                    patch.dict(submit.os.environ, {"PATH": "/apps/cent7/anaconda/bin:/usr/bin"}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                submit.submit_phase(args, cfg, run)
+            server = next(c for c in calls if c[0] == "sbatch" and any("-server" in a for a in c))
+            export = next(a for a in server if a.startswith("--export="))
+            self.assertNotIn("anaconda", export)
+            self.assertIn("PATH=/usr/local/bin:/usr/bin", export)
+            self.assertIn("EMBEDEVAL_MODELS=", export)
+            self.assertIn("EMBEDEVAL_VLLM_CACHE=" + str(run / "jobs" / "vllm-cache-"), export)
+            # the job ends the server it started once its workers are done
+            script = next((run / "jobs").glob("evaluate-*.sbatch")).read_text()
+            self.assertIn("scancel 77\n", script)
+            self.assertLess(script.index("srun"), script.index("scancel 77"))
 
 
 if __name__ == "__main__":

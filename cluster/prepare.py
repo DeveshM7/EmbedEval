@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -101,8 +102,11 @@ def plan_mynewt(args, cfg: dict, run: Path, env: dict, logs: Path, skip_known, s
         prs = []
         for iid in ids:
             project, pr = inst_mod.split_instance(iid)
-            if project != "mynewt" or not pr.isdigit():
-                sys.exit(f"{iid}: only plain mynewt__mynewt-<PR> instances can be revalidated")
+            m = re.fullmatch(r"(\d+)(?:-t(\d+))?", pr)
+            if project != "mynewt" or not m:
+                sys.exit(f"{iid}: only mynewt__mynewt-<PR> (or <fix PR>-t<test PR>) instances "
+                         "can be revalidated")
+            pr = m.group(2) or m.group(1)      # a run keys a PR by its tests' PR, as triage does
             src = run / "sources" / iid
             src.mkdir(parents=True, exist_ok=True)
             for f in ("metadata.json", "test_patch.diff", "observed_before.log"):
