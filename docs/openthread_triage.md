@@ -32,10 +32,10 @@ Policy for this port:
   4, rule 4).
 - Bug fixes and small features are both fine (`change_type`). Linked issues are
   not required.
-- Most candidates are not tasks. In a source-read sample of the candidate pool
-  (2024-11 to 2026-10) roughly one in five had a usable runtime oracle; the rest
-  were option-gated, incidental compile failures, or did not detect anything (see section 4).
-  Rejecting or holding is the normal outcome; accepting needs a traced chain.
+- Most candidates are not tasks: roughly one in five has a usable runtime
+  oracle; the rest are option-gated, incidental compile failures, or detect
+  nothing (see section 4). Rejecting or holding is the normal outcome;
+  accepting needs a traced chain.
 
 What the hard filters already prove (scripts/openthread_candidates.py): the
 commit is a squash-merged PR (title ends `(#N)`), not a revert, changes files
@@ -72,9 +72,8 @@ fails before the fix. That is your job.
   over time; the record's `profile_cmake_options` list what the profile already
   sets, and its `ci_cmake_options` come from the base commit's own
   `.github/workflows/unit.yml`.
-- **Pool and eras** (226 candidates, merged 2024-11 to 2026-10; 4-13 per month
-  in 2025, 6-20 per month in 2026). Unit-only 89%, gtest-only 6%, both
-  5%. Layout changes that matter for selection:
+- **Eras** (candidates are merged 2024-11 to 2026-10). Layout changes that
+  matter for selection:
   - mbedtls is vendored under `third_party/mbedtls/repo` for bases before
     2025-11-12 and a git submodule (with a nested submodule) afterwards.
   - GoogleTest: bases before 2025-03-25 download it with `FetchContent` at
@@ -94,8 +93,7 @@ fails before the fix. That is your job.
     cmake 3.10 minimum are the same in all eras.
 - **Shared test helpers.** `tests/unit/test_platform.*`, `tests/unit/test_util.*`
   and `tests/gtest/fake_platform.*` are linked into many executables and belong to
-  no single one. About one candidate in seven changes one. A helper edit detects
-  nothing by itself; accept only if a named executable's own changed assertions
+  no single one. A helper edit detects nothing by itself; accept only if a named executable's own changed assertions
   fail without the production fix.
 - **Local test guards.** Large tests wrap their body in `#if` blocks, often
   through a locally defined `ENABLE_..._TEST` macro (a conjunction of several
@@ -166,8 +164,6 @@ Run: a gtest target's binary is executed and results are read per case
 (`Suite.Case`); a unit test is executed through ctest by its `ot-test-<name>`
 name, and passes or fails as a whole executable (`FAILED` plus a non-zero exit at
 the first failed `VerifyOrQuit`/`SuccessOrQuit`, otherwise "All tests passed").
-On the pinned revision the FTD gtest target (13 cases) and one unit executable
-built and passed in about 30-35 s each.
 
 Not verified, so treat as source-predicted: any base commit other than the
 pinned revision (older eras were never built here: vendored mbedtls, the network
