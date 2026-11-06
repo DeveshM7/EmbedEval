@@ -282,10 +282,13 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> N
 
 
 def statements(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> None:
-    """Problem statements, written by the served model, for finalized
-    observation-only instances (they have no triage verdict to take one from)."""
-    todo = status.statement_todo(run)
-    log(f"statements: {len(todo)} instances without one")
+    """Problem statements, written by the served model, for VALID instances
+    without one (observation-only instances have no triage verdict to take
+    one from); with statement_recheck, existing statements are checked under
+    the current rules and replaced when they fail."""
+    recheck = bool(cfg.get("statement_recheck"))
+    todo = status.statement_todo(run, recheck)
+    log(f"statements: {len(todo)} instances to " + ("write or recheck" if recheck else "write"))
     if not todo:
         return
     caps, profile = cfg["caps"], cfg["model"]["profile"]
@@ -298,14 +301,18 @@ def statements(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) 
         log(f"model server ready after {(time.time() - t0) / 60:.1f} min")
         deadline = t0 + (minutes - 5) * 60
 
+        tried: set[int] = set()     # a statement that failed is not retried in this job
+
         def one(pr: int) -> None:
             left = (deadline - time.time()) / 60
             if left < 2 or _stopping.is_set():
                 return
+            tried.add(pr)
             start = time.time()
-            folder = run / "finalized" / f"contiki-ng__contiki-ng-{pr}"
+            folder = run / status.instance_folder(run, pr) / f"contiki-ng__contiki-ng-{pr}"
             rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "statement", "--project",
-                       cfg["project"], "--profile", profile, "--instance", str(folder)],
+                       cfg["project"], "--profile", profile, "--instance", str(folder),
+                       *(["--recheck"] if recheck else [])],
                       LOGS / f"statement-{pr}.log", min(caps["triage_pr"], left), env)
             if rc == 143:
                 return
@@ -314,7 +321,7 @@ def statements(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) 
             if record(run, pr, "statement", info):
                 log(f"statement {pr}: {info['state']} ({info['minutes']} min)")
 
-        q = claims.Queue(run, "statement", ME, lambda pr: pr in status.statement_todo(run))
+        q = claims.Queue(run, "statement", ME, lambda pr: pr not in tried and pr in status.statement_todo(run, recheck))
         drain(q, todo, one, cfg["parallel"]["triage_per_node"], deadline - 2 * 60)
     finally:
         kill_group(server.pid)

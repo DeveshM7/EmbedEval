@@ -10,11 +10,8 @@ How the parts work together, and how to change them, is in
 
 Paths below use `$SCRATCH` for `/scratch/scholar/$USER`.
 
-Contiki-NG uses the same cluster entrypoints with `project: contiki-ng`, a
-separate scratch root, and an x86 CPU build partition. Its `observe`, `triage`
-and `validate` jobs run separately; see
-[Contiki-NG cluster execution](contiki_ng_triage.md#cluster-execution) for the
-configuration, supported profiles and current validation evidence.
+Contiki-NG uses the same cluster entrypoints with separate phase jobs; see
+[section 12](#12-contiki-ng-runs).
 
 ---
 
@@ -658,3 +655,73 @@ they break if moved. Delete them instead.
 `scripts/` still work on their own, but without `--run-dir` they write next
 to the code (`candidates/`, `generated/`, `triage/runs/`) and into
 `$SCRATCH/embedeval-twister`, as they did before run folders existed.
+
+---
+
+## 12. Contiki-NG runs
+
+The same orchestration runs Contiki-NG (`project: contiki-ng` in the cluster
+config; the run's manifest records it). Use a separate scratch root, and set
+`slurm.build_partition` to an x86 CPU partition: builds, observation and
+validation run on x86_64, the model on Spark. CPU jobs use
+`slurm.build_cpus_per_node`, `build_mem` and `build_python`; Spark jobs keep
+`cpus_per_node`, `mem` and `triage_python`. `paths.contiki_ng_image` may point
+at a local copy of the upstream CI image. The model's instructions are
+[contiki_ng_triage.md](contiki_ng_triage.md).
+
+```bash
+P=/path/to/python3   # one with the pipeline's dependencies
+$P cluster/prepare.py --name c-check --pr 3246 3020              # triage run
+$P cluster/prepare.py --name c-obs --pr ... --observe-only --observe-profile native
+$P cluster/submit.py triage   --run c-check --config spark.yaml
+$P cluster/submit.py validate --run c-check --config cpu.yaml --after <triage job>
+$P cluster/submit.py observe  --run c-obs   --config cpu.yaml
+$P cluster/submit.py statement --run c-obs  --config spark.yaml --after <observe job>
+$P cluster/report.py --run c-check
+```
+
+What differs from Zephyr:
+
+- **Separate phases.** There is no `pipeline` mode: `triage` and `statement`
+  run on Spark, `observe` and `validate` on CPU nodes. `submit.py --after JOB`
+  chains a job behind another, so a campaign keeps within the two-job limit.
+  Each submission freezes the source tree under `<run>/jobs/source-<stamp>/`.
+- **prepare**: PRs, hard filters (touches `tests/` or `regression-tests/`, not
+  a revert) and enrichment are `scripts/contiki_ng_candidates.py`'s. Records
+  carry an enrichment version; a stale record is refused. `--observe-only`
+  makes a model-free run, with `--observe-profile native|cooja|script` for PRs
+  whose units span profiles.
+- **Profiles**: `native` (x86_64 `TARGET=native` unit tests), `cooja`
+  (scenarios, run in the upstream CI image of the base's era: Ant-era 32-bit
+  images to 2022-11, then the newest Gradle-era image on or before the base;
+  `ci_image` in `instance.json`), `script` (script-base). Cross-compiled ARM/NXP
+  ports, Renode, TUN/TAP and external-service fixtures are not supported; such
+  PRs are holds.
+- **observe** runs every supported affected unit before and after the fix with
+  no model plan. An observed-valid PR is finalized in the same slot: generated
+  from the observation into `<run>/finalized/`, built and validated with three
+  before repeats. Statements for these come from `statement` jobs.
+- **statement** asks the model for the problem statement of each VALID
+  instance without one. `--recheck` also checks existing statements under the
+  current rules (`STATEMENT_CHECK`: no quoted fix lines, no fix identifiers the
+  tests do not use, and a fresh model review of whether it gives the fix away),
+  keeps those that pass, and regenerates the rest; the old wording stays under
+  `superseded_statements` in `metadata.json`. A statement that still fails is
+  cleared, so the instance cannot be promoted. Statements are outside the recipe
+  fingerprint.
+- **Runner details**: a native binary killed by a signal is rerun once under
+  gdb, and the innermost `unit_test_function_<name>` frame marks that case
+  `error`; a timeout is never attributed. Before repeats run `make clean` first.
+  Compile oracles also accept a missing header when the fix creates it and its
+  added lines declare a selected symbol. Ant-era Cooja results come from
+  `<scenario>.testlog`; mote-load failures are build failures. 32-bit images run
+  from a node-local sandbox (their SIF inodes break 32-bit `stat`), so graders
+  must start instances through `apptainer_util.exec_args`. On Scholar, TUN/TAP
+  devices cannot be opened from the user namespace.
+- **report**: an observation run's rows follow `observation`, `finalize` and
+  statement outcomes; only a promotable instance is VALID and settles its PR in
+  the ledger.
+- **promotion** stays manual, after review: `scripts/promote_instance.py
+  --source <run>/instances` (triage runs) or `--source <run>/finalized`
+  (observation runs). Instance images are not pushed to a registry.
+

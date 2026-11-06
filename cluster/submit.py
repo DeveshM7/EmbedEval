@@ -124,6 +124,8 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="write the job script, do not submit")
     p.add_argument("--after", metavar="JOB", help="start only once this Slurm job has ended (a chain "
                    "keeps at most two jobs running)")
+    p.add_argument("--recheck", action="store_true", help="statement mode: also check existing "
+                   "statements under the current rules, replacing those that fail")
     p.add_argument("--idle", type=int, help="assume this many idle nodes (testing)")
     args = p.parse_args()
 
@@ -175,7 +177,10 @@ def main() -> None:
     # Observation jobs also finalize what observed valid; statements are model work.
     observe_left = (list(dict.fromkeys(status.observe_todo(run) + status.finalize_todo(run)))
                     if project == "contiki-ng" else [])
-    statement_left = status.statement_todo(run) if project == "contiki-ng" else []
+    if args.recheck and args.mode != "statement":
+        sys.exit("--recheck applies to statement jobs")
+    cfg["statement_recheck"] = args.recheck
+    statement_left = status.statement_todo(run, args.recheck) if project == "contiki-ng" else []
     counts = {"triage": len(triage_left), "observe": len(observe_left),
               "validate": len(validate_left), "statement": len(statement_left)}
     if (not triage_left and not validate_left) if args.mode == "pipeline" else not counts[args.mode]:

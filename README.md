@@ -245,7 +245,8 @@ cluster/            the Zephyr pipeline on Scholar: config, setup.py, prepare.py
                     submit.py, node_worker.py, report.py, the job template
 docs/               running_on_scholar.md (using the pipeline),
                     pipeline_internals.md (how it works), pr_triage.md (the
-                    model's triage instructions), stage1_pr_candidates.md (the gold PRs)
+                    model's triage instructions; contiki_ng_triage.md for
+                    Contiki-NG), stage1_pr_candidates.md (the gold PRs)
 triage/             models.json (model profiles), gold.json (the gold set)
 scripts/            Zephyr pipeline: filter_candidates.py, zephyr_env.py,
                     dry_run.py, triage_prs.py, generate_instance.py,

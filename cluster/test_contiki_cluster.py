@@ -113,6 +113,25 @@ class ContikiClusterTest(unittest.TestCase):
             self.assertEqual(status.finalize_todo(run), [])
             self.assertEqual(status.statement_todo(run), [7])
 
+    def test_statement_recheck_covers_triage_instances_once_per_check_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / 'manifest.json').write_text(json.dumps({'prs': [{'pr': p, 'stage': 'to triage'}
+                                                                    for p in (1, 2, 3, 4)]}))
+            def put(pr, valid, meta):
+                d = run / 'instances' / f'contiki-ng__contiki-ng-{pr}'
+                d.mkdir(parents=True)
+                (d / 'validation.json').write_text(json.dumps({'valid': valid}))
+                (d / 'metadata.json').write_text(json.dumps(meta))
+            put(1, True, {'problem_statement': 'old wording'})
+            put(2, True, {'problem_statement': 'checked',
+                          'statement_check': {'version': status.STATEMENT_CHECK}})
+            put(3, False, {'problem_statement': ''})
+            put(4, True, {'problem_statement': ''})
+            self.assertEqual(status.instance_folder(run, 1), 'instances')
+            self.assertEqual(status.statement_todo(run), [4])
+            self.assertEqual(status.statement_todo(run, recheck=True), [1, 4])
+
     def test_not_observable_generation_is_final(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

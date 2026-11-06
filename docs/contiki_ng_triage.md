@@ -1,260 +1,214 @@
-# Contiki-NG triage contract
+# Contiki-NG PR triage
 
-Status: integrated adapter undergoing bounded Scholar pilot verification.
-A full campaign requires the remaining profile/era controls below. Supported
-selections pass the inventory checker before generation and named-case validation.
-Detailed research and logs live in `triage/runs/contiki-research/` (ignored).
+Instructions for the model that decides which merged Contiki-NG PRs can become
+EmbedEval benchmark instances.
 
-## Run contract
+---
 
-- Repository: https://github.com/contiki-ng/contiki-ng, default branch `develop`.
-  Research pin: `c02eedae8b187123069891f81a7111b833701f9c` (2026-10-25).
-  This is Contiki-NG, not the legacy Contiki repository.
-- Work only on `contiki-ng-port` in the EmbedEval-contiki worktree. Starting
-  EmbedEval revision: `52744b392e3f9bf212938076f69ad906b7b055f3`.
-  Origin refreshed before comparison; checkout was clean and ten commits ahead
-  of origin/main. Reuse generic observe, after-fix, profile and compile-oracle
-  infrastructure; do not transplant OpenThread discovery or CMake assumptions.
-- Goal: maximum valid-instance yield with trustworthy triage. Small-pilot triage
-  tuning is allowed (user clarification, 2026-11-04); validating the full pool
-  to tune triage is not. Validation remains the gate. Use upstream tests only,
-  never authored regression substitutes.
-- Runtime and semantic compile oracles are allowed. A compile failure qualifies
-  only when the PR supplies the very interface/build fix that its tests need;
-  incidental incompatibilities do not qualify. Attributable configuration/dependency-only
-  fixes are also allowed (user decision, 2026-11-03).
-- Research history: official merged Contiki-NG PRs through the research pin,
-  including merges outside the `develop` first-parent chain and archived merge
-  objects no longer reachable from `develop`. Verify each PR against GitHub
-  metadata; imported legacy Contiki PR numbers must not be assigned NG PR URLs.
-  Full NG history is the confirmed campaign window (user decision, 2026-11-03).
-- Execution: Scholar, Apptainer, workspace
-  `/scratch/scholar/zhan5136/embedeval-contiki`. Do not access the OpenThread
-  workspace or `~/EmbedEval`. Shared generic images may be read without mutation.
-  One Contiki job at a time while OpenThread owns the other slot; total limit two.
-  Spark jobs require `--gres=gpu:1`, `--export=NONE`, a clean `env -i`, and
-  `/usr/sbin` in PATH. Maximum job wall time four hours.
-- Triage: Scholar vLLM profile `qwen38-nvfp4` from `triage/models.json`.
-  No paid API calls without asking. No push, publication or promotion without
-  asking. Commit coherent steps as `zhan5136 <zhan5136@purdue.edu>`.
-- No pool-wide observation, triage, or finalization before the user has reviewed
-  research and the readiness gate passes. Bounded research controls are allowed.
+## What you are deciding
 
-## Repository, configuration and test model
+A benchmark instance gives a coding agent the Contiki-NG repository
+(https://github.com/contiki-ng/contiki-ng, not the legacy Contiki) at the
+commit **before** a PR landed, plus the upstream tests that PR added or
+changed. The agent has to change production code so that those tests pass,
+without seeing the PR's own changes.
 
-Modern production is under `os/` and `arch/`, with application code also in
-`examples/`; neither examples nor tools are universally non-production.
-Before PR #63 (September 2017), production uses `core/`, `apps/`, and `drivers/`,
-and tests use `regression-tests/`. Inspect the candidate's own revisions.
+After you accept a PR, the instance is built and **validated**: the units you
+select are built and run on the tree before the change (the cases you name
+must **fail**), the PR's production change is applied, and they run again
+(every case of the selected units must **pass**). The before state is run
+several times and must fail the same way each time. An instance that does not
+behave that way is thrown away.
 
-The build is GNU Make. `Makefile.include` finds `project-conf.h` and defines
-`PROJECT_CONF_PATH`. `os/contiki.h` includes platform `contiki-conf.h` and then
-`contiki-default-conf.h`; the native platform includes project configuration
-before applying platform values. `DEFINES`, `MODULES`, `MAKE_NET`, `MAKE_MAC`,
-`WITH_*`, target makefiles and derived macros also affect the compiled program.
-Never decide test eligibility by macro names alone.
+Your job is to predict that outcome from the PR, and to accept the PRs that
+will validate. The question is:
 
-`tests/Makefile.compile-test` interprets colon-separated `EXAMPLES` as
-application/target, optional runner (`RUN_FILE=1`), then Make assignments. It
-builds with `WERROR=1`; `CLANG_WARNINGS=1` adds a Clang pass. Keep assignments in
-the profile identity, especially both HEAPMEM_DEBUG and IP64_CONF_DHCP variants.
-`tests/Makefile.simulation-test` discovers `??-*.csc`, runs Cooja with fixed
-BASESEED/RUNCOUNT, and uses scenario scripts as assertions. A `.csc` carries its
-own mote types, source/firmware paths and build commands. Resolve those instead
-of assuming every simulation uses the same architecture.
+> **Does this PR make a behavioural change, and does one of its upstream tests
+> detect that change -- failing before it and passing after it -- under a
+> profile we can run?**
 
-Native unit cases use `UNIT_TEST_REGISTER`, `UNIT_TEST_RUN`, and
-`UNIT_TEST_PASSED`. `os/services/unit-test/unit-test.c` reports description,
-result, source exit point and assertion count. Registration alone does not prove
-execution. Source inventory at the pin finds 34 C files with 391 registrations;
-these are not 391 independently runnable or validated cases. Map descriptions
-to symbols, application Makefiles, invoked cases and profile guards.
+Only upstream tests count. Nothing is written for the benchmark: never edit an
+upstream assertion, never move production code into the before state, never
+toggle unrelated options to manufacture a failure.
 
-Shared consumers include `tests/utils.sh`, `08-native-runs/run-one.sh`,
-`Makefile.compile-test`, `Makefile.simulation-test`, and the production unit-test
-module. Helper-only changes need a concrete affected consumer, not an invented
-standalone executable. Script-base LC/memb programs report their own assertions.
-Cooja units are scenarios, not gtest cases.
+---
 
-Use the compiler's actual preprocessing command (upstream `build/<target>/obj/*.e`
-rule) to resolve bodies. Preserve include provenance and macro dumps, and mark
-unresolved expressions unknown. Research verified that IP64_CONF_DHCP=0 removes
-`IP64_TAP_MODE dhcp` and keeps `static`, while =1 reverses them. Compiler line/definition evidence is recorded by the research resolver. Guarded
-native selections remain holds until their own profile has compiler-backed proof.
-The TAP runtime agreement control was blocked by device access permissions.
+## What has already been checked for you
 
-## CI profiles and worker status
+Scripts ran before you and settled the mechanical questions:
 
-Source: `.github/workflows/build.yml`, each `tests/??-*/Makefile`, and shared
-runners at the pin. Linux executes `cimake -C tests/??-${test}` and then
-`tests/check-test.sh`; cimake sets RELSTR and CFLAGS_DATE. macOS uses make after
-installing its own dependencies. The matrix has 17 suites across Linux/macOS,
-with seven macOS exclusions (27 combinations). MacOS is out of worker scope.
+- **The PR touches tests.** Hard filters kept merged PRs that change files
+  under `tests/` (or, before September 2017, `regression-tests/`) and are not
+  reverts. They do not prove that any test exercises the production change,
+  that the change is behaviour, or that anything fails before the fix.
+- **Which units can run.** `test_inventory` lists the affected runnable units
+  under our profiles, each with its `profile`, its case names, whether its test
+  body is compiled in (`profile_evidence`), what it needs at the base
+  (`before_dependencies`, `before_compile`) and which upstream Make rules and
+  scenarios use it (`execution_evidence`). `inventory_holds` lists affected
+  tests that cannot be selected, and why. `ci_sources` gives the upstream CI
+  configuration at the base commit.
+- **Symbols the tests need from the fix.** `compile_requirements` lists names
+  that the added test lines use and the production change adds, and whether
+  each exists at the base (`at_base`).
+- **Your verdict's form.** After you answer, code checks that your units are
+  in the inventory under your profile, that their bodies are compiled in, that
+  your case names exist, that a runtime oracle does not contradict a
+  `source_blocked` unit, and that compile symbols come from
+  `compile_requirements`. If not, you are told why and asked again; do not
+  repair an error by inventing names.
 
-| CI suite | Execution model | Research status on Scholar |
-| --- | --- | --- |
-| documentation | Doxygen/Sphinx | Not a runtime profile; oracle scope pending |
-| compile-base | example/tool target matrix | Compile profile; toolchain controls pending |
-| compile-arm-ports | board matrix and out-of-tree builds | Cross-toolchain controls pending |
-| renode-simulation | upstream Renode scripts | Uncontrolled; upstream image installs amd64 Renode |
-| script-base | native LC switch/address-labels, memb, visualization | Full current suite completed on x86 control, including visualization Cooja scenario; historical versions untested |
-| simulation-base | Cooja scenario matrix | Native-mote ringbufindex and Sky hello-world passed on current x86 control; remaining scenarios/eras untested |
-| native-runs | native applications and shell runners | Current pure-native subset: 20 runner logs, 158 named cases passed; network/service cases untested |
-| ipv6 | Cooja scenarios | Current single native-mote scenario passed; older eras need controls |
-| ipv6-nbr | native neighbor test | Current x86 control passed with named unit result; historical versions untested |
-| ieee802154 | Cooja scenarios | Current PAN-ID native-mote scenario passed |
-| rpl-lite | Cooja scenarios | Current route scenario passed on node-local storage; NFS clean fails with loaded libraries |
-| rpl-classic | Cooja scenarios | Current route scenario passed on node-local storage; NFS clean fails with loaded libraries |
-| tun-rpl-br | Cooja plus host TUN/router scripts | Pending simulator and network privilege fixture |
-| coap-lwm2m | simulations/standalone native and queue mode | External submodule/services; fixture unverified |
-| packet-parsing | native packet injector, four shell consumers | Current x86 suite completed; historical profile coverage bounded |
-| security-protocols | Cooja and crypto dependencies | Current EDHOC method-0 scenario passed with pinned crypto trees |
-| nat64-standalone | native application plus host echo fixture | Current x86 UDP echo round trip passed; historical versions untested |
+What no script can tell is whether the changed tests actually **detect** the
+change. That is your judgement.
 
-Within native-runs, MQTT, ping, CoAP, SNMP and IP64 TAP scripts have network,
-service or privilege requirements that the pure native units do not. Native
-startup can warn that TUN is unavailable yet successfully execute pure units;
-that does not establish support for network cases. Never blanket-exclude all
-native tests for this warning, or treat it as a regression oracle.
+---
 
-Historical CI, scenario and Makefile inputs are recorded at all 341 test-touching
-PR bases. Normalized CI blobs and extracted scenario build commands are research
-inputs, not an executable historical profile selector. The current Dockerfile
-uses Ubuntu 22.04 and hard-coded x86 binaries for Java, MSP430, ARM tools and
-Renode. It cannot be assumed to run on Spark ARM64. Current Cooja submodule is
-`fabff3ee41eeeb6f3de7bd11f7c9cdf0a7d7dfc4` with Java toolchain 25; historical
-Ant/Gradle and submodule versions must be resolved per base. No whole-history
-image/toolchain compatibility claim is established. A separate x86_64 control
-used an Apptainer SIF converted from the current upstream Dockerfile image;
-the local SIF file has SHA256
-`8fb5b6fea745e0aba4c69a860c476f51549a164036a7a3f88c0ccb20e22702c6`
-ran Java 25.0.3, GCC 11.4.0 and MSP430 GCC 4.7.4. The two current Cooja
-scenarios passed, and a user-network-namespace probe exited zero; neither
-establishes support for other simulator, network, or historical recipes.
+## What you are given
 
-Research native controls used an existing read-only Ubuntu 24.04 ARM64 image,
-SHA256 `9f5a1ffa170250cd051e5adc54115917efd6a3780373c66c199f64efc977f287`,
-GCC 13.3.0 and Make 4.3. This is a smoke environment, not a frozen campaign recipe.
-Source archives omit `.git`, causing version-query warnings; the campaign must
-preserve revision metadata or use the pinned upstream CI version variables.
+One enriched record per PR: number, title and body; `base_commit` and
+`fix_commit`; the test files and production files the PR changes; the complete
+`test_patch` (everything under the test roots) and `production_diff`
+(everything else); `test_inventory`, `inventory_holds`, `profiles`,
+`compile_requirements`, `ci_sources`; and `nested_merge_count`, the number of
+other PRs merged inside this one's range. Very long hex blobs or diffs are
+shortened in the prompt only, and listed under `prompt_omissions`.
 
-Profile choice must use CI at the candidate base, supplemented by the upstream
-PR's newly introduced test recipe where necessary. Select a real built consumer
-and an enabled test body; mixed configurations need additional observations.
-Unsupported profiles remain holds, not invalid PRs.
+You also have read-only tools onto the repository at the PR's base or fix
+commit: `read_file`, `list_dir` and `grep`. Use them for a specific fact the
+record lacks -- a configuration default, a Makefile, the source around a
+changed line. Tool rounds are limited; when they run out you are asked for
+your verdict from what you have.
 
-## PR boundaries, selection and separation
+---
 
-The official merged-PR census contains 1,843 PRs with recovered merge objects;
-341 touch `tests/` or historical `regression-tests/`. Of these, 102 merges and
-23 test-touching merges are outside the old first-parent census. Seven recovered
-merge objects are no longer reachable from `develop`; preserve their GitHub
-identity and verify archived base/fix availability before observation. The
-first-parent chain separately contains 1,758 commits: 1,744 merges (1,743
-numbered PRs plus one release merge) and 14 unassociated direct commits. Its
-rename, deletion, and revert flags are mechanical, not hard-filter acceptance
-counts. Across the full PR census, 24 PRs rename test paths, 26 delete them,
-and 18 contain other official PR merges in their base..fix ancestry. Those 18
-need rollup review and deduplication; nesting alone does not imply exclusion.
+## How the repository works
 
-For ordinary merge PRs, base = merge first parent; fix = complete merge result.
-Check the second-parent history and complete diff for merge-resolution changes.
-Do not pick only the last topic commit or the GitHub current base branch tip.
-Unassociated commits and ambiguous release rollups need explicit mapping/hold.
-Reverts, renames and deletions do not inherently supply a detecting assertion.
-If squash/rebase styles appear in a future window, map full PR commit ranges
-before enabling them; never apply OpenThread's title regex as a universal rule.
+**Layout.** Production is under `os/` and `arch/`, with application code also
+in `examples/`; neither examples nor tools are automatically non-production.
+Before PR #63 (September 2017) production used `core/`, `apps/` and
+`drivers/`, and tests used `regression-tests/`. Read the PR's own revisions,
+not the current tree.
 
-Read the changed test setup/input/assertion against the old production path and
-record a causal chain. Hold unclear attribution. A newly added vector-decoding helper or utility header
-is an incidental compile dependency when the PR targets a separate algorithm
-fix; its absence must not be mislabeled as the intended compile oracle. New APIs can supply semantic
-compile oracles; symbols and diagnostic notes must identify the intended API.
-Protect upstream tests/support and transport them identically to both states;
-apply only the selected production patch to the after state. Do not copy gold
-production into the before state, or expose it in the problem statement.
+**Configuration.** The build is GNU Make. `Makefile.include` finds
+`project-conf.h` and defines `PROJECT_CONF_PATH`; `os/contiki.h` includes the
+platform's `contiki-conf.h`, then `contiki-default-conf.h`; the native platform
+includes the project configuration before applying platform values. `DEFINES`,
+`MODULES`, `MAKE_NET`, `MAKE_MAC`, `WITH_*`, target makefiles and derived macros
+all change the compiled program. Never decide whether a test runs from macro
+names alone.
 
-## Evidence, output and readiness contract
+**Tests.**
+- `tests/Makefile.compile-test` reads colon-separated `EXAMPLES` entries:
+  application/target, an optional runner (`RUN_FILE=1`), then Make
+  assignments. It builds with `WERROR=1`; `CLANG_WARNINGS=1` adds a Clang pass.
+  The assignments are part of a unit's identity (for example the HEAPMEM_DEBUG
+  and IP64_CONF_DHCP variants are different units).
+- Native unit tests use `UNIT_TEST_REGISTER`, `UNIT_TEST_RUN` and
+  `UNIT_TEST_PASSED`; `os/services/unit-test/unit-test.c` reports each case's
+  result. Registration alone does not prove that a case runs.
+- `tests/Makefile.simulation-test` runs each `??-*.csc` Cooja scenario with a
+  fixed seed; the scenario's script is its assertion. A `.csc` carries its own
+  mote types, sources and build commands. A Cooja unit is the scenario, not a
+  set of cases.
+- Script-base programs (LC switch, memb, ...) report their own assertions.
+- Shared consumers -- `tests/utils.sh`, `08-native-runs/run-one.sh`,
+  `Makefile.compile-test`, `Makefile.simulation-test` and the unit-test module
+  -- feed many units. A change to one of them detects nothing by itself; name a
+  concrete affected unit whose own result changes.
 
-Always collect before/after build output, named case results, assertion/exit
-locations, elapsed time, selected profile and recipe hash. Build and run after
-when before does not compile. Unexecuted cases after a crash are unknown, not
-failures; isolate where the upstream runner supports it. A timeout alone is not
-an oracle. Keep baseline failures distinct from candidate detection.
+---
 
-Historical native runners can falsely pass without execution (fixed upstream in
-PR #3267). Require fresh logs, positive completion markers and named execution.
-Do not transplant that fix into old benchmark tests without separate fixture
-analysis. Repeat the before state to check determinism.
+## What we can run
 
-The implemented decision schema uses `pr`, `verdict` (`accept`, `reject`,
-`hold`), and `reason` for rejects/holds. Accepts require:
+| profile | what it runs |
+|---|---|
+| `native` | Contiki-NG built with `TARGET=native` as an ordinary Linux program on x86_64; unit-test cases are read by name (`unit_id::test_symbol`). |
+| `cooja` | A Cooja simulation scenario, run with the upstream CI image of the base commit's era (Cooja motes or MSP430 Sky motes under MSPSim). One result per scenario. |
+| `script` | A script-base program or runner script. One result per unit. |
 
-- `units`: nonempty list of exact affected `test_inventory` unit IDs.
-- `profile`: `native`, `cooja`, or `script`; selected units must match.
-- `fail_to_pass`: exact case IDs; native IDs are `unit_id::test_symbol`,
-  while script/scenario IDs equal their unit ID.
-  Select the smallest justified detecting set. A new or edited case need not
-  fail before. For each selected runtime case, the causal chain must trace its
-  actual input and assertion through base behavior and explain why the checked
-  result fails. A memory-safety fix can leave a case's numeric result unchanged;
-  a safer implementation alone does not prove that case's assertion flips.
-  Omit uncertain F2P claims; all cases in the selected units are checked after
-  independently of this list.
-- `pass_to_pass`: relevant unaffected case IDs that actually execute and pass
-  before and after, or an empty list. A case in a binary that cannot build
-  before cannot be P2P, including under compile/config oracles.
-- `oracle`: `runtime` (default), `compile`, or `config`.
-- `problem_statement`, `causal_chain`, and `change_type`: nonempty strings.
-  `problem_statement` is what the agent sees in place of the PR text: an issue a
-  user could file, giving the observable symptom of the unfixed code, the
-  conditions that trigger it (inputs, configuration, network sequence) and the
-  required behavior. Never the fix: no function, file or line to edit, no code,
-  identifiers or constants from the production diff, no description of the
-  implementation or of the missing check. Restate implementation-style titles
-  as behavior. For a compile oracle, name the new interface only as the tests
-  use it. The same rules apply when an observation-validated instance asks
-  for a statement alone (`triage_prs.py statement`).
-- Compile oracles also require `compile_symbols`, drawn from the record's
-  verified absent-at-base `compile_requirements`, plus `oracle_attribution`.
-  Missing test utilities remain incidental unless they implement the PR purpose.
-- Config oracles require exact `config_diagnostics` and `oracle_attribution`.
-  An unavailable dependency without source attribution is an infrastructure hold.
+Not supported, so a PR that needs them is a `hold`: ARM, NXP, nRF and other
+cross-compiled ports; Renode; macOS; documentation builds; tests that need a
+host TUN/TAP device, a border router or an external service (`tun-rpl-br`,
+MQTT, CoAP/LwM2M servers, SNMP, ping, IP64 TAP). A native unit that prints a
+TUN warning at startup but runs its cases is still runnable.
 
-Native accept selections require enabled-body evidence; unresolved guarded
-bodies remain holds until compiler evidence establishes the selected profile.
-Source-unconditional bodies are recorded explicitly. Observations can investigate
-unknown bodies but do not turn missing execution into failure. Records carry an
-enrichment version and required fields; stale records must be re-enriched.
+Cases after a crash are not run, so they are unknown, not failures. A crashing
+native case is reported as `error`. A timeout alone is never an oracle.
+Historical native runners could report success without running (fixed upstream
+in PR #3267); validation requires named execution, so a unit whose runner only
+checks that the process finished detects nothing.
 
-Keep body inclusion, dependency closure, build success and execution separate.
-Native `execution_evidence` lists matching upstream Make registrations and
-simulation scenarios that reference the testcase source. `ci_sources` gives
-upstream CI at base. These are source facts, not build or execution receipts;
-an empty registration list is unknown rather than proof that no valid profile
-exists. A testcase used by Cooja is not automatically buildable for native.
-Source-unconditional body evidence checks definitions, assertions, registration
-and calls; configuration guards elsewhere may still change the result. Static
-dependency edges are evidence of inputs, not proof that Make builds the target.
-The before snapshot contains base production plus the fixed upstream protected
-tests/support. `before_compile.status=source_blocked` identifies direct calls to
-new production functions absent at base; a runtime oracle contradicts that
-evidence. `unknown` does not establish build success. A submodule required by
-the fixed tests but absent from the base gitlinks/configuration is a setup hold
-until the runner can represent it without copying production into before.
+---
 
-A source-blocked unit can qualify for a semantic compile oracle only when that
-missing interface is the PR's purpose. An incidental new fixture helper does
-not become a valid oracle merely because it prevents compilation. Undefined
-behavior or a possible crash is also insufficient: trace the supplied input to
-an assertion, checked result or observed attributable failure. Do not infer a
-detecting assertion from a packet runner that only checks process completion.
-Generation mechanically requires every inventoried case of the selected units
-to pass after (`after_required`), even when P2P is empty; this does not claim that
-those cases executed before.
+## Accept when all of these hold
 
-Illustrative schema only; every ID below is a placeholder, never an execution
-claim or an allowed substitute for actual inventory values:
+1. **You can name a case that fails before the change, and trace why.** Read
+   the changed test setup, input and assertion against the old production path,
+   and explain why the checked result fails on the base. A new or edited case
+   need not fail before; list only the ones you can trace. A memory-safety fix
+   can leave a case's numeric result unchanged -- a safer implementation alone
+   does not prove that the case's assertion flips. Undefined behaviour or a
+   possible crash is not enough either: trace the supplied input to an
+   assertion, a checked result or an observable failure.
+
+2. **The selected unit really runs it under your profile.** It is a real
+   runnable unit, not a helper; its target is built by the profile; its body is
+   compiled in (`profile_evidence.enabled`); its dependencies can be set up at
+   the base (`before_dependencies`). A guarded body whose state is unresolved
+   is a hold. A testcase used by Cooja is not automatically buildable for
+   native, and an empty `execution_evidence` list is unknown, not proof that
+   nothing builds it.
+
+3. **The failure is the right kind (`oracle`).**
+   - `runtime` (the default): the unit builds at the base and the case fails
+     there. If `before_compile.status` is `source_blocked` -- the tests call
+     production functions absent at the base -- a runtime oracle is
+     contradicted.
+   - `compile`: the tests do not build at the base, and the missing interface
+     **is the PR's purpose** -- a feature adding the API the tests exercise, or
+     a fix whose correction is the interface the tests rely on. Name the
+     symbols in `compile_symbols`, taken from `compile_requirements` entries
+     absent at the base, and explain in `oracle_attribution`. A build break
+     from something incidental -- a new test helper or utility header, a
+     vector-decoding helper for a separate algorithm fix, a rename the tests
+     were adapted to -- is not a compile oracle.
+   - `config`: a configuration or dependency fix whose build diagnostics at the
+     base are attributable to the PR. Give the exact `config_diagnostics` and
+     `oracle_attribution`. An unavailable dependency without source attribution
+     is a hold.
+
+4. **There is a separate production fix.** Validation applies only the
+   production change to the after state; the upstream tests are identical in
+   both. For an ordinary merge PR the base is the merge's first parent and the
+   fix is the whole merge result.
+
+---
+
+## Reject or hold
+
+**Reject** for a concrete reason that the PR cannot form an instance:
+
+- no production change separate from the tests, or a cosmetic one (formatting,
+  comments, renames) with no detecting test;
+- the changed tests do not exercise the change, or would pass on the base too;
+- the only failure before is an incidental build break unrelated to the PR's
+  purpose, and no other unit detects the change.
+
+**Hold** when the PR may be a good instance but cannot be run or decided now:
+an unsupported profile or fixture, an unresolved configuration guard, a
+dependency the before state cannot represent (a submodule absent at the base),
+a release rollup or other PR with nested merges whose attribution is unclear,
+or a missing fact that would change your answer. A hold is an abstention, not
+a soft reject. Do not spend tool rounds filling gaps a script could fill.
+
+---
+
+## Output
+
+Return exactly one JSON object. No prose outside it.
+
+The example is illustrative only: every ID is a placeholder, not an execution
+result or a unit you are given.
 
 ```json
 {
@@ -266,611 +220,40 @@ claim or an allowed substitute for actual inventory values:
   "pass_to_pass": [],
   "oracle": "runtime",
   "change_type": "bugfix",
-  "problem_statement": "The parser must respect the supplied input length.",
-  "causal_chain": "The changed upstream case supplies a truncated input and checks the documented error."
+  "problem_statement": "Parsing a record whose length field is larger than the data supplied reads past the end of the input instead of being rejected.",
+  "causal_chain": "The changed upstream case supplies a truncated input and checks the documented error; the base parser trusts the length field, so the check fails; with the fix it returns the error."
 }
 ```
 
-High confidence requires source attribution plus compatible observed evidence;
-uncertain dependencies/configuration are holds. Do not spend model calls filling
-mechanically obtainable inventory gaps. Research controls are intentionally
-selected, not held-out triage-accuracy evidence, and their expected answers must
-stay out of future prompts.
-
-Use `reject` when source evidence proves that the PR cannot form an instance
-under this contract: no disjoint production fix, cosmetic changes without a
-detecting oracle, or a required incidental build break unrelated to the fix's
-purpose with no eligible alternative consumer. Use `hold` for unresolved facts
-or unsupported setup/profiles. A hold is an abstention, not a correct rejection.
-
-The native adapter, schema, generator, validator and cluster integration are
-implemented and bounded CPU controls pass. Full-campaign readiness remains
-closed: historical profile resolution, remaining profile/era controls, complete
-baseline inventories and guarded-body execution agreement are outstanding.
-The bounded model pilot below proves native handoff, not full profile coverage.
-No full pass has been launched.
-
-
-<!-- END TRIAGE INSTRUCTIONS -->
-
-## Cluster execution
-
-Set `project: contiki-ng` and `slurm.build_partition: cpu` in the cluster config.
-Use a separate scratch root and optional `paths.contiki_ng_image` override for
-the verified x86 CI SIF. `cluster/setup.py` verifies the clone, image and tools;
-`cluster/prepare.py` fetches/enriches the selected PRs without Twister or Zephyr
-SDK setup. Full history needs an explicit 2017-to-pin preparation date window.
-
-Submit prepared runs with `cluster/submit.py observe --run NAME` for x86 runtime
-observation, `triage` for Spark model inference, and `validate` for x86 accepted
-recipes. Contiki does not use the combined Zephyr `pipeline` mode. CPU resources
-use `slurm.build_cpus_per_node`, `build_mem`, and `build_python`; Spark retains
-`cpus_per_node`, `mem`, and `triage_python`. Set architecture-appropriate Python
-executables when system Python lacks dependencies. The model is qwen38-nvfp4.
-
-Jobs use `--export=NONE`, a clean environment, absolute shell paths, and PATH
-including `/usr/sbin`. Submissions cap wall time at four hours. Run folders,
-claims, project-scoped ledgers, recipes, observed/validation receipts and logs
-support resuming incomplete work. A VALID receipt certifies only its matching
-recipe fingerprint; promotion/publication still requires user authorization.
-
-
-Cooja writable overlays use node-local temporary storage during validation and
-fresh agent grading. On Scholar NFS, a loaded native mote library can prevent
-`make clean` from removing its build directory; node-local reruns of the unchanged
-RPL controls pass. Logs/receipts remain in the shared run directory. TUN/TAP
-fixtures remain unsupported on this worker because opening the bound device from
-the user namespace returns permission denied; those selections are infrastructure
-holds. Current automatic accepts require source-unconditional native bodies;
-Cooja/script observations are supported, while guarded/scenario accepts need
-additional compiled-body evidence. No full-history campaign is certified yet.
-
-### Observation-backed instances
-
-`observe` jobs run every supported affected unit before and after the fix with
-no model plan. A PR that observes valid is finalized in the same slot: generated
-from its observation into `<run>/finalized/`, built and validated with three
-before repeats (status stage `finalize`). A PR whose units span profiles is
-observed under the manifest entry's `observe_profile`, one run per profile.
-`statement` jobs (Spark) then ask the served model for the problem statement of
-each finalized VALID instance (`triage_prs.py statement`): the record, the
-observed F2P/P2P names and the statement rules above. Code checks the fields
-and rejects statements quoting the production diff; the result goes into
-`metadata.json` with model provenance, outside the recipe fingerprint.
-`submit.py --after JOB` chains jobs so at most two run. `report.py` follows an
-observation run's PRs through `observation`, `finalize` and statement outcomes;
-only a promotable instance is VALID and settles its PR in the ledger. Promote
-reviewed instances with `promote_instance.py --source <run>/finalized`.
-
-Cooja instances record `ci_image`, the upstream CI image of their base's era
-(`COOJA_ERA_IMAGES`): the current image's Java 25/Gradle cannot build Ant-era
-(to 2022-11) or early Gradle-era Cooja. The 2019 image is 32-bit Ubuntu 16.04
-with Python 3.5, so `run_tests.py` and the image `%post` avoid newer syntax.
-Only submodules that are gitlinks at the base are initialized.
-
-Native runner details: a binary killed by a signal is rerun once under gdb and
-the innermost `unit_test_function_<name>` frame marks that registered case
-`error` (later cases stay `not_run`); a timeout is never attributed. Compile
-oracles also accept a missing header when the fix creates it and its added lines
-declare a plan symbol. Before repeats `make clean` the native units first, so a
-binary built from fix-created files cannot pass for the before state.
-
-## Integration proof (2026-11-04)
-
-Scholar CPU job 484669 ran the final two controls from a frozen source archive
-(`5b4c9e9`, archive SHA256
-`0c4551e4122d44136778a3dc31355b2232ce967b7a75d70f3614406733563637`).
-These use explicitly labelled, source-informed manual verdicts; they prove
-packaging and validation, not unattended model selection or triage accuracy.
-
-| PR | Profile/oracle | Before | After | Repeated before |
-| --- | --- | --- | --- | --- |
-| #3246 | native/runtime | Four named JSON failures; two named passes | All six pass | Three additional runs agree |
-| #3020 | native/semantic compile | Missing `cbor_write_signed` / `cbor_read_signed`, attributed to the interface added by the PR | Named signed-integer case passes | Three additional builds agree |
-
-Finalization took about 4.7 minutes per instance including image creation.
-Receipts and logs live under
-`/scratch/scholar/zhan5136/embedeval-contiki/runs/port-pilot/`.
-The earlier observation pass retains its own receipts; the CBOR observation
-correctly held for semantic attribution rather than counting an unexecuted case
-as a runtime failure. Infrastructure/profile holds remain outside the permanent
-invalid-instance ledger. Resubmitting observation retries failed/capped work
-and preserves completed observations.
-
-Spark's `SparkRelocation` maintenance reservation covers November 4 through
-November 11, 2026, including the batch partition; it does not block every Spark
-node. The first batch inference submission was canceled after its forecast
-moved to November 11; no inference occurred and no paid fallback was used.
-`spark-interactive` remains usable with a 60,250 MB maximum memory request.
-The six-control pilot uses one node, 60,000 MB, GPU memory utilization 0.40,
-131,072 context tokens and two concurrent requests. Model settings, input
-records, instruction snapshots and source archives are frozen under the run
-folders. No instances have been promoted or published.
-
-Fresh-grader control job 484672 rebuilt the JSON image independently and applied
-only the upstream production fix on a fresh node-local overlay: all six cases
-passed. A separate protected-test patch was rejected before container execution.
-Results are under `research/gold-grader-control/` in the Scholar workspace. This
-is an upstream-gold control, not an agent attempt.
-
-## Qwen six-PR pilot results (2026-11-04)
-
-The actual `qwen38-nvfp4` pilot is complete. The sample is intentionally
-source-reviewed, not held out; coarse accept/non-accept agreement is not an
-accuracy estimate. Expected answers and this reporting section are excluded
-from model instructions. Schema repairs use the existing automatic checker;
-no model decision was manually changed or retried to improve its label.
-
-| PR | Model decision | Selected oracle | Final validation of untouched plan |
-| --- | --- | --- | --- |
-| #3246 | accept | runtime | VALID: four named F2P, two P2P; three repeated before runs agree |
-| #3020 | accept | runtime | INVALID: base compilation fails on the added API; runtime failure was not observed |
-| #3195 | accept | compile | INVALID: the declared P2P case cannot execute in the failing base build |
-| #1183 | hold | none | No eligible inventoried unit; no automatic build |
-| #1170 | hold | none | Correctly identifies the incidental hex-decoding dependency; no automatic build |
-| #255 | accept | runtime | VALID: one named F2P, five P2P; three repeated before runs agree |
-
-All six coarse decisions match the selected source-reviewed expectations, but
-only **two of four accepted plans validate**. #1183's hold is due to missing
-inventory, not recognition of its observed non-detection. #3020 remains a known
-valid semantic-compile control under the earlier manual plan; its model-selected
-runtime plan fails. #3195's source-attributed compile failure and after passes
-do not establish its additional before-pass claim. Neither model plan was
-repaired to inflate the valid count. The model pilot yields two native/runtime
-instances and no validated model-selected compile instance.
-
-Main model job 484781 produced five decisions after Python bootstrap (484681)
-and missing-MCP client failures (484768), both before any model reply. MCP is
-now an explicit dependency and client setup requires a successful loopback HTTP
-completion preflight. The client preflight is infrastructure verification, not
-a benchmark testcase or model inference. Original error traces remain archived.
-
-#1170 initially exceeded context before a reply: its raw rendered record has
-about 738k tokenizer tokens, dominated by six enormous hex literals. The generic
-renderer now replaces only oversized hex literals with length, SHA256 and short
-samples; original source and benchmark patches remain unchanged and available
-through source tools. The repaired view is about 40k tokens. Supplemental model
-job 484789 produced its hold; the two enriched records are byte-for-byte equal.
-The other five model decisions were retained. Supplemental CPU job 484790
-correctly found no accepted instance to build.
-
-CPU job 484782 automatically generated and validated all four accepts. The pilot
-exposed a validator gap: compile/config plans could claim P2P without observed
-before passes. The gate now requires actual before passes for every declared
-P2P case, under every oracle, including repeated before runs. Job 484793 reran
-only the affected #3195 plan using the stricter validator and rejected it. Its
-earlier permissive receipt is archived under `jobs/p2p-policy-repair-3195/`;
-the latest receipt and ledger outcome supersede it. A malformed operational
-helper submission (484792) was canceled before execution and replaced.
-
-Successful inference took 3.2–23.6 minutes per main-sample PR (about nine minutes
-mean), plus a 5.3-minute warm-cache server start; #1170 took another 9.9 minutes
-after context repair. CPU build/validation took roughly five minutes per plan.
-The two shared running-job limit was respected. No paid APIs, full campaign,
-agent attempts, promotion, publication or push were performed.
-
-Evidence is in Scholar's `runs/triage-six-controls/` and
-`runs/triage-context-repair/`. `pilot-final-audit.json` and
-`pilot-final-audit.md` join the six decisions without overwriting the original
-context error. The audit checks schema validity, successful replies, prompt
-separation, unchanged accepted selections, matching recipe fingerprints,
-before/after case evidence and three deterministic before repeats for valid
-instances. Local verification: 30 pipeline/runner/grading checks and nine
-cluster checks pass. The pilot supports using triage with validation as the
-gate; it does not certify full-history campaign readiness.
-
-## Repository audit for small-pilot triage improvements (2026-11-04)
-
-The user authorized further research and tuning through small pilots, while
-explicitly prohibiting whole-pool validation as a tuning procedure. The original
-six controls are development data, not an independent accuracy benchmark.
-Future evaluation must distinguish semantic mistakes, unsupported profiles,
-missing inventory and infrastructure errors; a hold caused by missing input is
-not evidence that the model understood a non-detecting test.
-
-The audit retains research pin `c02eedae8b187123069891f81a7111b833701f9c`.
-An upstream reference check reports a newer `develop` tip,
-`3c8c6c8282c5b9f3f745167c5fd3fb29f7c29479`; that does not silently extend the
-candidate window. The read-only census catalogs 2,855 tracked entries and reads
-2,715 bounded UTF-8 files for source indexing, including 17 gitlinks, 17 main CI
-suites, 95 Cooja scenario files and 34 unit-test C sources with 391 registration
-matches. These are source counts, not execution coverage. The current adapter
-emits 28 native variants, 19 script entries and 94 direct scenario entries;
-only 22 native variants currently have its source-unconditional enabled flag.
-That flag alone does not prove complete dependencies or actual execution.
-
-Historical CI/source inputs already cover 591 distinct base/fix revisions and
-98 CI blobs across the 341 test-touching PRs. Nine candidate bases retain
-`regression-tests/`; the remainder use `tests/`. Travis and GitHub configurations
-overlap across historical branches, so calendar dates cannot replace inspecting
-the candidate's actual base. In the test-root path census, 117 PRs change only
-build/configuration paths. These are not 117 known valid tasks: they require
-inspection of what the build checks and whether its failure is attributable.
-
-### What a packaged instance must preserve
-
-- The verified PR base and complete fix, with a disjoint, source-justified
-  partition of protected assertions/setup/data/support and editable production.
-  A missing production dependency must not be copied into the before state just
-  to make a regression compile.
-- The actual runnable consumer, target, board, Make assignments and configuration
-  chain, including local headers, included C data, `PROJECT_SOURCEFILES`, nested
-  `MODULES`, module `-imacros`, platform configuration and feature guards.
-- All fixed runtime inputs: packet files, vector tables, Cooja scripts and mote
-  programs, generated-data prerequisites, local services and filesystem state.
-  Directory names alone cannot determine their roles. A scenario-referenced
-  application can be either test support or the program being repaired.
-- External repositories at their recorded gitlink revisions and the candidate's
-  build-tool/toolchain era. Native targets can need crypto submodules; Cooja can
-  need Ant or Gradle depending on revision. Current CI uses recursive submodules.
-- A fixed execution recipe and named evidence contract. A registration, a clean
-  compiler exit, `All tests OK`, or an absent failure log alone does not prove a
-  selected assertion executed. Preserve timeout, crash and not-run outcomes.
-
-### Source-confirmed gaps to address before another model pilot
-
-| Gap | Pinned source evidence | Consequence |
-| --- | --- | --- |
-| Incomplete native consumer closure | AES test C includes `test-vectors.c`; Make automatically includes local `project-conf.h` | Vector/header/unit-Makefile changes can miss their consumer because inventory currently lists too few inputs |
-| Legacy script discovery and protocol-specific fixture closure | The older packet suite includes `Makefile.script-test`; modern wrappers source `packet-injector.sh`, which loads `packet-injector/$TEST_PROTOCOL-data/*` | The development control has no legacy consumer; modern inventory previously associated every protocol's data with every runner |
-| Missing native submodule dependency | `08-native-runs/18-ecc/Makefile` adds `os/services/ecc`; its `Makefile.ecc` adds `os/net/security/micro-ecc` | Inventory predicts enabled native tests but generated native units request no submodule |
-| Script wrapper hides another executor | `06-script-base/code-result-visualization/Makefile` invokes the simulation runner; its shell check invokes an analyzer under `examples/benchmarks/` | A script entry needs Cooja, analyzer code and generated output, not just its top-level shell file |
-| C string concatenation is misparsed | `13-ieee802154/code-6tisch/test-sixp.c` uses adjacent string literals for distinct case descriptions | The current registration regex truncates descriptions and produces collisions |
-| Profile and build-only coverage incomplete | Compile-base has native/MCU/config variants and Clang passes; ARM suite has 146 entries; NAT64 has a custom Make target | Current runnable-unit discovery cannot represent all CI test types |
-| Configuration proof too coarse | `Makefile.include` selects modules, includes nested module Makefiles, adds `-imacros` and target/project definitions | Presence or absence of `#if` in the main C file does not resolve the whole compiled test |
-| Test/support boundaries need per-instance roles | Cooja scenarios reference programs in `examples/`; test infrastructure can itself be a PR's target | Applying every test-root change before and every other change after can mix setup repair with production behavior |
-
-The CI audit also includes CodeQL's separate example-build/SARIF workflow,
-not just the main 17-suite matrix. Static-analysis findings are not automatically
-an authorized runtime/compile/config oracle. Unsupported analyzer, hardware,
-privilege or historical-toolchain requirements must remain explicit scope holds.
-
-Next work is to correct the dependency/input model and encode mechanically
-checkable oracle contradictions, then revise the instructions to match the
-implemented facts. Bounded development and separate evaluation pilots follow
-that work; no new model run or pool-wide build/validation was launched for this
-source audit. Detailed artifacts are `repository-sweep.json`,
-`sweep-history-coverage.json` and `sweep-ci-eras.json` under the ignored research
-run directory. Source predictions remain separate from observed results.
-
-### Bounded source-model controls
-
-CPU job 484810 ran unmodified upstream sources at the research pin, not candidate
-PR validation. Inputs, logs and compiler output are retained under Scholar's
-`research/sweep-controls-484810/` and local `sweep-controls-results/`.
-
-| Control | Observed result | Implication |
-| --- | --- | --- |
-| Native ECC, gitlink contents absent | Build fails at missing `uECC.h` | The generated native unit's empty submodule list is incomplete |
-| Same ECC source, pinned `micro-ecc` initialized | All three named cases pass | Dependency initialization repairs packaging without changing tests or production |
-| Heapmem with upstream `HEAPMEM_DEBUG=0` | All nine named cases pass | Configuration guards do not imply disabled testcase bodies |
-| Heapmem with upstream `HEAPMEM_DEBUG=1` | All nine named cases pass | Preserve and resolve the two build variants separately |
-| Framer-negative built for native | TSCH timing conversion macros are unavailable | A Makefile and registered cases do not establish native buildability; its CI scenario selects `TARGET=cooja` |
-| Framer preprocessing, upstream configuration | Guarded security case is emitted | Compiler evidence can establish body presence independently of build success |
-| Framer preprocessing, diagnostic security-off wrapper | Guarded security case is absent | A negative preprocessing control; generated configuration only, not a benchmark profile or authored testcase |
-
-All upstream test C hashes remain unchanged. The compiler-only negative control
-does not claim runtime agreement: the framer native target did not build. These
-checks require distinct enrichment facts for dependency closure, body enablement,
-target buildability and execution evidence; none can substitute for the others.
-
-Additional source audit findings: custom framer failure reports use
-`FAILED - description (exit at N)`, while the runner currently recognizes only
-the older `description: exit at LN` suffix. The enricher also silently clipped
-production diffs at 120,000 characters. Both are addressed by the version-5
-changes below. Testing infrastructure itself can be a
-PR's fix target, so a test-root-only change must not be presumed either a valid
-production task or an intrinsically invalid PR; fixed-test/editable-fix separation
-must be representable first.
-
-### Version-5 input improvements
-
-Enrichment now records application Makefiles and local configuration, recursive
-local C includes (including C vector tables), explicit project sources, module
-Makefiles/macros and source-derived submodule dependencies. Shell dependencies
-include sourced/executed wrappers and statically resolved input globs; packet
-data is associated with its protocol consumer. Cooja source references bring
-their application Makefiles/configuration, without automatically changing those
-files' protected-versus-production role. Dependency edges, unresolved supported
-expressions and `build_verified: false` keep source-derived closure separate
-from an observed build. This is not a general Make or shell interpreter.
-
-C testcase parsing now joins adjacent string literals and ignores macro-looking
-text inside comments/strings. Genuine duplicate runtime descriptions remain
-unsupported for individual native case attribution rather than inventing unique
-names. The runner recognizes the framer's parenthesized failure location.
-Enrichment retains the full production diff; bounded model previews explicitly
-report omitted content and hashes instead of silently destroying the record.
-Old enriched inputs require re-enrichment; frozen prior pilot artifacts remain
-unchanged. Current local verification has 41 pipeline/runner/input checks and
-nine cluster checks passing. Source checks confirm the ECC dependency, exactly
-one protocol consumer for a packet fixture and deterministic inventory output
-across Python hash seeds.
-
-These changes do not yet resolve the legacy `Makefile.script-test` executor,
-compiler-backed guard resolution, state-dependent dependency initialization or
-all CI profiles. Oracle contradictions and instructions are the next work;
-no improved model accuracy is claimed from these implementation checks.
-
-### Version-6 oracle consistency and body evidence
-
-The before snapshot now carries source-derived new-function requirements and
-base gitlink/configuration availability. The checker prevents runtime plans
-from contradicting a known required-interface build failure and prevents P2P
-claims from a blocked unit. Separate unblocked units can still supply P2P.
-The runner retains all observed named results, and validation requires every
-inventoried case in the selected units to pass after, independently of the
-model's P2P selection. Original pilot receipts are preserved.
-
-Native body evidence checks guards overlapping definitions, assertions,
-registration or invocation rather than treating every configuration guard as
-a disabled body. This permits source-unconditional heapmem bodies while
-retaining holds for guarded cases. It does not establish target buildability.
-Verification: 55 local Contiki checks and nine cluster checks pass. Refreshed
-development records identify the CBOR API and AES fixture-helper build
-requirements without conflating their semantic purposes. The legacy packet
-executor remains an inventory gap. No new model accuracy result is claimed yet.
-
-### Frozen version-6 pilots (in progress)
-
-Revision `7e2cb1c` freezes the source and prompt for a fresh six-control
-development run and an eight-PR evaluation. The evaluation uses deterministic
-SHA256 ranking within test-path strata (four native-source, one script, one
-simulation, one build/config-only and one legacy), excluding prior reviewed
-controls. Selection was frozen before source review or execution outcomes:
-`triage/runs/contiki-eval-v6/selection.json`, SHA256
-`4a3e6f4e3d3c8b5d5794e822d68cb2fc0eed566b19baaf28437c280e9f3dd8a4`.
-It selects #3251, #3202, #2898, #3261, #1410, #29, #2587 and #52.
-This is a small coverage sample, not a population accuracy estimate. Evaluation
-outcomes will assess this frozen version, not tune it in place.
-
-Source hypotheses were separately frozen before seeing model or observation
-outcomes (`source-expectations.json`, SHA256
-`c1117744c50067c1d22dcc1287b9e5698103f0f6150b7e07f7e6245fa4901f14`).
-Independent native observations for #3202, #3261 and #52 use a separate audit
-run; its outcomes do not enter the model input directory. The other sampled
-PRs include empty production patches and unsupported historical/dependency
-profiles; those must be reported separately from semantic correctness.
-
-Scholar jobs: development triage 484823 and independent audit 484824;
-development validation 484827 and evaluation triage 484828 depend on both;
-evaluation validation 484829 depends on 484827 and 484828. This sequence permits
-at most two running jobs and automatically validates untouched model accepts.
-Every phase has a source snapshot/hash and a two-hour wall limit. Previous pilot
-artifacts remain intact. Model, infrastructure, coverage, oracle choice and
-named-case selection must be assessed separately when these jobs finish.
-
-### Version-6 pilot results and operational follow-up
-
-All five jobs completed with exit code zero; this does not mean all instance
-plans validated. Development accepted four and validated three: #255 runtime,
-#3020 compile and #3195 compile. #3246 incorrectly included `test_long_fraction`
-as F2P although it passed before. The two holds were #1170 (incidental helper)
-and #1183 (legacy executor/causal uncertainty).
-
-Evaluation accepted three and validated one (#3202, runtime). Independent
-observations found three Antelope F2P cases and six P2P cases. #3261 is also a
-detecting runtime PR (three F2P, two P2P), but its model plan incorrectly labeled
-both already-passing cases F2P. #52 failed the native build in both states at
-unavailable TSCH timing macros: an unsupported profile, not demonstrated PR
-invalidity. Four other decisions were holds (#1410, #2587, #2898, #3251);
-#29 exhausted the 131072-token context before a reply. These results do not
-establish reliable plan selection or population accuracy. Original plans and
-receipts remain unchanged in the ignored results directories.
-
-The independent audit's #52 generation failed because its mixed profiles
-required an explicit selection. The worker immediately retried the same
-deterministic error until its deadline. Follow-up changes bound each PR to one
-attempt per observation job while retaining retries on later submissions.
-Validation now binds detailed build/run logs into a separate persistent folder
-for each state, including repeats; previously those detailed logs lived only in
-the deleted overlay. Frozen version-6 runs are unchanged and cannot retroactively
-gain those lost details. Local verification: 55 Contiki checks and ten cluster
-checks pass, including state-separated log retention and bounded retries.
-
-Revision `568f445` tightens the per-case reasoning instruction using the existing
-JSON development control's over-selection failure. A targeted #3246 development
-rerun is job 484901, with untouched-accept validation queued as 484902. It also
-exercises persistent raw logs on Scholar. The original eight-PR evaluation is
-closed and unchanged; its results are not rescored under this new instruction.
-The context repair now explicitly bounds both test and production diff previews
-while preserving full original records and omission hashes. #29's preview is
-217432 characters after this change; no successful model replay is claimed.
-Local checks now total 56 Contiki and ten cluster tests passing. Confidence in
-whole-pool triage remains unestablished, especially coverage and exact case
-selection; a successful known-control rerun alone would not establish it.
-
-### Version-7 CI provenance inputs
-
-The model preview now includes the already-collected CI files at the candidate
-base. Native units separately record matching Make registrations and simulation
-scenarios referencing their source. This exposes the distinction observed in
-the source audit: JSON and both heapmem variants have native registrations,
-whereas framer-negative has a Cooja consumer and no native registration. The
-facts do not assert build success or make a missing registration an exclusion.
-Version-6 enriched records must be refreshed for this input version. Current
-verification: 58 Contiki checks pass, including CI preview preservation and
-separate native/scenario provenance. The running #3246 development pilot remains
-frozen at `568f445`; no version-7 model result is claimed.
-
-The next evaluation sample is frozen in
-`triage/runs/contiki-eval-v7/selection.json` (SHA256
-`7c9dd5647ac97d9a353650e2506f3821858fa66d88113eb8836da267f8a43f50`):
-#3229, #3250, #3011, #1895, #3098 and #2192. Selection ranks PRs by SHA256
-within four native-source/production slots, one native-source/no-production
-slot and one script slot, excluding previous controls and evaluation PRs. It
-was frozen before PR diff review or model/observation outcomes. This deliberately
-tests source selection and coverage, not population accuracy. Source enrichment
-is complete; no model run or validation for this sample has started.
-
-Source expectations were frozen on 2026-11-05 before any model or observation
-outcome (`source-expectations.json`, SHA256
-`89811b3432fe85505ecaebf157b0d6d049564eca9f0c55ab3ae25dfc74eaf13f`): #3250 runtime
-accept (all five LwM2M TLV cases F2P), #3011 cosmetic reject, #3098 and #2192 no
-production patch, #3229 release-rollup hold. #1895 is a hold pending a policy
-decision: its new unit-test API is the PR purpose, but the editable fix is the
-framework that reports test results.
-
-Confidence assessment must retain the strict plan criterion: exact selected
-F2P/P2P names, semantic oracle attribution, correct profile and protected input
-separation, after passes and repeated before evidence. Coarse accept/hold
-agreement is insufficient. Review the nonaccepts for missed supported detecting
-instances and count unsupported profiles and infrastructure failures separately.
-Known development controls must work, and a fresh evaluation must provide
-multiple independently validated accepts; a batch of holds cannot establish
-reliability. Any unresolved systematic case-selection error keeps confidence
-open. Do not present a small selected sample as whole-pool accuracy.
-
-### Fifteen-PR gold development set
-
-The user requested seven accepts and eight rejects. These are known development
-controls, separate from the six-PR version-7 evaluation above. Existing #3202
-and #3261 evaluation results are preserved; their reuse as gold references does
-not turn later scores into unseen accuracy. The label file and source audits
-are in `triage/runs/contiki-gold-15/`, never model inputs. Exact binary labels
-are scored separately from abstentions and exact instance-plan validity.
-
-| PR | Gold label | Basis |
-| --- | --- | --- |
-| #255 | accept, runtime | Valid upstream list regression and repeated-before receipts |
-| #3020 | accept, compile | Valid signed-CBOR API compile oracle |
-| #3195 | accept, compile | Valid CBOR accessor/skip API compile oracle |
-| #3246 | accept, runtime | Four JSON F2P cases; revised model plan validated in job 484902 |
-| #3202 | accept, runtime | Independent Antelope observation and validated model plan |
-| #3261 | accept, runtime | Independent CoAP F2P/P2P; reference plan valid in job 484913 (three F2P, two P2P) |
-| #2830 | accept, compile | New calloc API is the tested purpose; reference plan valid in job 484913 |
-| #384 | reject | Test-only output formatting; no disjoint production fix |
-| #958 | reject | Test-only timing changes; no disjoint production fix |
-| #1769 | reject | Protected helper-only change; no disjoint production fix |
-| #2587 | reject | Test-only build registration; no disjoint production fix |
-| #3251 | reject | Protected failure-reporting change; no supplied detecting production task |
-| #3057 | reject | Test-only brace changes; no production fix |
-| #422 | reject | Cosmetic production edits; C token streams match except braces around unchanged single return statements |
-| #1170 | reject | Only supported consumer requires an incidental vector-decoding helper absent at base; the intended fix is AES length handling |
-
-Eight reject labels have source audits with original patch hashes. Six have no
-production patch under the protected-test boundary; this is a selection bias,
-not a representative negative distribution. #422 adds a cosmetic production
-control, and #1170 adds the explicitly disallowed incidental compile category.
-Unsupported profiles and infrastructure errors are not gold rejects.
-
-Job 484913 validated explicit reference plans for #2830 (missing `heapmem_calloc`
-before; all seven heapmem cases pass after) and #3261 (three named F2P failures,
-two P2P passes). Both have three agreeing before repeats. These are
-gold-reference verification, not new model successes. The latter uses the
-independent observed case lists; its original incorrect model plan remains
-invalid in the frozen evaluation. The new JSON pilot's successful validation
-also exercises persistent phase-specific raw logs. `finalize-gold.py` then
-checked all seven positive receipts (validity, recipe fingerprints, after passes,
-three agreeing before repeats) and recorded their units, F2P/P2P lists and receipt
-hashes in the tracked dataset, now `_status: finalized`. Reference lists are
-measured plans, not the only acceptable plans.
-
-The tracked scoring dataset is `triage/gold-contiki-ng.json`, separate from
-Zephyr's `triage/gold.json`. `run --project contiki-ng --gold` selects this set
-without including its labels in model messages; it refuses to start unless
-the dataset is finalized. `eval --project contiki-ng` scores the
-Contiki labels, reports holds/errors separately, and compares claimed cases
-against measured references without treating that comparison as validation.
-`cluster/report.py --scorecard` passes the project's scoring selector.
-Local checks: 61 Contiki checks and 11 cluster checks pass, including separate
-gold selection, the 7/8 split, pending-reference gating and abstention scoring.
-
-### Gold-15 model run and full-pool launch (2026-11-05)
-
-Jobs 484920 (triage) and 484921 (validation of untouched accepts) ran all 15
-gold controls from frozen source `03e1c35` with `qwen38-nvfp4`. All 15 decisions
-match the labels: 7 accepts, 8 rejects, no holds or errors. All seven accepted
-plans validated with three agreeing before repeats. No selected F2P case passed
-before and no selected P2P case failed: F2P recall is 18/19 (#3261 omitted
-`test_attribute_filter`), and P2P lists are conservative subsets (allowed, since
-`after_required` checks every selected-unit case). #2830 selected both heapmem
-variants and validated. These are known development controls, so this is
-evidence that the earlier over-claiming error is fixed, not unseen accuracy.
-Triage took 1.9–21.6 minutes per PR.
-
-The full hard-filter pool (341 census PRs) was prepared as `full-341-v7`, with
-`--redo` so earlier pilot outcomes do not suppress candidates. The 15 gold PRs
-keep their gold-run results (identical instructions) and are not re-triaged; #52's
-stale reservation by the terminal observation-only v6 audit was overridden with a
-recorded manifest backup. Triage job 484942 uses 8 Spark nodes. `submit.py` caps
-non-Zephyr projects at two nodes, so the frozen job script was copied with only
-`-N` changed, after canceling a 2-node submission (484941) before any triage.
-Validation job 484943 uses 4 CPU nodes with four validations per node. The v7
-evaluation PRs are part of this pool; their outcomes are scored against the frozen
-source expectations, not used to tune this run.
-
-## Full-341 campaign results (2026-11-05)
-
-All 341 hard-filter PRs went through the pipeline (`prepare.py` / `submit.py` /
-`report.py`); results are in ignored `triage/runs/contiki-full-341/<run>/`
-(synced from Scholar `runs/`). Promotion is pending review; nothing is pushed.
-
-| Run | What | Outcome |
-| --- | --- | --- |
-| `gold-triage-15` | Qwen triage + validation of the 15 gold PRs | 7 VALID (all 7 gold accepts) |
-| `full-341-v7` | Qwen triage of the other 326, validation of 30 accepts | 151 reject, 133 hold, 1 malformed verdict, 10 context errors (9 release rollups), 1 cap; of 30 accepts: 15 VALID, 10 INVALID, 2 hold, 3 not generable |
-| `c341-retriage15` | Fresh Qwen triage + validation of those 15 non-valid accepts after the validator/runner fixes | 6 VALID (all new-library compile oracles) |
-| `c341-obs-native` | Model-free observation, native profile, all PRs | 59 observed, 10 VALID (9 duplicate triage instances; new: #3198 via crash attribution) |
-| `c341-obs-cooja3` | Observation, Cooja profile, era CI images | 68 observed, 11 VALID (new: 10) |
-| `c341-obs-script` | Observation, script profile | 7 observed, none flip |
-
-Superseded diagnostic runs (`full-341-observe*`, `full-341-attribution`,
-`c341-obs-cooja`, `c341-obs-cooja2`) stay on Scholar only; their failures fed
-the fixes below and none of their instances are used.
-
-**Promotable: 38 instances** (each passes `promote_instance.py`'s checks:
-valid receipt, matching recipe fingerprint, three agreeing before repeats,
-non-empty problem statement). Duplicates resolve to the triage-run instance.
-
-| Oracle / profile | Count | PRs |
-| --- | --- | --- |
-| compile / native | 16 | 226, 561, 1653, 2173, 2203, 2830, 2974, 3000, 3020, 3054, 3096, 3121, 3132, 3195, 3254, 3272 |
-| runtime / native | 12 | 255, 2186, 3197, 3198, 3202, 3230, 3246, 3250, 3256, 3261, 3266, 3286 |
-| runtime / cooja | 10 | 385, 401, 533, 1205, 1239, 1417, 1516, 1518, 3171, 3212 |
-
-Promote after review (from the repository root):
-
-```sh
-R=triage/runs/contiki-full-341
-python scripts/promote_instance.py --source $R/gold-triage-15/instances $(printf 'contiki-ng__contiki-ng-%s ' 255 2830 3020 3195 3202 3246 3261)
-python scripts/promote_instance.py --source $R/full-341-v7/instances $(printf 'contiki-ng__contiki-ng-%s ' 561 2173 2186 2203 3096 3121 3132 3197 3230 3250 3254 3256 3266 3286)
-python scripts/promote_instance.py --source $R/c341-retriage15/instances $(printf 'contiki-ng__contiki-ng-%s ' 226 1653 2974 3000 3054 3272)
-python scripts/promote_instance.py --source $R/c341-obs-native/finalized contiki-ng__contiki-ng-3198
-python scripts/promote_instance.py --source $R/c341-obs-cooja3/finalized $(printf 'contiki-ng__contiki-ng-%s ' 385 401 533 1205 1239 1417 1516 1518 3171 3212)
-```
-
-Review notes:
-
-- #1895 validated (compile) but is held out: its fix is the unit-test reporting
-  framework itself, so an agent patch could fake passes.
-- Problem statements of the 11 observation-only instances (#3198 and the
-  Cooja ten) were written by Qwen in `statement` jobs; the rest come from
-  triage verdicts. Statements for #3197, #3230 and #3256 lean toward naming
-  the missing check; #533's oracle is a uniform node-ID boot banner the
-  scenario scripts wait for; #1518 is effectively a feature (root-specific
-  Orchestra schedule). Rerun the statement phase with a stricter check if wanted.
-- Pre-2022 Cooja instances are 32-bit userlands; `apptainer_util.exec_args`
-  runs them from a node-local sandbox (64-bit SIF inodes break 32-bit stat).
-  Graders must exec instances through `exec_args`, as the harness does.
-- Triage on native: observation found no runtime PR that triage missed. Of
-  the 15 full-run accepts that did not validate, 10 were validator/runner gaps
-  (fixed; re-triage recovered 6) and about 5 were plan errors.
-
-Fixes made during the campaign (all in tracked code, unit-tested): missing-
-header compile attribution; gdb crash attribution for native signals; `make
-clean` before before-repeats; per-base Cooja CI images (Ant buckets, then the
-newest image on or before the base); a sandbox build path and node-local
-execution for i386 images; Python 3.5-compatible runner; gitlink-checked
-recursive submodules with a full-fetch fallback and the old `tools/mspsim`
-gitlink; Ant-era verdict files (`<scenario>.testlog`, `TEST FAIL`) with
-mote-load failures classified as build failures; a 512 MB heap for 32-bit
-JVMs (the era's `simexec.sh` forces `-Xshare:on`); JAVA_HOME resolved to a JDK
-with `jni.h`. Pipeline: observe jobs finalize, `statement` phase, `--observe-only`
-/ `--observe-profile` runs, `submit.py --after` chaining, report outcomes.
-
-Out of scope or unrecovered: ARM/NXP cross-compile matrices (56 holds; mostly
-build-only example additions), `tun-rpl-br` and MQTT/SNMP/CoAP/LwM2M service
-fixtures, doxygen, release rollups (context-window errors), #2666 (its fix
-bumps the Cooja submodule, which applying a gitlink diff does not check out),
-and compile/config oracles that observation cannot credit.
+- `verdict` -- `accept`, `reject` or `hold`. For `reject` and `hold` give only
+  `pr`, `verdict` and `reason`.
+- `profile` -- `native`, `cooja` or `script`; every selected unit must have it.
+- `units` -- the exact `test_inventory` unit IDs you select.
+- `fail_to_pass` -- the smallest justified set of cases that fail before and
+  pass after. Native case IDs are `unit_id::test_symbol`; a script or scenario
+  case ID is its unit ID. Omit uncertain claims: every case of the selected
+  units is required to pass after anyway.
+- `pass_to_pass` -- cases unrelated to the change that run and pass before and
+  after, or `[]`. A case in a unit that cannot build before cannot be
+  pass-to-pass, so compile and config oracles have none for blocked units.
+- `oracle` -- `runtime` (default), `compile` or `config`, with
+  `compile_symbols` / `config_diagnostics` and `oracle_attribution` as above.
+- `change_type` -- what kind of change the PR is (for example `bugfix`,
+  `feature`); recorded, never a reason to reject.
+- `problem_statement` -- what the agent is shown in place of the PR text, and
+  the field where wording matters most. Write an issue a user could file: the
+  **observable symptom** of the unfixed code, the **conditions that trigger
+  it** (inputs, configuration, network sequence) and the **required
+  behaviour**. Describe only what a caller or a test can observe from outside
+  the code. Never the fix: no function, macro, file or line to edit; no code,
+  identifiers or constants from the production diff; nothing about how the bug
+  comes about inside the code (which check is missing, what it compares
+  against, which variable or type is wrong) or what the code must validate,
+  track or add. Restate implementation-style titles as behaviour. For a compile
+  oracle, name the new interface only as the tests use it. The same rules apply
+  when you are asked for a statement alone, for an instance that has already
+  validated.
+- `causal_chain` -- the trace for each `fail_to_pass` entry: the changed test
+  input, the old production path it reaches, why the check fails there, and
+  why the fix makes it pass. Read by humans, not parsed.
+- `reason` -- for a reject or hold, the concrete reason.

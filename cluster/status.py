@@ -104,13 +104,28 @@ def finalize_todo(run: Path) -> list[int]:
             and read(run, e["pr"]).get("finalize", {}).get("state") != "done"]
 
 
-def statement_todo(run: Path) -> list[int]:
-    """Finalized VALID instances whose metadata has no problem statement yet."""
+# The statement check in force: keep equal to scripts/triage_prs.STATEMENT_CHECK.
+STATEMENT_CHECK = 2
+
+
+def instance_folder(run: Path, pr: int) -> str:
+    """Where a run keeps its validated instance: finalized/ for an
+    observation run, instances/ for a triage run."""
+    return "finalized" if (Path(run) / "finalized" / f"contiki-ng__contiki-ng-{pr}").exists() else "instances"
+
+
+def statement_todo(run: Path, recheck: bool = False) -> list[int]:
+    """VALID instances whose metadata has no problem statement yet; with
+    recheck, also those whose statement has not been checked under the
+    current STATEMENT_CHECK."""
     out = []
     for e in manifest(run)["prs"]:
-        if (receipt(run, "finalized", e["pr"], "validation.json").get("valid") is True
-                and not (receipt(run, "finalized", e["pr"], "metadata.json")
-                         .get("problem_statement") or "").strip()):
+        folder = instance_folder(run, e["pr"])
+        if receipt(run, folder, e["pr"], "validation.json").get("valid") is not True:
+            continue
+        meta = receipt(run, folder, e["pr"], "metadata.json")
+        if (not (meta.get("problem_statement") or "").strip()
+                or (recheck and (meta.get("statement_check") or {}).get("version") != STATEMENT_CHECK)):
             out.append(e["pr"])
     return out
 

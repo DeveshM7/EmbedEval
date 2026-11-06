@@ -67,12 +67,7 @@ INSTRUCTIONS = REPO_ROOT / "docs" / "pr_triage.md"
 
 
 def instruction_text():
-    text = INSTRUCTIONS.read_text()
-    if PROJECT == "contiki-ng":
-        text, marker, _ = text.partition("<!-- END TRIAGE INSTRUCTIONS -->")
-        if not marker:
-            raise ValueError("Contiki triage instructions lack the reporting boundary")
-    return text
+    return INSTRUCTIONS.read_text()
 
 TRIAGE = REPO_ROOT / "triage"
 RUNS = layout.triage_runs()
@@ -849,6 +844,12 @@ def triage_one(pr: int, profile: str, prof: dict, api_base: str, run_dir: Path) 
             "budget_hit": trace["budget_hit"], "issues": issues, "error": trace["error"]}
 
 
+# Version of the statement rules and check below; an instance's metadata
+# records the version its statement passed (cluster/status.py keeps a copy).
+# 1 rejected only quoted lines of the fix; 2 adds the identifier check and
+# the model review of whether the statement gives the fix away.
+STATEMENT_CHECK = 2
+
 STATEMENT_REQUEST = """This PR is already a validated benchmark instance: model-free
 observation found that the upstream tests below fail before the production fix
 and pass after it, in the selected units. You are not triaging it. Write only
@@ -856,15 +857,90 @@ what an agent will see in place of the PR text, following the instructions'
 problem-statement rules: describe the observable misbehavior an issue report
 would describe, never the fix, its diff or code it adds.
 
+Describe only what a caller or a test can observe from outside the code: the
+inputs or conditions, the wrong outcome (a crash, a read past the input, a
+wrong return value or result, a timeout) and the required behavior. Do not say
+how the code goes wrong inside -- which check is missing, what it compares
+against, which variable or type is too small -- or what the code must
+validate, track or add. Name no function, macro, type or file of the
+production change unless the tests use it; finding those is the task.
+
 Observed fail-to-pass: {f2p}
 Observed pass-to-pass: {p2p}
 
 Reply with the JSON object only:
 {{"pr": {pr}, "problem_statement": "...", "causal_chain": "...", "change_type": "..."}}"""
 
+REVIEW_REQUEST = """You review one problem statement of a coding benchmark. An agent is
+given only this statement and the repository before the fix; it must find the
+defect and write the fix itself. A statement may describe the symptom, the
+inputs or conditions that trigger it, and the required observable behavior,
+and may name an interface the tests call. It gives the fix away if it:
+- says what the code checks, fails to check, compares or computes, or where in
+  the code the defect is;
+- says what the code must validate, track, pass along, add or change
+  internally, rather than the observable result;
+- names a function, macro, variable, type or file of the production change
+  that the tests do not use;
+- describes the fix or the change itself.
 
-def check_statement(v, rec: dict) -> list[str]:
-    """The statement fields, and no line of the production fix quoted in them."""
+The production change (the agent does not see it):
+{diff}
+
+Names the tests use: {test_names}
+
+The statement:
+{statement}
+
+Reply with the JSON object only:
+{{"gives_away_fix": true or false, "phrases": ["each phrase of the statement that gives the fix away, verbatim"]}}"""
+
+REVIEW_DIFF_CAP = 60_000
+IDENT = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _code_like(token: str) -> bool:
+    return ("_" in token or (len(token) >= 5 and token.isalpha() and token.isupper())
+            or re.search(r"[a-z][A-Z]", token) is not None)
+
+
+def fix_identifiers(statement: str, rec: dict) -> list[str]:
+    """Identifiers from the production change's edited lines that the
+    statement names, other than ones the tests use (an interface may be
+    named as the tests use it)."""
+    changed = set()
+    for line in (rec.get("production_diff") or "").splitlines():
+        if line[:1] in "+-" and line[:3] not in ("+++", "---"):
+            changed |= {t for t in IDENT.findall(line) if _code_like(t)}
+    tests = (rec.get("test_patch") or "").lower()
+    return sorted({t for t in IDENT.findall(statement) if t in changed and t.lower() not in tests})
+
+
+def review_statement(statement: str, rec: dict, kw: dict, trace: dict) -> list[str]:
+    """Ask the served model, in a fresh conversation without tools, whether
+    the statement gives the fix away. Returns the offending phrases (a
+    generic one when it says so without quoting); raises when the reply
+    twice carries no verdict."""
+    import litellm
+    test_names = sorted({t for t in IDENT.findall(rec.get("test_patch") or "") if _code_like(t)})
+    request = REVIEW_REQUEST.format(diff=(rec.get("production_diff") or "")[:REVIEW_DIFF_CAP],
+                                    test_names=", ".join(test_names) or "(none)", statement=statement)
+    for _ in range(2):
+        r = litellm.completion(messages=[{"role": "user", "content": request}], **kw)
+        v = parse_verdict(r.choices[0].message.content)
+        trace.setdefault("reviews", []).append({"statement": statement, "reply": r.choices[0].message.content})
+        if isinstance(v, dict) and isinstance(v.get("gives_away_fix"), bool):
+            if not v["gives_away_fix"]:
+                return []
+            phrases = [x for x in v.get("phrases") or [] if isinstance(x, str) and x.strip()]
+            return phrases or ["(the reviewer quoted no phrase)"]
+    raise ValueError("the statement review returned no verdict")
+
+
+def check_statement(v, rec: dict, review=None) -> list[str]:
+    """The statement fields; no line of the production fix quoted, no
+    identifier of the fix the tests do not use, and (given review) no
+    phrase the model review says gives the fix away."""
     if not isinstance(v, dict):
         return ["the reply must be one JSON object"]
     issues = []
@@ -879,40 +955,87 @@ def check_statement(v, rec: dict) -> list[str]:
              if line.startswith("+") and not line.startswith("+++")}
     if any(len(line) >= 25 and line in statement for line in added):
         issues.append("`problem_statement` quotes the production fix; describe the behavior instead")
+    named = fix_identifiers(statement, rec)
+    if named:
+        issues.append("`problem_statement` names code of the fix that the tests do not use ("
+                      + ", ".join(named) + "); describe what a caller observes instead")
+    if not issues and review is not None:
+        phrases = review(statement)
+        if phrases:
+            issues.append("`problem_statement` gives the fix away: " + "; ".join(f"\"{x}\"" for x in phrases)
+                          + ". Describe only the observable symptom, its trigger and the required "
+                          "behavior, not what the code checks or must do internally")
     return issues
 
 
-def statement_one(folder: Path, profile: str, prof: dict, api_base: str, out_dir: Path) -> dict:
+def statement_one(folder: Path, profile: str, prof: dict, api_base: str, out_dir: Path,
+                  recheck: bool = False) -> dict:
     """Ask the served model for the problem statement of a validated
-    observation-only instance; write it into the instance's metadata.json,
-    which the recipe fingerprint does not cover."""
+    instance and write it into the instance's metadata.json, which the
+    recipe fingerprint does not cover. With recheck, an existing statement
+    is first checked under the current rules and kept if it passes; one
+    that fails is replaced, and kept under superseded_statements."""
     meta = json.loads((folder / "metadata.json").read_text())
     pr = int(meta["instance_id"].rsplit("-", 1)[1])
     rec = json.loads((ENRICHED / f"{pr}.json").read_text())
+    kw = model_kw(profile, prof, api_base)
+    trace = {"pr": pr, "profile": profile, "mode": "statement", "turns": [], "repairs": [],
+             "error": None, "tool_calls": 0, "budget_hit": False}
+    review = lambda s: review_statement(s, rec, kw, trace)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = out_dir / f"{pr}.statement.trace.json"
+    old = (meta.get("problem_statement") or "").strip()
+    t0 = time.time()
+
+    def write(meta: dict) -> None:
+        (folder / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
+
+    if recheck and old:
+        try:
+            trace["recheck_issues"] = check_statement(
+                {"pr": pr, "problem_statement": old, "causal_chain": meta.get("causal_chain") or "-",
+                 "change_type": meta.get("change_type") or "-"}, rec, review)
+        except Exception as e:                 # no verdict: decide nothing
+            trace.update(error=f"{type(e).__name__}: {e}", seconds=round(time.time() - t0, 1))
+            trace_path.write_text(json.dumps(trace, indent=2, default=str))
+            return {"pr": pr, "ok": False, "issues": [], "error": trace["error"]}
+        if not trace["recheck_issues"]:
+            trace["seconds"] = round(time.time() - t0, 1)
+            trace_path.write_text(json.dumps(trace, indent=2, default=str))
+            meta["statement_check"] = {"version": STATEMENT_CHECK, "result": "kept",
+                                       "trace": str(trace_path)}
+            write(meta)
+            return {"pr": pr, "ok": True, "kept": True, "issues": [], "error": None}
+
     request = STATEMENT_REQUEST.format(pr=pr, f2p=json.dumps(meta["fail_to_pass"]),
                                        p2p=json.dumps(meta["pass_to_pass"]))
     messages = [{"role": "system", "content": instruction_text()},
                 {"role": "user", "content": "Enriched PR record:\n\n" + PROJECTS[PROJECT]["render"](rec)
                  + "\n\n---\n" + request
                  + f"\n\nYou may use up to {MAX_TOOL_ROUNDS} tool rounds."}]
-    trace = {"pr": pr, "profile": profile, "mode": "statement", "turns": [], "repairs": [],
-             "error": None, "tool_calls": 0, "budget_hit": False}
-    t0 = time.time()
-    answer, issues = converse(messages, rec, lambda v: check_statement(v, rec),
-                              model_kw(profile, prof, api_base), trace)
+    answer, issues = converse(messages, rec, lambda v: check_statement(v, rec, review), kw, trace)
+    if trace["error"] and not issues:
+        issues = [trace["error"]]
     trace.update(seconds=round(time.time() - t0, 1), issues=issues, messages=messages)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    trace_path = out_dir / f"{pr}.statement.trace.json"
     trace_path.write_text(json.dumps(trace, indent=2, default=str))
+    if old:
+        meta.setdefault("superseded_statements", []).append(
+            {"problem_statement": old, "provenance": meta.get("statement_provenance") or "triage verdict",
+             "check_issues": trace.get("recheck_issues")})
     if issues:
+        if old:       # a statement that failed the check is not promotable
+            meta.update(problem_statement="", statement_check={
+                "version": STATEMENT_CHECK, "result": "failed", "issues": issues, "trace": str(trace_path)})
+            write(meta)
         return {"pr": pr, "ok": False, "issues": issues, "error": trace["error"]}
     meta.update(problem_statement=answer["problem_statement"].strip(),
                 causal_chain=answer["causal_chain"].strip(), change_type=answer["change_type"].strip(),
-                statement_provenance={"model": profile, "mode": "observation statement",
+                statement_provenance={"model": profile, "mode": "statement",
                                       "trace": str(trace_path),
-                                      "prompt_sha256": hashlib.sha256(messages[0]["content"].encode()).hexdigest()[:16]})
-    (folder / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
-    return {"pr": pr, "ok": True, "issues": [], "error": None}
+                                      "prompt_sha256": hashlib.sha256(messages[0]["content"].encode()).hexdigest()[:16]},
+                statement_check={"version": STATEMENT_CHECK, "result": "written", "trace": str(trace_path)})
+    write(meta)
+    return {"pr": pr, "ok": True, "kept": False, "issues": [], "error": None}
 
 
 def cmd_statement(args) -> None:
@@ -924,8 +1047,10 @@ def cmd_statement(args) -> None:
     receipt = json.loads((folder / "validation.json").read_text())
     if not receipt.get("valid"):
         sys.exit(f"{folder.name}: not a valid instance")
-    s = statement_one(folder, args.profile, profiles[args.profile], args.api_base, RUNS)
-    print(f"  {s['pr']}: {'statement written' if s['ok'] else 'no statement: ' + '; '.join(s['issues'])}")
+    s = statement_one(folder, args.profile, profiles[args.profile], args.api_base, RUNS, args.recheck)
+    print(f"  {s['pr']}: " + ("statement kept (passes the check)" if s.get("kept") else
+                              "statement written" if s["ok"] else
+                              "no statement: " + "; ".join(s["issues"] or [s["error"] or "?"])))
     sys.exit(0 if s["ok"] else 1)
 
 
@@ -1184,10 +1309,12 @@ def main() -> None:
     e.add_argument("run_dir", nargs="?", help="default: the latest run")
 
     st = sub.add_parser("statement", help="model-written problem statement for a validated "
-                                          "observation-only instance")
+                                          "instance")
     st.add_argument("--project", choices=("contiki-ng",), default="contiki-ng")
     st.add_argument("--profile", required=True, help="entry in triage/models.json")
-    st.add_argument("--instance", required=True, help="the finalized instance folder")
+    st.add_argument("--instance", required=True, help="the validated instance folder")
+    st.add_argument("--recheck", action="store_true",
+                    help="check an existing statement under the current rules; replace it if it fails")
     st.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
 
     args = p.parse_args()
