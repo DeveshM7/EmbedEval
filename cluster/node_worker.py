@@ -21,6 +21,12 @@ validate  only once the run's triage is complete: take accepted PRs
           afterwards. While the run's instance images exceed disk_guard_gb,
           no new PR is taken. No model server runs.
 
+Mynewt runs (the manifest's project) run each phase as its own job:
+triage on a GPU node (scripts/triage_mynewt_prs.py, the local model only),
+validation on an x86 node (mynewt_validate below; no model server), and
+evaluate, which runs an agent on each validated instance and grades its
+patch (mynewt_evaluate below).
+
 Every PR gets status/<pr>.json once a phase is through with it (status.py).
 Each step runs in its own process group, killed whole on a timeout. On
 SIGTERM (scancel, the job's time limit) it stops its steps and the server and
@@ -52,6 +58,9 @@ import report  # noqa: E402
 import status  # noqa: E402
 
 PY = sys.executable
+API_KEYS = ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+            "GOOGLE_API_KEY", "TOGETHER_API_KEY", "TOGETHERAI_API_KEY")
+DETERMINISM_RUNS = 5                 # Mynewt: before-state runs a runtime instance must pass
 WARM = ".warm"                       # in the compile cache once a server filled it
 _children: set[int] = set()          # process groups of running steps
 _lock = threading.Lock()
@@ -121,7 +130,7 @@ _queue: claims.Queue | None = None     # this phase's queue, for on_sigterm
 
 
 def drain(q: claims.Queue, todo: list[int], one, slots: int, until: float,
-          ready=lambda: True) -> None:
+          ready=lambda: True, stop=lambda: False) -> None:
     """Run one(pr) on PRs taken from the queue, `slots` at a time, until none
     is left or `until` (a time) has passed. While ready() is false, no PR is
     taken. A slot with nothing to take waits while other nodes still hold
@@ -130,7 +139,7 @@ def drain(q: claims.Queue, todo: list[int], one, slots: int, until: float,
     _queue = q
 
     def slot() -> None:
-        while not _stopping.is_set() and time.time() < until:
+        while not _stopping.is_set() and time.time() < until and not stop():
             if not ready():
                 time.sleep(claims.BEAT)
                 continue
@@ -222,6 +231,18 @@ def server_ready(p: subprocess.Popen, minutes: float) -> bool:
     return False
 
 
+def verdict_fields(v: dict) -> dict:
+    """What a verdict adds to the triage status: Zephyr's board and scenario;
+    Mynewt's accept or reject (triage_mynewt_prs.is_accept), kind and oracle."""
+    if PROJECT == "mynewt":
+        import triage_mynewt_prs as tm
+        ok = tm.is_accept(v)
+        return {"verdict": "accept" if ok else "error" if v.get("kind") == "error" else "reject",
+                "kind": v.get("kind"), "failure_mode": v.get("failure_mode", "runtime") if ok else None}
+    pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
+    return {"verdict": v.get("verdict"), "pair": pair}
+
+
 def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> None:
     todo = status.triage_todo(run)
     log(f"triage: {len(todo)} PRs left in the run")
@@ -246,17 +267,20 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> N
                 return                                    # stays to do: a resubmit runs it
             cap = min(caps["triage_pr"], left)
             start = time.time()
-            rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "run", "--profile",
-                       profile, "--pr", str(pr), "--parallel", "1"],
-                      LOGS / f"triage-{pr}.log", cap, env)
+            if PROJECT == "mynewt":
+                cmd = [PY, "scripts/triage_mynewt_prs.py", "run", "--profile", profile, "--case",
+                       str(pr), "--parallel", "1", "--out", str(run / "triage")]
+            else:
+                cmd = [PY, "scripts/triage_prs.py", "--run-dir", str(run), "run", "--profile",
+                       profile, "--pr", str(pr), "--parallel", "1"]
+            rc = step(cmd, LOGS / f"triage-{pr}.log", cap, env)
             if rc == 143:
                 return
             minutes = round((time.time() - start) / 60, 1)
             f = run / "triage" / f"{pr}.json"
             if f.exists() and f.stat().st_mtime >= start:
                 v = json.loads(f.read_text())
-                pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
-                info = {"state": "done", "verdict": v.get("verdict"), "pair": pair,
+                info = {"state": "done", **verdict_fields(v),
                         "confidence": v.get("confidence"), "minutes": minutes, "node": N}
             elif rc == 124:
                 info = {"state": "cap", "minutes": minutes, "node": N,
@@ -341,6 +365,16 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         if left() < 10 or _stopping.is_set():
             return                                         # stays to do
         lg = LOGS / f"validate-{pr}.log"
+        if PROJECT == "mynewt":
+            res = mynewt_validate(run, pr, lg, left, venv)
+            if res is None:
+                return                                     # stopping: stays to do
+            state, what, extra = res
+            info = {"state": state, "minutes": round((time.time() - start) / 60, 1), "node": N, **extra}
+            info["outcome" if state == "done" else "note"] = what
+            if record(run, pr, "validate", info):
+                log(f"validate {pr}: {what}")
+            return
         verdict = run / "triage" / f"{pr}.json"
         tried = []
         while True:
@@ -374,6 +408,9 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
                 f"{cfg['disk_guard_gb']} GB); taking no new PR until there is room")
         return False
 
+    if PROJECT == "mynewt" and not mynewt_base(venv):
+        log("the shared Mynewt image could not be built; see logs/node*/base.log. Taking no PRs")
+        return
     q = claims.Queue(run, "validate", ME, lambda pr: status.validate_needed(run, pr))
     drain(q, todo, one, cfg["parallel"]["validate_per_node"], deadline - 10 * 60, room)
 
@@ -435,6 +472,242 @@ def other_board(run: Path, pr: int, verdict: Path, tried: list[str]) -> Path | N
     return out
 
 
+# ---------------------------------------------------------------- Mynewt
+#
+# Validation of one PR, on an x86 node (old trees build -m32 binaries):
+#   a. the recipe in <run>/instances/<iid>/: generated from the verdict
+#      (generate_instance.py --repo mynewt --runtime apptainer), or, for a PR
+#      prepared from an existing instance (prepare.py --instances), rendered
+#      again from that instance's metadata and test patch in <run>/sources/;
+#   b. build_instances.py, then validate_instance.py --determinism 5: the
+#      leak check (nothing after the base, no fix, no network), the before
+#      state DETERMINISM_RUNS times for a runtime oracle, the fix, the after
+#      state; every command without a network, as the agent's will be;
+#   c. cleanup_instance.py, always: the image is rebuilt from the recipe.
+
+
+def mynewt_env(env: dict) -> dict:
+    """The local model only (no provider keys), and the sbin directories for
+    unshare/ip and apptainer's ldconfig, which a batch job's PATH may lack."""
+    env = {k: v for k, v in env.items() if k not in API_KEYS}
+    path = (env.get("PATH") or os.defpath).split(":")
+    env["PATH"] = ":".join(path + [d for d in ("/usr/sbin", "/sbin") if d not in path])
+    return env
+
+
+def mynewt_base(venv: dict) -> bool:
+    """The shared Mynewt image, built by one worker at a time (the others
+    wait for it, then find it built)."""
+    shared = Path(venv["EMBEDEVAL_SHARED"]) / "images"
+    shared.mkdir(parents=True, exist_ok=True)
+    with open(shared / ".mynewt-base.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rc = step([PY, "-c", "import sys; sys.path.insert(0, 'scripts'); from pathlib import Path; "
+                   "import apptainer_util as au; print(au.ensure_mynewt_base_image(Path(sys.argv[1])))",
+                   str(LOGS / "base")], LOGS / "base.log", 120, venv)
+    return rc == 0
+
+
+def mynewt_validate(run: Path, pr: int, lg: Path, left, venv: dict):
+    """One PR: ("done", "VALID" | "INVALID: why", info), ("failed", why, info),
+    or None if the worker is stopping."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    e = status.entry(run, pr)
+    out = run / "instances"
+    if e.get("instance"):
+        iid, src = e["instance"], run / "sources" / e["instance"]
+        generate = [PY, "scripts/render_mynewt_instance.py", "--metadata", str(src / "metadata.json"),
+                    "--test-patch", str(src / "test_patch.diff"), "--out", str(out)]
+    else:
+        from generate_instance import mynewt_instance_id
+        verdict = run / "triage" / f"{pr}.json"
+        iid = mynewt_instance_id(pr, json.loads(verdict.read_text()))
+        generate = [PY, "scripts/generate_instance.py", "--repo", "mynewt", "--runtime", "apptainer",
+                    "--pr", str(pr), "--triage", str(verdict), "--out", str(out),
+                    "--enriched-root", str(run / "candidates" / "mynewt" / "enriched")]
+    info = {"instance": iid}
+    step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)     # leftovers of a cut-short try
+    shutil.rmtree(out / iid, ignore_errors=True)
+    try:
+        rc = step(generate, lg, min(10, left()), venv)
+        if rc == 143:
+            return None
+        if rc:
+            lines = [l.strip() for l in lg.read_text(errors="replace").splitlines() if "ERROR" in l]
+            return "done", f"INVALID: generate refused: {lines[-1][:300] if lines else 'see the log'}", info
+        meta = json.loads((out / iid / "metadata.json").read_text())
+        info["failure_mode"] = meta.get("failure_mode", "runtime")
+        rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
+                  min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
+        if rc == 143:
+            return None
+        if rc:
+            return "failed", "build failed" if rc != 124 else "build hit the cap", info
+        if left() < 5:
+            return "failed", "no time left to validate", info
+        rc = step([PY, "scripts/validate_instance.py", iid, "--timeout", "600",
+                   "--determinism", str(DETERMINISM_RUNS)], lg, left(), venv)
+        if rc == 143:
+            return None
+        if rc == 124:
+            return "failed", "validation hit the cap", info
+        f = out / iid / "validation.json"
+        report = json.loads(f.read_text()) if f.exists() else {}
+        leak = report.get("leak_check") or {}
+        info["leak_check"] = "clean" if leak.get("ok") else "; ".join(leak.get("findings", [])) or None
+        if report.get("valid"):
+            return "done", "VALID", info
+        reason = report.get("reason") or f"rc={rc}"
+        if reason.startswith(("error:", "image not built")):
+            return "failed", f"validation error: {reason[:300]}", info
+        return "done", f"INVALID: {reason[:400]}", info
+    finally:
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+
+
+# ---------------------------------------------------------------- Mynewt evaluate
+#
+# Per VALID instance of the run: build its image, run the agent on it
+# (harness/run.py: no network, the problem statement and the tests only), grade
+# the patch in a fresh container (harness/evaluate_patches.py), remove the
+# image. A local model is reached through an SSH tunnel to the node of the
+# model-server job (one submit.py started, which node 0 ends when the queue is
+# empty, or a running one named with --server-job, which is left alone). Outputs are the run's: <run>/outputs/mynewt/<model>/<PR>/ (patch,
+# trajectory) and <run>/outputs/grades/<iid>.json.
+
+
+def model_tunnel(job: str, minutes: float, port: int = 8000):
+    """(the tunnel process, api base) to the server of job `job`, once it answers."""
+    deadline = time.time() + minutes * 60
+    node = ""
+    while time.time() < deadline and not _stopping.is_set():
+        r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T %N"], capture_output=True, text=True)
+        state, _, node = r.stdout.strip().partition(" ")
+        if state == "RUNNING" and node:
+            hosts = subprocess.run(["scontrol", "show", "hostnames", node], capture_output=True,
+                                   text=True).stdout.split()
+            node = hosts[N % len(hosts)] if hosts else node     # a server job of several nodes
+            break
+        if not state:
+            return None, f"server job {job} is not in the queue"
+        time.sleep(30)
+    else:
+        return None, f"server job {job} did not start"
+    tunnel = subprocess.Popen(["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                               "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=60",
+                               "-N", "-L", f"{port}:127.0.0.1:8000", node], start_new_session=True)
+    with _lock:
+        _children.add(tunnel.pid)
+    base = f"http://127.0.0.1:{port}/v1"
+    while time.time() < deadline and not _stopping.is_set() and tunnel.poll() is None:
+        try:
+            urllib.request.urlopen(base + "/models", timeout=5)
+            return tunnel, base
+        except Exception:
+            time.sleep(20)
+    kill_group(tunnel.pid)
+    return None, f"server of job {job} on {node} did not answer"
+
+
+def server_alive(base: str, tunnel) -> bool:
+    if tunnel.poll() is not None:
+        return False
+    try:
+        urllib.request.urlopen(base + "/models", timeout=10)
+        return True
+    except Exception:
+        return False
+
+
+def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
+    todo = status.evaluate_todo(run)
+    log(f"evaluate: {len(todo)} instances left in the run")
+    if not todo:
+        return
+    ev, caps = cfg["evaluate"], cfg["caps"]
+    t0 = time.time()
+    deadline = t0 + (minutes - 3) * 60
+    venv = {**env, "EMBEDEVAL_BUILD_TIMEOUT_MIN": str(caps["build"])}
+    server = cfg.get("evaluate_server_job")
+    tunnel = None
+    if server:
+        tunnel, base = model_tunnel(server, caps["server_start"])
+        if tunnel is None:
+            log(f"no model server: {base}. Taking no instances")
+            return
+        venv["EMBEDEVAL_LOCAL_API_BASE"] = base
+        log(f"model server of job {server} answers at {base}")
+    sweep(Path(env["EMBEDEVAL_WORK"]))
+    grades = run / "outputs" / "grades"
+    grades.mkdir(parents=True, exist_ok=True)
+
+    lost = threading.Event()        # the model server is gone: take no more instances
+
+    def one(pr: int) -> None:
+        if tunnel is not None and not server_alive(venv["EMBEDEVAL_LOCAL_API_BASE"], tunnel):
+            lost.set()
+            return                                         # stays to do: the next job runs it
+        iid = status.read(run, pr)["validate"]["instance"]
+        lg, start = LOGS / f"evaluate-{pr}.log", time.time()
+        left = lambda: (deadline - time.time()) / 60
+        if left() < ev["time_limit"] + 20 or _stopping.is_set():
+            return                                         # stays to do
+        info = {"model": ev["model"], "instance": iid, "node": N}
+
+        def done(state: str, **more) -> None:
+            info.update(state=state, minutes=round((time.time() - start) / 60, 1), **more)
+            if record(run, pr, "evaluate", info):
+                log(f"evaluate {pr}: {info.get('grade') or info.get('note')}")
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+        try:
+            rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
+                      2 * caps["build"] + 5, venv)
+            if rc == 143:
+                return
+            if rc:
+                return done("failed", note="build failed" if rc != 124 else "build hit the cap")
+            rc = step([PY, "harness/run.py", "--instance", iid, "--model", ev["model"],
+                       "--step-limit", str(ev["step_limit"]), "--time-limit", str(ev["time_limit"])],
+                      lg, ev["time_limit"] + 15, venv)
+            if rc == 143:
+                return
+            if tunnel is not None and not server_alive(venv["EMBEDEVAL_LOCAL_API_BASE"], tunnel):
+                # the agent lost its model: not the agent's outcome, so it is run again
+                lost.set()
+                return done("failed", note="model server gone during the run")
+            out = grades / f"{iid}.json"
+            rc = step([PY, "harness/evaluate_patches.py", "--instance", iid, "--model", ev["model"],
+                       "--output", str(out)], lg, 30, venv)
+            if rc == 143:
+                return
+            if not out.exists():
+                return done("failed", note=f"no grade (rc={rc}); see the log")
+            g = json.loads(out.read_text())["results"][0]
+            steps = None
+            r = run / "outputs" / "mynewt"
+            for f in r.glob(f"*/{iid.split('-', 1)[1]}/trajectory.json"):
+                try:
+                    steps = json.loads(f.read_text())["info"]["model_stats"]["api_calls"]
+                except (OSError, ValueError, KeyError):
+                    pass
+            done("done", grade=g.get("grade"), error=g.get("error"), steps=steps,
+                 tampering=g.get("tampering", False))
+        finally:
+            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+
+    q = claims.Queue(run, "evaluate", ME, lambda pr: status.evaluate_needed(run, pr))
+    try:
+        drain(q, todo, one, ev["per_node"], deadline - 5 * 60, stop=lost.is_set)
+        if lost.is_set():
+            log("the model server is gone: the rest stays to do for the next evaluate job")
+    finally:
+        if tunnel is not None:
+            kill_group(tunnel.pid)
+    if server and cfg.get("evaluate_server_owned") and N == 0 and not status.evaluate_todo(run):
+        subprocess.run(["scancel", server])
+        log(f"every instance evaluated: model server job {server} ended")
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -451,12 +724,12 @@ def on_sigterm(signum, frame) -> None:
 
 
 def main() -> None:
-    global N, NN, LOGS, ME
+    global N, NN, LOGS, ME, PROJECT
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True)
     p.add_argument("--config", required=True, help="the frozen settings submit.py wrote")
-    p.add_argument("--phase", required=True, choices=["triage", "validate"])
+    p.add_argument("--phase", required=True, choices=["triage", "validate", "evaluate"])
     p.add_argument("--minutes", type=float, required=True,
                    help="the phase's time: what is left of the job, less the report's")
     args = p.parse_args()
@@ -471,20 +744,25 @@ def main() -> None:
     sys.stdout = open(LOGS / f"worker-{args.phase}.log", "a", buffering=1)
     sys.stderr = sys.stdout
     signal.signal(signal.SIGTERM, on_sigterm)
-    env = {**os.environ, **cluster_config.env_for(cfg, run),
+    PROJECT = status.project(run)           # the run's, as prepared
+    env = {**os.environ, **cluster_config.env_for(cfg, run, PROJECT),
            # this node's own images, overlays and temp files: its cleanup can
            # never touch another node's work
            "EMBEDEVAL_WORK": str(node_dir / "work")}
+    if PROJECT == "mynewt":
+        env = mynewt_env(env)
     log(f"phase {args.phase}, node {N} of {NN}, run {run}, {args.minutes:.0f} min")
     claims.keep_alive(run, ME)
     if args.phase == "triage":
         triage(cfg, run, env, node_dir, args.minutes)
+    elif args.phase == "evaluate":
+        evaluate(cfg, run, env, args.minutes)
     else:
         validate(cfg, run, env, args.minutes)
     log(f"phase {args.phase} done")
 
 
-N, NN, LOGS, ME = 0, 1, Path("."), "local-node0"
+N, NN, LOGS, ME, PROJECT = 0, 1, Path("."), "local-node0", "zephyr"
 
 if __name__ == "__main__":
     main()

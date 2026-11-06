@@ -20,6 +20,7 @@ CLUSTER_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CLUSTER_DIR.parent
 EXAMPLE = CLUSTER_DIR / "config.example.yaml"
 DEFAULT = CLUSTER_DIR / "config.yaml"
+PROJECTS = ("zephyr", "mynewt")
 
 
 class ConfigError(Exception):
@@ -76,6 +77,8 @@ def load(path: str | Path | None = None) -> dict:
     elif path != DEFAULT:
         raise ConfigError(f"no config file {path}")
     cfg = _expand(_overlay(base, user))
+    if cfg["project"] not in PROJECTS:
+        raise ConfigError(f"'project' must be one of {', '.join(PROJECTS)}, got {cfg['project']!r}")
     root = Path(cfg["scratch_root"])
     p = cfg["paths"]
     shared = Path(p["shared"]) if p["shared"] else root / "shared"
@@ -85,15 +88,17 @@ def load(path: str | Path | None = None) -> dict:
         "shared": str(shared),
         "runs": str(root / "runs"),
         "zephyr_clone": p["zephyr_clone"] or str(shared / "zephyr.git"),
+        "mynewt_clone": p["mynewt_clone"] or str(shared / "mynewt-core.git"),
         "vllm_cache": p["vllm_cache"] or str(shared / "vllm-cache"),
         "ledger": str(shared / "ledger.jsonl"),
     }
     return cfg
 
 
-def env_for(cfg: dict, run_dir: Path | None = None) -> dict:
+def env_for(cfg: dict, run_dir: Path | None = None, project: str | None = None) -> dict:
     """The environment the pipeline scripts read (scripts/layout.py,
-    scripts/apptainer_util.py, scripts/serve_triage_model.sh)."""
+    scripts/apptainer_util.py, scripts/serve_triage_model.sh). `project`: the
+    run's (its manifest's); default the config's."""
     d, p = cfg["derived"], cfg["paths"]
     env = {"EMBEDEVAL_SHARED": d["shared"],
            "EMBEDEVAL_ZEPHYR_CLONE": d["zephyr_clone"],
@@ -101,6 +106,12 @@ def env_for(cfg: dict, run_dir: Path | None = None) -> dict:
            "EMBEDEVAL_VLLM_IMAGE": p["vllm_image"]}
     if cfg.get("registry"):
         env["EMBEDEVAL_REGISTRY"] = cfg["registry"]
+    if (project or cfg["project"]) == "mynewt":
+        # the clone every Mynewt script reads (two names: candidates/generation
+        # and images, triage), and a run's enriched records
+        env["EMBEDEVAL_MYNEWT_CLONE"] = env["MYNEWT_CLONE"] = d["mynewt_clone"]
+        if run_dir is not None:
+            env["MYNEWT_ENRICHED"] = str(Path(run_dir) / "candidates" / "mynewt" / "enriched")
     if run_dir is not None:
         env["EMBEDEVAL_RUN_DIR"] = str(run_dir)
     return env

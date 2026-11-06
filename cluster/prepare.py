@@ -25,6 +25,17 @@ Creates <scratch_root>/runs/<name>/ and, in it:
 
 Then `python cluster/submit.py pipeline --run <name>`. Run this from an
 interactive session on a Spark node: the SDK images are built here.
+
+--project mynewt (or `project: mynewt` in the config) prepares a Mynewt run
+instead (plan_mynewt): the PRs come from scripts/mynewt_candidates.py (fetch,
+filter: every merged PR that changes a unit-test package; --all takes the
+whole history, --since/--until a window of merge dates) and are enriched
+into <run>/candidates/mynewt/enriched/; there is no dry run, and the shared
+Mynewt image is built by the first validation worker (on x86). It needs the
+`gh` CLI and the clone (paths.mynewt_clone). --instances DIR prepares a
+revalidation of existing instances instead (each <id>/metadata.json and
+test_patch.diff is copied into <run>/sources/): no triage, every PR "to
+validate". Then `submit.py triage`, and `submit.py validate --after <job>`.
 """
 
 from __future__ import annotations
@@ -32,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -71,6 +83,88 @@ def script(name: str, *args: str, env: dict, logfile: Path, timeout: int | None 
             return 124
 
 
+def plan_mynewt(args, cfg: dict, run: Path, env: dict, logs: Path, skip_known, stage: dict,
+                notes: dict, timings: dict) -> tuple[list[int], dict, dict]:
+    """Steps 1-5 for Mynewt: (the PRs, the manifest's source, extra manifest
+    fields per PR). Every PR ends in `stage`."""
+    clone = Path(cfg["derived"]["mynewt_clone"])
+    if not (clone / "objects").is_dir() and not (clone / ".git").is_dir():
+        sys.exit(f"no mynewt-core clone at {clone}; `git clone --bare https://github.com/apache/"
+                 "mynewt-core.git` there (or set paths.mynewt_clone)")
+    extra: dict[int, dict] = {}
+    t = time.time()
+    if args.instances:
+        sys.path.insert(0, str(REPO / "scripts"))
+        import instances as inst_mod
+        root = Path(args.instances).resolve()
+        ids = sorted(d.name for d in root.iterdir() if (d / "metadata.json").exists())
+        prs = []
+        for iid in ids:
+            project, pr = inst_mod.split_instance(iid)
+            if project != "mynewt" or not pr.isdigit():
+                sys.exit(f"{iid}: only plain mynewt__mynewt-<PR> instances can be revalidated")
+            src = run / "sources" / iid
+            src.mkdir(parents=True, exist_ok=True)
+            for f in ("metadata.json", "test_patch.diff", "observed_before.log"):
+                if (root / iid / f).exists():
+                    shutil.copy2(root / iid / f, src / f)
+            prs.append(int(pr))
+            stage[int(pr)] = "to validate"
+            extra[int(pr)] = {"instance": iid}
+        timings["select"] = time.time() - t
+        log(f"{len(prs)} instances from {root}, to validate")
+        return prs, {"instances": str(root), "redo": args.redo}, extra
+
+    data = run / "candidates" / "mynewt"
+    if args.pr:
+        prs = list(dict.fromkeys(args.pr))
+        source = {"pr": prs, "redo": args.redo}
+        skip_known(prs)
+        fresh = [pr for pr in prs if pr not in stage]
+        if fresh:
+            script("mynewt_candidates.py", "fetch", "--pr", *map(str, fresh), env=env,
+                   logfile=logs / "fetch.log", timeout=None)
+    else:
+        source = {"all": True} if args.all else {"since": args.since, "until": args.until}
+        source["redo"] = args.redo
+        log("fetching every PR of apache/mynewt-core")
+        if script("mynewt_candidates.py", "fetch", env=env, logfile=logs / "fetch.log", timeout=None):
+            sys.exit(f"fetch failed; see {logs / 'fetch.log'}")
+    if script("mynewt_candidates.py", "filter", env=env, logfile=logs / "filter.log"):
+        sys.exit(f"filter failed; see {logs / 'filter.log'}")
+    found = {json.loads(l)["number"]: json.loads(l) for l in open(data / "candidates.jsonl")}
+    if args.pr:
+        for pr in (p for p in prs if p not in stage):
+            if pr not in found:
+                f = data / "cache" / f"{pr}.json"
+                stage[pr], notes[pr] = ("hard filter", "changes no unit-test package, or not merged, "
+                                        "or a revert") if f.exists() else ("fetch failed", f"see {logs / 'fetch.log'}")
+    else:
+        prs = sorted(n for n, c in found.items()
+                     if args.all or args.since <= (c.get("merged_at") or "")[:10] <= args.until)
+        skip_known(prs)
+    timings["select"] = time.time() - t
+    log(f"{len(prs)} PRs")
+
+    t = time.time()
+    kept = [pr for pr in prs if pr not in stage]
+    log(f"enriching {len(kept)}, {cfg['parallel']['enrich']} at a time")
+    if kept:
+        script("mynewt_candidates.py", "enrich", "--parallel", str(cfg["parallel"]["enrich"]),
+               "--pr", *map(str, kept), env=env, logfile=logs / "enrich.log", timeout=None)
+    for pr in kept:
+        f = data / "enriched" / f"{pr}.json"
+        if not f.exists():
+            stage[pr], notes[pr] = "enrich failed", f"see {logs / 'enrich.log'}"
+        elif not json.loads(f.read_text()).get("test_suites"):
+            stage[pr], notes[pr] = "enrich: no runnable test", "no unit-test package at the PR's head"
+        else:
+            stage[pr] = "to triage"
+    timings["enrich"] = time.time() - t
+    log(f"enriched in {timings['enrich']:.0f} s: {sum(1 for p in kept if stage[p] == 'to triage')} to triage")
+    return prs, source, extra
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -78,6 +172,11 @@ def main() -> None:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--since", help="fetch PRs merged on or after this date (YYYY-MM-DD)")
     src.add_argument("--pr", type=int, nargs="+", help="these PRs, hard filters applied")
+    src.add_argument("--all", action="store_true", help="Mynewt: every PR in the history")
+    src.add_argument("--instances", help="Mynewt: revalidate the instances in this folder "
+                     "(e.g. apptainer/instances/mynewt)")
+    p.add_argument("--project", choices=cluster_config.PROJECTS,
+                   help="default: the config's `project`")
     p.add_argument("--no-filter", action="store_true", help="with --pr: skip the hard filters")
     p.add_argument("--redo", action="store_true",
                    help="also take PRs the ledger has already settled in an earlier run")
@@ -90,12 +189,15 @@ def main() -> None:
         p.error("--no-filter goes with --pr")
 
     cfg = cluster_config.load_or_exit(args.config)
+    project = args.project or cfg["project"]
+    if project == "zephyr" and (args.all or args.instances):
+        p.error("--all and --instances are Mynewt only")
     run = Path(cfg["derived"]["runs"]) / args.name
     if (run / "manifest.json").exists():
         sys.exit(f"{run} is already prepared; pick another --name "
                  "(or delete that run folder yourself)")
     run.mkdir(parents=True, exist_ok=True)
-    env = cluster_config.env_for(cfg, run)
+    env = cluster_config.env_for(cfg, run, project)
     os.environ.update(env)              # for the modules imported below
     logs = run / "logs" / "prepare"
     par = cfg["parallel"]
@@ -106,8 +208,8 @@ def main() -> None:
     # 1. the PRs; skipped: those an earlier run settled (ledger.py), and those
     # another run has taken and not finished (never two runs on one PR)
     stage, notes = {}, {}
-    done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]))
-    taken = status.unfinished(Path(cfg["derived"]["runs"]), but=run)
+    done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]), project)
+    taken = status.unfinished(Path(cfg["derived"]["runs"]), but=run, of=project)
 
     def skip_known(prs):
         for pr in prs:
@@ -124,6 +226,13 @@ def main() -> None:
         if n:
             log(f"{n} taken by unfinished runs ({', '.join(sorted({taken[p] for p in prs if p in taken}))})")
 
+    if project == "mynewt":
+        prs, source, extra = plan_mynewt(args, cfg, run, env, logs, skip_known, stage, notes, timings)
+        write_manifest(args, cfg, project, run, env, source, prs, stage, notes, timings, t0, [], extra)
+        print(f"\nnext: python cluster/submit.py {'validate' if args.instances else 'triage'} "
+              f"--run {args.name}" + ("" if args.instances else
+                                      f"; then submit.py validate --run {args.name} --after <job>"))
+        return
     if args.pr:
         prs = list(dict.fromkeys(args.pr))
         source = {"pr": prs, "hard_filter": not args.no_filter, "redo": args.redo}
@@ -223,19 +332,28 @@ def main() -> None:
     log(f"commits: {len(shas)} present ({fetched})")
 
     # 6. the manifest
+    write_manifest(args, cfg, project, run, env, source, prs, stage, notes, timings, t0,
+                   [f"{sdk} (Python {py})" for py, sdk, _ in missing if not au.sdk_image(sdk, py).exists()])
+    print(f"\nnext: python cluster/submit.py pipeline --run {args.name}")
+
+
+def write_manifest(args, cfg: dict, project: str, run: Path, env: dict, source: dict, prs: list[int],
+                   stage: dict, notes: dict, timings: dict, t0: float, missing_images: list[str],
+                   extra: dict | None = None) -> None:
+    """Step 6: the manifest, the ledger's settled outcomes, and the summary."""
     git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
                                     text=True).stdout.strip()
     manifest = {
         "name": args.name, "prepared": datetime.now().isoformat(timespec="seconds"),
+        **({"project": project} if project != "zephyr" else {}),
         "source": source,
         "code": {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))},
         "config": {k: v for k, v in cfg.items() if k != "derived"},
         "environment": env,
         "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
-                for pr in prs],
+                | (extra or {}).get(pr, {}) for pr in prs],
         "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
-        "missing_sdk_images": [f"{sdk} (Python {py})" for py, sdk, _ in missing
-                               if not au.sdk_image(sdk, py).exists()],
+        "missing_sdk_images": missing_images,
         "seconds": {k: round(v) for k, v in timings.items()},
     }
     tmp = run / "manifest.json.tmp"
@@ -247,7 +365,6 @@ def main() -> None:
         print(f"    {n:>5}  {s}")
     if manifest["missing_sdk_images"]:
         print(f"  WARNING: SDK images could not be built: {manifest['missing_sdk_images']}")
-    print(f"\nnext: python cluster/submit.py pipeline --run {args.name}")
 
 
 if __name__ == "__main__":

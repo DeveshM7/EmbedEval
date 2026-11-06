@@ -652,3 +652,69 @@ they break if moved. Delete them instead.
 `scripts/` still work on their own, but without `--run-dir` they write next
 to the code (`candidates/`, `generated/`, `triage/runs/`) and into
 `$SCRATCH/embedeval-twister`, as they did before run folders existed.
+
+---
+
+## 11. Mynewt runs
+
+The same orchestration runs Apache Mynewt (`project: mynewt` in
+`cluster/config.yaml`, or `--project mynewt` on `prepare.py`; the run's
+manifest records it). Mynewt differs in where its phases run: the model needs a
+GPU (Spark, ARM), while the instances must build and run on x86 (trees before
+2024 build `-m32` native binaries). So each phase is its own job, chained with
+`--after`:
+
+```bash
+# settings: project, the clone, the x86 partition and a Python for each architecture
+cat >> cluster/config.yaml <<'YAML'
+project: mynewt
+paths:
+  mynewt_clone: /scratch/scholar/$USER/repos/mynewt-core.git   # bare, with refs/pull/*/head
+slurm:
+  partition: spark-interactive
+  build_partition: cpu
+  triage_python: /home/$USER/EmbedEval/.venv/bin/python        # ARM venv (Spark)
+  build_python: /home/$USER/EmbedEval/.venv-x86/bin/python     # x86 venv (cpu, login node)
+YAML
+
+# a campaign: every merged PR that changes a unit-test package (needs `gh`; on
+# the x86 login node an x86 gh first on PATH)
+python cluster/prepare.py --name mynewt-full --all             # or --pr N..., or --since/--until
+python cluster/submit.py triage   --run mynewt-full            # the local model on Spark
+python cluster/submit.py validate --run mynewt-full --after <triage job>
+python cluster/submit.py evaluate --run mynewt-full --after <validate job>   # optional: an agent on each VALID one
+
+# a revalidation of instances that exist (no triage)
+python cluster/prepare.py --name mynewt-reval --instances apptainer/instances/mynewt
+python cluster/submit.py validate --run mynewt-reval
+python cluster/report.py --run mynewt-reval
+```
+
+- **prepare**: `scripts/mynewt_candidates.py` fetches every PR, keeps the merged non-revert
+  ones that change a `pkg.type: unittest` package or its test-support library, and enriches
+  them into `<run>/candidates/mynewt/enriched/`. No dry run. A PR whose enrichment has no
+  unit-test package is settled as `enrich: no runnable test`. `--instances DIR` copies each
+  instance's metadata and test patch into `<run>/sources/` and marks it `to validate`.
+- **triage** (`submit.py triage`) is `scripts/triage_mynewt_prs.py run --out <run>/triage`,
+  one PR per call; an accepting kind at high or medium confidence is an accept.
+- **validate** (`submit.py validate`, on `build_partition`) generates the recipe from the
+  verdict (a revalidation renders it from the instance's own metadata), builds it, and runs
+  `validate_instance.py --determinism 5`. The first worker builds the shared Mynewt image.
+  Every command runs without a network. Before any test, the leak check
+  (`scripts/mynewt_leakcheck.py`) inspects the unpacked image: only the base commit and the
+  recipe's own commits in `/testbed`, no fix commit and no fixed blob, no line only the fix
+  adds anywhere in the image, no other copy of mynewt-core (the newt sources carry one), no
+  route out, and a problem statement that names nothing only the fix introduces. A finding
+  is INVALID. The before state must also be judged the same in 5 runs (a compile
+  oracle can depend on which file a parallel build stops at; a runtime one on timing).
+- **evaluate** (`submit.py evaluate`) runs `harness/run.py` and `harness/evaluate_patches.py`
+  on each VALID instance (`evaluate:` in the config: model, steps, minutes, agents per
+  node). With a local model it first submits the model server on `partition`
+  (`scripts/serve_triage_model.sh`; `--server-job J` uses a running one) and reaches it over
+  an SSH tunnel; node 0 ends the server when every instance is graded. The agent sees the
+  repository at the base commit with the PR's tests, the problem statement and the test
+  names: not the fix's files, not the history, not the network.
+- **jobs** run a frozen copy of the code (`<run>/jobs/source-<time>/`, with
+  `source-manifest.json` hashes), so editing the checkout never changes a queued job.
+- **promotion** stays manual: `scripts/promote_instance.py --run-dir <run> <id>`. It refuses a
+  Mynewt instance without a clean leak check or a 5/5 before state.

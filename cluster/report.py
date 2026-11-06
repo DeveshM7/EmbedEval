@@ -32,16 +32,18 @@ import status  # noqa: E402
 
 
 def outcome(entry: dict, st: dict) -> tuple[str, str]:
-    """(where the PR ended up, detail)."""
-    if entry["stage"] != "to triage":
+    """(where the PR ended up, detail). A PR prepared "to validate" (a
+    revalidation of an existing instance) has no triage."""
+    if entry["stage"] not in ("to triage", "to validate"):
         return entry["stage"], entry.get("note", "")
-    t = st.get("triage")
-    if not t:
-        return "triage: not yet", ""
-    if t["state"] != "done":
-        return f"triage: {t['state']}", t.get("note", "")
-    if t.get("verdict") != "accept":
-        return f"triage: {t.get('verdict')}", t.get("note", "")
+    if entry["stage"] == "to triage":
+        t = st.get("triage")
+        if not t:
+            return "triage: not yet", ""
+        if t["state"] != "done":
+            return f"triage: {t['state']}", t.get("note", "")
+        if t.get("verdict") != "accept":
+            return f"triage: {t.get('verdict')}", t.get("note", "")
     v = st.get("validate")
     if not v:
         return "accepted, validation not yet", ""
@@ -52,7 +54,7 @@ def outcome(entry: dict, st: dict) -> tuple[str, str]:
     return "INVALID", "; ".join(x for x in (v["outcome"], v.get("note")) if x)
 
 
-ORDER = ["in ledger", "in another run", "fetch failed", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "triage: server failed",
+ORDER = ["in ledger", "in another run", "fetch failed", "hard filter", "enrich failed", "dry run error", "dry run: no runnable pair", "enrich: no runnable test", "triage: server failed",
          "triage: cap", "triage: failed", "triage: error", "triage: reject", "triage: not yet",
          "accepted, validation not yet", "validation: skipped", "validation: failed",
          "INVALID", "VALID"]
@@ -64,15 +66,21 @@ def build(run: Path) -> dict:
     for e in m["prs"]:
         st = status.read(run, e["pr"])
         where, detail = outcome(e, st)
+        v = st.get("validate") or {}
         rows.append({"pr": e["pr"], "outcome": where, "detail": detail,
                      "triage_min": (st.get("triage") or {}).get("minutes"),
-                     "validate_min": (st.get("validate") or {}).get("minutes"),
-                     "pair": (st.get("triage") or {}).get("pair")})
+                     "validate_min": v.get("minutes"),
+                     "pair": (st.get("triage") or {}).get("pair")
+                     or " ".join(x for x in (v.get("instance"), v.get("failure_mode")) if x) or None}
+                    | ({"agent": st["evaluate"].get("grade") or st["evaluate"]["state"]} if st.get("evaluate") else {}))
     counts = Counter(r["outcome"] for r in rows)
-    return {"run": m["name"], "generated": datetime.now().isoformat(timespec="seconds"),
+    agents = Counter(r["agent"] for r in rows if "agent" in r)
+    return {"run": m["name"], "project": m.get("project", "zephyr"),
+            "generated": datetime.now().isoformat(timespec="seconds"),
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
-            "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"], "rows": rows}
+            "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"],
+            **({"agents": dict(agents)} if agents else {}), "rows": rows}
 
 
 def to_ledger(run: Path, prs: set[int] | None = None) -> tuple[int, Path]:
@@ -87,7 +95,7 @@ def to_ledger(run: Path, prs: set[int] | None = None) -> tuple[int, Path]:
             rows.append({"pr": e["pr"], "outcome": where, "detail": detail})
     book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
     n = ledger.record(book, m["name"], m["code"]["commit"],
-                      datetime.now().isoformat(timespec="seconds"), rows)
+                      datetime.now().isoformat(timespec="seconds"), rows, m.get("project", "zephyr"))
     return n, book
 
 
@@ -97,7 +105,10 @@ def markdown(rep: dict) -> str:
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
-            "| PR | outcome | detail | pair | triage min | validation min |",
+            *([f"**Agent grades:** " + ", ".join(f"{k} {v}" for k, v in rep["agents"].items()), ""]
+              if rep.get("agents") else []),
+            "| PR | outcome | detail | " + ("instance, oracle" if rep.get("project") == "mynewt" else "pair")
+            + " | triage min | validation min |",
             "|---|---|---|---|---|---|"]
     for r in rep["rows"]:
         out.append(f"| {r['pr']} | {r['outcome']} | {r['detail'][:100]} | {r['pair'] or ''} | "
@@ -126,6 +137,8 @@ def main() -> None:
     for k, v in rep["funnel"].items():
         print(f"  {v:>5}  {k}")
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
+    if rep.get("agents"):
+        print(f"  agent grades: {rep['agents']}")
     print(f"  -> {run / 'report.md'}")
     n, book = to_ledger(run)      # normally already there: workers record as PRs settle
     print(f"  ledger: {n} new settled outcomes -> {book}")

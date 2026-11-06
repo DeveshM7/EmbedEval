@@ -44,13 +44,17 @@ class ApptainerEnvironment:
     def __init__(self, *, image: str | Path, name: str, cwd: str = "/testbed",
                  timeout: int = 900, setup_commands: list[str] | None = None,
                  sandbox: bool = False, network_fixture: str | None = None,
+                 isolate_network: bool = False,
                  logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
         if not self.image.exists():
             raise FileNotFoundError(f"instance image not built: {self.image}")
         self.cwd, self.timeout = cwd, timeout
+        # No network for the agent (scripts/mynewt_network.py): it cannot fetch
+        # the fix or read the PR. A network fixture is always isolated too.
         self.network_fixture = network_fixture
+        self.isolate_network = isolate_network or network_fixture is not None
         # Mynewt's native builds are much faster in a writable sandbox than in a .sif.
         self.sandbox = au.unpack_sandbox(self.image) if sandbox else None
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -80,7 +84,8 @@ class ApptainerEnvironment:
                else au.exec_args(self.image, overlay=self.overlay))
         cmd[2:2] = ["--pwd", cwd or self.cwd]
         cmd += ["bash", "-c", command]
-        cmd = isolated_command(cmd, self.network_fixture)
+        if self.isolate_network:
+            cmd = isolated_command(cmd, self.network_fixture)
         try:
             r = subprocess.run(cmd, text=True, encoding="utf-8", errors="replace",
                                timeout=timeout or self.timeout,

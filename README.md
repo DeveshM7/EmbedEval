@@ -17,11 +17,11 @@ and the tests actually run.
 - **NuttX and RIOT** instances are hand-built **Docker** images in
   `docker/instances/`.
 
-- **Mynewt** has 54 validated Apptainer instances under
+- **Mynewt** has 48 validated Apptainer instances under
   `apptainer/instances/mynewt/`, built and run on Linux x86_64 with
   `hw/bsp/native` and `compiler/sim`.
 
-**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT, plus 54 Apache Mynewt.
+**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT, plus 48 Apache Mynewt.
 
 ---
 
@@ -242,32 +242,31 @@ together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 
 ## Apache Mynewt
 
-The 54 promoted instances use the existing build, validation, and agent commands.
-Run builds and tests on Linux x86_64; historical native builds require multilib.
-The Apptainer shared base is built on demand:
+The 48 promoted instances (`apptainer/instances/mynewt/`) build and run on Linux
+x86_64 (historical native builds need multilib). An agent run gets exactly the
+task: mynewt-core at the base commit with the PR's tests committed (history:
+that one commit, fetched `--depth 1`), the problem statement and the test names.
+It does not get the files the fix changed (SWE-bench's "oracle" setting), a
+network (every container command runs in its own network namespace:
+`scripts/mynewt_network.py`), the fix's history, or the newt sources (they hold
+a later mynewt-core snapshot). Validation checks this on every image before any
+test runs (`scripts/mynewt_leakcheck.py`), and promotion requires a clean record.
 
 ```bash
-python scripts/build_instances.py --repo mynewt
-python scripts/validate_instance.py --repo mynewt --verbose
+python scripts/build_instances.py --instance mynewt__mynewt-3680
+python scripts/validate_instance.py mynewt__mynewt-3680 --determinism 5
 python harness/run.py --instance mynewt__mynewt-3680 --model <model> -v
 python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <model>
 ```
 
-To discover new candidates, use `scripts/filter_candidates.py` with
-`--repo mynewt` for `fetch`, `filter`, and `enrich`, then run
-`scripts/triage_mynewt_prs.py` against a locally served model.
-The [Mynewt triage document](docs/mynewt_triage.md) covers package selection,
-dependencies, native execution, test/fix separation, and evidence requirements.
-Use `scripts/mynewt_batch.py --run-dir <run> --reviewed <verdict-directory>`
-to generate/build/validate accepted candidates. Promote only validated recipes
-with `scripts/promote_instance.py --run-dir <run> <instance-id>`.
-
-Validation records baseline diagnostics, then requires a failure attributable
-to the selected production change and a pass with that change applied. Runtime,
-compile, configuration and dependency failures have separate evidence rules;
-a generic build error or timeout is not a regression oracle. Test files remain
-protected. The complete local recovery and sample evidence is retained under
-`generated/mynewt-evidence/` (ignored by Git).
+On Scholar, campaigns, revalidations and agent evaluations run through
+`cluster/` (triage on Spark, validation and agents on the x86 `cpu`
+partition): [docs/running_on_scholar.md, section 11](docs/running_on_scholar.md#11-mynewt-runs).
+The [Mynewt triage document](docs/mynewt_triage.md) is the triage model's
+instructions. Validation records baseline diagnostics, then requires a failure
+attributable to the selected production change and a pass with that change
+applied; runtime, compile, configuration and dependency failures have separate
+evidence rules, and a generic build error or timeout is not a regression oracle.
 
 ---
 

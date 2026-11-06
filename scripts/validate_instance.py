@@ -41,7 +41,14 @@ compile in on ARM64), and in it
     3. run_tests -> everything passes (exit 0)
 
 each judged on the runner's structured result (/tmp/mynewt-result.json), as in
-Docker. A mynewt-core clone (EMBEDEVAL_MYNEWT_CLONE) supplies the fix.
+Docker. A mynewt-core clone (EMBEDEVAL_MYNEWT_CLONE) supplies the fix. Every
+command runs without a network (scripts/mynewt_network.py), as the agent's do.
+Before step 0 the image is checked for anything the agent must not find
+(scripts/mynewt_leakcheck.py: post-base history, the fix, copies of
+mynewt-core) and for a route out; a finding makes the instance invalid. With
+--determinism N the before state runs N - 1 more times and must be judged as
+in step 1 every time (for a runtime oracle: every fail_to_pass case fails and
+every pass_to_pass case passes; for the others, the same attributed failure).
 """
 
 from __future__ import annotations
@@ -65,6 +72,8 @@ import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au
 import build_config
 import instances
+import mynewt_leakcheck
+from mynewt_network import isolated_command
 
 
 def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
@@ -394,10 +403,13 @@ def gold_patch(meta: dict, workdir: Path) -> str:
     files = meta.get("files_changed_by_fix", [])
     cmd = ["git", "-C", str(clone), "diff", f"{base}..{fix}", "--"]
     cmd += files if files else [".", ":(exclude)tests/"]
-    r = sh(cmd, timeout=300)
-    if r.returncode != 0 or not r.stdout.strip():
-        raise RuntimeError(f"could not produce a gold patch: {r.stderr.strip()[:200]}")
-    return r.stdout
+    # Bytes as git wrote them: text mode would turn a CRLF file's \r\n into \n
+    # and the patch would no longer apply.
+    r = subprocess.run(cmd, capture_output=True, timeout=300)
+    out = r.stdout.decode("utf-8", "surrogateescape")
+    if r.returncode != 0 or not out.strip():
+        raise RuntimeError(f"could not produce a gold patch: {r.stderr.decode(errors='replace').strip()[:200]}")
+    return out
 
 
 
@@ -605,8 +617,13 @@ NUTTX_RUN_TESTS_MEANING = {0: "passed", 1: "failed", 2: "timed out"}
 
 
 
+NO_ROUTE = ("python3 -c \"import socket; socket.create_connection(('140.82.112.3', 443), 5)\" "
+            "2>/dev/null && echo NETWORK-REACHABLE; "
+            "timeout 20 git -C /testbed ls-remote origin >/dev/null 2>&1 && echo ORIGIN-REACHABLE; true")
+
+
 def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
-                              verbose: bool) -> bool:
+                              verbose: bool, determinism: int = 0) -> bool:
     """A Mynewt instance in its Apptainer image (metadata "runtime": "apptainer")."""
     meta = instances.load_metadata(instance_id)
     au.require_host_arch(meta)
@@ -638,8 +655,9 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
                 "rc=$?; echo ==MYNEWT-RESULT==; "
                 "cat /tmp/mynewt-result.json 2>/dev/null; exit $rc")
         try:
-            r = subprocess.run(au.sandbox_exec_args(sandbox, binds={run_dir: "/embedeval-run"})
-                               + ["bash", "-c", full], capture_output=True, text=True, timeout=t)
+            r = subprocess.run(isolated_command(au.sandbox_exec_args(sandbox, binds={run_dir: "/embedeval-run"})
+                                                + ["bash", "-c", full], meta.get("network_fixture")),
+                               capture_output=True, text=True, timeout=t)
             rc, out = r.returncode, (r.stdout or "") + (r.stderr or "")
         except subprocess.TimeoutExpired as e:
             out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -690,9 +708,29 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
             return invalid("not a Mynewt instance")
 
         def sandbox_git(*args):
-            r = subprocess.run(au.sandbox_exec_args(sandbox) + ["git", "-C", "/testbed", *args],
+            r = subprocess.run(isolated_command(au.sandbox_exec_args(sandbox) + ["git", "-C", "/testbed", *args],
+                                                meta.get("network_fixture")),
                                capture_output=True, text=True, timeout=120)
             return r.returncode, r.stdout
+
+        print("\n  Leak check: the image as the agent gets it")
+        gold = gold_patch(meta, run_dir)
+        patch = patch_override.read_text() if patch_override else gold
+        facts = mynewt_leakcheck.fix_facts(au.mynewt_clone(), meta, gold,
+                                           (idir / "test_patch.diff").read_text())
+        report["leak_check"] = leak = mynewt_leakcheck.scan(sandbox, facts)
+        r = subprocess.run(isolated_command(au.sandbox_exec_args(sandbox) + ["bash", "-c", NO_ROUTE],
+                                            meta.get("network_fixture")),
+                           capture_output=True, text=True, timeout=120)
+        leak["network"] = "reachable" if "REACHABLE" in r.stdout else "isolated"
+        if leak["network"] != "isolated" or r.returncode:
+            leak["ok"] = False
+            leak["findings"].append(f"network: {r.stdout.strip() or r.stderr.strip()[-200:]}")
+        print(f"    {'clean' if leak['ok'] else 'FOUND: ' + '; '.join(leak['findings'])} "
+              f"({leak['commits']} commits, {leak['fix_blobs_checked']} fixed blobs, "
+              f"{leak['fix_lines_checked']} fix lines checked; network {leak['network']})")
+        if not leak["ok"]:
+            return invalid("leak: " + "; ".join(leak["findings"]))
 
         kind, proof, not_proven = baseline_proof(meta, sandbox_git)
         if meta.get("baseline_test_path") is not None and kind != "relocated":
@@ -744,9 +782,36 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
         if why:
             return invalid(why, error_lines(out))
 
+        if determinism > 1:
+            # Every oracle: a compile or dependency failure can depend on build
+            # order (which file a parallel build stops at), a runtime one on
+            # timing or memory layout. Each repeat is judged as step 1 was.
+            print(f"\n  Determinism: the before state {determinism - 1} more times")
+            tally = {n: {} for n in meta["fail_to_pass"] + meta["pass_to_pass"]}
+            first = dict(report["before"])
+            failures = []
+            for k in range(1, determinism + 1):
+                if k > 1:
+                    rc, out, result = step("run_tests", "run_tests", f"before-{k}.log", timeout + 300)
+                    why = judge("before", rc, result, 1)
+                    if why:
+                        failures.append(f"run {k}: {why[:300]}")
+                passed, failed = set((result or {}).get("passed", [])), set((result or {}).get("failed", []))
+                for n in tally:
+                    st = "passed" if n in passed else "failed" if n in failed else "not_run"
+                    tally[n][st] = tally[n].get(st, 0) + 1
+            report["before"] = first
+            mode = meta.get("failure_mode", "runtime")
+            flaky = [n for n in meta["fail_to_pass"] if mode == "runtime" and tally[n].get("failed", 0) != determinism]
+            flaky += [n for n in meta["pass_to_pass"] if mode == "runtime" and tally[n].get("passed", 0) != determinism]
+            report["determinism"] = {"runs": determinism, "ok": not flaky and not failures, "flaky": flaky,
+                                     "failures": failures, "tally": {n: t for n, t in tally.items() if n in flaky}}
+            if flaky or failures:
+                return invalid(f"flaky before state: {(flaky[:5] or failures[:1])} in {determinism} runs")
+            print(f"    deterministic: {determinism}/{determinism}")
+
         print("\n  Step 2: applying the upstream fix, expecting everything to PASS")
-        patch = patch_override.read_text() if patch_override else gold_patch(meta, run_dir)
-        (run_dir / "fix.diff").write_text(patch)
+        (run_dir / "fix.diff").write_bytes(patch.encode("utf-8", "surrogateescape"))
         three_way = " --3way" if meta.get("gold_patch_three_way") else ""
         rc, out, _ = step("git apply", f"git apply{three_way} /embedeval-run/fix.diff",
                           "apply.log", 120)
@@ -774,12 +839,12 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
 
 
 def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
-             verbose: bool = False) -> bool:
+             verbose: bool = False, determinism: int = 0) -> bool:
     meta = instances.load_metadata(instance_id)
     if meta.get("pipeline") == "twister":
         return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
     if meta["project"] == "mynewt" and meta.get("runtime") == "apptainer":
-        return validate_mynewt_apptainer(instance_id, patch_override, timeout, verbose)
+        return validate_mynewt_apptainer(instance_id, patch_override, timeout, verbose, determinism)
     if meta["project"] == "zephyr":
         print(f"  SKIP: {instance_id} is a Docker Zephyr instance, kept as reference "
               f"metadata only; Zephyr instances are validated from the twister pipeline "
@@ -965,6 +1030,9 @@ def main() -> None:
     p.add_argument("--timeout", type=int, default=600)
     p.add_argument("--verbose", "-v", action="store_true",
                    help="stream build and test output instead of capturing it")
+    p.add_argument("--determinism", type=int, default=0, metavar="N",
+                   help="Mynewt instances: run the before state N times in all and "
+                        "require the same judgement every time")
     args = p.parse_args()
 
     if args.all:
@@ -981,7 +1049,7 @@ def main() -> None:
 
     start = time.time()
     results = {t: validate(t, Path(args.patch) if args.patch else None, args.timeout,
-                           args.verbose)
+                           args.verbose, args.determinism)
                for t in targets}
 
     print(f"\n{'=' * 70}\nSUMMARY  ({(time.time() - start) / 60:.1f} min)\n{'=' * 70}")

@@ -5,6 +5,7 @@ set -euo pipefail
 
 exec python3 - "$@" <<'PY'
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -46,11 +47,14 @@ def checkout_repository(name, url, revision):
         git("fetch", "-q", "--depth", "1", url, revision)
         git("update-ref", ref, "FETCH_HEAD")
     git("checkout", "-q", "--detach", "--force", ref)
+    print(f"dependency {name} resolved commit:", flush=True)
+    git("rev-parse", "HEAD")
 
 
 def sync_dependencies(meta):
     sync_repository("mbedtls", "crypto/mbedtls/pkg.yml")
     sync_repository("tinycbor", "encoding/tinycbor/pkg.yml")
+    sync_repository("coremqtt", "net/mqtt/coremqtt/pkg.yml")
     revision = meta.get("mcumgr_commit")
     if revision:
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -70,8 +74,8 @@ def sync_dependencies(meta):
 
 
 def classify(output, returncode, expected):
-    passed = set(re.findall(r"^\[pass\] (\S+)", output, re.MULTILINE))
-    failed = set(re.findall(r"^\[FAIL\] (\S+)", output, re.MULTILINE))
+    passed = set(re.findall(r"\[pass\] (\S+)", output))
+    failed = set(re.findall(r"\[FAIL\] (\S+)", output))
     if returncode < 0:
         # Old tests (before 2019) use plain assert(): a failing case kills the
         # whole binary with SIGABRT and prints no [FAIL] line. The cases that
@@ -219,6 +223,32 @@ def attached_note_diagnostic(lines, index, expectations, notes):
     return None
 
 
+def preprocessor_diagnostic(lines, index, expectations, notes, output):
+    """Attribute a #if use of a macro whose header is reached only through the missing header.
+
+    The row is attested at generation. The dependency scan must also list the
+    missing header by its bare name, which GCC -MG does when it cannot find it."""
+    error = re.fullmatch(r"(.+?):(\d+):(\d+): error: missing binary operator before token \"\(\"", lines[index])
+    if not error:
+        return None
+    path, row, column = error[1], error[2], int(error[3])
+    for source, entries in (notes or {}).items():
+        entry = entries.get(row)
+        if (source not in expectations or not entry or entry.get("kind") != "preprocessor"
+                or entry.get("api") not in expectations[source]
+                or not (path == source or path.endswith("/" + source))):
+            continue
+        use = re.match(rf"\s*#\s*(?:if|elif)\s+({re.escape(entry['macro'])})\(", entry["text"])
+        excerpt = source_excerpt(lines, index + 1, row, column)
+        missing = re.compile(rf"\s*{re.escape(entry['api'])}(?: \\)?")
+        if (use and column == use.end(1) + 1 and excerpt == entry["text"]
+                and (Path("/testbed") / source).read_text().splitlines()[int(row) - 1] == entry["text"]
+                and any(missing.fullmatch(line) for line in output.splitlines())):
+            return {"source": source, "api": entry["api"], "kind": "preprocessor_macro", "line": row,
+                    "diagnostic": lines[index] + "\n" + lines[index + 1]}
+    return None
+
+
 def compile_diagnostic_group(output, expectations, declarations=None, notes=None):
     """Account for every error using source/API pairs attested at generation."""
     diagnostics = []
@@ -266,6 +296,8 @@ def compile_diagnostic_group(output, expectations, declarations=None, notes=None
         if matched is None:
             matched = attached_note_diagnostic(lines, index, expectations, notes)
         if matched is None:
+            matched = preprocessor_diagnostic(lines, index, expectations, notes, output)
+        if matched is None:
             return []
         diagnostics.append(matched)
         linked |= "undefined reference to" in line
@@ -277,14 +309,25 @@ def observe_testutil(binary, runtime):
     # function, changes program variables, or supplies an expected outcome.
     commands = ["set pagination off", "set confirm off", "set debuginfod enabled off",
                 "set disable-randomization off", "set print thread-events off",
+                "python import gdb",
                 "handle SIGALRM nostop noprint pass", "handle SIGVTALRM nostop noprint pass",
                 "handle SIGUSR1 nostop noprint pass",
                 "handle SIGUSR2 nostop noprint pass"]
+    suite = ("'tu_config.ts_suite_name' if gdb.lookup_global_symbol('tu_config') "
+             "else 'ts_current_config->ts_suite_name'")
     for function, label in (("tu_case_write_pass_buf", "pass"), ("tu_case_fail", "FAIL")):
+        printf = f'printf "[{label}] %s/%s\\n", '
         commands += [f"break {function}", "commands", "silent",
-                     f'printf "[{label}] %s/%s\\n", tu_config.ts_suite_name, tu_case_name',
+                     f"python gdb.execute({printf!r} + ({suite}) + ', tu_case_name')",
                      "continue", "end"]
-    commands += ["run"]
+    commands += ["run", "python",
+                 "if gdb.selected_inferior().pid:",
+                 "    gdb.execute('bt full')",
+                 "    if gdb.lookup_global_symbol('tu_case_name'):",
+                 "        gdb.execute('p tu_case_name')",
+                 "    if gdb.lookup_global_symbol('g_current_task'):",
+                 "        gdb.execute('p *g_current_task')",
+                 "    gdb.execute('info registers')", "end"]
     script = runtime.parent / "mynewt-observe.gdb"
     script.write_text("\n".join(commands) + "\n")
     return ["gdb", "--batch", "--quiet", "--nx", "--return-child-result", "-x", str(script), str(binary)]
@@ -311,6 +354,8 @@ result = {
     "failure_mode": mode,
     "build_ok": False,
     "compile_failure": False,
+    "config_failure": False,
+    "dependency_failure": False,
     "compile_test_source": meta.get("compile_test_source"),
     "missing_api": meta.get("missing_api"),
     "diagnostic": None,
@@ -349,7 +394,16 @@ try:
             with binary.open("rb") as handle:
                 if handle.read(4) == b"\x7fELF":
                     binaries.append(binary)
-    if mode == "compile" and build.returncode > 0 and "Executing test: " not in output:
+    if mode in ("config", "dependency") and build.returncode > 0 and "Executing test: " not in output:
+        fingerprint = hashlib.sha256(output.strip().encode()).hexdigest()
+        if fingerprint == meta.get(mode + "_output_sha256"):
+            result[mode + "_failure"] = True
+            result["diagnostic"] = output.strip()
+            result[mode + "_output_sha256"] = fingerprint
+            code = 1
+        else:
+            result["error"] = f"build failed without the source-attributed {mode} diagnostic"
+    elif mode == "compile" and build.returncode > 0 and "Executing test: " not in output:
         if meta.get("compile_expectations"):
             result["compile_diagnostics"] = compile_diagnostic_group(
                 output, meta["compile_expectations"], meta.get("compile_declarations"),

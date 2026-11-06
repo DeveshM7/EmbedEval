@@ -9,11 +9,18 @@
 #   <scratch_root>/runs/     one folder per run
 scratch_root: /scratch/scholar/${USER}/embedeval
 
+# The repository the pipeline runs on: zephyr or mynewt. prepare.py records it
+# in the run's manifest (its --project overrides this for one run); submit and
+# the workers read it from there, so a run keeps its project.
+project: zephyr
+
 # Where large shared things already are. null means the default under
 # <scratch_root>/shared/. Point these at existing copies to reuse them.
 paths:
   shared: null              # Python/SDK images, dry-run venvs, uv cache
   zephyr_clone: null        # full bare clone of Zephyr
+  mynewt_clone: null        # full bare clone of apache/mynewt-core with refs/pull/*/head
+                            # (project: mynewt); workers never fetch into it
   models: /scratch/scholar/${USER}/hf/models          # model weights, one folder per model
   vllm_image: /scratch/scholar/${USER}/images/vllm-0.27.1.sif
   vllm_cache: null          # vLLM compile cache; never point it at one used outside
@@ -37,6 +44,18 @@ slurm:
   cpus_per_node: 20
   mem: 120500M
   gres: gpu:1
+  # Mynewt runs triage on `partition` (the model needs the GPU) and builds and
+  # validates on this x86 CPU partition instead: old mynewt-core trees build
+  # -m32 binaries, which only x86 runs. Each phase is its own job there
+  # (submit.py triage / validate / evaluate). null: the Mynewt CPU phases
+  # cannot be submitted.
+  build_partition: null     # e.g. cpu
+  build_cpus_per_node: 64
+  build_mem: 240G
+  # The Python each kind of job runs (a venv with the requirements, of the
+  # node's architecture). null: the one submit.py runs with.
+  triage_python: null
+  build_python: null
 
 model:
   profile: qwen38-nvfp4     # an entry of triage/models.json
@@ -52,5 +71,15 @@ parallel:                   # at once
   dry_run: 8                # PRs, on the node running prepare.py
   triage_per_node: 4        # PRs per model server
   validate_per_node: 4      # builds and validations per node
+
+# Mynewt evaluate jobs (submit.py evaluate): an agent (harness/run.py) on each
+# VALID instance of a run, its patch graded in a fresh container
+# (harness/evaluate_patches.py). A model of triage/models.json is served on the
+# GPU partition for the job; any other is a hosted one (its API key needed).
+evaluate:
+  model: qwen38-nvfp4
+  step_limit: 50
+  time_limit: 40            # minutes of agent time per instance
+  per_node: 3               # agents at once per node
 
 disk_guard_gb: 250          # no new builds while the run's instance images exceed this

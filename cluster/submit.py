@@ -17,13 +17,29 @@ It writes <run>/jobs/pipeline-<time>.sbatch from cluster/templates/, with a
 frozen copy of the settings beside it, and submits it with `-N min-wanted`:
 Slurm starts the job on as many idle nodes as it can, up to the wanted
 number. One job, a hard time limit, nothing resubmitted automatically.
+
+Mynewt runs submit one phase per job instead, each on the nodes it needs:
+
+    python cluster/submit.py triage   --run R             # GPU partition, the model
+    python cluster/submit.py validate --run R --after J   # slurm.build_partition (x86)
+    python cluster/submit.py evaluate --run R --after J   # an agent on each VALID instance
+
+--after J starts the job once job J has ended (a chain needs no slot until
+then). evaluate with a local model (evaluate.model in triage/models.json)
+also submits the model's server on the GPU partition, unless --server-job
+names one already running; the evaluate job reaches it over an SSH tunnel and
+ends it when done. Each Mynewt job runs a frozen copy of the code
+(<run>/jobs/source-<time>/, with its sha256 manifest), so editing the
+checkout never changes a job that is queued or running.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -70,20 +86,148 @@ def plan_nodes(cfg: dict, work_nodes: int, idle: int) -> tuple[int, int, str]:
     return lowest, wanted, note
 
 
+# What a Mynewt job runs: the code, frozen per job (freeze_source).
+SOURCE_DIRS = ("cluster", "scripts", "harness", "templates", "docs")
+SOURCE_FILES = ("triage/models.json", "triage/mynewt_gold.json", "requirements.txt")
+SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "runs", "generated", "outputs"}
+
+
+def freeze_source(source: Path, destination: Path) -> dict:
+    """Copy the code a job runs and record the sha256 of every file."""
+    destination.mkdir(parents=True, exist_ok=False)
+    files = {}
+    paths = [p for root in SOURCE_DIRS for p in (source / root).rglob("*")]
+    paths += [source / name for name in SOURCE_FILES if (source / name).exists()]
+    for src in sorted(paths):
+        rel = src.relative_to(source)
+        if (not src.is_file() or src.is_symlink() or any(part in SKIP_DIRS for part in rel.parts)
+                or rel == Path("cluster/config.yaml") or src.suffix in (".pyc", ".pyo")):
+            continue
+        data = src.read_bytes()
+        (destination / rel).parent.mkdir(parents=True, exist_ok=True)
+        (destination / rel).write_bytes(data)
+        shutil.copymode(src, destination / rel)
+        files[rel.as_posix()] = hashlib.sha256(data).hexdigest()
+    git = lambda *a: subprocess.run(["git", "-C", str(source), *a], capture_output=True,
+                                    text=True).stdout.strip()
+    manifest = {"revision": git("rev-parse", "HEAD") or None, "dirty": bool(git("status", "--porcelain")),
+                "files": files, "sha256": hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}
+    (destination / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def submit_phase(args, cfg: dict, run: Path) -> None:
+    """One Mynewt phase as its own job (see the module docstring)."""
+    s, par, mode = cfg["slurm"], cfg["parallel"], args.mode
+    if mode == "pipeline":
+        sys.exit("Mynewt runs submit each phase as its own job: triage, then validate "
+                 "(and evaluate), each with --after the one before")
+    model_phase = mode == "triage"
+    partition = s["partition"] if model_phase else s["build_partition"]
+    if not partition:
+        sys.exit("slurm.build_partition must name an x86 CPU partition (e.g. cpu)")
+    if minutes(s["time_limit"]) > 240:
+        sys.exit("Scholar jobs may not exceed four hours")
+    name = f"embedeval-{run.name}-{mode}"
+    q = subprocess.run(["squeue", "-h", "--me", "-n", name, "-o", "%i %T"], capture_output=True, text=True)
+    live = [l for l in q.stdout.splitlines() if l.strip() and not l.endswith("COMPLETING")]
+    if live and not args.after:
+        sys.exit(f"run {run.name} already has a {mode} job ({'; '.join(live)}); wait for it, "
+                 "scancel it, or chain this one with --after")
+    todo = {"triage": status.triage_todo, "validate": status.validate_todo,
+            "evaluate": status.evaluate_todo}[mode](run)
+    if mode == "validate" and status.triage_todo(run) and not args.after:
+        sys.exit(f"triage is not complete ({len(status.triage_todo(run))} PRs left): submit "
+                 "validate --after the triage job")
+    n = len(todo)
+    if not n:
+        if not args.after:
+            print(f"nothing left to {mode} in {run.name}. Report: python cluster/report.py --run {run.name}")
+            return
+        n = sum(1 for e in status.manifest(run)["prs"] if e["stage"] in ("to triage", "to validate"))
+        print(f"  --after {args.after}: no {mode} work yet; sized for the run's {n} PRs")
+    per = {"triage": par["triage_per_node"], "validate": par["validate_per_node"],
+           "evaluate": cfg["evaluate"]["per_node"]}[mode]
+    idle = args.idle if args.idle is not None else idle_nodes(partition)
+    lowest, wanted, note = plan_nodes(cfg, math.ceil(n / per), idle)
+
+    stamp = f"{datetime.now():%Y%m%d-%H%M%S-%f}"   # two submissions may come within a second
+    jobs = run / "jobs"
+    jobs.mkdir(parents=True, exist_ok=True)
+    source = jobs / f"source-{stamp}"
+    frozen_src = freeze_source(REPO, source)
+    deps = [f"afterany:{args.after}"] if args.after else []
+    if mode == "evaluate":
+        local = cfg["evaluate"]["model"] in json.loads((REPO / "triage" / "models.json").read_text())
+        server = args.server_job
+        if local and not server and not args.dry_run:
+            r = subprocess.run(["sbatch", "--parsable", "-p", s["partition"], "-J", f"{name}-server",
+                                f"--mem={s['mem']}", f"--cpus-per-task={s['cpus_per_node']}",
+                                f"--gres={s['gres']}",
+                                "-o", str(jobs / "server-%j.log"), "-t", s["time_limit"],
+                                *([f"--dependency={deps[0]}"] if deps else []),
+                                str(source / "scripts" / "serve_triage_model.sh"), cfg["evaluate"]["model"]],
+                               capture_output=True, text=True, cwd=source)
+            if r.returncode:
+                sys.exit(f"sbatch of the model server failed: {r.stderr.strip()}")
+            server = r.stdout.strip().split(";")[0]
+            cfg["evaluate_server_owned"] = True       # the evaluate job ends it when done
+            print(f"  model server: job {server} ({cfg['evaluate']['model']}, {s['partition']})")
+        if server:
+            cfg["evaluate_server_job"] = server
+            deps.append(f"after:{server}")
+    frozen = jobs / f"config-{stamp}.json"
+    frozen.write_text(json.dumps(cfg, indent=2) + "\n")
+    python = (s["triage_python"] if model_phase else s["build_python"]) or sys.executable
+    script = jobs / f"{mode}-{stamp}.sbatch"
+    script.write_text((CLUSTER / "templates" / "phase.sbatch").read_text().format(
+        partition=partition, nodes=f"{lowest}-{wanted}" if lowest < wanted else wanted,
+        cpus=s["cpus_per_node"] if model_phase else s["build_cpus_per_node"],
+        gres_line=f"#SBATCH --gres={s['gres']}" if model_phase else "",
+        mem=s["mem"] if model_phase else s["build_mem"], time_limit=s["time_limit"],
+        name=name, run=run, repo=source, config=frozen, python=python, phase=mode,
+        limit_min=minutes(s["time_limit"]), report_min=REPORT_MIN, stamp=stamp))
+    print(f"run {run.name}: {len(todo)} PRs to {mode}")
+    print(f"  nodes: {lowest}-{wanted} on {partition} ({idle} idle; max {s['nodes_max']})"
+          + (f"\n  note: {note}" if note else ""))
+    print(f"  job script: {script}\n  source: {source} (sha256 {frozen_src['sha256'][:16]})")
+    if args.dry_run:
+        print("  --dry-run: not submitted")
+        return
+    r = subprocess.run(["sbatch", "--parsable", *([f"--dependency={','.join(deps)}"] if deps else []),
+                        str(script)], capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"sbatch failed: {r.stderr.strip()}")
+    job = r.stdout.strip().split(";")[0]
+    with open(jobs / "submitted.jsonl", "a") as fh:
+        fh.write(json.dumps({"job": job, "script": script.name, "submitted": stamp, "mode": mode,
+                             "nodes": f"{lowest}-{wanted}", "after": args.after,
+                             "server": cfg.get("evaluate_server_job"), "todo": len(todo),
+                             "source_sha256": frozen_src["sha256"]}) + "\n")
+    print(f"  submitted: job {job}; log {jobs}/job-{job}.out")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("mode", choices=["pipeline"])
+    p.add_argument("mode", choices=["pipeline", "triage", "validate", "evaluate"])
     p.add_argument("--run", required=True, help="run name (folder under runs/) or path")
     p.add_argument("--config", help="default: cluster/config.yaml")
     p.add_argument("--dry-run", action="store_true", help="write the job script, do not submit")
     p.add_argument("--idle", type=int, help="assume this many idle nodes (testing)")
+    p.add_argument("--after", metavar="JOB", help="Mynewt: start once this job has ended")
+    p.add_argument("--server-job", metavar="JOB", help="Mynewt evaluate: a running model-server "
+                   "job (scripts/serve_triage_model.sh) to use instead of submitting one")
     args = p.parse_args()
 
     cfg = cluster_config.load_or_exit(args.config)
     run = Path(args.run) if "/" in args.run else Path(cfg["derived"]["runs"]) / args.run
     if not (run / "manifest.json").exists():
         sys.exit(f"{run} is not a prepared run (no manifest.json); run cluster/prepare.py first")
+    if status.project(run) == "mynewt":
+        return submit_phase(args, cfg, run)
+    if args.mode != "pipeline":
+        sys.exit("Zephyr runs use pipeline mode")
 
     s, par = cfg["slurm"], cfg["parallel"]
     if minutes(s["time_limit"]) < REPORT_MIN + VALIDATE_MIN:

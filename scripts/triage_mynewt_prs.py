@@ -857,10 +857,19 @@ def run(args) -> None:
         raise SystemExit(f"model server unavailable at {args.api_base}: {exc}") from exc
     if args.profile not in served:
         raise SystemExit(f"model server does not serve {args.profile}; available: {sorted(served)}")
-    run_dir = RUNS / f"{datetime.now():%Y-%m-%d_%H%M%S}_{args.profile}{'_blind' if args.blind else ''}"
-    run_dir.mkdir(parents=True, exist_ok=False)
+    if args.out:
+        # cluster/node_worker.py: one PR per call, verdicts side by side in
+        # <run>/triage/, a manifest per call
+        run_dir = Path(args.out)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        manifest_file = run_dir / f"manifest-{'-'.join(cases)[:60]}-{datetime.now():%Y%m%d-%H%M%S}.json"
+    else:
+        run_dir = RUNS / f"{datetime.now():%Y-%m-%d_%H%M%S}_{args.profile}{'_blind' if args.blind else ''}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+        manifest_file = run_dir / "manifest.json"
     prompt = PROMPT.read_text()
-    (run_dir / PROMPT.name).write_text(prompt)
+    if not args.out:
+        (run_dir / PROMPT.name).write_text(prompt)
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                             capture_output=True, text=True).stdout.strip()
     manifest = {"profile": args.profile, "api_base": args.api_base, "blind": args.blind,
@@ -870,7 +879,7 @@ def run(args) -> None:
                 "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "git_commit": commit, "cases": cases,
                 "started": datetime.now().isoformat(timespec="seconds")}
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    manifest_file.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"run dir: {run_dir}  prompt sha256: {manifest['prompt_sha256'][:10]}", flush=True)
     with futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
         jobs = [pool.submit(triage_one, case, records[case], args.profile,
@@ -880,8 +889,8 @@ def run(args) -> None:
             print(f"{result['case']}: {result['verdict']} ({result['seconds']} s) "
                   f"{result['error'] or '; '.join(result['issues'])}", flush=True)
     manifest["finished"] = datetime.now().isoformat(timespec="seconds")
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    if args.gold:
+    manifest_file.write_text(json.dumps(manifest, indent=2) + "\n")
+    if args.gold and not args.out:
         eval_run(run_dir)
 
 
@@ -897,6 +906,8 @@ def main() -> None:
     run_parser.add_argument("--blind", action="store_true", help="hide explicit links (tracked only)")
     run_parser.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
     run_parser.add_argument("--parallel", type=int, default=4)
+    run_parser.add_argument("--out", help="write the verdicts straight into this folder "
+                            "(cluster/node_worker.py: <run>/triage)")
     eval_parser = commands.add_parser("eval")
     eval_parser.add_argument("run_dir", nargs="?")
     args = parser.parse_args()

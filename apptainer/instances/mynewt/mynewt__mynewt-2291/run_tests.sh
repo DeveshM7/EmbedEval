@@ -5,6 +5,7 @@ set -euo pipefail
 
 exec python3 - "$@" <<'PY'
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -73,8 +74,8 @@ def sync_dependencies(meta):
 
 
 def classify(output, returncode, expected):
-    passed = set(re.findall(r"^\[pass\] (\S+)", output, re.MULTILINE))
-    failed = set(re.findall(r"^\[FAIL\] (\S+)", output, re.MULTILINE))
+    passed = set(re.findall(r"\[pass\] (\S+)", output))
+    failed = set(re.findall(r"\[FAIL\] (\S+)", output))
     if returncode < 0:
         # Old tests (before 2019) use plain assert(): a failing case kills the
         # whole binary with SIGABRT and prints no [FAIL] line. The cases that
@@ -319,7 +320,14 @@ def observe_testutil(binary, runtime):
         commands += [f"break {function}", "commands", "silent",
                      f"python gdb.execute({printf!r} + ({suite}) + ', tu_case_name')",
                      "continue", "end"]
-    commands += ["run"]
+    commands += ["run", "python",
+                 "if gdb.selected_inferior().pid:",
+                 "    gdb.execute('bt full')",
+                 "    if gdb.lookup_global_symbol('tu_case_name'):",
+                 "        gdb.execute('p tu_case_name')",
+                 "    if gdb.lookup_global_symbol('g_current_task'):",
+                 "        gdb.execute('p *g_current_task')",
+                 "    gdb.execute('info registers')", "end"]
     script = runtime.parent / "mynewt-observe.gdb"
     script.write_text("\n".join(commands) + "\n")
     return ["gdb", "--batch", "--quiet", "--nx", "--return-child-result", "-x", str(script), str(binary)]
@@ -346,6 +354,8 @@ result = {
     "failure_mode": mode,
     "build_ok": False,
     "compile_failure": False,
+    "config_failure": False,
+    "dependency_failure": False,
     "compile_test_source": meta.get("compile_test_source"),
     "missing_api": meta.get("missing_api"),
     "diagnostic": None,
@@ -384,7 +394,16 @@ try:
             with binary.open("rb") as handle:
                 if handle.read(4) == b"\x7fELF":
                     binaries.append(binary)
-    if mode == "compile" and build.returncode > 0 and "Executing test: " not in output:
+    if mode in ("config", "dependency") and build.returncode > 0 and "Executing test: " not in output:
+        fingerprint = hashlib.sha256(output.strip().encode()).hexdigest()
+        if fingerprint == meta.get(mode + "_output_sha256"):
+            result[mode + "_failure"] = True
+            result["diagnostic"] = output.strip()
+            result[mode + "_output_sha256"] = fingerprint
+            code = 1
+        else:
+            result["error"] = f"build failed without the source-attributed {mode} diagnostic"
+    elif mode == "compile" and build.returncode > 0 and "Executing test: " not in output:
         if meta.get("compile_expectations"):
             result["compile_diagnostics"] = compile_diagnostic_group(
                 output, meta["compile_expectations"], meta.get("compile_declarations"),

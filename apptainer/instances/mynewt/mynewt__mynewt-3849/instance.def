@@ -22,11 +22,15 @@ From: {{ BASE_IMAGE }}
     test_patch.diff /opt/benchmark/test_patch.diff
     bench.json /opt/benchmark/metadata.json
     run_tests.sh /usr/local/bin/run_tests
-    sim_arm64.patch /opt/benchmark/sim_arm64.patch
+
+
 
 %post
     set -e
     retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i: $*"; sleep 20; done; return 1; }
+    # The newt of this base's era (see render_mynewt_instance.py).
+    ln -sf /opt/newt/1.15.0/newt /usr/local/bin/newt
+    newt version
     git init -q /testbed
     cd /testbed
     git remote add origin https://github.com/apache/mynewt-core.git
@@ -34,18 +38,16 @@ From: {{ BASE_IMAGE }}
     [ -d /embedeval-src/mynewt-core.git/objects ] && SRC=/embedeval-src/mynewt-core.git
     retry git fetch -q --depth 1 $SRC 060a06b17fe45dfa664f27f7ba4a1277b3b76ba4
     git checkout -q --detach FETCH_HEAD
-    # ARM64 host only: the sim has no aarch64 context-switch code upstream.
-    # The port is committed, so it is part of the base the agent starts
-    # from, never of its patch.
-    if [ "$(uname -m)" = aarch64 ]; then
-        git apply /opt/benchmark/sim_arm64.patch
-        git -c user.name=EmbedEval -c user.email=benchmark@localhost \
-            commit -q -a -m "sim: aarch64 host support"
-    fi
+
+
     git apply /opt/benchmark/test_patch.diff
     git add -A
     git -c user.name=EmbedEval -c user.email=benchmark@localhost \
         commit -q -m "Benchmark starting snapshot with regression tests"
+    # Nothing beyond the starting snapshot: the history is the base commit
+    # alone (fetched --depth 1), and the patches applied above go, since a
+    # fixture or port patch can hold code from after the base.
+    rm -f .git/FETCH_HEAD /opt/benchmark/sim_arm64.patch /opt/benchmark/simulator_compat.diff
 
     mkdir -p /project/repos /project/targets/unittest
     ln -s /testbed /project/repos/apache-mynewt-core
@@ -64,7 +66,7 @@ From: {{ BASE_IMAGE }}
         'target.build_profile: "debug"' \
         'target.compiler: "@apache-mynewt-core/compiler/sim"' \
         > /project/targets/unittest/target.yml
-    printf '%s\n' 'pkg.name: targets/unittest' 'pkg.type: target' > /project/targets/unittest/pkg.yml
+    printf '%s\n' 'pkg.name: targets/unittest' 'pkg.type: target' 'pkg.cflags:' '    - -Wno-error' '    - -fcommon' > /project/targets/unittest/pkg.yml
     chmod 755 /usr/local/bin/run_tests
     run_tests --install-deps
 

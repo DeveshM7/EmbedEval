@@ -34,6 +34,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 GENERATED = layout.generated()
 DEST = REPO_ROOT / "apptainer" / "instances"
 RECORD_FILES = ("metadata.json", "validation.json")
+# The saved build output a config or dependency oracle was attributed from
+# (generate_instance.py); render_mynewt_instance.py needs it to re-render.
+EVIDENCE_FILES = ("observed_before.log",)
 
 
 def promote(instance_id: str, source: Path = GENERATED,
@@ -52,7 +55,18 @@ def promote(instance_id: str, source: Path = GENERATED,
         return False, "validation.json predates recipe fingerprints; validate it again"
     if au.recipe_fingerprint(src, recipe) != want:
         return False, "recipe changed since it was validated; validate it again"
-    files = (*recipe, *RECORD_FILES)
+    if project == "mynewt":
+        # Nothing an agent must not see in the image (validate_instance.py's
+        # leak check), and a before state judged the same in 5 runs.
+        leak = report.get("leak_check")
+        if not leak:
+            return False, "no leak check record; validate it again"
+        if not leak.get("ok") or leak.get("network") != "isolated":
+            return False, f"leak check failed: {leak.get('findings')}"
+        d = report.get("determinism")
+        if not d or d.get("runs", 0) < 5 or not d.get("ok"):
+            return False, "no deterministic before state (validate with --determinism 5)"
+    files = (*recipe, *RECORD_FILES, *[f for f in EVIDENCE_FILES if (src / f).exists()])
     missing = [f for f in files if not (src / f).exists()]
     if missing:
         return False, f"missing {', '.join(missing)}"

@@ -355,6 +355,7 @@ result = {
     "build_ok": False,
     "compile_failure": False,
     "config_failure": False,
+    "dependency_failure": False,
     "compile_test_source": meta.get("compile_test_source"),
     "missing_api": meta.get("missing_api"),
     "diagnostic": None,
@@ -393,15 +394,15 @@ try:
             with binary.open("rb") as handle:
                 if handle.read(4) == b"\x7fELF":
                     binaries.append(binary)
-    if mode == "config" and build.returncode > 0 and "Executing test: " not in output:
+    if mode in ("config", "dependency") and build.returncode > 0 and "Executing test: " not in output:
         fingerprint = hashlib.sha256(output.strip().encode()).hexdigest()
-        if fingerprint == meta.get("config_output_sha256"):
-            result["config_failure"] = True
+        if fingerprint == meta.get(mode + "_output_sha256"):
+            result[mode + "_failure"] = True
             result["diagnostic"] = output.strip()
-            result["config_output_sha256"] = fingerprint
+            result[mode + "_output_sha256"] = fingerprint
             code = 1
         else:
-            result["error"] = "build failed without the source-attributed configuration diagnostic"
+            result["error"] = f"build failed without the source-attributed {mode} diagnostic"
     elif mode == "compile" and build.returncode > 0 and "Executing test: " not in output:
         if meta.get("compile_expectations"):
             result["compile_diagnostics"] = compile_diagnostic_group(

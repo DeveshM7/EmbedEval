@@ -171,7 +171,7 @@ def check_api_key(model_name: str) -> None:
 def build_prompts(meta: dict) -> tuple[str, str]:
     cfg = projects.config_for(meta)
     protected = " or ".join(f"`{p}`" for p in projects.setting(meta, "protected_paths"))
-    warn = cfg["extra_warnings"]
+    warn = projects.setting(meta, "extra_warnings")    # an instance's own (protected test support) wins
     system = SYSTEM_TEMPLATE.format(
         label=cfg["label"], orientation=cfg["orientation"]
     )
@@ -201,7 +201,11 @@ def _build_and_test(meta: dict) -> str:
 
 
 def build_task(meta: dict) -> str:
-    """The first user message: the problem plus its test context."""
+    """The first user message: the problem plus its test context.
+
+    Nothing derived from the fix: the files the upstream fix changed
+    (files_changed_by_fix) are not shown -- that is SWE-bench's "oracle"
+    retrieval setting, which tells the agent where the answer is."""
     def bullets(items):
         return "\n".join(f"  - {i}" for i in items) or "  (none)"
 
@@ -217,10 +221,6 @@ def build_task(meta: dict) -> str:
 ## Tests That Must Continue Passing
 
 {bullets(meta.get("pass_to_pass", []))}
-
-## Relevant Source File(s)
-
-{bullets(meta.get("files_changed_by_fix", []))}
 """
 
 
@@ -257,7 +257,8 @@ def make_environment(meta: dict):
                                     timeout=projects.setting(meta, "command_timeout", 900),
                                     setup_commands=[commit_tests] if meta["project"] == "zephyr" else [],
                                     sandbox=meta["project"] == "mynewt",
-                                    network_fixture=meta.get("network_fixture"))
+                                    network_fixture=meta.get("network_fixture"),
+                                    isolate_network=meta["project"] == "mynewt")
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
