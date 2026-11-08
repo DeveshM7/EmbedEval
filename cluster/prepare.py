@@ -139,6 +139,9 @@ def prepare_instances(args, cfg: dict, run: Path, env: dict) -> None:
     t0 = time.time()
     sys.path.insert(0, str(REPO / "scripts"))
     import render_nuttx_instance as rn
+    if cfg["nuttx"]["data"] and not os.environ.get("EMBEDEVAL_NUTTX_CLONE"):
+        # the renderer reads the kernel at its base (render_nuttx_instance.needs_version_file)
+        os.environ["EMBEDEVAL_NUTTX_CLONE"] = str(Path(cfg["nuttx"]["data"]) / "kernel.git")
     root = Path(args.instances).resolve()
     folders = sorted(d for d in root.iterdir() if (d / "metadata.json").exists())
     prs, stage, extra = [], {}, {}

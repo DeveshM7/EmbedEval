@@ -67,6 +67,9 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
               "patch_file": str(paths.show(patch_path)),
               "patch_empty": False, "patch_applied": False, "build_ok": False,
               "tests_passed": False, "grade": "fail", "error": None, "elapsed_seconds": 0}
+    # NuttX grades without a network, as its agent runs and validation do.
+    isolated = meta["project"] == "nuttx"
+    result["network"] = "isolated" if isolated else "host"
     if not patch_path.exists():
         result.update(grade="missing", error="no patch file (run not found)")
         return result
@@ -83,9 +86,6 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     overlay = run_dir / "overlay"
     overlay.mkdir(parents=True)
     (run_dir / "agent.patch").write_text(patch_path.read_text())
-    # NuttX grades without a network, as its agent runs and validation do.
-    isolated = meta["project"] == "nuttx"
-    result["network"] = "isolated" if isolated else "host"
     container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay,
                              network=not isolated)
     try:

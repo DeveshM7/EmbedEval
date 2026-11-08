@@ -32,6 +32,8 @@ for a in "$@"; do case "$a" in --test-only) echo "sbatch: Job would start"; exit
 n=$(( $(wc -l < "$FAKE_LOG/sbatch.log") + 1000 )); echo "$n"
 """,
     "squeue": "#!/bin/bash\nexit 0\n",
+    "scontrol": "#!/bin/bash\necho \"$@\" >> \"$FAKE_LOG/scontrol.log\"\n",
+    "scancel": "#!/bin/bash\necho \"$@\" >> \"$FAKE_LOG/scancel.log\"\n",
     "sinfo": "#!/bin/bash\necho 3\n",
 }
 
@@ -61,6 +63,9 @@ nuttx: {{validate: true}}
         self.instances.mkdir()
         for iid in (ARM, X86):
             shutil.copytree(INSTANCES / iid, self.instances / iid)
+            meta = json.loads((self.instances / iid / "metadata.json").read_text())
+            meta.setdefault("needs_version_file", False)      # no kernel clone here
+            (self.instances / iid / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
 
     def run(self, script: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_LOG": str(self.log)}
@@ -155,18 +160,24 @@ class Submit(unittest.TestCase):
     def test_evaluate_x86_owns_its_server(self):
         self.s.run("submit.py", "evaluate", "--run", self.run.name, "--arch", "x86_64",
                    "--model", "qwen38-nvfp4", "--after", "77")
-        server, job = self.s.sbatch_calls()[-2:]
-        self.assertIn("serve_triage_model.sh qwen38-nvfp4", server)
-        self.assertIn("--gres=gpu:1", server)
+        job, server = self.s.sbatch_calls()[-2:]
+        self.assertIn("--hold", job)                       # held until it is chained to its server
+        self.assertIn("--dependency=afterany:77", job)
         self.assertIn("--dependency=afterany:77", server)
+        self.assertTrue(server.rstrip().endswith(".sbatch"))
         export = server.split("--export=", 1)[1].split()[0]
         self.assertNotIn("ALL", export)
         self.assertIn("PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin,", export)
-        self.assertIn("--dependency=afterany:77,after:1001", job)
-        text = self.script("evaluate", "x86_64")
-        self.assertIn("scancel 1001", text)
+        scontrol = (self.s.log / "scontrol.log").read_text().splitlines()
+        self.assertEqual(scontrol, ["update JobId=1001 Dependency=afterany:77,after:1002", "release 1001"])
+        server_script = next((self.run / "jobs").glob("server-x86_64-*.sbatch")).read_text()
+        self.assertIn("squeue -h -j 1001", server_script)
+        self.assertIn("#SBATCH --gres=gpu:1", server_script)
+        self.assertIn("serve_triage_model.sh qwen38-nvfp4", server_script)
+        self.assertIn("server-of-$SLURM_JOB_ID", self.script("evaluate", "x86_64"))
+        self.assertEqual((self.run / "jobs" / "server-of-1001").read_text().strip(), "1002")
         cfg = json.loads(next((self.run / "jobs").glob("config-*.json")).read_text())
-        self.assertEqual((cfg["evaluate"]["model"], cfg["evaluate_server_job"]), ("qwen38-nvfp4", "1001"))
+        self.assertEqual((cfg["evaluate"]["model"], cfg["evaluate_server_job"]), ("qwen38-nvfp4", "1002"))
 
     def test_evaluate_arm_serves_itself(self):
         r = self.s.run("submit.py", "evaluate", "--run", self.run.name, "--arch", "aarch64")
@@ -188,6 +199,33 @@ class Submit(unittest.TestCase):
     def test_arch_needed(self):
         r = self.s.run("submit.py", "validate", "--run", self.run.name, check=False)
         self.assertIn("needs --arch", r.stderr)
+
+
+class ServerWatchdog(unittest.TestCase):
+    """server.sbatch ends when its evaluate job is gone, or cannot start."""
+
+    def run_server(self, squeue: str, grace: int) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "bin").mkdir()
+            for name, body in (("squeue", squeue), ("curl", "exit 0"), ("sleep", "exit 0")):
+                (tmp / "bin" / name).write_text(f"#!/bin/bash\n{body}\n")
+                (tmp / "bin" / name).chmod(0o755)
+            (tmp / "scripts").mkdir()
+            (tmp / "scripts" / "serve_triage_model.sh").write_text("exec tail -f /dev/null\n")
+            text = (CLUSTER / "templates" / "server.sbatch").read_text().format(
+                partition="p", cpus=1, gres="gpu:1", mem="1G", time_limit="1:00", name="n", jobs=tmp,
+                model="m", eval_job="42", stamp="s", source=tmp, grace=grace)
+            (tmp / "server.sh").write_text(text)
+            r = subprocess.run(["bash", str(tmp / "server.sh")], capture_output=True, text=True, timeout=60,
+                               env={**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}"})
+            return r.stdout
+
+    def test_gone(self):
+        self.assertIn("evaluate job 42 is gone", self.run_server("exit 0", 30))
+
+    def test_cannot_start(self):
+        self.assertIn("still PENDING", self.run_server("echo PENDING", -1))
 
 
 class Worker(unittest.TestCase):

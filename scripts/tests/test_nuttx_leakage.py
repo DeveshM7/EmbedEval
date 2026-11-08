@@ -210,6 +210,39 @@ class LeakCheck(unittest.TestCase):
         self.assertEqual(facts["fix_lines"], [])
 
 
+class VersionFile(unittest.TestCase):
+    """Kernels whose build needs a release tag get a version file, decided
+    from the clone once and kept in the metadata."""
+
+    def test_render(self):
+        import render_nuttx_instance as rn
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            kernel = tmp / "k"
+            kernel.mkdir()
+            git(kernel, "init", "-q")
+            (kernel / "tools").mkdir()
+            (kernel / "tools" / "version.sh").write_text('echo "Missing versioning information"\nexit 1\n')
+            git(kernel, "add", "-A")
+            git(kernel, "commit", "-qm", "old")
+            old = git(kernel, "rev-parse", "HEAD")
+            (kernel / "tools" / "version.sh").write_text('echo "Missing versioning information. Using the dummy value. (0.0.0)"\n')
+            git(kernel, "commit", "-qam", "cb9ff5ff99")
+            new = git(kernel, "rev-parse", "HEAD")
+            self.assertTrue(rn.needs_version_file(kernel / ".git", old))
+            self.assertFalse(rn.needs_version_file(kernel / ".git", new))
+            src = REPO / "apptainer" / "instances" / "nuttx" / "nuttx__nuttx-11889-a2327"
+            meta = json.loads((src / "metadata.json").read_text())
+            for flag in (True, False):
+                out = tmp / f"out-{flag}"
+                inst = rn.render({**meta, "needs_version_file": flag}, src / "test_patch.diff", out,
+                                 runtime="apptainer")
+                recipe = (inst / "instance.def").read_text()
+                self.assertEqual("tools/version.sh -v 0.0.0 .version" in recipe, flag)
+                self.assertNotIn("@@", recipe)
+                self.assertIs(json.loads((inst / "metadata.json").read_text())["needs_version_file"], flag)
+
+
 class Network(unittest.TestCase):
     def test_exec_args_isolates_when_asked(self):
         self.assertIn("--network", au.exec_args(Path("i.sif"), network=False))

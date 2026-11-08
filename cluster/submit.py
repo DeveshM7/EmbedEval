@@ -93,6 +93,7 @@ SOURCE_DIRS = ("cluster", "scripts", "harness", "templates", "docs")
 SOURCE_FILES = ("triage/models.json", "triage/nuttx_apps_gold.json", "requirements.txt")
 SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "runs", "generated", "outputs", "tests"}
 REPORT_MIN = 5          # minutes a phase job keeps for its report
+SERVER_GRACE_MIN = 30   # minutes an x86 evaluate job's server waits for it, once ready
 
 
 def freeze_source(source: Path, destination: Path) -> dict:
@@ -203,27 +204,13 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     source = jobs / f"source-{stamp}"
     frozen_src = freeze_source(REPO, source)
     deps = [f"afterany:{args.after}"] if args.after else []
-    server = None
-    if mode == "evaluate" and x86 and cfg["evaluate"]["model"] in harness_paths.LOCAL_PROFILES:
-        # x86 nodes have no GPU: the model is served by a job of its own on the
-        # GPU partition, which this evaluate job ends when its workers are done.
-        server = args.server_job
-        if not server and not args.dry_run:
-            r = subprocess.run(["sbatch", "--parsable", "-p", s["partition"], "-J", f"{name}-server",
-                                f"--mem={s['mem']}", f"--cpus-per-task={s['cpus_per_node']}",
-                                f"--gres={s['gres']}", "--export=" + server_export(cfg, run, stamp),
-                                "-o", str(jobs / "server-%j.log"), "-t", s["time_limit"],
-                                *([f"--dependency={deps[0]}"] if deps else []),
-                                str(source / "scripts" / "serve_triage_model.sh"), cfg["evaluate"]["model"]],
-                               capture_output=True, text=True, cwd=source)
-            if r.returncode:
-                sys.exit(f"sbatch of the model server failed: {r.stderr.strip()}")
-            server = r.stdout.strip().split(";")[0]
-            cfg["evaluate_server_owned"] = True
-            print(f"  model server: job {server} ({cfg['evaluate']['model']}, {s['partition']})")
-        if server:
-            cfg["evaluate_server_job"] = server
-            deps.append(f"after:{server}")
+    # x86 nodes have no GPU: a local model is served by a job of its own on the
+    # GPU partition (server.sbatch), which this evaluate job cancels when done.
+    own_server = (mode == "evaluate" and x86 and not args.server_job
+                  and cfg["evaluate"]["model"] in harness_paths.LOCAL_PROFILES)
+    if args.server_job:
+        cfg["evaluate_server_job"] = args.server_job
+        deps.append(f"after:{args.server_job}")
     frozen = jobs / f"config-{stamp}.json"
     frozen.write_text(json.dumps(cfg, indent=2) + "\n")
     python = (s["build_python"] if x86 else s["triage_python"]) or sys.executable
@@ -239,8 +226,7 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
         phase_min=phase_min, stamp=stamp, path_prefix=f"{extra_path}:" if extra_path else "",
         # the server this job started serves it alone; it ends with the
         # workers rather than hold a job slot until its own time limit
-        end_server=(f"scancel {cfg['evaluate_server_job']}\n"
-                    if cfg.get("evaluate_server_owned") else "")))
+        end_server=(f"scancel $(cat {jobs}/server-of-$SLURM_JOB_ID 2>/dev/null)\n" if own_server else "")))
     print(f"run {run.name}: {len(todo)} instances to {mode} on {arch}")
     print(f"  nodes: {lowest}-{wanted} on {partition} ({idle} idle; max {s['nodes_max']})"
           + (f"\n  note: {note}" if note else ""))
@@ -248,11 +234,40 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     if args.dry_run:
         print("  --dry-run: not submitted")
         return
-    r = subprocess.run(["sbatch", "--parsable", *([f"--dependency={','.join(deps)}"] if deps else []),
+    # With its own server, the evaluate job is submitted held, so the server
+    # job can name it; it is released once its config names the server.
+    r = subprocess.run(["sbatch", "--parsable", *(["--hold"] if own_server else []),
+                        *([f"--dependency={','.join(deps)}"] if deps else []),
                         str(script)], capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"sbatch failed: {r.stderr.strip()}")
     job = r.stdout.strip().split(";")[0]
+    if own_server:
+        server_script = jobs / f"server-{arch}-{stamp}.sbatch"
+        server_script.write_text((CLUSTER / "templates" / "server.sbatch").read_text().format(
+            partition=s["partition"], cpus=s["cpus_per_node"], gres=s["gres"], mem=s["mem"],
+            time_limit=s["time_limit"], name=f"{name}-server", jobs=jobs, model=cfg["evaluate"]["model"],
+            eval_job=job, stamp=stamp, source=source, grace=SERVER_GRACE_MIN))
+        r = subprocess.run(["sbatch", "--parsable", "--export=" + server_export(cfg, run, stamp),
+                            *([f"--dependency={deps[0]}"] if args.after else []), str(server_script)],
+                           capture_output=True, text=True, cwd=source)
+        if r.returncode:
+            subprocess.run(["scancel", job])
+            sys.exit(f"sbatch of the model server failed: {r.stderr.strip()}; evaluate job {job} cancelled")
+        server = r.stdout.strip().split(";")[0]
+        cfg["evaluate_server_job"] = server
+        frozen.write_text(json.dumps(cfg, indent=2) + "\n")       # the workers read it at start
+        (jobs / f"server-of-{job}").write_text(server + "\n")
+        deps.append(f"after:{server}")
+        u = subprocess.run(["scontrol", "update", f"JobId={job}", f"Dependency={','.join(deps)}"],
+                           capture_output=True, text=True)
+        rel = subprocess.run(["scontrol", "release", job], capture_output=True, text=True)
+        if u.returncode or rel.returncode:
+            subprocess.run(["scancel", job, server])
+            sys.exit(f"could not chain evaluate job {job} to server job {server}: "
+                     f"{(u.stderr + rel.stderr).strip()}; both cancelled")
+        print(f"  model server: job {server} ({cfg['evaluate']['model']}, {s['partition']}; "
+              f"ends {SERVER_GRACE_MIN} min after the model answers if job {job} cannot start)")
     with open(jobs / "submitted.jsonl", "a") as fh:
         fh.write(json.dumps({"job": job, "script": script.name, "submitted": stamp, "mode": mode,
                              "arch": arch, "nodes": f"{lowest}-{wanted}", "after": args.after,

@@ -26,6 +26,25 @@ from pathlib import Path
 
 import nuttx_platforms as platforms
 
+# Kernels before cb9ff5ff99 (2021-03-06) stop the build when git has no release
+# tag to describe; a depth-1 repository has none. Their recipe writes the
+# version file as later kernels do then (0.0.0); .version is git-ignored.
+VERSION_FILE = """    # Before cb9ff5ff99 the build needs a release tag; write 0.0.0 as later kernels do.
+    if [ -f tools/version.sh ] && ! grep -q 'Using the dummy value' tools/version.sh; then
+        tools/version.sh -v 0.0.0 .version
+    fi
+"""
+
+
+def needs_version_file(clone: Path, base: str) -> bool:
+    """Whether the kernel at `base` lacks tools/version.sh's 0.0.0 fallback."""
+    import subprocess
+    r = subprocess.run(["git", "--git-dir", str(clone), "show", f"{base}:tools/version.sh"],
+                       capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError(f"cannot read tools/version.sh at {base} in {clone}: {r.stderr.strip()[:200]}")
+    return "Using the dummy value" not in r.stdout
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "nuttx"
 DEFAULT_OUT = REPO_ROOT / "generated"
@@ -168,6 +187,14 @@ def render(meta: dict, patch_file: Path, out_root: Path,
     if meta["fail_type"] == "compile_error" and \
             (not meta.get("compile_test_source") or not meta.get("missing_api")):
         raise ValueError("compile cases need compile_test_source and missing_api")
+    if runtime == "apptainer" and "needs_version_file" not in meta:
+        # decided once, from the kernel clone, and kept in the metadata so a
+        # later render needs no clone
+        import os
+        clone = os.environ.get("EMBEDEVAL_NUTTX_CLONE")
+        if not clone:
+            raise ValueError("needs_version_file is unknown: set EMBEDEVAL_NUTTX_CLONE to a kernel clone")
+        meta = {**meta, "needs_version_file": needs_version_file(Path(clone), meta["kernel_base_commit"])}
     banners = meta.get("test_banners")
     if (not banners and meta["fail_type"] != "compile_error") or \
             any(not BANNER_TEXT.fullmatch(b) for b in banners or []):
@@ -238,6 +265,7 @@ def render(meta: dict, patch_file: Path, out_root: Path,
                            ("SIM_CONFIG", sim_config),
                            ("EXTRA_CONFIG", "\n".join(f"    {s}" for s in apptainer_steps))):
             recipe = recipe.replace(f"@@{key}@@", value)
+        recipe = recipe.replace("@@VERSION_FILE@@\n", VERSION_FILE if meta["needs_version_file"] else "")
         # Prerequisite kernel PRs (metadata base_prs) are committed onto the
         # kernel base, so they are part of what the agent starts from.
         recipe = recipe.replace("@@BASE_FILES@@\n", "    base_patch.diff /opt/embedeval/base_patch.diff\n"
