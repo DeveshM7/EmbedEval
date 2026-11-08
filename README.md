@@ -20,7 +20,7 @@ and the tests actually run.
   scenarios in the upstream CI image of the base's era (Apptainer), with no
   network; see section 12 of [docs/running_on_scholar.md](docs/running_on_scholar.md).
 
-**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 36 Contiki-NG
+**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 38 Contiki-NG
 (`apptainer/instances/contiki-ng/`), 6 NuttX, 3 RIOT.
 
 ---
