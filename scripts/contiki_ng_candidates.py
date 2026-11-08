@@ -8,7 +8,7 @@ from functools import lru_cache
 from contiki_ng_inputs import closure
 
 REPO='https://github.com/contiki-ng/contiki-ng'
-ENRICH_VERSION=7
+ENRICH_VERSION=8
 TEST_ROOTS=('tests/','regression-tests/')
 SUPPORTED_SIM_SUITES=('07-simulation-base','09-ipv6','13-ieee802154','21-security-protocols')
 
@@ -347,9 +347,62 @@ def added_blocks(patch):
             yield path,block;block=[]
     if block:yield path,block
 
+# Words of C code that are never an interface a fix introduces.
+C_KEYWORDS={'auto','break','case','char','const','continue','default','do','double','else','enum','extern',
+            'float','for','goto','if','inline','int','long','register','restrict','return','short','signed',
+            'sizeof','static','struct','switch','typedef','union','unsigned','void','volatile','while','bool',
+            'true','false','NULL','define','undef','ifdef','ifndef','endif','elif','include','defined'}
+CODE_STRING=re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+CODE_COMMENT=re.compile(r'/\*.*?\*/|//.*$')
+
+def code_identifiers(line):
+    """Identifiers on a line of C, outside comments and string literals."""
+    text=CODE_COMMENT.sub(' ',CODE_STRING.sub(' ',line))
+    return set(re.findall(r'\b[A-Za-z_]\w{2,}\b',text))-C_KEYWORDS
+
+# Keywords after which a name followed by ( or ; is used, not declared.
+NOT_A_TYPE=C_KEYWORDS-{'char','double','float','int','long','short','signed','unsigned','void','bool',
+                       'const','volatile','static','extern','inline','register','restrict','struct',
+                       'union','enum','auto'}
+DECLARATOR=re.compile(r'(?:\b([A-Za-z_]\w*)\s+\**|\*|\})\s*([A-Za-z_]\w*)\s*(?=[\[;=,:(){])')
+ENUM_LIKE=re.compile(r'^\s*([A-Za-z_]\w*)\s*(?:=(?!=)|,|$)')
+
+def declared_identifiers(lines):
+    """Names that added lines of C declare: a #define, a function, variable,
+    parameter, struct member or typedef after its type (or after `}`), a
+    struct, union or enum tag, an enum constant on its own line. A name the
+    lines only use -- INT64_MAX in `x > INT64_MAX`, a function they call --
+    is not declared."""
+    out=set()
+    for line in lines:
+        macro=re.match(r'\s*#\s*define\s+([A-Za-z_]\w*)',line)
+        if macro:out.add(macro[1]);continue
+        if line.lstrip().startswith(('#','*','/*','//')):continue
+        text=CODE_COMMENT.sub(' ',CODE_STRING.sub(' ',line))
+        for m in DECLARATOR.finditer(text):
+            # a parameter (inside parentheses, then , or )) is not an interface
+            inside=text[:m.start(2)].count('(')>text[:m.start(2)].count(')')
+            if inside and text[m.end(2):].lstrip()[:1] in (',',')'):continue
+            if m[1] is None or m[1] not in NOT_A_TYPE:out.add(m[2])
+        m=ENUM_LIKE.match(text)
+        if m and m[1] not in C_KEYWORDS:out.add(m[1])
+        # a definition's name on its own line, after a return type line above
+        m=re.match(r'^([A-Za-z_]\w*)\s*\(',text)
+        if m and not text.rstrip().endswith(';'):out.add(m[1])
+    return out-C_KEYWORDS
+
+def test_declared(lines):
+    """Names added test lines declare themselves (locals, helpers) or register
+    as cases (UNIT_TEST_REGISTER(name, ...)): never missing before a fix."""
+    return declared_identifiers(lines)|{m for l in lines for m in re.findall(
+        r'\bUNIT_TEST(?:_REGISTER|_RUN|_PASSED)?\s*\(\s*([A-Za-z_]\w*)',l)}
+
 def compile_requirements(base,production_diff,test_patch):
-    """Interfaces introduced by the fix and used on newly added test lines."""
-    tests=list(added_lines(test_patch)); found={}
+    """Interfaces introduced by the fix and used on newly added test lines:
+    the macros and functions it defines, and every other name its added lines
+    declare -- a type, struct member, enum constant or variable (kind
+    "identifier") -- that the tests use and the base has nowhere."""
+    tests=list(added_lines(test_patch)); found={}; candidates=[]; names=[]
     for path,block in added_blocks(production_diff):
         interfaces=[]
         for line in block:
@@ -360,14 +413,21 @@ def compile_requirements(base,production_diff,test_patch):
         joined='\n'.join(block)
         for match in re.finditer(r'(?m)^([A-Za-z_]\w*)[ \t]*\([^;{}\n]*\)[ \t]*\n[ \t]*\{',joined):
             interfaces.append((match[1],'function'))
-        for symbol,kind in interfaces:
-            used=sorted({p for p,text in tests if re.search(r'\b'+re.escape(symbol)+r'\b',text)})
-            if not used or symbol in found:continue
-            # Any occurrence at the base makes absence unproved. This is conservative
-            # for common names and declarations, which must be reviewed manually.
-            if git('grep','-n','-w','-e',symbol,base,'--',check=False):continue
-            found[symbol]={'symbol':symbol,'kind':kind,'at_base':False,
-                           'production_file':path,'test_files':used}
+        candidates+=[(symbol,kind,path) for symbol,kind in interfaces]
+        if path.endswith(('.c','.h')):
+            names+=[(w,'identifier',path) for w in sorted(declared_identifiers(block))]
+    # A defined macro or function keeps its kind wherever its name also appears.
+    seen=test_declared([text for _,text in tests])
+    for symbol,kind,path in candidates+names:
+        if symbol in seen:continue
+        seen.add(symbol)
+        used=sorted({p for p,text in tests if re.search(r'\b'+re.escape(symbol)+r'\b',text)})
+        if not used:continue
+        # Any occurrence at the base makes absence unproved. This is conservative
+        # for common names and declarations, which must be reviewed manually.
+        if git('grep','-n','-w','-e',symbol,base,'--',check=False):continue
+        found[symbol]={'symbol':symbol,'kind':kind,'at_base':False,
+                       'production_file':path,'test_files':used}
     return list(found.values())
 
 def stale_record(rec):

@@ -125,11 +125,12 @@ PROVIDER_KEYS = {
 
 
 # Models served locally by scripts/serve_triage_model.sh: vLLM's
-# OpenAI-compatible API, so LiteLLM's openai/ route with an api_base. The
-# sampling settings come from the same profile triage uses (triage/models.json).
-# EMBEDEVAL_LOCAL_API_BASE overrides the address; the server listens on
-# 127.0.0.1, so the harness must run on the server's node.
-LOCAL_MODELS = {"openai/qwen38-nvfp4": "qwen38-nvfp4"}
+# OpenAI-compatible API, so LiteLLM's openai/ route with an api_base. Every
+# profile of triage/models.json is one (openai/<profile>); its sampling
+# settings are the profile's. EMBEDEVAL_LOCAL_API_BASE overrides the address;
+# the server listens on 127.0.0.1, so the harness runs on the server's node
+# or reaches it through a tunnel.
+LOCAL_MODELS = {f"openai/{name}": name for name in paths.local_model_profiles()}
 REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
 
 
@@ -195,10 +196,13 @@ def _build_and_test(meta: dict) -> str:
 
 
 def build_task(meta: dict) -> str:
-    """The first user message: the problem plus its test context."""
-    def bullets(items):
-        return "\n".join(f"  - {i}" for i in items) or "  (none)"
+    """The first user message: the problem statement.
 
+    Nothing derived from the fix or the grading, for every project: not the
+    files the upstream fix changed (files_changed_by_fix; SWE-bench's
+    "oracle" retrieval setting, which tells the agent where the answer is),
+    nor the fail_to_pass / pass_to_pass lists. The tests themselves are in
+    the repository, and `run_tests` runs them."""
     if not (meta.get("problem_statement") or "").strip():
         sys.exit(f"ERROR: {meta['instance_id']} has no problem statement; write one first")
     return f"""\
@@ -206,17 +210,9 @@ def build_task(meta: dict) -> str:
 
 {meta["problem_statement"]}
 
-## Failing Tests (must pass after your fix)
+## Tests
 
-{bullets(meta.get("fail_to_pass", []))}
-
-## Tests That Must Continue Passing
-
-{bullets(meta.get("pass_to_pass", []))}
-
-## Relevant Source File(s)
-
-{bullets(meta.get("files_changed_by_fix", []))}
+`run_tests` builds and runs the tests your fix is graded on.
 """
 
 
@@ -252,6 +248,7 @@ def make_environment(meta: dict):
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
                                     local_overlay=meta["project"] == "contiki-ng",
+                                    network=meta["project"] != "contiki-ng",
                                     setup_commands=[commit_tests])
 
     # NuttX, RIOT: Docker.

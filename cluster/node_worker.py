@@ -121,7 +121,7 @@ _queue: claims.Queue | None = None     # this phase's queue, for on_sigterm
 
 
 def drain(q: claims.Queue, todo: list[int], one, slots: int, until: float,
-          ready=lambda: True) -> None:
+          ready=lambda: True, stop=lambda: False) -> None:
     """Run one(pr) on PRs taken from the queue, `slots` at a time, until none
     is left or `until` (a time) has passed. While ready() is false, no PR is
     taken. A slot with nothing to take waits while other nodes still hold
@@ -130,7 +130,7 @@ def drain(q: claims.Queue, todo: list[int], one, slots: int, until: float,
     _queue = q
 
     def slot() -> None:
-        while not _stopping.is_set() and time.time() < until:
+        while not _stopping.is_set() and time.time() < until and not stop():
             if not ready():
                 time.sleep(claims.BEAT)
                 continue
@@ -498,6 +498,13 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         if left() < 10 or _stopping.is_set():
             return                                         # stays to do
         lg = LOGS / f"validate-{pr}.log"
+        source = status.entry(run, pr).get("instance")
+        if source:                  # a revalidation: render the existing instance again
+            res = attempt(run, pr, iid, None, lg, left, venv, render=run / "sources" / source)
+            if res is None:
+                return
+            state, what, published = res
+            return done(state, published, outcome=what) if state == "done" else done("failed", what)
         verdict = run / "triage" / f"{pr}.json"
         tried = []
         while True:
@@ -535,21 +542,29 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     drain(q, todo, one, cfg["parallel"]["validate_per_node"], deadline - 10 * 60, room)
 
 
-def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: dict):
-    """One generate, build, validate of the verdict's pair: ("done", outcome,
-    note), ("failed", why, ""), or None if the worker is stopping. A VALID
-    image is pushed to the registry, if there is one, before it is removed;
-    a push that fails leaves the PR VALID, with a note."""
+def attempt(run: Path, pr: int, iid: str, verdict: Path | None, lg: Path, left, venv: dict,
+            render: Path | None = None):
+    """One generate (or, with render, a re-render of an existing instance),
+    build, validate of the verdict's pair: ("done", outcome, note), ("failed",
+    why, ""), or None if the worker is stopping. A VALID image is pushed to
+    the registry, if there is one, before it is removed; a push that fails
+    leaves the PR VALID, with a note."""
     step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)   # leftovers of a cut-short try
     try:
         project = "contiki-ng" if iid.startswith("contiki-ng__") else "zephyr"
-        rc = step([PY, "scripts/generate_instance.py", "--project", project,
-                   "--pr", str(pr), "--triage", str(verdict)],
-                  lg, min(5, left()), venv)
+        if render:
+            shutil.rmtree(run / "instances" / iid, ignore_errors=True)
+            generate = [PY, "scripts/generate_instance.py", "--project", project, "--render", str(render),
+                        "--out", str(run / "instances")]
+        else:
+            generate = [PY, "scripts/generate_instance.py", "--project", project,
+                        "--pr", str(pr), "--triage", str(verdict)]
+        rc = step(generate, lg, min(10, left()), venv)
         if rc == 143:
             return None
         if rc:
-            return "failed", "generate failed: the verdict's pair is not runnable", ""
+            return "failed", ("render failed; see the log" if render
+                              else "generate failed: the verdict's pair is not runnable"), ""
         rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
                   min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
         if rc == 143:
@@ -597,6 +612,150 @@ def other_board(run: Path, pr: int, verdict: Path, tried: list[str]) -> Path | N
     return out
 
 
+# ---------------------------------------------------------------- evaluate
+#
+# Per VALID instance of the run: build its image, run the agent on it
+# (harness/run.py: no network, the problem statement and the repository
+# only), grade the patch in a fresh container (harness/evaluate_patches.py),
+# remove the image. The model is the job's (submit.py evaluate --model); it
+# is reached through an SSH tunnel to the node of its server job. Outputs:
+# <run>/outputs/contiki-ng/<model>/<PR>/ (patch, trajectory) and
+# <run>/outputs/grades/<model>/<instance>.json.
+
+
+def model_tunnel(job: str, minutes: float, port: int = 8000):
+    """(the tunnel process, api base) to the server of job `job`, once it answers."""
+    deadline = time.time() + minutes * 60
+    node = ""
+    while time.time() < deadline and not _stopping.is_set():
+        r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T %N"], capture_output=True, text=True)
+        state, _, node = r.stdout.strip().partition(" ")
+        if state == "RUNNING" and node:
+            break
+        if not state:
+            return None, f"server job {job} is not in the queue"
+        time.sleep(30)
+    else:
+        return None, f"server job {job} did not start"
+    local = port + N             # one tunnel per node, and never the server's own port
+    tunnel = subprocess.Popen(["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                               "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=60",
+                               "-N", "-L", f"{local}:127.0.0.1:8000", node], start_new_session=True)
+    with _lock:
+        _children.add(tunnel.pid)
+    base = f"http://127.0.0.1:{local}/v1"
+    while time.time() < deadline and not _stopping.is_set() and tunnel.poll() is None:
+        try:
+            urllib.request.urlopen(base + "/models", timeout=5)
+            return tunnel, base
+        except Exception:
+            time.sleep(20)
+    kill_group(tunnel.pid)
+    return None, f"server of job {job} on {node} did not answer"
+
+
+def server_alive(base: str, tunnel) -> bool:
+    if tunnel.poll() is not None:
+        return False
+    try:
+        urllib.request.urlopen(base + "/models", timeout=10)
+        return True
+    except Exception:
+        return False
+
+
+def agent_record(run: Path, model: str, iid: str) -> dict:
+    """What the trajectory says of an agent run: exit status, model calls."""
+    sys.path.insert(0, str(REPO / "harness"))
+    import paths
+    f = Path(run) / "outputs" / "contiki-ng" / paths.model_dir(model) / iid.rsplit("-", 1)[1] / "trajectory.json"
+    try:
+        info = json.loads(f.read_text())["info"]
+        return {"exit_status": info.get("exit_status"), "steps": info["model_stats"]["api_calls"]}
+    except (OSError, ValueError, KeyError):
+        return {"exit_status": None, "steps": None}
+
+
+def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
+    model, ev, caps = cfg["evaluate_model"], cfg["evaluate"], cfg["caps"]
+    todo = status.evaluate_todo(run, model)
+    log(f"evaluate {model}: {len(todo)} instances left in the run")
+    if not todo:
+        return
+    t0 = time.time()
+    deadline = t0 + (minutes - 3) * 60
+    venv = {**env, "EMBEDEVAL_BUILD_TIMEOUT_MIN": str(caps["build"])}
+    tunnel, base = model_tunnel(cfg["evaluate_server_job"], caps["server_start"])
+    if tunnel is None:
+        log(f"no model server: {base}. Taking no instances")
+        return
+    venv["EMBEDEVAL_LOCAL_API_BASE"] = base
+    log(f"model server of job {cfg['evaluate_server_job']} answers at {base}")
+    sweep(Path(env["EMBEDEVAL_WORK"]))
+    grades = run / "outputs" / "grades" / model
+    grades.mkdir(parents=True, exist_ok=True)
+    key = status.evaluate_key(model)
+    lost = threading.Event()        # the model server is gone: take no more instances
+    # an instance is started only with time for its build, the agent and the grading
+    enough = lambda: (deadline - time.time()) / 60 >= ev["time_limit"] + caps["build"] + 25
+
+    def one(pr: int) -> None:
+        if lost.is_set() or not server_alive(base, tunnel):
+            lost.set()
+            return                                         # stays to do: the next job runs it
+        iid = f"contiki-ng__contiki-ng-{pr}"
+        lg, start = LOGS / f"evaluate-{pr}.log", time.time()
+        if not enough() or _stopping.is_set():
+            return                                         # stays to do
+        info = {"model": model, "instance": iid, "node": N,
+                "limits": {"step_limit": ev["step_limit"], "time_limit": ev["time_limit"]}}
+
+        def done(state: str, **more) -> None:
+            info.update(state=state, minutes=round((time.time() - start) / 60, 1), **more)
+            if record(run, pr, key, info):
+                log(f"evaluate {pr}: {info.get('grade') or info.get('note')}")
+
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+        try:
+            rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg, 2 * caps["build"] + 5, venv)
+            if rc == 143:
+                return
+            if rc:
+                return done("failed", note="build failed" if rc != 124 else "build hit the cap")
+            agent_start = time.time()
+            rc = step([PY, "harness/run.py", "--instance", iid, "--model", model,
+                       "--step-limit", str(ev["step_limit"]), "--time-limit", str(ev["time_limit"])],
+                      lg, ev["time_limit"] + 15, venv)
+            if rc == 143:
+                return
+            agent = {**agent_record(run, model, iid), "agent_minutes": round((time.time() - agent_start) / 60, 1)}
+            if not server_alive(base, tunnel):
+                # the agent lost its model: not the agent's outcome, so it is run again
+                lost.set()
+                return done("failed", retry=True, note="model server gone during the run", **agent)
+            out = grades / f"{iid}.json"
+            rc = step([PY, "harness/evaluate_patches.py", "--instance", iid, "--model", model,
+                       "--output", str(out)], lg, 45, venv)
+            if rc == 143:
+                return
+            if not out.exists():
+                return done("failed", note=f"no grade (rc={rc}); see the log", **agent)
+            g = json.loads(out.read_text())["results"][0]
+            done("done", grade=g.get("grade"), error=g.get("error"),
+                 timed_out=agent["exit_status"] == "TimeExceeded",
+                 step_limit_hit=agent["exit_status"] == "LimitsExceeded", **agent)
+        finally:
+            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+
+    q = claims.Queue(run, key, ME, lambda pr: status.evaluate_needed(run, pr, model))
+    try:
+        drain(q, todo, one, ev["per_node"], deadline - 5 * 60, stop=lambda: lost.is_set() or not enough())
+        if lost.is_set():
+            log("the model server is gone: the rest stays to do for the next evaluate job")
+    finally:
+        kill_group(tunnel.pid)
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -618,7 +777,7 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True)
     p.add_argument("--config", required=True, help="the frozen settings submit.py wrote")
-    p.add_argument("--phase", required=True, choices=["triage", "observe", "validate", "statement"])
+    p.add_argument("--phase", required=True, choices=["triage", "observe", "validate", "statement", "evaluate"])
     p.add_argument("--minutes", type=float, required=True,
                    help="the phase's time: what is left of the job, less the report's")
     args = p.parse_args()
@@ -647,6 +806,10 @@ def main() -> None:
         if os.uname().machine != "aarch64":
             sys.exit("model statements run on Spark ARM64")
         statements(cfg, run, env, node_dir, args.minutes)
+    elif args.phase == "evaluate":
+        if cfg["project"] != "contiki-ng" or os.uname().machine != "x86_64":
+            sys.exit("Contiki-NG evaluation requires x86_64")
+        evaluate(cfg, run, env, args.minutes)
     elif args.phase == "observe":
         if cfg["project"] != "contiki-ng" or os.uname().machine != "x86_64":
             sys.exit("Contiki-NG observation requires x86_64")

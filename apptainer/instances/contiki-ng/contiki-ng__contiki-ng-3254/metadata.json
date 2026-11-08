@@ -1,0 +1,67 @@
+{
+  "instance_id": "contiki-ng__contiki-ng-3254",
+  "project": "contiki-ng",
+  "pipeline": "contiki-ng",
+  "repo": "https://github.com/contiki-ng/contiki-ng",
+  "base_commit": "50c02f5a0cb508d97cbc7b22249d467a0d1701ef",
+  "fix_commit": "2d1aa946683dd37706b470ed41394b7f4176b590",
+  "test_commit": "2d1aa946683dd37706b470ed41394b7f4176b590",
+  "problem_statement": "When a NAT64 gateway is asked to translate an inbound DNS reply (an A answer rewritten to AAAA) into the outgoing IPv6 message, a single UDP packet received on the DNS port can drive the translation past the end of the buffer it is given, or produce a reply that is not a well-formed answer that can be sent. The observable failures are: (1) a reply whose answer record claims, in its length field, more data than the packet actually contains causes the translation to copy far past both the input and the output buffer instead of refusing the packet; (2) the same malformed reply, where the bad record is the second one, leaves a reply that has already been partially rewritten in the output and the caller would forward it instead of dropping it; (3) a reply whose question name is so long that it runs past the end of the packet (with no terminating zero-length label) is not stopped, so the walk reads past the message; and (4) a reply that does not fit in the room available for the outgoing message is not rejected, so the translation overruns that buffer. In each of these cases the correct behavior is that the translation drops the packet rather than overrunning a buffer or returning a length that would forward a half-rewritten reply. The translation of ordinary, well-formed replies (including ones with extra records, an EDNS OPT record in the additional section, or two answers where the first grows) must still succeed and place every record at its new offset without touching memory past the room it was given.",
+  "fail_to_pass": [
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_rejects_oversized_record",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_rejects_a_late_oversized_record",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_rejects_unterminated_name",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_stops_when_the_output_is_full"
+  ],
+  "pass_to_pass": [],
+  "after_required": [
+    "tests/08-native-runs/26-ip64/test-ip64::arp_resolution",
+    "tests/08-native-runs/26-ip64/test-ip64::udp_round_trip",
+    "tests/08-native-runs/26-ip64/test-ip64::forwarded_flow",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_rewrite",
+    "tests/08-native-runs/26-ip64/test-ip64::icmp_echo",
+    "tests/08-native-runs/26-ip64/test-ip64::inbound_ports",
+    "tests/08-native-runs/26-ip64/test-ip64::sixto4_rejects_bad_length",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_copies_later_records",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_moves_the_additional_section",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_rejects_oversized_record",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_rejects_a_late_oversized_record",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_rejects_unterminated_name",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_stops_when_the_output_is_full",
+    "tests/08-native-runs/26-ip64/test-ip64::dns64_6to4_stops_at_the_end"
+  ],
+  "files_changed_by_fix": [
+    "os/services/ip64/ip64-dns64.c",
+    "os/services/ip64/ip64-dns64.h",
+    "os/services/ip64/ip64.c"
+  ],
+  "pr_url": "https://github.com/contiki-ng/contiki-ng/pull/3254",
+  "run_command": "run_tests",
+  "apptainer_image": "contiki-ng__contiki-ng-3254.sif",
+  "generated": true,
+  "oracle": "compile",
+  "architecture": "x86_64",
+  "observation_only": false,
+  "superseded_statements": [
+    {
+      "problem_statement": "ip64_dns64_4to6() copied every answer record using the length field from the wire without checking it against the message, so a single UDP packet from port 53 could overrun ip64_packet_buffer on any build with NAT64 enabled (the Type A branch being CVE-2020-24336); the question loop also skipped its bounds guard for a zero-length label; and a parser that gave up partway still returned a length, so ip64_4to6() forwarded a half-rewritten reply.",
+      "provenance": "triage verdict",
+      "check_issues": [
+        "`problem_statement` gives the fix away: \"copied every answer record using the length field from the wire without checking it against the message\"; \"the question loop also skipped its bounds guard for a zero-length label\"; \"a parser that gave up partway still returned a length\". Describe only the observable symptom, its trigger and the required behavior, not what the code checks or must do internally"
+      ]
+    }
+  ],
+  "causal_chain": "The four observed cases call the A-to-AAAA DNS64 translation directly with a reply that has an answer record whose length field exceeds the bytes the packet holds (the first and second variants differ only in which record is bad), a question name whose label length runs past the end of the packet, and a reply that does not fit in the output capacity. They each check that the translation returns the drop indicator and that a canary placed past the output capacity is untouched. Before the fix the translation trusted the wire length field and copied past the buffers, returned a length that forwarded a partially rewritten reply when it gave up partway, walked past the packet for an unterminated name, and did not bound the copy against the available output capacity, so each case fails; after the fix the translation bounds every copy against the message length and the output capacity, drops on any record that claims more data than the packet holds, and drops when the reply cannot fit, so the cases pass. The passing companion cases confirm that ordinary replies with later records, an OPT record, and a pair of answers are still rewritten correctly and that nothing past the output capacity is written.",
+  "change_type": "bugfix",
+  "statement_provenance": {
+    "model": "qwen38-nvfp4",
+    "mode": "statement",
+    "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/full-341-v7/triage/3254.statement.trace.json",
+    "prompt_sha256": "e8c4bf72efe615a2"
+  },
+  "statement_check": {
+    "version": 2,
+    "result": "written",
+    "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/full-341-v7/triage/3254.statement.trace.json"
+  }
+}

@@ -284,7 +284,8 @@ class ContikiClusterTest(unittest.TestCase):
         common = dict(partition="cpu", nodes=1, cpus=2, mem="2G", time_limit="01:00:00",
                       job_name="job", run="/tmp/run", repo="/tmp/repo", config="/tmp/config",
                       python="/usr/bin/python3", limit_min=60, report_min=8,
-                      validate_min=30, stamp="now", name="run", gres="", phase="observe")
+                      validate_min=30, stamp="now", name="run", gres="", phase="observe",
+                      end_server="")
         cpu = template.format(**(common | {"gres_line": ""}))
         gpu = template.format(**(common | {"gres_line": "#SBATCH --gres=gpu:1",
                                           "phase": "triage"}))
@@ -342,3 +343,172 @@ class ContikiClusterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RevalidationTest(unittest.TestCase):
+    """prepare.py --instances: existing instances, rendered again and
+    validated under the current runner."""
+
+    def instance(self, root, pr, iid=None):
+        d = root / (iid or f'contiki-ng__contiki-ng-{pr}')
+        d.mkdir(parents=True)
+        for n in prepare.SOURCE_FILES:
+            (d / n).write_text(json.dumps({'instance_id': iid or f'contiki-ng__contiki-ng-{pr}'}) if n == 'metadata.json' else '{}')
+        return d
+
+    def test_sources_round_trip_ids_and_copy_only_the_recipe_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            one = self.instance(root / 'a', 3246)
+            self.instance(root / 'b', 255)
+            (one / 'validation.json').write_text('{}')
+            run = root / 'run'
+            got = prepare.instance_sources([one, root / 'b'], run)
+            self.assertEqual(sorted(got), [255, 3246])
+            self.assertEqual(sorted(p.name for p in got[3246].iterdir()), sorted(prepare.SOURCE_FILES))
+            self.assertEqual(got[3246], run / 'sources' / 'contiki-ng__contiki-ng-3246')
+
+    def test_malformed_or_duplicate_ids_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.instance(root / 'a', 1, iid='contiki-ng__contiki-ng-01')
+            with self.assertRaises(SystemExit):
+                prepare.instance_sources([root / 'a'], root / 'run')
+            self.instance(root / 'b', 7)
+            self.instance(root / 'c', 7)
+            with self.assertRaises(SystemExit):
+                prepare.instance_sources([root / 'b', root / 'c'], root / 'run2')
+
+    def test_revalidation_prs_are_validated_and_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / 'manifest.json').write_text(json.dumps({'project': 'contiki-ng', 'revalidation': True, 'prs': [
+                {'pr': 1, 'stage': 'to validate', 'instance': 'contiki-ng__contiki-ng-1'},
+                {'pr': 2, 'stage': 'to validate', 'instance': 'contiki-ng__contiki-ng-2'}]}))
+            self.assertEqual(status.validate_todo(run), [1, 2])
+            status.write_stage(run, 1, 'validate', {'state': 'done', 'outcome': 'VALID'})
+            self.assertEqual(status.validate_todo(run), [2])
+            self.assertEqual(status.valid(run), [1])
+            self.assertEqual(report.outcome(status.entry(run, 1), status.read(run, 1), run), ('VALID', ''))
+            self.assertEqual(report.outcome(status.entry(run, 2), status.read(run, 2), run)[0],
+                             'accepted, validation not yet')
+
+    def test_worker_renders_a_revalidation_instead_of_generating(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / 'manifest.json').write_text(json.dumps({'project': 'contiki-ng', 'prs': [
+                {'pr': 5, 'stage': 'to validate', 'instance': 'contiki-ng__contiki-ng-5'}]}))
+            calls = []
+            def fake_step(cmd, *args):
+                calls.append(cmd)
+                if 'validate_instance.py' in cmd[1]:
+                    d = run / 'instances' / 'contiki-ng__contiki-ng-5'
+                    d.mkdir(parents=True, exist_ok=True)
+                    (d / 'validation.json').write_text(json.dumps({'valid': True}))
+                return 0
+            with (patch.object(node_worker, 'LOGS', run / 'logs', create=True),
+                  patch.object(node_worker, 'ME', 'test-node0', create=True),
+                  patch.object(node_worker, 'N', 0, create=True),
+                  patch.object(node_worker, 'step', side_effect=fake_step),
+                  patch.object(node_worker, 'sweep'),
+                  patch.object(node_worker.report, 'to_ledger')):
+                node_worker.validate({'project': 'contiki-ng', 'caps': {'validate_pr': 60, 'build': 10},
+                                      'parallel': {'validate_per_node': 1}, 'disk_guard_gb': 250}, run,
+                                     {'EMBEDEVAL_WORK': str(run / 'work')}, 60)
+            generate = next(c for c in calls if 'generate_instance.py' in c[1])
+            self.assertEqual(generate[generate.index('--render') + 1],
+                             str(run / 'sources' / 'contiki-ng__contiki-ng-5'))
+            self.assertNotIn('--triage', generate)
+            self.assertEqual(status.read(run, 5)['validate']['outcome'], 'VALID')
+
+
+class EvaluateTest(unittest.TestCase):
+    """submit.py evaluate --model M and its worker, against a fake scheduler."""
+
+    def run_dir(self, tmp):
+        root = Path(tmp)
+        cfg_file = root / "config.yaml"
+        cfg_file.write_text(f"scratch_root: {tmp}\nproject: contiki-ng\n"
+                            "slurm:\n  build_partition: cpu\n  partition: spark-interactive\n"
+                            "  build_python: /x86/python\n"
+                            "evaluate:\n  python: /x86/agent-venv/python\n")
+        cfg = config.load(cfg_file)
+        run = Path(cfg["derived"]["runs"]) / "reval"
+        run.mkdir(parents=True)
+        (run / "manifest.json").write_text(json.dumps({"name": "reval", "project": "contiki-ng", "prs": [
+            {"pr": 1, "stage": "to validate", "instance": "contiki-ng__contiki-ng-1"},
+            {"pr": 2, "stage": "to validate", "instance": "contiki-ng__contiki-ng-2"}]}))
+        status.write_stage(run, 1, "validate", {"state": "done", "outcome": "VALID"})
+        status.write_stage(run, 2, "validate", {"state": "done", "outcome": "INVALID: x"})
+        return cfg_file, run
+
+    def test_model_server_gets_a_clean_environment_and_ends_with_the_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            calls = []
+            def fake(cmd, **kw):
+                calls.append(cmd)
+                out = "900;cluster\n" if cmd[0] == "sbatch" and "--parsable" in cmd else ""
+                return SimpleNamespace(returncode=0, stdout=out, stderr="")
+            with (patch.object(sys, "argv", ["submit.py", "evaluate", "--run", "reval", "--config", str(cfg_file),
+                                             "--model", "qwen38-nvfp4", "--idle", "1"]),
+                  patch.dict(submit.os.environ, {"HOME": "/home/u", "USER": "u", "PATH": "/opt/conda/bin:/usr/bin"}),
+                  patch.object(submit.subprocess, "run", side_effect=fake),
+                  contextlib.redirect_stdout(io.StringIO())):
+                submit.main()
+            server = next(c for c in calls if c[0] == "sbatch" and "serve_triage_model.sh" in c[-2])
+            export = next(a for a in server if a.startswith("--export="))
+            self.assertIn("PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin,", export)
+            self.assertNotIn("conda", export)
+            self.assertEqual(server[-1], "qwen38-nvfp4")
+            self.assertIn("spark-interactive", server)
+            job = [c for c in calls if c[0] == "sbatch" and "--parsable" in c][-1]
+            self.assertIn("--dependency=after:900", job)
+            script = Path(job[-1]).read_text()
+            self.assertIn("/usr/bin/scancel 900\n", script)
+            self.assertIn("/x86/agent-venv/python cluster/node_worker.py", script)
+            self.assertIn("#SBATCH -p cpu", script)
+            frozen = json.loads(next(run.glob("jobs/config-*.json")).read_text())
+            self.assertEqual((frozen["evaluate_model"], frozen["evaluate_server_job"]), ("qwen38-nvfp4", "900"))
+
+    def test_hosted_models_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            with (patch.object(sys, "argv", ["submit.py", "evaluate", "--run", "reval", "--config", str(cfg_file),
+                                             "--model", "gpt-5.4"]),
+                  self.assertRaises(SystemExit)):
+                submit.main()
+
+    def test_worker_grades_only_valid_instances_and_keys_by_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            cfg = {**config.load(cfg_file), "evaluate_model": "qwen38-nvfp4", "evaluate_server_job": "900"}
+            calls = []
+            def fake_step(cmd, *args):
+                calls.append(cmd)
+                if "evaluate_patches.py" in cmd[1]:
+                    out = Path(cmd[cmd.index("--output") + 1])
+                    out.write_text(json.dumps({"results": [{"grade": "fail", "error": "tests failed"}]}))
+                return 0
+            tunnel = SimpleNamespace(pid=1, poll=lambda: None)
+            with (patch.object(node_worker, "LOGS", run / "logs", create=True),
+                  patch.object(node_worker, "ME", "test-node0", create=True),
+                  patch.object(node_worker, "N", 0, create=True),
+                  patch.object(node_worker, "step", side_effect=fake_step),
+                  patch.object(node_worker, "sweep"),
+                  patch.object(node_worker, "kill_group"),
+                  patch.object(node_worker, "model_tunnel", return_value=(tunnel, "http://127.0.0.1:8000/v1")),
+                  patch.object(node_worker, "server_alive", return_value=True),
+                  patch.object(node_worker, "agent_record", return_value={"exit_status": "TimeExceeded", "steps": 40}),
+                  patch.object(node_worker.report, "to_ledger")):
+                node_worker.evaluate(cfg, run, {"EMBEDEVAL_WORK": str(run / "work")}, 240)
+            agent = next(c for c in calls if "harness/run.py" in c[1])
+            self.assertEqual(agent[agent.index("--instance") + 1], "contiki-ng__contiki-ng-1")
+            self.assertEqual(agent[agent.index("--model") + 1], "qwen38-nvfp4")
+            self.assertFalse(any("contiki-ng__contiki-ng-2" in " ".join(c) for c in calls))
+            e = status.read(run, 1)["evaluate:qwen38-nvfp4"]
+            self.assertEqual((e["state"], e["grade"], e["timed_out"], e["steps"]), ("done", "fail", True, 40))
+            self.assertEqual(e["limits"], {"step_limit": cfg["evaluate"]["step_limit"],
+                                           "time_limit": cfg["evaluate"]["time_limit"]})
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4"), [])
+            self.assertEqual(status.evaluate_todo(run, "nemotron"), [1])

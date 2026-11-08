@@ -14,6 +14,11 @@ A stage appears only once it has finished, one way or another:
     validate.state  done            outcome "VALID", or "INVALID: <reason>"
                     skipped         not started (disk guard, ...; see note)
                     failed          generate or build failed, or the cap hit
+    evaluate:<model>.state
+                    done            the agent ran and its patch was graded
+                                    (grade, steps, timed_out)
+                    failed          not graded (build failed, no grade); with
+                                    "retry": the model server went away
 
 Only one worker handles a PR, and a stage is written once, all at once
 (written to a temporary file and renamed), so a file is never half-written,
@@ -151,6 +156,39 @@ def unfinished(runs: Path, but: Path | None = None,
     return out
 
 
+def revalidation(run: Path) -> list[int]:
+    """A Contiki-NG revalidation's PRs (prepare.py --instances): each has an
+    existing instance in <run>/sources/, rendered again under the current runner."""
+    return [e["pr"] for e in manifest(run)["prs"] if e["stage"] == "to validate"]
+
+
+def entry(run: Path, pr: int) -> dict:
+    return next(e for e in manifest(run)["prs"] if e["pr"] == pr)
+
+
 def validate_todo(run: Path) -> list[int]:
-    """Accepted PRs with no validation outcome yet."""
-    return [pr for pr in accepted(run) if validate_needed(run, pr)]
+    """Accepted (or, in a revalidation, listed) PRs with no validation outcome yet."""
+    return [pr for pr in accepted(run) + revalidation(run) if validate_needed(run, pr)]
+
+
+def valid(run: Path) -> list[int]:
+    """PRs of the run whose validation outcome is VALID."""
+    return [e["pr"] for e in manifest(run)["prs"]
+            if (read(run, e["pr"]).get("validate") or {}).get("outcome") == "VALID"]
+
+
+def evaluate_key(model: str) -> str:
+    """The status stage of one model's evaluation: evaluate:<model>."""
+    return f"evaluate:{model}"
+
+
+def evaluate_needed(run: Path, pr: int, model: str) -> bool:
+    """No outcome for this model yet, or one cut short by the infrastructure
+    (the model server went away): a finished agent run is never redone."""
+    e = read(run, pr).get(evaluate_key(model))
+    return not e or (e["state"] == "failed" and e.get("retry", False))
+
+
+def evaluate_todo(run: Path, model: str) -> list[int]:
+    """VALID instances of the run the model has not been evaluated on."""
+    return [pr for pr in valid(run) if evaluate_needed(run, pr, model)]

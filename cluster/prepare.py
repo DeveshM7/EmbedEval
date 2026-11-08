@@ -4,6 +4,7 @@ Prepare a run: everything before the cluster job, on the node you run it from.
 
     python cluster/prepare.py --name 2025-09 --since 2025-09-01 --until 2025-09-30
     python cluster/prepare.py --name gold --pr 65697 85079 ...
+    python cluster/prepare.py --name reval --instances apptainer/instances/contiki-ng   # Contiki-NG
 
 Creates <scratch_root>/runs/<name>/ and, in it:
 
@@ -25,6 +26,12 @@ Creates <scratch_root>/runs/<name>/ and, in it:
 
 Then `python cluster/submit.py pipeline --run <name>`. Run this from an
 interactive session on a Spark node: the SDK images are built here.
+
+Contiki-NG --instances DIR...: a revalidation of existing instances (each DIR
+an instance folder, or a folder of them) under the current runner: their
+instance.json, metadata.json and test_patch.diff are copied to <run>/sources/,
+and `submit.py validate` renders each again from there (generate_instance.py
+--render), builds and validates it. No triage; the ledger is not consulted.
 """
 
 from __future__ import annotations
@@ -85,6 +92,44 @@ def script(name: str, *args: str, env: dict, logfile: Path, timeout: int | None 
             return 124
 
 
+SOURCE_FILES = ("instance.json", "metadata.json", "test_patch.diff")
+
+
+def instance_sources(dirs: list[Path], run: Path) -> dict[int, Path]:
+    """PR -> <run>/sources/<instance>, copied from the given instance folders
+    (or folders of them). One instance per PR; an id must round-trip."""
+    import shutil
+    sys.path.insert(0, str(REPO / "scripts"))
+    import instances as inst_mod
+    found: dict[int, Path] = {}
+    for d in dirs:
+        d = Path(d).resolve()
+        folders = [d] if (d / "metadata.json").exists() else sorted(
+            x for x in d.iterdir() if (x / "metadata.json").exists())
+        for f in folders:
+            project, pr = inst_mod.split_instance(f.name)
+            if project != "contiki-ng" or f.name != f"contiki-ng__contiki-ng-{int(pr)}":
+                sys.exit(f"{f}: not a contiki-ng__contiki-ng-<PR> instance folder")
+            missing = [n for n in SOURCE_FILES if not (f / n).exists()]
+            if missing:
+                sys.exit(f"{f}: missing {', '.join(missing)}")
+            if json.loads((f / "metadata.json").read_text()).get("instance_id") != f.name:
+                sys.exit(f"{f}: metadata.json names another instance")
+            if int(pr) in found:
+                sys.exit(f"PR {pr} twice: {found[int(pr)]} and {f}")
+            found[int(pr)] = f
+    out = {}
+    for pr, f in found.items():
+        dst = run / "sources" / f.name
+        dst.mkdir(parents=True, exist_ok=True)
+        for n in SOURCE_FILES:
+            shutil.copy2(f / n, dst / n)
+        out[pr] = dst
+    if not out:
+        sys.exit("no instance folders found")
+    return out
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -92,6 +137,8 @@ def main() -> None:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--since", help="fetch PRs merged on or after this date (YYYY-MM-DD)")
     src.add_argument("--pr", type=int, nargs="+", help="these PRs, hard filters applied")
+    src.add_argument("--instances", nargs="+", type=Path, metavar="DIR",
+                     help="Contiki-NG: revalidate these instance folders (or folders of them)")
     p.add_argument("--no-filter", action="store_true", help="with --pr: skip the hard filters")
     p.add_argument("--redo", action="store_true",
                    help="also take PRs the ledger has already settled in an earlier run")
@@ -113,6 +160,8 @@ def main() -> None:
 
     cfg = cluster_config.load_or_exit(args.config)
     project = cfg["project"]
+    if args.instances and (project != "contiki-ng" or args.observe_only or args.no_filter):
+        p.error("--instances is Contiki-NG only, without --observe-only or --no-filter")
     run = Path(cfg["derived"]["runs"]) / args.name
     if (run / "manifest.json").exists():
         sys.exit(f"{run} is already prepared; pick another --name "
@@ -157,7 +206,17 @@ def main() -> None:
         if n:
             log(f"{n} taken by unfinished runs ({', '.join(sorted({taken[p] for p in prs if p in taken}))})")
 
-    if args.pr:
+    sources = {}
+    if args.instances:
+        sources = instance_sources(args.instances, run)
+        prs = sorted(sources)
+        source = {"instances": [str(Path(d).resolve()) for d in args.instances]}
+        # Not held back by another run's unfinished triage or validation of the
+        # PR: a revalidation writes only its own run folder.
+        for pr in prs:
+            stage[pr] = "to validate"
+        log(f"{len(prs)} instances to revalidate")
+    elif args.pr:
         prs = list(dict.fromkeys(args.pr))
         source = {"pr": prs, "hard_filter": not args.no_filter, "redo": args.redo}
         skip_known(prs)
@@ -204,6 +263,8 @@ def main() -> None:
     t = time.time()
     log(f"enriching, {par['enrich']} at a time")
     kept = [pr for pr in prs if pr not in stage]
+    if sources:
+        kept = []                       # a revalidation takes no new PR records
     if kept:
         candidate_cmd("enrich", "--parallel", str(par["enrich"]),
                       "--pr", *map(str, kept), logfile=logs / "enrich.log")
@@ -233,7 +294,7 @@ def main() -> None:
             stage[pr] = "dry run: no runnable pair"
         else:
             stage[pr] = "to triage"
-    to_triage = [pr for pr in prs if stage[pr] == "to triage"]
+    to_triage = [pr for pr in prs if stage[pr] in ("to triage", "to validate")]
     log(f"dry runs done in {timings['dry_run']:.0f} s: {len(to_triage)} to triage")
 
     # 4. shared SDK images the triaged PRs may need, each built once
@@ -260,7 +321,8 @@ def main() -> None:
         import zephyr_env
     shas = set()
     for pr in to_triage:
-        rec = json.loads((run / "enriched" / f"{pr}.json").read_text())
+        rec = json.loads(((sources[pr] / "metadata.json") if pr in sources
+                          else run / "enriched" / f"{pr}.json").read_text())
         shas |= {s for s in (rec.get("base_commit"), rec.get("head_commit"),
                              rec.get("merge_commit_sha"), rec.get("fix_commit")) if s}
     try:
@@ -283,10 +345,12 @@ def main() -> None:
         "config": {k: v for k, v in cfg.items() if k != "derived"},
         "environment": env,
         "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
+                | ({"instance": sources[pr].name} if pr in sources else {})
                 | ({"observe_profile": args.observe_profile}
                    if args.observe_profile and stage[pr] == "to triage" else {})
                 for pr in prs],
         **({"observe_only": True} if args.observe_only else {}),
+        **({"revalidation": True} if sources else {}),
         "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
         "missing_sdk_images": ([f"{sdk} (Python {py})" for py, sdk, _ in missing
                                 if not au.sdk_image(sdk, py).exists()] if project == "zephyr" else []),
@@ -301,7 +365,8 @@ def main() -> None:
         print(f"    {n:>5}  {s}")
     if manifest["missing_sdk_images"]:
         print(f"  WARNING: SDK images could not be built: {manifest['missing_sdk_images']}")
-    mode = ("observe" if args.observe_only else "triage") if project == "contiki-ng" else "pipeline"
+    mode = (("validate" if sources else "observe" if args.observe_only else "triage")
+            if project == "contiki-ng" else "pipeline")
     print(f"\nnext: python cluster/submit.py {mode} --run {args.name}")
 
 

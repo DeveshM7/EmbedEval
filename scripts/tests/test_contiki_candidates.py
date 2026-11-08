@@ -195,10 +195,22 @@ class CandidatesTests(unittest.TestCase):
         tests=('+++ b/tests/08-native-runs/16-cbor/test-cbor.c\n'
                '+cbor_write_signed(&writer, -1);\n+cbor_read_signed(&reader, &value);\n'
                '+assert(CBOR_NEW_LIMIT > 0);\n+existing_api();\n')
-        with patch.object(c,'git',side_effect=lambda *args,**kwargs: 'old declaration' if 'existing_api' in args else ''):
+        new={'cbor_write_signed','cbor_read_signed','CBOR_NEW_LIMIT','cbor_writer_state_t','cbor_reader_state_t'}
+        with patch.object(c,'git',side_effect=lambda *args,**kwargs: '' if args[4] in new else 'at the base'):
             found=c.compile_requirements('a'*40,production,tests)
         self.assertEqual({r['symbol'] for r in found},{'cbor_write_signed','cbor_read_signed','CBOR_NEW_LIMIT'})
+        self.assertEqual({r['symbol']:r['kind'] for r in found}['cbor_read_signed'],'function')
         self.assertTrue(all(r['at_base'] is False for r in found))
+
+    def test_compile_requirements_include_new_types_and_members_the_tests_use(self):
+        production=('+++ b/os/lib/heapmem.h\n+typedef struct heapmem_zone_stats {\n+  size_t max_footprint; /* peak */\n'
+                    '+} heapmem_zone_stats_t;\n+#if HEAPMEM_GATE\n')
+        tests=('+++ b/tests/08-native-runs/12-heapmem/test-heapmem.c\n'
+               '+  heapmem_zone_stats_t s;\n+  check(s.max_footprint); /* peak use */\n+#if HEAPMEM_GATE\n')
+        with patch.object(c,'git',side_effect=lambda *args,**kwargs: 'at the base' if args[4] in ('size_t','check') else ''):
+            found={r['symbol']:r['kind'] for r in c.compile_requirements('a'*40,production,tests)}
+        # not the comment's words, not a preprocessor condition
+        self.assertEqual(found,{'heapmem_zone_stats_t':'identifier','max_footprint':'identifier'})
 
     def test_observed_finalization_requires_same_revision_and_named_runtime_flip(self):
         rec=record();unit=rec['test_inventory'][0];case=unit['id']+'::json_test'

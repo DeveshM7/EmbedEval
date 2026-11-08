@@ -678,6 +678,10 @@ $P cluster/submit.py validate --run c-check --config cpu.yaml --after <triage jo
 $P cluster/submit.py observe  --run c-obs   --config cpu.yaml
 $P cluster/submit.py statement --run c-obs  --config spark.yaml --after <observe job>
 $P cluster/report.py --run c-check
+$P cluster/prepare.py --name c-reval --instances apptainer/instances/contiki-ng   # revalidation
+$P cluster/submit.py validate --run c-reval --config cpu.yaml
+$P cluster/submit.py evaluate --run c-reval --config cpu.yaml --model qwen38-nvfp4 --after <validate job>
+$P cluster/census.py --runs <every run of a campaign> --valid c-reval --out census.md
 ```
 
 What differs from Zephyr:
@@ -721,7 +725,40 @@ What differs from Zephyr:
 - **report**: an observation run's rows follow `observation`, `finalize` and
   statement outcomes; only a promotable instance is VALID and settles its PR in
   the ledger.
+- **What an agent sees.** The image holds the repository at the base commit
+  (fetched by URL at depth 1: no remote, ref, reflog or FETCH_HEAD), the
+  upstream test changes, the selected submodules (pinned commit only, refs and
+  remotes stripped), the era's CI image (its own git repositories removed) and
+  `bench.json`, only what `run_tests` needs. `instance.json` (lists, oracle,
+  compile expectations) stays on the host. Every agent, validation and grading
+  command runs with `--net --network none`; Gradle-era Cooja fills its Gradle
+  cache while the image builds. The prompt is the problem statement: no files
+  of the fix, no fail-to-pass or pass-to-pass lists.
+- **Validation receipts** carry `leak_check` (`scripts/contiki_ng_leakcheck.py`
+  on the unpacked image, before any test; a finding makes the instance
+  INVALID) and `determinism` (five before runs with identical results).
+  Compile oracles are attested against `compile_expectations`, derived from
+  the fix when the recipe is written: each native unit's before-build must
+  name every fix-introduced identifier its added test code uses, or report a
+  fix-created header missing; native builds run `make -k`.
+- **Revalidation**: `prepare.py --instances DIR...` copies existing instances
+  to `<run>/sources/`; `submit.py validate` renders each under the current
+  templates (`generate_instance.py --render`), builds and validates it.
+- **Evaluation**: `submit.py evaluate --model PROFILE` (a profile of
+  `triage/models.json`; hosted models are refused) runs an agent on every
+  VALID instance of the run on the CPU partition, with the config's
+  `evaluate.step_limit` and `evaluate.time_limit` for every model, and grades
+  each patch in a fresh container. It submits the model's server on the GPU
+  partition with a clean environment (or uses `--server-job`); the evaluate
+  job tunnels to it and cancels it at the end. `evaluate.python` is an x86
+  Python with mini-swe-agent. Results: status `evaluate:<model>`,
+  `<run>/outputs/grades/<model>/`; `report.py` counts time-outs apart from
+  failed patches. `--queue` submits even when both job slots are busy.
 - **promotion** stays manual, after review: `scripts/promote_instance.py
-  --source <run>/instances` (triage runs) or `--source <run>/finalized`
-  (observation runs). Instance images are not pushed to a registry.
+  --source <run>/instances` (triage and revalidation runs) or `--source
+  <run>/finalized` (observation runs), into `apptainer/instances/contiki-ng/`.
+  It requires a clean leak check under an isolated network, five deterministic
+  before runs and a statement checked under the current `STATEMENT_CHECK` and
+  the leak check's identifier test. Instance images are not pushed to a
+  registry.
 

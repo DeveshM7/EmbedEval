@@ -162,11 +162,6 @@ def generate(pr,verdict,out_root,observe=False,observed=None,profile=None):
         cfg['submodules']=sorted({*cfg['submodules'],'tools/mspsim'})
     cfg['after_required']=[name for unit in cfg['units'] for name in candidates.case_names(unit)]
     cfg['enrich_version']=candidates.ENRICH_VERSION
-    (dest/'instance.json').write_text(json.dumps(cfg,indent=2)+'\n')
-    shutil.copyfile(TEMPLATES/'run_tests.py',dest/'run_tests.py')
-    definition=(TEMPLATES/'instance.def.tmpl').read_text()
-    for key,value in {'@@INSTANCE_ID@@':iid,'@@REPO@@':candidates.REPO,'@@BASE_COMMIT@@':rec['base_commit']}.items():definition=definition.replace(key,value)
-    (dest/'instance.def').write_text(definition)
     meta={'instance_id':iid,'project':'contiki-ng','pipeline':'contiki-ng','repo':candidates.REPO,
           'base_commit':rec['base_commit'],'fix_commit':rec['fix_commit'],'test_commit':rec['fix_commit'],
           'problem_statement':statement,'fail_to_pass':cfg['fail_to_pass'],'pass_to_pass':cfg['pass_to_pass'],
@@ -174,8 +169,137 @@ def generate(pr,verdict,out_root,observe=False,observed=None,profile=None):
           'files_changed_by_fix':rec['source_files'],'pr_url':rec['url'],'run_command':'run_tests',
           'apptainer_image':iid+'.sif','generated':True,'oracle':cfg['oracle'],'architecture':'x86_64',
           'observation_only':bool(observed and verdict is None)}
+    write_recipe(dest,cfg,meta,patch)
     (dest/'metadata.json').write_text(json.dumps(meta,indent=2)+'\n')
     return dest
+
+# What run_tests reads inside the image (bench.json). The expected lists,
+# oracle, compile expectations and evidence stay on the host in instance.json.
+BENCH_UNIT_FIELDS=('id','kind','directory','binary','make_options','suite_directory','scenario','entry','submodules')
+
+def bench(cfg):
+    units=[]
+    for u in cfg['units']:
+        b={k:u[k] for k in BENCH_UNIT_FIELDS if k in u}
+        if 'cases' in u:b['cases']=[{'id':c['id'],'description':c['description']} for c in u['cases']]
+        units.append(b)
+    return {'units':units,'submodules':cfg.get('submodules',[])}
+
+def write_recipe(dest,cfg,meta,test_patch):
+    """The recipe files of an instance: instance.json (host), bench.json
+    (image), run_tests.py and instance.def. A compile oracle gets its
+    expectations derived from the fix here."""
+    if cfg.get('oracle')=='compile':
+        cfg['compile_expectations']=compile_expectations(meta['base_commit'],meta['fix_commit'],
+                                                         meta['files_changed_by_fix'],test_patch,cfg['units'])
+        if not any(e['symbols'] or e['headers'] for e in cfg['compile_expectations'].values()):
+            raise ValueError('compile oracle: the tests use nothing the fix introduces')
+    (dest/'instance.json').write_text(json.dumps(cfg,indent=2)+'\n')
+    (dest/'bench.json').write_text(json.dumps(bench(cfg),indent=2)+'\n')
+    shutil.copyfile(TEMPLATES/'run_tests.py',dest/'run_tests.py')
+    definition=(TEMPLATES/'instance.def.tmpl').read_text()
+    for key,value in {'@@INSTANCE_ID@@':meta['instance_id'],'@@REPO@@':candidates.REPO,'@@BASE_COMMIT@@':meta['base_commit']}.items():definition=definition.replace(key,value)
+    (dest/'instance.def').write_text(definition)
+
+def render(source,out_root):
+    """An existing (validated or promoted) instance under the current
+    templates: its instance.json, metadata.json and test_patch.diff, with the
+    recipe written again. A revalidation rebuilds every instance this way."""
+    from generate_instance import check_applies
+    source=Path(source);cfg=json.loads((source/'instance.json').read_text())
+    meta=json.loads((source/'metadata.json').read_text());patch=(source/'test_patch.diff').read_text()
+    iid=meta['instance_id']
+    if source.name!=iid or meta.get('pipeline')!='contiki-ng':raise ValueError(f'{source}: not a Contiki-NG instance folder')
+    if cfg.get('observe'):raise ValueError(f'{iid}: an observation, not an instance')
+    dest=Path(out_root)/iid
+    if dest.resolve()==source.resolve():raise ValueError('render into a different folder')
+    candidates.ensure_commits(meta['base_commit'],meta['fix_commit'])
+    dest.mkdir(parents=True,exist_ok=True)
+    (dest/'test_patch.diff').write_text(patch)
+    check_applies(patch,meta['base_commit'],dest,candidates.clone())
+    cfg.pop('compile_expectations',None)
+    write_recipe(dest,cfg,meta,patch)
+    (dest/'metadata.json').write_text(json.dumps(meta,indent=2)+'\n')
+    return dest
+
+C_WORDS={'int','void','char','long','short','unsigned','signed','struct','union','enum','const','volatile',
+         'static','return','sizeof','else','for','while','switch','case','break','continue','default','goto',
+         'typedef','extern','inline','bool','true','false','NULL','uint8_t','uint16_t','uint32_t','uint64_t',
+         'int8_t','int16_t','int32_t','int64_t','size_t'}
+STRING=re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+COMMENT=re.compile(r'/\*.*?\*/|//.*$')
+INCLUDE=re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
+
+def code_words(line):
+    """Identifiers on a C line, outside comments and string literals."""
+    text=COMMENT.sub(' ',STRING.sub(' ',line))
+    return set(re.findall(r'\b[A-Za-z_]\w{2,}\b',text))-C_WORDS
+
+def uncommented(lines):
+    """The lines with block comments that span lines removed."""
+    out=[];inside=False
+    for line in lines:
+        text=''
+        while line:
+            if inside:
+                end=line.find('*/')
+                if end<0:line='';break
+                line=line[end+2:];inside=False
+            else:
+                start=STRING.sub(lambda m:' '*len(m[0]),line).find('/*')
+                if start<0:text+=line;break
+                text+=line[:start]+' ';line=line[start+2:];inside=True
+        out.append(text)
+    return out
+
+def compile_expectations(base,fix,fix_files,test_patch,units):
+    """What each unit's before-build must fail on, derived from the fix: the
+    identifiers the code lines the tests add use that the fix introduces
+    (declared by its added production lines, absent from the whole base
+    tree), and the
+    headers it creates that the tests include. A unit's build is attested when
+    its errors name every such identifier, or report such a header missing
+    (GCC stops at the #include). Preprocessor conditions, comments and
+    strings are not code, so their names are not expected."""
+    rows=candidates.git('diff','--unified=0',base,fix,'--',*fix_files)
+    created=[];path=None;new=False;lines=[]
+    for line in rows.splitlines():
+        if line.startswith('--- '):new=line=='--- /dev/null'
+        elif line.startswith('+++ b/'):
+            path=line[6:]
+            if new and path.endswith('.h'):created.append(path)
+        elif line.startswith('+') and not line.startswith('+++') and path and path.endswith(('.c','.h')):
+            lines.append(line[1:])
+    # only what the fix declares: a name it merely uses (INT64_MAX from the
+    # C library) is not missing before it
+    added=candidates.declared_identifiers(uncommented(lines))
+    present=set()
+    if added:
+        r=subprocess.run(['git','-C',str(candidates.clone()),'grep','-h','-o','-w','-F',
+                          *[a for w in sorted(added) for a in ('-e',w)],base,'--'],
+                         capture_output=True,text=True,errors='replace')
+        present=set(r.stdout.split())
+    introduced=added-present
+    tests={};path=None
+    for line in test_patch.splitlines():
+        if line.startswith('+++ b/'):path=line[6:]
+        elif path and line.startswith('+') and not line.startswith('+++'):tests.setdefault(path,[]).append(line[1:])
+    out={}
+    for unit in units:
+        sources=[s for s in unit.get('sources',[]) if s.endswith(('.c','.h')) and s in tests]
+        symbols=set();headers=set()
+        # a name the tests declare themselves (a local, a helper) is not missing
+        added_test=uncommented([l for s in sources for l in tests[s]])
+        own=candidates.test_declared(added_test)
+        for s in sources:
+            for line in uncommented(tests[s]):
+                m=INCLUDE.match(line)
+                if m:
+                    headers|={h for h in created if h==m[1] or h.endswith('/'+m[1])};continue
+                if line.lstrip().startswith('#'):continue
+                symbols|=(code_words(line)&introduced)-own
+        out[unit['id']]={'symbols':sorted(symbols),'headers':sorted(headers)}
+    return out
 
 def parse_results(text):
     cases={};on=False
@@ -196,24 +320,6 @@ def fix_patch(meta):
 
 MISSING_HEADER=re.compile(r'fatal error: ([\w./+-]+\.h): No such file or directory')
 
-def header_attribution(output,symbols,patch):
-    """A missing header that the fix creates and whose added lines declare a
-    compile symbol. GCC stops at the #include, so the symbols themselves never
-    reach the base build log."""
-    created={};path=None;new=False
-    for line in patch.splitlines():
-        if line.startswith('--- '):new=line=='--- /dev/null';path=None
-        elif line.startswith('+++ b/'):
-            path=line[6:] if new else None
-            if path:created[path]=[]
-        elif path and line.startswith('+'):created[path].append(line[1:])
-    for header in dict.fromkeys(MISSING_HEADER.findall(output)):
-        for created_path,lines in created.items():
-            if created_path!=header and not created_path.endswith('/'+header):continue
-            text='\n'.join(lines)
-            if any(re.search(r'(?<!\w)'+re.escape(s)+r'(?!\w)',text) for s in symbols):return header
-    return None
-
 def config_attribution(output,diagnostics):
     failure_lines=[line for line in output.splitlines() if re.search(r'error:|fatal error:|undefined reference|make(?:\[\d+\])?: \*\*\*|failed',line,re.I)]
     return next((d for d in diagnostics if any(d in line for line in failure_lines)),None)
@@ -221,8 +327,68 @@ def config_attribution(output,diagnostics):
 def protected_test_change(patch):
     return bool(re.search(r'^(?:diff --git a/|--- a/|\+\+\+ b/)(?:tests/|regression-tests/|tools/cooja/)',patch,re.M))
 
-def validate(iid,patch_override=None,timeout=1800,verbose=False):
-    from validate_instance import observe_lists, compile_attribution, build_errors, _finish
+# Every before run judged the same way, this many times (the first one
+# included): a VALID instance's before state is deterministic.
+DETERMINISM_RUNS=5
+NETWORK_PROBE=('import socket,sys\n'
+               'try:\n socket.getaddrinfo("github.com",443);sys.exit(1)\n'
+               'except OSError:pass\n'
+               's=socket.socket();s.settimeout(5)\n'
+               'sys.exit(1 if s.connect_ex(("140.82.112.3",443))==0 else 0)\n')
+
+def unit_log_name(unit,phase):
+    return re.sub(r'[^A-Za-z0-9_.-]','_',unit['id'])+'.'+phase+'.log'
+
+def compile_attestation(cfg,output,details):
+    """(per-unit attestation, None) when every native unit's before-build
+    fails exactly as the fix-derived compile_expectations say: a unit with
+    expectations fails and its errors name every expected identifier, or
+    report an expected (fix-created) header missing; a unit without any
+    builds. Otherwise (None, why)."""
+    from validate_instance import error_text
+    expectations=cfg.get('compile_expectations')
+    if not expectations:return None,'compile oracle without derived compile_expectations'
+    attested={}
+    for unit in cfg['units']:
+        if unit.get('kind')!='native':return None,'compile oracles are attested on native units only'
+        e=expectations.get(unit['id'],{'symbols':[],'headers':[]})
+        failed=(unit['id']+': native build failed') in output
+        if not (e['symbols'] or e['headers']):
+            if failed:return None,f"{unit['id']}: build fails on nothing the fix introduces"
+            continue
+        if not failed:return None,f"{unit['id']}: builds before the fix"
+        log=Path(details)/unit_log_name(unit,'build')
+        text=log.read_text(errors='replace') if log.exists() else ''
+        missing=[h for h in MISSING_HEADER.findall(text) if any(x==h or x.endswith('/'+h) for x in e['headers'])]
+        if missing:
+            attested[unit['id']]={'header':missing[0]};continue
+        errors=error_text(text)
+        absent=[x for x in e['symbols'] if not re.search(r'(?<![\w])'+re.escape(x)+r'(?![\w])',errors)]
+        if absent or not e['symbols']:
+            return None,f"{unit['id']}: before-build errors do not name {absent or e['headers']}"
+        attested[unit['id']]={'symbols':e['symbols']}
+    return attested,None
+
+def leak_check(meta,image,patch,test_patch,cmd):
+    """contiki_ng_leakcheck on the image's files, and a network probe under
+    the isolation every run uses. `patch` is the upstream fix (None: read it
+    from the clone, as when another patch is validated)."""
+    import contiki_ng_leakcheck as leakcheck
+    facts=leakcheck.fix_facts(candidates.clone(),meta,patch if patch is not None else fix_patch(meta),test_patch)
+    sandbox=au.extract_local_sandbox(image)
+    try:
+        record=leakcheck.scan(sandbox,facts)
+    finally:
+        if not au.is_i386_sif(image):au.remove_local_sandbox(image)
+    probe=subprocess.run(cmd+['python3','-c',NETWORK_PROBE],capture_output=True,text=True,timeout=120)
+    record['network']='isolated' if probe.returncode==0 else 'open'
+    if probe.returncode:
+        record['ok']=False;record['findings'].append('network: the container reaches the network')
+    record['statement_sha256']=hashlib.sha256((meta.get('problem_statement') or '').encode()).hexdigest()
+    return record
+
+def validate(iid,patch_override=None,timeout=1800,verbose=False,determinism=DETERMINISM_RUNS):
+    from validate_instance import observe_lists, build_errors, _finish
     folder=instances.instance_dir(iid);meta=instances.load_metadata(iid)
     cfg=json.loads((folder/'instance.json').read_text()); image=au.instance_image(iid)
     report={'instance_id':iid,'image':str(image),'valid':False,'observe':bool(cfg.get('observe')),
@@ -235,14 +401,15 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
     overlay=Path(local_overlay.name)/'overlay';overlay.mkdir()
     logs=au.path('logs',iid,'validate-'+stamp,'x').parent;logs.mkdir(parents=True,exist_ok=True)
     report['logs']=str(logs)
-    cmd=au.exec_args(image,binds={work:'/embedeval-run'},overlay=overlay)
+    # No network for any step: what the tests do offline is what an agent's patch is graded on.
+    cmd=au.exec_args(image,binds={work:'/embedeval-run'},overlay=overlay,network=False)
     def step(name,args):
         start=time.monotonic()
         details=logs/(name+'-details') if args==['run_tests'] else None
         step_cmd=cmd
         if details is not None:
             details.mkdir()
-            step_cmd=au.exec_args(image,binds={work:'/embedeval-run',details:'/testbed/.embedeval/logs'},overlay=overlay)
+            step_cmd=au.exec_args(image,binds={work:'/embedeval-run',details:'/testbed/.embedeval/logs'},overlay=overlay,network=False)
         try:
             r=subprocess.run(step_cmd+args,capture_output=True,text=True,errors='replace',timeout=timeout)
             rc,out=r.returncode,r.stdout+r.stderr
@@ -253,10 +420,16 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
         return {'rc':rc,'seconds':round(time.monotonic()-start,3),'cases':parse_results(out),
                 'build_errors':build_errors(out),'details':str(details) if details is not None else None},out
     try:
-        before,out1=step('before',['run_tests']);report['before']=before
         patch=Path(patch_override).read_text() if patch_override else fix_patch(meta)
         if protected_test_change(patch):report['reason']='production fix overlaps protected upstream tests';return _finish(iid,report)
         if not patch.strip():report['reason']='empty production fix';return _finish(iid,report)
+        # Nothing an agent must not see, before any test runs.
+        leak=report['leak_check']=leak_check(meta,image,None if patch_override else patch,
+                                             (folder/'test_patch.diff').read_text(),cmd)
+        if not leak['ok']:
+            report['reason']='leak check: '+'; '.join(leak['findings'])[:600]
+            print(iid+': '+report['reason']);return _finish(iid,report)
+        before,out1=step('before',['run_tests']);report['before']=before
         (work/'fix.diff').write_text(patch)
         applied,outa=step('apply',['git','-C','/testbed','apply','/embedeval-run/fix.diff'])
         if applied['rc']!=0:report['reason']='production fix does not apply';return _finish(iid,report)
@@ -269,19 +442,30 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
                 'base build failed; semantic compile/config attribution required' if before['rc']==2 else 'no attributable runtime F2P or after-state failure')
         else:
             f2p=cfg['fail_to_pass'];p2p=cfg['pass_to_pass'];oracle=cfg.get('oracle','runtime')
-            if oracle=='runtime':signal=(before['rc']==1
-                and all(before['cases'].get(n) in ('failed','error') for n in f2p))
-            elif oracle=='compile':
-                signal=before['rc']==2 and bool(compile_attribution(out1,cfg.get('compile_symbols',[])) or header_attribution(out1,cfg.get('compile_symbols',[]),patch))
-            else:
-                signal=before['rc']==2 and bool(config_attribution(out1,cfg.get('config_diagnostics',[])))
+            def judge(result,out):
+                """(the before state's signature, why it is not the oracle's)"""
+                if oracle=='runtime':
+                    bad=[n for n in f2p if result['cases'].get(n) not in ('failed','error')]
+                    why=None if result['rc']==1 and not bad else f"fail_to_pass did not fail: {bad or result['rc']}"
+                    attested=None
+                elif oracle=='compile':
+                    attested,why=(compile_attestation(cfg,out,result['details']) if result['rc']==2
+                                  else (None,f"the before run did not fail to build (rc={result['rc']})"))
+                else:
+                    attested=config_attribution(out,cfg.get('config_diagnostics',[])) if result['rc']==2 else None
+                    why=None if attested else 'no configured diagnostic in the before build'
+                not_passing=[n for n in p2p if result['cases'].get(n)!='passed']
+                if why is None and not_passing:why=f'pass_to_pass did not pass before: {not_passing}'
+                return {'rc':result['rc'],'cases':result['cases'],'attested':attested},why
+            first,why=judge(before,out1)
+            if oracle=='compile' and first['attested']:report['before']['compile_attested']=first['attested']
             passes=all(after['cases'].get(n)=='passed' for n in cfg.get('after_required',f2p+p2p))
-            before_passes=all(before['cases'].get(n)=='passed' for n in p2p)
-            report['valid']=bool(f2p) and signal and before_passes and after['rc']==0 and passes
-            report['reason']='attributable before failure and named after passes' if report['valid'] else 'oracle or required named case evidence missing'
+            report['valid']=bool(f2p) and why is None and after['rc']==0 and passes
+            report['reason']=('attributable before failure and named after passes' if report['valid'] else
+                              why or 'required named cases did not pass with the fix')
             if report['valid']:
                 repeat,out=step('before-repeat-reset',['git','-C','/testbed','apply','-R','/embedeval-run/fix.diff'])
-                deterministic=repeat['rc']==0; repeats=[]
+                deterministic=repeat['rc']==0; repeats=[]; differences=[]
                 # Files the fix created are gone again, but make would keep the
                 # binary built from them: rebuild the native units from scratch.
                 for unit in cfg['units']:
@@ -289,19 +473,17 @@ def validate(iid,patch_override=None,timeout=1800,verbose=False):
                         cleaned,_=step('before-repeat-clean',['make','-C','/testbed/'+unit['directory'],'TARGET=native','clean'])
                         deterministic=cleaned['rc']==0
                 if deterministic:
-                    for i in range(3):
+                    for i in range(determinism-1):
                         result,repeat_out=step('before-repeat-'+str(i+1),['run_tests']);repeats.append(result)
-                        if oracle=='runtime':
-                            deterministic &= (result['rc']==1
-                                and all(result['cases'].get(n) in ('failed','error') for n in f2p))
-                        elif oracle=='compile':
-                            deterministic &= result['rc']==2 and bool(compile_attribution(repeat_out,cfg['compile_symbols']) or header_attribution(repeat_out,cfg['compile_symbols'],patch))
-                        else:
-                            deterministic &= result['rc']==2 and bool(config_attribution(repeat_out,cfg['config_diagnostics']))
-                        deterministic &= all(result['cases'].get(n)=='passed' for n in p2p)
+                        signature,repeat_why=judge(result,repeat_out)
+                        if repeat_why or signature!=first:
+                            differences.append({'run':i+2,'why':repeat_why or 'results differ from the first before run'})
+                deterministic&=not differences
                 report['before_repeats']=repeats;report['deterministic_before']=deterministic
-                report['valid'] &= deterministic
-                if not deterministic:report['reason']='before-state failures are not repeatable'
+                report['determinism']={'runs':1+len(repeats),'ok':deterministic and 1+len(repeats)>=determinism,
+                                       'differences':differences}
+                report['valid'] &= report['determinism']['ok']
+                if not report['valid']:report['reason']='before-state failures are not repeatable'
         if not report['valid'] and (after['rc'] in (2,3,'timeout') or before['rc']=='timeout'):
             report['status']='hold'
             report['reason']='infrastructure/profile hold: '+report['reason']

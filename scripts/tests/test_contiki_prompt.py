@@ -107,7 +107,7 @@ class RecheckTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self.enriched, self.folder = root / 'enriched', root / 'contiki-ng__contiki-ng-9'
         self.enriched.mkdir()
-        (self.enriched / '9.json').write_text(json.dumps(StrictStatementTests.REC))
+        (self.enriched / '9.json').write_text(json.dumps({**StrictStatementTests.REC, 'base_commit': 'a' * 40}))
         self.folder.mkdir()
         self.out = root / 'triage'
 
@@ -126,7 +126,8 @@ class RecheckTests(unittest.TestCase):
               patch.object(triage_prs, 'converse', side_effect=converse),
               patch.object(triage_prs, 'instruction_text', return_value='rules'),
               patch.dict(triage_prs.PROJECTS['contiki-ng'], {'render': lambda rec: 'record'}),
-              patch.object(triage_prs, 'PROJECT', 'contiki-ng')):
+              patch.object(triage_prs, 'PROJECT', 'contiki-ng'),
+              patch('contiki_ng_leakcheck.statement_fix_identifiers', return_value=[])):
             r = triage_prs.statement_one(self.folder, 'qwen', {}, 'http://x', self.out, recheck=True)
         return r, json.loads((self.folder / 'metadata.json').read_text())
 
@@ -136,6 +137,9 @@ class RecheckTests(unittest.TestCase):
         self.assertEqual(meta['problem_statement'], 'A short packet is read past its end.')
         self.assertEqual(meta['statement_check']['version'], triage_prs.STATEMENT_CHECK)
         self.assertEqual(meta['statement_check']['result'], 'kept')
+        # the leak check's fix-identifier test, on the statement as kept
+        self.assertEqual(meta['statement_leak_check']['fix_identifiers'], [])
+        self.assertEqual(len(meta['statement_leak_check']['statement_sha256']), 64)
 
     def test_failing_statement_is_replaced_and_superseded(self):
         good = {'pr': 9, 'problem_statement': 'A short packet is read past its end.',

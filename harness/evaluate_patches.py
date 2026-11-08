@@ -84,7 +84,9 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     overlay = (Path(local_overlay.name) if local_overlay else run_dir) / "overlay"
     overlay.mkdir(parents=True)
     (run_dir / "agent.patch").write_text(patch_path.read_text())
-    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay)
+    # Contiki-NG: graded without a network, as it was validated.
+    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay,
+                             network=meta["project"] != "contiki-ng")
     try:
         print("  applying patch ...")
         ap = subprocess.run(container + ["git", "-C", "/testbed", "apply",

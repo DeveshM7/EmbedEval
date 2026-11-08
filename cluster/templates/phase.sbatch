@@ -26,7 +26,7 @@ echo "[$(/usr/bin/date +%T)] {phase} job $SLURM_JOB_ID on $SLURM_JOB_NODELIST ($
         {python} cluster/node_worker.py --run "{run}" --config "{config}" --phase {phase} --minutes "'"$M"'"'
 worker_rc=$?
 echo "[$(/usr/bin/date +%T)] worker rc=$worker_rc"
-{python} cluster/report.py --run "$RUN"
+{end_server}{python} cluster/report.py --run "$RUN"
 report_rc=$?
 if [ "$worker_rc" -ne 0 ]; then
     exit "$worker_rc"

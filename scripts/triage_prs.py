@@ -988,6 +988,17 @@ def statement_one(folder: Path, profile: str, prof: dict, api_base: str, out_dir
     t0 = time.time()
 
     def write(meta: dict) -> None:
+        # The leak check's fix-identifier test on the statement as written now
+        # (promote_instance.py accepts it in place of the validation's).
+        statement = (meta.get("problem_statement") or "").strip()
+        if statement and PROJECT == "contiki-ng":
+            import contiki_ng_candidates
+            import contiki_ng_leakcheck
+            meta["statement_leak_check"] = {
+                "statement_sha256": hashlib.sha256(meta["problem_statement"].encode()).hexdigest(),
+                "fix_identifiers": contiki_ng_leakcheck.statement_fix_identifiers(
+                    contiki_ng_candidates.clone(), rec["base_commit"], meta["problem_statement"],
+                    rec.get("production_diff") or "", rec.get("test_patch") or "")}
         (folder / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
 
     if recheck and old:

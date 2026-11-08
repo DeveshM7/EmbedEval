@@ -62,6 +62,8 @@ def observation_outcome(run: Path, pr: int, st: dict) -> tuple[str, str]:
 
 def outcome(entry: dict, st: dict, run: Path | None = None, observe_only: bool = False) -> tuple[str, str]:
     """(where the PR ended up, detail)."""
+    if entry["stage"] == "to validate":                 # a revalidation (prepare.py --instances)
+        return validation_outcome(st)
     if entry["stage"] != "to triage":
         return entry["stage"], entry.get("note", "")
     if observe_only:
@@ -75,6 +77,10 @@ def outcome(entry: dict, st: dict, run: Path | None = None, observe_only: bool =
         return "triage: malformed verdict", "the verdict field is not accept/reject/hold"
     if t.get("verdict") != "accept":
         return f"triage: {t.get('verdict')}", t.get("note", "")
+    return validation_outcome(st)
+
+
+def validation_outcome(st: dict) -> tuple[str, str]:
     v = st.get("validate")
     if not v:
         return "accepted, validation not yet", ""
@@ -111,6 +117,23 @@ def build(run: Path) -> dict:
                      "triage_min": (st.get("triage") or {}).get("minutes"),
                      "validate_min": (st.get("validate") or {}).get("minutes"),
                      "pair": (st.get("triage") or {}).get("pair")})
+    # agent evaluations, per model: a time-out is reported apart from a failed patch
+    evaluations: dict[str, Counter] = {}
+    for e in m["prs"]:
+        for k, v in status.read(run, e["pr"]).items():
+            if k.startswith("evaluate:"):
+                c = evaluations.setdefault(k.split(":", 1)[1], Counter())
+                c["instances"] += 1
+                if v["state"] != "done":
+                    c["not graded"] += 1
+                elif v.get("grade") == "pass":
+                    c["pass"] += 1
+                elif v.get("timed_out"):
+                    c["fail: time-out"] += 1
+                elif v.get("step_limit_hit"):
+                    c["fail: step limit"] += 1
+                else:
+                    c["fail"] += 1
     counts = Counter(r["outcome"] for r in rows)
     observations = Counter(r["observe"] for r in rows if r["observe"])
     return {"run": m["name"], "generated": datetime.now().isoformat(timespec="seconds"),
@@ -118,6 +141,7 @@ def build(run: Path) -> dict:
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
             "observations": dict(observations),
+            "evaluations": {k: dict(v) for k, v in sorted(evaluations.items())},
             "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"], "rows": rows}
 
 
@@ -144,6 +168,8 @@ def markdown(rep: dict) -> str:
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
     if rep["observations"]:
         out += ["", "Observation: " + ", ".join(f"{v} {k}" for k, v in rep["observations"].items())]
+    for model, c in (rep.get("evaluations") or {}).items():
+        out += ["", f"Agent {model}: " + ", ".join(f"{v} {k}" for k, v in c.items())]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
             "| PR | outcome | detail | pair | triage min | validation min |",

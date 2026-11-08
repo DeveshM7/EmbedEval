@@ -32,7 +32,9 @@ from layout import show  # noqa: E402,F401
 _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
                   if _override else [layout.generated()] if layout.run_dir()
-                  else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "docker" / "instances"])
+                  else [REPO_ROOT / "apptainer" / "instances",
+                        REPO_ROOT / "apptainer" / "instances" / "contiki-ng",
+                        REPO_ROOT / "docker" / "instances"])
 OUTPUTS_DIR = layout.outputs()
 
 PATCH_NAME = "patch.diff"
@@ -52,6 +54,16 @@ MODEL_DIRS: dict[str, str] = {
     # OpenAI-compatible); see LOCAL_MODELS in harness/run.py.
     "openai/qwen38-nvfp4": "qwen38-nvfp4",
 }
+
+
+
+def local_model_profiles() -> list[str]:
+    """The open-weights models served locally: the profiles of triage/models.json."""
+    f = REPO_ROOT / "triage" / "models.json"
+    return [k for k in json.loads(f.read_text()) if not k.startswith("_")] if f.exists() else []
+
+
+MODEL_DIRS.update({f"openai/{name}": name for name in local_model_profiles()})
 
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.
 MODEL_ALIASES: dict[str, str] = {short: full for full, short in MODEL_DIRS.items()}

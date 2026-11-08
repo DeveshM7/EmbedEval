@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build and run the upstream Contiki-NG tests selected in instance.json."""
+"""Build and run the upstream Contiki-NG tests selected in bench.json.
+
+bench.json holds only how to run the selected units; which cases are
+expected to fail or pass stays on the host (instance.json)."""
 
 import json
 import os
@@ -14,7 +17,7 @@ from pathlib import Path
 
 
 TESTBED = Path('/testbed')
-CONFIG = Path('/opt/embedeval/instance.json')
+CONFIG = Path('/opt/embedeval/bench.json')
 LOGS = TESTBED / '.embedeval' / 'logs'
 BUILD_TIMEOUT = 900
 RUN_TIMEOUT = 300
@@ -199,7 +202,9 @@ def build_native(unit):
         if rc != 0:
             return False
     stamp.write_text(options)
-    cmd = ['make', '-C', str(TESTBED / unit['directory']), 'TARGET=native',
+    # -k: a build that fails reports every error, in the same serial order
+    # each time, not only those of the first source that failed.
+    cmd = ['make', '-k', '-C', str(TESTBED / unit['directory']), 'TARGET=native',
            'WERROR=1', *unit.get('make_options', []), unit['binary'] + '.native']
     rc, _ = run_logged(cmd, log_path(unit, 'build'))
     return rc == 0 and native_binary(unit) is not None
@@ -265,14 +270,7 @@ def cooja_java_home():
     return None
 
 
-def run_cooja(unit):
-    suite = TESTBED / unit['suite_directory']
-    stem = unit['scenario'][:-len('.csc')]
-    # Current Cooja writes COOJA.testlog; Ant-era simexec leaves the verdict in
-    # <scenario>.testlog (and the script log in <scenario>.<seed>.scriptlog).
-    for old in [*suite.rglob('COOJA.testlog'), *suite.glob(stem + '.testlog'),
-                *suite.glob(stem + '.*.scriptlog'), *suite.glob(stem + '.*.coojalog')]:
-        old.unlink()
+def cooja_env():
     home = cooja_java_home()
     java_home = {'JAVA_HOME': home} if home else {}
     # A 32-bit JVM sizes its default heap from the host's memory; on a large
@@ -282,8 +280,33 @@ def run_cooja(unit):
     java_options = {}
     if platform.architecture()[0] == '32bit':
         java_options['JAVA_TOOL_OPTIONS'] = (os.environ.get('JAVA_TOOL_OPTIONS', '') + ' -Xmx512m').strip()
-    env = {**os.environ, **java_home, **java_options,
-           'GRADLE_USER_HOME': str(TESTBED / '.embedeval' / 'gradle')}
+    return {**os.environ, **java_home, **java_options,
+            'GRADLE_USER_HOME': str(TESTBED / '.embedeval' / 'gradle')}
+
+
+def warm_gradle(unit):
+    """Gradle-era Cooja resolves its build and its dependencies through
+    Gradle. Runs have no network, so the image build (which has one) runs
+    the Gradle task the scenarios run, filling the cache in GRADLE_USER_HOME.
+    Ant-era Cooja carries its jars and needs nothing."""
+    gradlew = TESTBED / 'tools' / 'cooja' / 'gradlew'
+    if not gradlew.is_file():
+        return True
+    cmd = [str(gradlew), '--no-daemon', '--no-watch-fs', '--build-cache', '-p',
+           str(TESTBED / 'tools' / 'cooja'), 'run', '--args=--help']
+    rc, _ = run_logged(cmd, log_path(unit, 'gradle-warm'), env=cooja_env())
+    return rc == 0
+
+
+def run_cooja(unit):
+    suite = TESTBED / unit['suite_directory']
+    stem = unit['scenario'][:-len('.csc')]
+    # Current Cooja writes COOJA.testlog; Ant-era simexec leaves the verdict in
+    # <scenario>.testlog (and the script log in <scenario>.<seed>.scriptlog).
+    for old in [*suite.rglob('COOJA.testlog'), *suite.glob(stem + '.testlog'),
+                *suite.glob(stem + '.*.scriptlog'), *suite.glob(stem + '.*.coojalog')]:
+        old.unlink()
+    env = cooja_env()
     cmd = ['make', '-C', str(suite), 'TESTS=' + unit['scenario'],
            'BASESEED=1', 'RUNCOUNT=1', 'NUMCORES=4']
     rc, output = run_logged(cmd, log_path(unit, 'run'), env=env)
@@ -324,6 +347,7 @@ def main():
     statuses = {}
     build_failed = False
     incomplete = False
+    warmed = False
     for unit in cfg['units']:
         kind = unit['kind']
         if kind == 'native':
@@ -338,6 +362,11 @@ def main():
                 statuses.update(result)
                 incomplete |= not complete
         elif build_only:
+            if kind == 'cooja' and not warmed:
+                warmed = True
+                if not warm_gradle(unit):
+                    print('{}: filling the Gradle cache failed; see {}'.format(
+                        unit['id'], log_path(unit, 'gradle-warm')))
             print('{}: {} builds when run; not precompiled'.format(unit['id'], kind))
         elif kind == 'cooja':
             result, complete, compile_failed = run_cooja(unit)
@@ -354,10 +383,6 @@ def main():
             raise ValueError('unknown unit kind: ' + kind)
     if build_only:
         return 2 if build_failed else 0
-    if not cfg.get('observe'):
-        expected = cfg.get('after_required', cfg.get('fail_to_pass', []) + cfg.get('pass_to_pass', []))
-        for name in expected:
-            statuses.setdefault(name, 'not_run')
     print('\n--- contiki-ng: results')
     for name, status in statuses.items():
         print('  {} {}'.format(status, name))

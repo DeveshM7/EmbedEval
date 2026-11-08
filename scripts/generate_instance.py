@@ -430,7 +430,10 @@ def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: 
 def main() -> None:
     p = argparse.ArgumentParser(description="Generate an instance from a triage verdict.")
     p.add_argument("--project", choices=("zephyr", "openthread", "contiki-ng"), default="zephyr")
-    p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--pr", type=int)
+    p.add_argument("--render", type=Path, metavar="DIR",
+                   help="Contiki-NG: write this existing instance folder's recipe again under the "
+                        "current templates (a revalidation), into --out")
     p.add_argument("--triage", help="path to the triage verdict JSON")
     p.add_argument("--observe", action="store_true",
                    help="OpenThread: no verdict; run the test executables the PR changed and "
@@ -446,6 +449,15 @@ def main() -> None:
                    help="generate even if the board/scenario check fails (for testing)")
     args = p.parse_args()
 
+    if args.render:
+        if args.project != "contiki-ng" or args.triage or args.observe or args.from_observed:
+            p.error("--render is Contiki-NG only and takes no verdict or observation")
+        from contiki_ng_pipeline import render
+        inst = render(args.render, Path(args.out))
+        print(f"  wrote {layout.show(inst)}")
+        return
+    if args.pr is None:
+        p.error("--pr is required")
     if args.project == "contiki-ng":
         from contiki_ng_pipeline import generate as generate_contiki
         verdict = json.loads(Path(args.triage).read_text()) if args.triage else None

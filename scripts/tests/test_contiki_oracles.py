@@ -1,7 +1,10 @@
 """Source contradictions must fail before expensive candidate validation."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import contiki_ng_candidates as c
@@ -101,20 +104,73 @@ class OracleFactsTests(unittest.TestCase):
         self.assertTrue(any('before snapshot' in error for error in c.check_verdict(verdict(),rec)))
 
 
-class HeaderAttributionTests(unittest.TestCase):
-    LOG='test-cbor.c:38:10: fatal error: lib/cbor.h: No such file or directory\ncompilation terminated.\n'
-    def patch(self,old='/dev/null',body='+void cbor_write_unsigned(int v);'):
-        return f'diff --git a/os/lib/cbor.h b/os/lib/cbor.h\n--- {old}\n+++ b/os/lib/cbor.h\n@@ -0,0 +1 @@\n{body}\n'
+class CompileExpectationTests(unittest.TestCase):
+    """Compile oracles: what a before-build must fail on is derived from the
+    fix, and every unit's failure must be attested."""
+    FIX=('diff --git a/os/lib/cbor.h b/os/lib/cbor.h\n--- a/os/lib/cbor.h\n+++ b/os/lib/cbor.h\n'
+         '@@ -1 +1,3 @@\n+int cbor_read_signed(int v);\n+#define CBOR_LIMIT_NEW 4\n+int base_thing(void);\n'
+         'diff --git a/os/lib/new.h b/os/lib/new.h\n--- /dev/null\n+++ b/os/lib/new.h\n@@ -0,0 +1 @@\n+int brand_new_api(void);\n')
+    TESTS=('diff --git a/tests/u/test-u.c b/tests/u/test-u.c\n--- a/tests/u/test-u.c\n+++ b/tests/u/test-u.c\n'
+           '@@ -1 +1,9 @@\n+#include "lib/new.h"\n+  x = cbor_read_signed(1); /* cbor_comment_only */\n'
+           '+  puts("CBOR_STRING_ONLY");\n+#if CBOR_LIMIT_NEW\n+  /* spans\n+   * cbor_hidden_name\n+   */\n'
+           '+  y = CBOR_LIMIT_NEW + base_thing();\n')
+    UNIT={'id':'tests/u/test-u','kind':'native','sources':['tests/u/test-u.c','tests/u/Makefile']}
 
-    def test_missing_header_created_by_fix_and_declaring_symbol(self):
-        from contiki_ng_pipeline import header_attribution
-        self.assertEqual(header_attribution(self.LOG,['cbor_write_unsigned'],self.patch()),'lib/cbor.h')
+    def derive(self):
+        import contiki_ng_pipeline as pipeline
+        def git(*args,**kw):
+            return self.FIX if args[0]=='diff' else ''
+        present='base_thing\n'
+        with patch.object(pipeline.candidates,'git',side_effect=git), \
+             patch.object(pipeline.subprocess,'run',return_value=SimpleNamespace(stdout=present,returncode=0)), \
+             patch.object(pipeline.candidates,'clone',return_value=Path('/clone')):
+            return pipeline.compile_expectations('b'*40,'f'*40,['os/lib/cbor.h','os/lib/new.h'],self.TESTS,[self.UNIT])
 
-    def test_existing_header_or_undeclared_symbol_is_not_attributed(self):
-        from contiki_ng_pipeline import header_attribution
-        self.assertIsNone(header_attribution(self.LOG,['cbor_write_unsigned'],self.patch(old='a/os/lib/cbor.h')))
-        self.assertIsNone(header_attribution(self.LOG,['cbor_read_signed'],self.patch()))
-        self.assertIsNone(header_attribution('no error\n',['cbor_write_unsigned'],self.patch()))
+    def test_derives_fix_introduced_names_and_created_headers(self):
+        e=self.derive()[self.UNIT['id']]
+        # not comments, strings, #if conditions, or names the base already has
+        self.assertEqual(e,{'symbols':['CBOR_LIMIT_NEW','cbor_read_signed'],'headers':['os/lib/new.h']})
+
+    def test_names_the_fix_only_uses_or_the_tests_declare_are_not_expected(self):
+        import contiki_ng_pipeline as pipeline
+        fix=('diff --git a/os/lib/heapmem.c b/os/lib/heapmem.c\n--- a/os/lib/heapmem.c\n+++ b/os/lib/heapmem.c\n'
+             '@@ -1 +1,4 @@\n+void *heapmem_calloc(size_t nmemb, size_t size)\n+{ if (nmemb > INT64_MAX) return 0; }\n'
+             '+static int zones;\n')
+        tests=('diff --git a/tests/u/test-u.c b/tests/u/test-u.c\n--- a/tests/u/test-u.c\n+++ b/tests/u/test-u.c\n'
+               '@@ -1 +1,4 @@\n+UNIT_TEST_REGISTER(zones, "Zones");\n+  size_t nmemb = INT64_MAX;\n'
+               '+  UNIT_TEST_ASSERT(heapmem_calloc(nmemb, 1));\n')
+        with patch.object(pipeline.candidates,'git',return_value=fix), \
+             patch.object(pipeline.subprocess,'run',return_value=SimpleNamespace(stdout='',returncode=1)), \
+             patch.object(pipeline.candidates,'clone',return_value=Path('/clone')):
+            e=pipeline.compile_expectations('b'*40,'f'*40,['os/lib/heapmem.c'],tests,[self.UNIT])
+        self.assertEqual(e[self.UNIT['id']]['symbols'],['heapmem_calloc'])
+
+    def attest(self,log,failed=True,expectations=None):
+        import contiki_ng_pipeline as pipeline
+        cfg={'units':[self.UNIT],'compile_expectations':expectations or
+             {self.UNIT['id']:{'symbols':['CBOR_LIMIT_NEW','cbor_read_signed'],'headers':['os/lib/new.h']}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp)/pipeline.unit_log_name(self.UNIT,'build')).write_text(log)
+            out=(self.UNIT['id']+': native build failed\n') if failed else ''
+            return pipeline.compile_attestation(cfg,out,tmp)
+
+    def test_missing_created_header_attests_the_unit(self):
+        attested,why=self.attest('test-u.c:1:10: fatal error: lib/new.h: No such file or directory\n')
+        self.assertEqual(attested,{self.UNIT['id']:{'header':'lib/new.h'}})
+
+    def test_every_expected_name_must_be_named(self):
+        log=("test-u.c:2:7: error: implicit declaration of function 'cbor_read_signed' [-Werror]\n"
+             "test-u.c:8:7: error: 'CBOR_LIMIT_NEW' undeclared (first use in this function)\n")
+        self.assertEqual(self.attest(log)[0],{self.UNIT['id']:{'symbols':['CBOR_LIMIT_NEW','cbor_read_signed']}})
+        attested,why=self.attest(log.splitlines()[0]+'\n')
+        self.assertIsNone(attested)
+        self.assertIn('CBOR_LIMIT_NEW',why)
+
+    def test_unit_that_builds_or_fails_unexplained_is_not_attested(self):
+        self.assertIsNone(self.attest('',failed=False)[0])
+        none={self.UNIT['id']:{'symbols':[],'headers':[]}}
+        self.assertIsNone(self.attest("error: something else\n",expectations=none)[0])
+        self.assertEqual(self.attest('',failed=False,expectations=none)[0],{})
 
 
 class CoojaEraImageTests(unittest.TestCase):
@@ -163,7 +219,8 @@ class SandboxBuildTests(unittest.TestCase):
         spec = au.parse_definition(text, {'BASE_IMAGE': '/img/base.sif'})
         self.assertEqual(spec['base'], '/img/base.sif')
         self.assertIn(('run_tests.py', '/usr/local/bin/run_tests'), spec['files'])
-        self.assertIn(('instance.json', '/opt/embedeval/instance.json'), spec['files'])
+        self.assertIn(('bench.json', '/opt/embedeval/bench.json'), spec['files'])
+        self.assertNotIn('instance.json', ' '.join(f for pair in spec['files'] for f in pair))
         self.assertIn('git apply /opt/embedeval/test_patch.diff', spec['post'])
         self.assertIn('export LANG=C.UTF-8', spec['environment'])
         self.assertIn('embedeval.instance', spec['labels'])
@@ -187,6 +244,26 @@ class SandboxBuildTests(unittest.TestCase):
                 self.assertTrue(au.build(d / 'out.sif', d / 'r.def', {}, d / 'build.log', attempts=1))
             self.assertTrue(fallback.called)
             self.assertTrue((d / 'out.sif').exists())
+
+
+class SandboxPostTests(unittest.TestCase):
+    def test_post_runs_without_the_host_home(self):
+        """With the host's home mounted, /home is a session overlay and %post's
+        changes under it (the CI image's /home/user repositories) are lost."""
+        import io, tempfile, apptainer_util as au
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / 'r.def').write_text('Bootstrap: localimage\nFrom: base.sif\n%post\n    true\n')
+            calls = []
+            def run(cmd, *a):
+                calls.append(cmd)
+                return 0
+            with patch.object(au, '_run_build', side_effect=run):
+                au._build_via_sandbox(d / 'out.sif', d / 'r.def', {}, io.StringIO(), {}, d, 60)
+        post = next(c for c in calls if c[:2] == ['apptainer', 'exec'])
+        self.assertIn('--no-home', post)
+        self.assertIn('--writable', post)
 
 
 class LocalSandboxTests(unittest.TestCase):

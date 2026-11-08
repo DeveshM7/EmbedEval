@@ -1,0 +1,1220 @@
+diff --git a/tests/08-native-runs/23-uiplib.sh b/tests/08-native-runs/23-uiplib.sh
+new file mode 100755
+index 000000000..311ad04d4
+--- /dev/null
++++ b/tests/08-native-runs/23-uiplib.sh
+@@ -0,0 +1,40 @@
++#!/bin/bash
++source ../utils.sh
++
++# Contiki directory
++CONTIKI=$1
++
++# Example code directory
++CODE_DIR=$CONTIKI/tests/08-native-runs/23-uiplib/
++CODE=test-uiplib
++
++# Starting Contiki-NG native node
++echo "Starting native node for uiplib test"
++make -C $CODE_DIR TARGET=native > make.log 2> make.err
++$CODE_DIR/build/native/$CODE.native > $CODE.log 2> $CODE.err &
++CPID=$!
++sleep 2
++
++echo "Closing native node"
++sleep 2
++kill_bg $CPID
++
++if grep -q "=check-me= FAILED" $CODE.log ; then
++  echo "==== make.log ====" ; cat make.log;
++  echo "==== make.err ====" ; cat make.err;
++  echo "==== $CODE.log ====" ; cat $CODE.log;
++  echo "==== $CODE.err ====" ; cat $CODE.err;
++
++  printf "%-32s TEST FAIL\n" "$CODE" | tee $CODE.testlog;
++  rm -f make.log make.err $CODE.log $CODE.err
++  exit 1
++else
++  cp $CODE.log $CODE.testlog
++  printf "%-32s TEST OK\n" "$CODE" | tee $CODE.testlog;
++fi
++
++rm -f make.log make.err $CODE.log $CODE.err
++
++# We do not want Make to stop -> Return 0
++# The Makefile will check if a log contains FAIL at the end
++exit 0
+diff --git a/tests/08-native-runs/23-uiplib/Makefile b/tests/08-native-runs/23-uiplib/Makefile
+new file mode 100644
+index 000000000..96e5d6791
+--- /dev/null
++++ b/tests/08-native-runs/23-uiplib/Makefile
+@@ -0,0 +1,9 @@
++CONTIKI_PROJECT = test-uiplib
++all: $(CONTIKI_PROJECT)
++
++TARGET = native
++
++MODULES += os/services/unit-test
++
++CONTIKI = ../../..
++include $(CONTIKI)/Makefile.include
+diff --git a/tests/08-native-runs/23-uiplib/test-uiplib.c b/tests/08-native-runs/23-uiplib/test-uiplib.c
+new file mode 100644
+index 000000000..f1a199b27
+--- /dev/null
++++ b/tests/08-native-runs/23-uiplib/test-uiplib.c
+@@ -0,0 +1,428 @@
++/*
++ * Copyright (c) 2026, RISE Research Institutes of Sweden AB.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the copyright holder nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * \file
++ *         Unit tests for the uIP address manipulation library.
++ * \author
++ *         Nicolas Tsiftes <nvt@ri.se>
++ */
++
++#include "contiki.h"
++#include "unit-test.h"
++#include "net/ipv6/uiplib.h"
++#include "net/ipv6/ip64-addr.h"
++
++#include <stdio.h>
++#include <string.h>
++
++PROCESS(run_tests, "uiplib unit tests");
++AUTOSTART_PROCESSES(&run_tests);
++
++/*---------------------------------------------------------------------------*/
++/* Helper: compare a parsed address against expected raw bytes. */
++static int
++parse_and_check(const char *str, const uint8_t *expected)
++{
++  uip_ip6addr_t addr;
++  memset(&addr, 0xAA, sizeof(addr));
++  if(!uiplib_ip6addrconv(str, &addr)) {
++    return 0;
++  }
++  return memcmp(addr.u8, expected, 16) == 0;
++}
++/*---------------------------------------------------------------------------*/
++/* IPv6 parsing: standard addresses */
++UNIT_TEST_REGISTER(test_parse_loopback, "Parse ::1");
++UNIT_TEST(test_parse_loopback)
++{
++  static const uint8_t expected[] = {
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("::1", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_unspecified, "Parse ::");
++UNIT_TEST(test_parse_unspecified)
++{
++  static const uint8_t expected[] = {
++    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("::", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_link_local, "Parse fe80::1");
++UNIT_TEST(test_parse_link_local)
++{
++  static const uint8_t expected[] = {
++    0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("fe80::1", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_full, "Parse full address without compression");
++UNIT_TEST(test_parse_full)
++{
++  static const uint8_t expected[] = {
++    0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x02,
++    0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("2001:db8:1:2:3:4:5:6", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_mid_compression, "Parse with mid-address ::");
++UNIT_TEST(test_parse_mid_compression)
++{
++  static const uint8_t expected[] = {
++    0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("2001:db8::1", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_leading_compression, "Parse with leading ::");
++UNIT_TEST(test_parse_leading_compression)
++{
++  static const uint8_t expected[] = {
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("::1:2", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_bracketed, "Parse [bracket] notation");
++UNIT_TEST(test_parse_bracketed)
++{
++  static const uint8_t expected[] = {
++    0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("[fe80::1]", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* IPv6 parsing: RFC 4291 mixed notation (trailing IPv4 dotted-decimal) */
++UNIT_TEST_REGISTER(test_parse_nat64_mixed, "Parse 64:ff9b::8.8.8.8");
++UNIT_TEST(test_parse_nat64_mixed)
++{
++  static const uint8_t expected[] = {
++    0x00, 0x64, 0xff, 0x9b, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x08, 0x08, 0x08, 0x08
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("64:ff9b::8.8.8.8", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_nat64_mixed_rfc, "Parse 64:ff9b::192.0.2.1");
++UNIT_TEST(test_parse_nat64_mixed_rfc)
++{
++  static const uint8_t expected[] = {
++    0x00, 0x64, 0xff, 0x9b, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x02, 0x01
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("64:ff9b::192.0.2.1", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_v4mapped_mixed, "Parse ::FFFF:10.0.0.1");
++UNIT_TEST(test_parse_v4mapped_mixed)
++{
++  static const uint8_t expected[] = {
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0xff, 0xff, 0x0a, 0x00, 0x00, 0x01
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("::FFFF:10.0.0.1", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_parse_full_mixed, "Parse full mixed d.d.d.d form");
++UNIT_TEST(test_parse_full_mixed)
++{
++  static const uint8_t expected[] = {
++    0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x02,
++    0x00, 0x03, 0x00, 0x04, 0xc0, 0xa8, 0x01, 0x01
++  };
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(parse_and_check("2001:db8:1:2:3:4:192.168.1.1", expected));
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* Parsing: rejection of invalid input */
++UNIT_TEST_REGISTER(test_parse_reject_invalid, "Reject malformed addresses");
++UNIT_TEST(test_parse_reject_invalid)
++{
++  uip_ip6addr_t addr;
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(uiplib_ip6addrconv("not-an-address", &addr) == 0);
++  UNIT_TEST_ASSERT(uiplib_ip6addrconv("", &addr) == 0);
++  UNIT_TEST_ASSERT(uiplib_ip6addrconv("xyz", &addr) == 0);
++  UNIT_TEST_ASSERT(uiplib_ip6addrconv("1:2:3:4:5:6:7:8:9", &addr) == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* Printing: standard IPv6 */
++UNIT_TEST_REGISTER(test_print_loopback, "Print ::1");
++UNIT_TEST(test_print_loopback)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  uip_ip6addr(&addr, 0, 0, 0, 0, 0, 0, 0, 1);
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "::1") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_print_link_local, "Print fe80::1");
++UNIT_TEST(test_print_link_local)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  uip_ip6addr(&addr, 0xfe80, 0, 0, 0, 0, 0, 0, 1);
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "fe80::1") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_print_full, "Print full address");
++UNIT_TEST(test_print_full)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  uip_ip6addr(&addr, 0x2001, 0xdb8, 1, 2, 3, 4, 5, 6);
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "2001:db8:1:2:3:4:5:6") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* Printing: IPv4-mapped */
++UNIT_TEST_REGISTER(test_print_v4mapped, "Print ::FFFF:d.d.d.d");
++UNIT_TEST(test_print_v4mapped)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  uip_ip6addr(&addr, 0, 0, 0, 0, 0, 0xffff, 0x0a01, 0x0203);
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "::FFFF:10.1.2.3") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* Printing: NAT64 */
++UNIT_TEST_REGISTER(test_print_nat64, "Print 64:ff9b::d.d.d.d");
++UNIT_TEST(test_print_nat64)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  uip_ip6addr(&addr, 0x0064, 0xff9b, 0, 0, 0, 0, 0x0808, 0x0808);
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "64:ff9b::8.8.8.8") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_print_nat64_rfc, "Print 64:ff9b::192.0.2.1");
++UNIT_TEST(test_print_nat64_rfc)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  uip_ip6addr(&addr, 0x0064, 0xff9b, 0, 0, 0, 0, 0xc000, 0x0201);
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "64:ff9b::192.0.2.1") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* Round-trip: parse then print */
++UNIT_TEST_REGISTER(test_roundtrip_nat64, "Round-trip 64:ff9b::192.0.2.1");
++UNIT_TEST(test_roundtrip_nat64)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(uiplib_ip6addrconv("64:ff9b::192.0.2.1", &addr));
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "64:ff9b::192.0.2.1") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_roundtrip_v4mapped, "Round-trip ::FFFF:10.0.0.1");
++UNIT_TEST(test_roundtrip_v4mapped)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(uiplib_ip6addrconv("::FFFF:10.0.0.1", &addr));
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "::FFFF:10.0.0.1") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++UNIT_TEST_REGISTER(test_roundtrip_plain, "Round-trip 2001:db8::1");
++UNIT_TEST(test_roundtrip_plain)
++{
++  uip_ip6addr_t addr;
++  char buf[UIPLIB_IPV6_MAX_STR_LEN];
++  UNIT_TEST_BEGIN();
++  UNIT_TEST_ASSERT(uiplib_ip6addrconv("2001:db8::1", &addr));
++  uiplib_ipaddr_snprint(buf, sizeof(buf), &addr);
++  UNIT_TEST_ASSERT(strcmp(buf, "2001:db8::1") == 0);
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* uip_nat64addr macro */
++UNIT_TEST_REGISTER(test_nat64_macro, "uip_nat64addr macro");
++UNIT_TEST(test_nat64_macro)
++{
++  uip_ip6addr_t macro_addr;
++  uip_ip6addr_t manual_addr;
++  UNIT_TEST_BEGIN();
++
++  uip_nat64addr(&macro_addr, 8, 8, 8, 8);
++  uip_ip6addr(&manual_addr, 0x0064, 0xff9b, 0, 0, 0, 0, 0x0808, 0x0808);
++  UNIT_TEST_ASSERT(uip_ip6addr_cmp(&macro_addr, &manual_addr));
++
++  uip_nat64addr(&macro_addr, 192, 0, 2, 1);
++  uip_ip6addr(&manual_addr, 0x0064, 0xff9b, 0, 0, 0, 0, 0xc000, 0x0201);
++  UNIT_TEST_ASSERT(uip_ip6addr_cmp(&macro_addr, &manual_addr));
++
++  uip_nat64addr(&macro_addr, 10, 0, 0, 1);
++  uip_ip6addr(&manual_addr, 0x0064, 0xff9b, 0, 0, 0, 0, 0x0a00, 0x0001);
++  UNIT_TEST_ASSERT(uip_ip6addr_cmp(&macro_addr, &manual_addr));
++
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++/* IPv4 parsing */
++UNIT_TEST_REGISTER(test_parse_ipv4, "Parse IPv4 addresses");
++UNIT_TEST(test_parse_ipv4)
++{
++  uip_ip4addr_t addr;
++  UNIT_TEST_BEGIN();
++
++  UNIT_TEST_ASSERT(uiplib_ip4addrconv("192.168.1.1", &addr) > 0);
++  UNIT_TEST_ASSERT(addr.u8[0] == 192 && addr.u8[1] == 168 &&
++                   addr.u8[2] == 1 && addr.u8[3] == 1);
++
++  UNIT_TEST_ASSERT(uiplib_ip4addrconv("10.0.0.1", &addr) > 0);
++  UNIT_TEST_ASSERT(addr.u8[0] == 10 && addr.u8[1] == 0 &&
++                   addr.u8[2] == 0 && addr.u8[3] == 1);
++
++  UNIT_TEST_ASSERT(uiplib_ip4addrconv("255.255.255.255", &addr) > 0);
++  UNIT_TEST_ASSERT(addr.u8[0] == 255 && addr.u8[1] == 255 &&
++                   addr.u8[2] == 255 && addr.u8[3] == 255);
++
++  UNIT_TEST_ASSERT(uiplib_ip4addrconv("0.0.0.0", &addr) > 0);
++  UNIT_TEST_ASSERT(addr.u8[0] == 0 && addr.u8[1] == 0 &&
++                   addr.u8[2] == 0 && addr.u8[3] == 0);
++
++  UNIT_TEST_END();
++}
++/*---------------------------------------------------------------------------*/
++PROCESS_THREAD(run_tests, ev, data)
++{
++  PROCESS_BEGIN();
++
++  printf("\nRunning uiplib unit tests\n");
++
++  UNIT_TEST_RUN(test_parse_loopback);
++  UNIT_TEST_RUN(test_parse_unspecified);
++  UNIT_TEST_RUN(test_parse_link_local);
++  UNIT_TEST_RUN(test_parse_full);
++  UNIT_TEST_RUN(test_parse_mid_compression);
++  UNIT_TEST_RUN(test_parse_leading_compression);
++  UNIT_TEST_RUN(test_parse_bracketed);
++  UNIT_TEST_RUN(test_parse_nat64_mixed);
++  UNIT_TEST_RUN(test_parse_nat64_mixed_rfc);
++  UNIT_TEST_RUN(test_parse_v4mapped_mixed);
++  UNIT_TEST_RUN(test_parse_full_mixed);
++  UNIT_TEST_RUN(test_parse_reject_invalid);
++  UNIT_TEST_RUN(test_print_loopback);
++  UNIT_TEST_RUN(test_print_link_local);
++  UNIT_TEST_RUN(test_print_full);
++  UNIT_TEST_RUN(test_print_v4mapped);
++  UNIT_TEST_RUN(test_print_nat64);
++  UNIT_TEST_RUN(test_print_nat64_rfc);
++  UNIT_TEST_RUN(test_roundtrip_nat64);
++  UNIT_TEST_RUN(test_roundtrip_v4mapped);
++  UNIT_TEST_RUN(test_roundtrip_plain);
++  UNIT_TEST_RUN(test_nat64_macro);
++  UNIT_TEST_RUN(test_parse_ipv4);
++
++  if(!UNIT_TEST_PASSED(test_parse_loopback) ||
++     !UNIT_TEST_PASSED(test_parse_unspecified) ||
++     !UNIT_TEST_PASSED(test_parse_link_local) ||
++     !UNIT_TEST_PASSED(test_parse_full) ||
++     !UNIT_TEST_PASSED(test_parse_mid_compression) ||
++     !UNIT_TEST_PASSED(test_parse_leading_compression) ||
++     !UNIT_TEST_PASSED(test_parse_bracketed) ||
++     !UNIT_TEST_PASSED(test_parse_nat64_mixed) ||
++     !UNIT_TEST_PASSED(test_parse_nat64_mixed_rfc) ||
++     !UNIT_TEST_PASSED(test_parse_v4mapped_mixed) ||
++     !UNIT_TEST_PASSED(test_parse_full_mixed) ||
++     !UNIT_TEST_PASSED(test_parse_reject_invalid) ||
++     !UNIT_TEST_PASSED(test_print_loopback) ||
++     !UNIT_TEST_PASSED(test_print_link_local) ||
++     !UNIT_TEST_PASSED(test_print_full) ||
++     !UNIT_TEST_PASSED(test_print_v4mapped) ||
++     !UNIT_TEST_PASSED(test_print_nat64) ||
++     !UNIT_TEST_PASSED(test_print_nat64_rfc) ||
++     !UNIT_TEST_PASSED(test_roundtrip_nat64) ||
++     !UNIT_TEST_PASSED(test_roundtrip_v4mapped) ||
++     !UNIT_TEST_PASSED(test_roundtrip_plain) ||
++     !UNIT_TEST_PASSED(test_nat64_macro) ||
++     !UNIT_TEST_PASSED(test_parse_ipv4)) {
++    printf("=check-me= FAILED\n");
++    printf("---\n");
++  }
++
++  printf("=check-me= DONE\n");
++  printf("---\n");
++
++  PROCESS_END();
++}
++/*---------------------------------------------------------------------------*/
+diff --git a/tests/08-native-runs/Makefile b/tests/08-native-runs/Makefile
+index bb3eb545b..1313e7068 100644
+--- a/tests/08-native-runs/Makefile
++++ b/tests/08-native-runs/Makefile
+@@ -25,6 +25,7 @@ tests/08-native-runs/17-process-mutex/native:./17-process-mutex.sh \
+ tests/08-native-runs/18-ecc/native:./18-ecc.sh \
+ tests/08-native-runs/19-bitrev/native:./19-bitrev-test.sh \
+ tests/08-native-runs/20-random/native:./20-random.sh \
+-tests/08-native-runs/21-coffee-validation/native:./21-coffee-validation.sh
++tests/08-native-runs/21-coffee-validation/native:./21-coffee-validation.sh \
++tests/08-native-runs/23-uiplib/native:./23-uiplib.sh \
+ 
+ include ../Makefile.compile-test
+diff --git a/tests/17-tun-rpl-br/10-native-nat64-cooja.csc b/tests/17-tun-rpl-br/10-native-nat64-cooja.csc
+new file mode 100644
+index 000000000..11b168a3a
+--- /dev/null
++++ b/tests/17-tun-rpl-br/10-native-nat64-cooja.csc
+@@ -0,0 +1,145 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<simconf version="2022112801">
++  <simulation>
++    <title>NAT64 multi-hop end-to-end test</title>
++    <speedlimit>1.0</speedlimit>
++    <randomseed>1</randomseed>
++    <motedelay_us>1000000</motedelay_us>
++    <radiomedium>
++      org.contikios.cooja.radiomediums.UDGM
++      <transmitting_range>50.0</transmitting_range>
++      <interference_range>100.0</interference_range>
++      <success_ratio_tx>1.0</success_ratio_tx>
++      <success_ratio_rx>1.0</success_ratio_rx>
++    </radiomedium>
++    <events>
++      <logoutput>40000</logoutput>
++    </events>
++    <motetype>
++      org.contikios.cooja.contikimote.ContikiMoteType
++      <description>SLIP Radio</description>
++      <source>[CONTIKI_DIR]/examples/slip-radio/slip-radio.c</source>
++      <commands>$(MAKE) TARGET=cooja clean
++$(MAKE) -j$(CPUS) slip-radio.cooja TARGET=cooja</commands>
++      <moteinterface>org.contikios.cooja.interfaces.Position</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.Battery</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiVib</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiMoteID</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiRS232</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiBeeper</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.RimeAddress</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.IPAddress</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiRadio</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiButton</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiPIR</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiClock</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiLED</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiCFS</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiEEPROM</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.Mote2MoteRelations</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.MoteAttributes</moteinterface>
++      <mote>
++        <interface_config>
++          org.contikios.cooja.interfaces.Position
++          <pos x="54.36775767371176" y="24.409055040864118" />
++        </interface_config>
++        <interface_config>
++          org.contikios.cooja.contikimote.interfaces.ContikiMoteID
++          <id>1</id>
++        </interface_config>
++      </mote>
++    </motetype>
++    <motetype>
++      org.contikios.cooja.contikimote.ContikiMoteType
++      <description>NAT64 test mote</description>
++      <source>[CONTIKI_DIR]/tests/17-tun-rpl-br/code-nat64-test/nat64-test.c</source>
++      <commands>$(MAKE) TARGET=cooja clean
++$(MAKE) -j$(CPUS) nat64-test.cooja TARGET=cooja</commands>
++      <moteinterface>org.contikios.cooja.interfaces.Position</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.Battery</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiVib</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiMoteID</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiRS232</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiBeeper</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.RimeAddress</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.IPAddress</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiRadio</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiButton</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiPIR</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiClock</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiLED</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiCFS</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiEEPROM</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.Mote2MoteRelations</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.MoteAttributes</moteinterface>
++      <mote>
++        <interface_config>
++          org.contikios.cooja.interfaces.Position
++          <pos x="83.54989222799365" y="52.63050856506214" />
++        </interface_config>
++        <interface_config>
++          org.contikios.cooja.contikimote.interfaces.ContikiMoteID
++          <id>2</id>
++        </interface_config>
++      </mote>
++      <mote>
++        <interface_config>
++          org.contikios.cooja.interfaces.Position
++          <pos x="108.91767775240822" y="78.59778809170032" />
++        </interface_config>
++        <interface_config>
++          org.contikios.cooja.contikimote.interfaces.ContikiMoteID
++          <id>3</id>
++        </interface_config>
++      </mote>
++      <mote>
++        <interface_config>
++          org.contikios.cooja.interfaces.Position
++          <pos x="139.91021061864723" y="98.34190023350419" />
++        </interface_config>
++        <interface_config>
++          org.contikios.cooja.contikimote.interfaces.ContikiMoteID
++          <id>4</id>
++        </interface_config>
++      </mote>
++    </motetype>
++  </simulation>
++  <plugin>
++    org.contikios.cooja.plugins.LogListener
++    <plugin_config>
++      <filter />
++      <formatted_time />
++      <coloring />
++    </plugin_config>
++    <bounds x="300" y="1" height="500" width="900" z="1" />
++  </plugin>
++  <plugin>
++    org.contikios.cooja.serialsocket.SerialSocketServer
++    <mote_arg>0</mote_arg>
++    <plugin_config>
++      <port>60001</port>
++      <bound>true</bound>
++      <commands>[CONFIG_DIR]/test-native-nat64.sh [CONTIKI_DIR] 10-native-nat64-cooja 180 2 3 4</commands>
++    </plugin_config>
++    <bounds x="13" y="414" height="116" width="362" z="0" />
++  </plugin>
++  <plugin>
++    org.contikios.cooja.plugins.ScriptRunner
++    <plugin_config>
++      <script>TIMEOUT(10000000000); /* milliseconds. no action at timeout */
++/* Run the simulation in real time so the native border router and
++ * the Python echo server (which use wall-clock time) stay in sync
++ * with mote events. */
++sim.setSpeedLimit(1.0);
++/* Mirror every mote log line into COOJA.testlog so the bash driver
++ * can grep for UDP_ECHO_OK / TCP_ECHO_OK markers; without this the
++ * file contains only the header lines written by Cooja itself. */
++while (true) {
++  log.log(time + " " + id + " " + msg + "\n");
++  YIELD();
++}</script>
++      <active>true</active>
++    </plugin_config>
++    <bounds x="1037" y="40" height="700" width="600" />
++  </plugin>
++</simconf>
+diff --git a/tests/17-tun-rpl-br/code-nat64-test/Makefile b/tests/17-tun-rpl-br/code-nat64-test/Makefile
+new file mode 100644
+index 000000000..d6c588b43
+--- /dev/null
++++ b/tests/17-tun-rpl-br/code-nat64-test/Makefile
+@@ -0,0 +1,6 @@
++CONTIKI_PROJECT = nat64-test
++all: $(CONTIKI_PROJECT)
++
++CONTIKI = ../../..
++
++include $(CONTIKI)/Makefile.include
+diff --git a/tests/17-tun-rpl-br/code-nat64-test/nat64-test.c b/tests/17-tun-rpl-br/code-nat64-test/nat64-test.c
+new file mode 100644
+index 000000000..5b516ce4e
+--- /dev/null
++++ b/tests/17-tun-rpl-br/code-nat64-test/nat64-test.c
+@@ -0,0 +1,206 @@
++/*
++ * Copyright (c) 2026, RISE Research Institutes of Sweden AB.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the copyright holder nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * \file
++ *         Mote-side driver for the NAT64 end-to-end test.
++ *
++ *         Each mote tags its UDP and TCP payload with its node_id
++ *         ("PING-<id>") and sends them to a fixed IPv4 destination
++ *         (127.0.0.1) addressed via the NAT64 well-known prefix
++ *         (64:ff9b::/96).  The native border router translates the
++ *         traffic to plain IPv4 sockets, where a Python echo server
++ *         reflects each datagram and connection.  When the mote
++ *         receives the reflected payload back, it logs a distinctive
++ *         marker (UDP_ECHO_OK / TCP_ECHO_OK) including its node_id,
++ *         so the shell driver can verify that every mote in the
++ *         multi-hop network completed both legs.
++ */
++
++#include "contiki.h"
++#include "net/routing/routing.h"
++#include "net/netstack.h"
++#include "net/ipv6/uip.h"
++#include "net/ipv6/simple-udp.h"
++#include "net/ipv6/tcp-socket.h"
++#include "net/ipv6/ip64-addr.h"
++#include "sys/node-id.h"
++
++#include <stdio.h>
++#include <string.h>
++
++#include "sys/log.h"
++#define LOG_MODULE "NAT64Test"
++#define LOG_LEVEL LOG_LEVEL_INFO
++
++#define UDP_LOCAL_PORT  5557
++#define UDP_REMOTE_PORT 5557
++#define TCP_REMOTE_PORT 5558
++
++#define UDP_PROBE_INTERVAL (5 * CLOCK_SECOND)
++#define UDP_PROBE_MAX 24
++
++#define PAYLOAD_BUF_SIZE 16
++#define TCP_BUF_SIZE     128
++
++static struct simple_udp_connection udp_conn;
++static struct tcp_socket tcp_sock;
++static uint8_t tcp_input_buf[TCP_BUF_SIZE];
++static uint8_t tcp_output_buf[TCP_BUF_SIZE];
++
++static char payload[PAYLOAD_BUF_SIZE];
++static size_t payload_len;
++
++static bool udp_echo_received;
++static bool tcp_echo_received;
++/*---------------------------------------------------------------------------*/
++PROCESS(nat64_test_process, "NAT64 end-to-end test");
++AUTOSTART_PROCESSES(&nat64_test_process);
++/*---------------------------------------------------------------------------*/
++static bool
++payload_matches(const uint8_t *data, uint16_t datalen)
++{
++  return datalen >= payload_len &&
++         memcmp(data, payload, payload_len) == 0;
++}
++/*---------------------------------------------------------------------------*/
++static void
++udp_rx_callback(struct simple_udp_connection *c,
++                const uip_ipaddr_t *sender_addr, uint16_t sender_port,
++                const uip_ipaddr_t *receiver_addr, uint16_t receiver_port,
++                const uint8_t *data, uint16_t datalen)
++{
++  if(payload_matches(data, datalen)) {
++    if(!udp_echo_received) {
++      udp_echo_received = true;
++      LOG_INFO("UDP_ECHO_OK node=%u\n", node_id);
++    }
++  } else {
++    LOG_INFO("UDP_RX_UNEXPECTED node=%u bytes=%u\n", node_id, datalen);
++  }
++}
++/*---------------------------------------------------------------------------*/
++static int
++tcp_data_callback(struct tcp_socket *s, void *ptr,
++                  const uint8_t *data, int datalen)
++{
++  if(payload_matches(data, datalen)) {
++    if(!tcp_echo_received) {
++      tcp_echo_received = true;
++      LOG_INFO("TCP_ECHO_OK node=%u\n", node_id);
++    }
++  }
++  return 0;
++}
++/*---------------------------------------------------------------------------*/
++static void
++tcp_event_callback(struct tcp_socket *s, void *ptr,
++                   tcp_socket_event_t event)
++{
++  switch(event) {
++  case TCP_SOCKET_CONNECTED:
++    LOG_INFO("TCP_CONNECTED node=%u\n", node_id);
++    tcp_socket_send(s, (const uint8_t *)payload, payload_len);
++    break;
++  case TCP_SOCKET_CLOSED:
++    LOG_INFO("TCP_CLOSED node=%u\n", node_id);
++    break;
++  case TCP_SOCKET_TIMEDOUT:
++    LOG_INFO("TCP_TIMEDOUT node=%u\n", node_id);
++    break;
++  case TCP_SOCKET_ABORTED:
++    LOG_INFO("TCP_ABORTED node=%u\n", node_id);
++    break;
++  case TCP_SOCKET_DATA_SENT:
++    break;
++  }
++}
++/*---------------------------------------------------------------------------*/
++PROCESS_THREAD(nat64_test_process, ev, data)
++{
++  static struct etimer wait_timer;
++  static uip_ipaddr_t target;
++  static unsigned probes;
++  int n;
++
++  PROCESS_BEGIN();
++
++  /* Stagger startup across motes so they don't all probe simultaneously. */
++  etimer_set(&wait_timer, (clock_time_t)node_id * CLOCK_SECOND);
++  PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&wait_timer));
++
++  n = snprintf(payload, sizeof(payload), "PING-%u", node_id);
++  payload_len = (n > 0 && (size_t)n < sizeof(payload)) ? (size_t)n : 0;
++
++  simple_udp_register(&udp_conn, UDP_LOCAL_PORT, NULL, UDP_REMOTE_PORT,
++                      udp_rx_callback);
++
++  tcp_socket_register(&tcp_sock, NULL,
++                      tcp_input_buf, sizeof(tcp_input_buf),
++                      tcp_output_buf, sizeof(tcp_output_buf),
++                      tcp_data_callback, tcp_event_callback);
++
++  /* 64:ff9b::7f00:1 maps 127.0.0.1 via the well-known NAT64 prefix. */
++  uip_nat64addr(&target, 127, 0, 0, 1);
++
++  LOG_INFO("Starting node=%u, waiting for routing...\n", node_id);
++  etimer_set(&wait_timer, CLOCK_SECOND);
++  while(!NETSTACK_ROUTING.node_is_reachable()) {
++    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&wait_timer));
++    etimer_reset(&wait_timer);
++  }
++  LOG_INFO("Network reachable node=%u, starting probes\n", node_id);
++
++  for(probes = 0; probes < UDP_PROBE_MAX && !udp_echo_received; probes++) {
++    LOG_INFO("UDP_PROBE_SEND node=%u probe=%u\n", node_id, probes);
++    simple_udp_sendto(&udp_conn, payload, payload_len, &target);
++    etimer_set(&wait_timer, UDP_PROBE_INTERVAL);
++    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&wait_timer));
++  }
++
++  if(!udp_echo_received) {
++    LOG_INFO("UDP_GAVE_UP node=%u\n", node_id);
++  }
++
++  LOG_INFO("TCP_CONNECT node=%u to ", node_id);
++  LOG_INFO_6ADDR(&target);
++  LOG_INFO_(":%u\n", TCP_REMOTE_PORT);
++  tcp_socket_connect(&tcp_sock, &target, TCP_REMOTE_PORT);
++
++  while(1) {
++    etimer_set(&wait_timer, 30 * CLOCK_SECOND);
++    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&wait_timer));
++    LOG_INFO("STATUS node=%u udp=%d tcp=%d\n",
++             node_id, udp_echo_received, tcp_echo_received);
++  }
++
++  PROCESS_END();
++}
++/*---------------------------------------------------------------------------*/
+diff --git a/tests/17-tun-rpl-br/code-nat64-test/project-conf.h b/tests/17-tun-rpl-br/code-nat64-test/project-conf.h
+new file mode 100644
+index 000000000..346985baf
+--- /dev/null
++++ b/tests/17-tun-rpl-br/code-nat64-test/project-conf.h
+@@ -0,0 +1,40 @@
++/*
++ * Copyright (c) 2026, RISE Research Institutes of Sweden AB.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the copyright holder nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef PROJECT_CONF_H_
++#define PROJECT_CONF_H_
++
++/* Enable TCP for the NAT64 TCP-splice test. */
++#define UIP_CONF_TCP 1
++
++/* Match the BR's 6LoWPAN compression context for the NAT64 prefix. */
++#include "services/nat64/nat64-6lowpan.h"
++
++#endif /* PROJECT_CONF_H_ */
+diff --git a/tests/17-tun-rpl-br/nat64-echo-server.py b/tests/17-tun-rpl-br/nat64-echo-server.py
+new file mode 100755
+index 000000000..932dda2f8
+--- /dev/null
++++ b/tests/17-tun-rpl-br/nat64-echo-server.py
+@@ -0,0 +1,130 @@
++#!/usr/bin/env python3
++"""IPv4 UDP and TCP echo servers used by the NAT64 end-to-end test.
++
++Listens on 127.0.0.1 only.  Each datagram or connection is logged
++(timestamp + protocol + peer + payload) so the shell driver can grep
++for evidence that the NAT64 gateway translated traffic from the IPv6
++mote into IPv4.
++"""
++
++import argparse
++import os
++import signal
++import socket
++import sys
++import threading
++import time
++
++
++def log(fp, msg):
++    fp.write("{:.3f} {}\n".format(time.time(), msg))
++    fp.flush()
++
++
++def udp_server(host, port, logfp, stop):
++    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++    s.bind((host, port))
++    s.settimeout(0.5)
++    log(logfp, "UDP_LISTEN {}:{}".format(host, port))
++    while not stop.is_set():
++        try:
++            data, addr = s.recvfrom(1024)
++        except socket.timeout:
++            continue
++        log(logfp, "UDP_ECHO from={}:{} bytes={} payload={!r}".format(
++            addr[0], addr[1], len(data), data[:64]))
++        try:
++            s.sendto(data, addr)
++        except OSError as e:
++            log(logfp, "UDP_SEND_ERR {}".format(e))
++    s.close()
++
++
++def tcp_handle(conn, peer, logfp):
++    log(logfp, "TCP_ACCEPT from={}:{}".format(peer[0], peer[1]))
++    conn.settimeout(10.0)
++    try:
++        # Read a small chunk and echo it back.
++        data = conn.recv(1024)
++        if not data:
++            log(logfp, "TCP_EMPTY from={}:{}".format(peer[0], peer[1]))
++            return
++        log(logfp, "TCP_ECHO from={}:{} bytes={} payload={!r}".format(
++            peer[0], peer[1], len(data), data[:64]))
++        conn.sendall(data)
++    except socket.timeout:
++        log(logfp, "TCP_TIMEOUT from={}:{}".format(peer[0], peer[1]))
++    except OSError as e:
++        log(logfp, "TCP_ERR from={}:{} {}".format(peer[0], peer[1], e))
++    finally:
++        try:
++            conn.shutdown(socket.SHUT_WR)
++        except OSError:
++            pass
++        conn.close()
++
++
++def tcp_server(host, port, logfp, stop):
++    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++    s.bind((host, port))
++    s.listen(8)
++    s.settimeout(0.5)
++    log(logfp, "TCP_LISTEN {}:{}".format(host, port))
++    while not stop.is_set():
++        try:
++            conn, peer = s.accept()
++        except socket.timeout:
++            continue
++        t = threading.Thread(target=tcp_handle, args=(conn, peer, logfp),
++                             daemon=True)
++        t.start()
++    s.close()
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--host", default="127.0.0.1")
++    ap.add_argument("--udp-port", type=int, default=5557)
++    ap.add_argument("--tcp-port", type=int, default=5558)
++    ap.add_argument("--log", required=True)
++    ap.add_argument("--pidfile")
++    args = ap.parse_args()
++
++    if args.pidfile:
++        with open(args.pidfile, "w") as f:
++            f.write(str(os.getpid()))
++
++    logfp = open(args.log, "w", buffering=1)
++    log(logfp, "PID {}".format(os.getpid()))
++
++    stop = threading.Event()
++
++    def handle_signal(signum, frame):
++        stop.set()
++
++    signal.signal(signal.SIGTERM, handle_signal)
++    signal.signal(signal.SIGINT, handle_signal)
++
++    threads = [
++        threading.Thread(target=udp_server,
++                         args=(args.host, args.udp_port, logfp, stop),
++                         daemon=True),
++        threading.Thread(target=tcp_server,
++                         args=(args.host, args.tcp_port, logfp, stop),
++                         daemon=True),
++    ]
++    for t in threads:
++        t.start()
++
++    while not stop.is_set():
++        time.sleep(0.5)
++
++    log(logfp, "STOP")
++    logfp.close()
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/17-tun-rpl-br/test-native-nat64.sh b/tests/17-tun-rpl-br/test-native-nat64.sh
+new file mode 100755
+index 000000000..9d9ea6b42
+--- /dev/null
++++ b/tests/17-tun-rpl-br/test-native-nat64.sh
+@@ -0,0 +1,149 @@
++#!/bin/bash
++#
++# End-to-end test for the NAT64 gateway over a multi-hop RPL network.
++#
++# Driven by Cooja's SerialSocketServer plugin: the .csc starts a
++# slip-radio mote and several nat64-test motes positioned in a chain,
++# then runs this script.  This script:
++#   1. Starts a Python IPv4 echo server on 127.0.0.1 (UDP and TCP).
++#   2. Starts the native rpl-border-router with --nat64 enabled,
++#      connecting to Cooja's serial socket on localhost:60001.
++#   3. Waits long enough for RPL convergence over multiple hops and
++#      for every mote to round-trip both UDP and TCP probes through
++#      the gateway.
++#   4. For each expected node_id, verifies that
++#        - the echo server saw a "PING-<id>" payload on UDP and TCP
++#          (proves the IPv6->IPv4 leg works for that mote), and
++#        - the mote logged "UDP_ECHO_OK node=<id>" and
++#          "TCP_ECHO_OK node=<id>" (proves the IPv4->IPv6 return leg).
++#
++# Usage: test-native-nat64.sh CONTIKI_DIR BASENAME WAIT_TIME [NODE_IDS...]
++#
++
++set -u
++
++CONTIKI=$1
++BASENAME=$2
++WAIT_TIME=${3:-180}
++shift 3 || true
++NODE_IDS=("$@")
++if [ ${#NODE_IDS[@]} -eq 0 ]; then
++  NODE_IDS=(2 3 4)
++fi
++
++THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
++ECHO_LOG="$THIS_DIR/$BASENAME.echo.log"
++ECHO_PIDFILE="$THIS_DIR/$BASENAME.echo.pid"
++BR_LOG="$THIS_DIR/$BASENAME.brlog"
++COOJA_LOG="$THIS_DIR/COOJA.testlog"
++
++UDP_PORT=5557
++TCP_PORT=5558
++
++cleanup() {
++  if [ -f "$ECHO_PIDFILE" ]; then
++    PID=$(cat "$ECHO_PIDFILE" 2>/dev/null || true)
++    if [ -n "$PID" ]; then
++      kill "$PID" 2>/dev/null || true
++    fi
++    rm -f "$ECHO_PIDFILE"
++  fi
++  if [ -n "${MPID:-}" ]; then
++    kill "$MPID" 2>/dev/null || true
++  fi
++}
++trap cleanup EXIT INT TERM
++
++rm -f "$ECHO_LOG" "$ECHO_PIDFILE" "$BR_LOG"
++
++echo "Starting IPv4 echo server (UDP $UDP_PORT, TCP $TCP_PORT)"
++python3 "$THIS_DIR/nat64-echo-server.py" \
++  --host 127.0.0.1 \
++  --udp-port "$UDP_PORT" \
++  --tcp-port "$TCP_PORT" \
++  --log "$ECHO_LOG" \
++  --pidfile "$ECHO_PIDFILE" &
++
++# Give the server a moment to bind both sockets.
++for _ in 1 2 3 4 5; do
++  if grep -q "TCP_LISTEN" "$ECHO_LOG" 2>/dev/null && \
++     grep -q "UDP_LISTEN" "$ECHO_LOG" 2>/dev/null; then
++    break
++  fi
++  sleep 1
++done
++
++echo "Starting native border-router with NAT64"
++# NAT64_ALLOW_LOOPBACK=1 lets the gateway forward to 127.0.0.0/8 so it
++# can reach the echo server on the BR's loopback.  Test-only — the BR
++# rejects loopback destinations by default.
++#
++# --no-tun lets the BR run without CAP_NET_ADMIN/sudo: NAT64 traffic is
++# served entirely from the BR's own AF_INET sockets, and any non-NAT64
++# IPv6 traffic from the motes is dropped at the fallback interface.
++make -C "$CONTIKI/examples/rpl-border-router" -B \
++     border-router.native TARGET=native NAT64_ALLOW_LOOPBACK=1 \
++     >"$BR_LOG" 2>&1
++"$CONTIKI/examples/rpl-border-router/build/native/border-router.native" \
++     -a localhost --nat64 --no-tun fd00::1/64 \
++     >>"$BR_LOG" 2>&1 &
++MPID=$!
++
++echo "Waiting $WAIT_TIME seconds for convergence and probes (nodes: ${NODE_IDS[*]})"
++sleep "$WAIT_TIME"
++
++STATUS=0
++
++# Per-node assertions.  Each mote tags its payload as PING-<id> and logs
++# "UDP_ECHO_OK node=<id>" / "TCP_ECHO_OK node=<id>" on a successful echo.
++for ID in "${NODE_IDS[@]}"; do
++  if grep -q "payload=b'PING-${ID}'" "$ECHO_LOG" 2>/dev/null; then
++    : # Match either UDP or TCP — we tighten below.
++  fi
++
++  if grep -q "UDP_ECHO .*payload=b'PING-${ID}'" "$ECHO_LOG" 2>/dev/null; then
++    echo "PASS: echo server reflected UDP PING-${ID}"
++  else
++    echo "FAIL: echo server saw no UDP datagram from node ${ID}"
++    STATUS=1
++  fi
++
++  if grep -q "TCP_ECHO .*payload=b'PING-${ID}'" "$ECHO_LOG" 2>/dev/null; then
++    echo "PASS: echo server reflected TCP PING-${ID}"
++  else
++    echo "FAIL: echo server saw no TCP payload from node ${ID}"
++    STATUS=1
++  fi
++
++  if [ -f "$COOJA_LOG" ]; then
++    if grep -q "UDP_ECHO_OK node=${ID}" "$COOJA_LOG"; then
++      echo "PASS: mote ${ID} received the UDP echo back"
++    else
++      echo "FAIL: mote ${ID} did not log UDP_ECHO_OK"
++      STATUS=1
++    fi
++
++    if grep -q "TCP_ECHO_OK node=${ID}" "$COOJA_LOG"; then
++      echo "PASS: mote ${ID} received the TCP echo back"
++    else
++      echo "FAIL: mote ${ID} did not log TCP_ECHO_OK"
++      STATUS=1
++    fi
++  else
++    echo "FAIL: Cooja log not found at $COOJA_LOG"
++    STATUS=1
++    break
++  fi
++done
++
++if [ $STATUS -eq 0 ]; then
++  printf "%-32s TEST OK\n" "$BASENAME" >"$BASENAME.testlog"
++else
++  printf "%-32s TEST FAIL\n" "$BASENAME" >"$BASENAME.testlog"
++  echo "==== border-router log (tail) ===="
++  tail -n 80 "$BR_LOG" 2>/dev/null || true
++  echo "==== echo server log ===="
++  cat "$ECHO_LOG" 2>/dev/null || true
++fi
++
++exit $STATUS

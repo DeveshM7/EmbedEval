@@ -1,0 +1,78 @@
+{
+  "instance_id": "contiki-ng__contiki-ng-3202",
+  "project": "contiki-ng",
+  "pipeline": "contiki-ng",
+  "repo": "https://github.com/contiki-ng/contiki-ng",
+  "base_commit": "b73dce38f405f824eb0f2568d54fb825da23265f",
+  "fix_commit": "27c4c10958088bb4e50ddc51b033dab9dd9ed751",
+  "test_commit": "27c4c10958088bb4e50ddc51b033dab9dd9ed751",
+  "problem_statement": "When using the Antelope database API and AQL from a native application, several observable behaviors are wrong. (1) Aggregate queries return incorrect results: COUNT/SUM/MAX/MIN behave, but MEAN always returns 0 instead of the average of the matching values (e.g. SELECT MEAN over a relation of values 1..5 should give 3, and over a set of 32-bit LONG values should give their integer average), and MEDIAN always returns 0 instead of the middle value (e.g. the median of an odd set of scores should be the middle score, and of an even set the average of the two middle scores). A query asking for two MEDIAN aggregates in one statement is not rejected as the documented limit requires. Aggregating a 32-bit (LONG) attribute returns a value truncated to the lower 16 bits instead of the full 32-bit value (e.g. SUM of scores 90,75,60,85,95 should be 405, and SUM of 100000 and 200000 should be 300000). (2) The MAXHEAP index cannot be reused across a database re-initialization: after a run that already created one MAXHEAP index, a later CREATE INDEX ... TYPE MAXHEAP fails, so bulk relations with an index and joins through an indexed attribute fail. (3) After re-initializing the database without reformatting storage, a previously created MAXHEAP index is not usable: an equi-join (JOIN ... ON <attr>) through the restored index does not return the newly inserted tuples, and the expected number of matched rows is wrong. The expected behavior is that aggregate functions return correct 32-bit values and reject more than one MEDIAN per query, that a MAXHEAP index slot freed by re-initialization can be re-created, and that a restored MAXHEAP index supports joins over newly inserted tuples.",
+  "fail_to_pass": [
+    "tests/08-native-runs/24-antelope/test-antelope::aggregates",
+    "tests/08-native-runs/24-antelope/test-antelope::index_persistence",
+    "tests/08-native-runs/24-antelope/test-antelope::large_relation"
+  ],
+  "pass_to_pass": [
+    "tests/08-native-runs/24-antelope/test-antelope::schema_and_insert",
+    "tests/08-native-runs/24-antelope/test-antelope::where_conditions",
+    "tests/08-native-runs/24-antelope/test-antelope::indexed_query",
+    "tests/08-native-runs/24-antelope/test-antelope::remove_tuples",
+    "tests/08-native-runs/24-antelope/test-antelope::join_relations"
+  ],
+  "after_required": [
+    "tests/08-native-runs/24-antelope/test-antelope::schema_and_insert",
+    "tests/08-native-runs/24-antelope/test-antelope::where_conditions",
+    "tests/08-native-runs/24-antelope/test-antelope::aggregates",
+    "tests/08-native-runs/24-antelope/test-antelope::indexed_query",
+    "tests/08-native-runs/24-antelope/test-antelope::remove_tuples",
+    "tests/08-native-runs/24-antelope/test-antelope::join_relations",
+    "tests/08-native-runs/24-antelope/test-antelope::index_persistence",
+    "tests/08-native-runs/24-antelope/test-antelope::large_relation",
+    "tests/08-native-runs/24-antelope/test-antelope::error_handling"
+  ],
+  "files_changed_by_fix": [
+    "doc/programming/Antelope.md",
+    "os/storage/antelope/aql-exec.c",
+    "os/storage/antelope/aql-lexer.c",
+    "os/storage/antelope/aql-parser.c",
+    "os/storage/antelope/aql.h",
+    "os/storage/antelope/db-options.h",
+    "os/storage/antelope/index-maxheap.c",
+    "os/storage/antelope/index-memhash.c",
+    "os/storage/antelope/index.c",
+    "os/storage/antelope/index.h",
+    "os/storage/antelope/relation.c",
+    "os/storage/antelope/relation.h",
+    "os/storage/antelope/storage-cfs.c",
+    "os/storage/antelope/storage.h"
+  ],
+  "pr_url": "https://github.com/contiki-ng/contiki-ng/pull/3202",
+  "run_command": "run_tests",
+  "apptainer_image": "contiki-ng__contiki-ng-3202.sif",
+  "generated": true,
+  "oracle": "runtime",
+  "architecture": "x86_64",
+  "observation_only": false,
+  "superseded_statements": [
+    {
+      "problem_statement": "The new Antelope unit-test suite (tests/08-native-runs/24-antelope) exercises the Antelope DBMS AQL/C API, and several of its cases expose base bugs in aggregate evaluation and index lifecycle: aggregate results are truncated to 16 bits and MEAN/MEDIAN are not accumulated; a failed query leaves the result relation in the handle; a MAXHEAP index is not removed from storage on destroy nor reset on db_init(); and a second MAXHEAP cannot be created because the single heap slot is not freed.",
+      "provenance": "triage verdict",
+      "check_issues": [
+        "`problem_statement` gives the fix away: \"aggregate results are truncated to 16 bits\"; \"MEAN/MEDIAN are not accumulated\"; \"a failed query leaves the result relation in the handle\"; \"a MAXHEAP index is not removed from storage on destroy nor reset on db_init()\"; \"and a second MAXHEAP cannot be created because the single heap slot is not freed\". Describe only the observable symptom, its trigger and the required behavior, not what the code checks or must do internally"
+      ]
+    }
+  ],
+  "causal_chain": "The upstream test-antelope cases drive the database through db_query/db_process and assert on the returned rows. In the aggregates case, the test inserts a fixed set of INT and LONG rows and issues SELECT MEAN(...), SELECT MEDIAN(...), SELECT SUM(score), and SELECT COUNT(id)... WHERE score>80; the unfixed code returns 0 for MEAN and MEDIAN and a truncated value for the LONG SUM, so the asserted 3, 81, 85, 87, 405 and 300000 are not produced, and the two-MEDIAN query is not rejected. In the index_persistence case, the test creates a MAXHEAP-indexed relation, re-initializes the database, and joins two relations on the indexed attribute; the unfixed code does not release the single MAXHEAP slot on re-initialization, does not restore the index, and does not keep the stored bucket consistent with newly inserted pairs, so index_restored() reports the index absent and the join returns the wrong rows. In the large_relation case the test inserts 1000 tuples, creates a second MAXHEAP index in the same run, and queries it; the unfixed code cannot re-create the MAXHEAP index (slot not released) and returns wrong aggregates/point results. The pass-to-pass cases (schema_and_insert, where_conditions, indexed_query, remove_tuples, join_relations) exercise non-re-initialized paths that remain correct, so they pass both before and after.",
+  "change_type": "bugfix",
+  "statement_provenance": {
+    "model": "qwen38-nvfp4",
+    "mode": "statement",
+    "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/gold-triage-15/triage/3202.statement.trace.json",
+    "prompt_sha256": "e8c4bf72efe615a2"
+  },
+  "statement_check": {
+    "version": 2,
+    "result": "written",
+    "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/gold-triage-15/triage/3202.statement.trace.json"
+  }
+}

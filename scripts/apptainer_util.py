@@ -295,7 +295,10 @@ def _build_via_sandbox(partial: Path, definition: Path, build_args: dict, fh, en
     script = rootfs / "opt" / "embedeval" / ".post.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(spec["post"] + "\n")
-    rc = _run_build(["apptainer", "exec", "--writable", "--pwd", "/", str(rootfs),
+    # --no-home: with the host's home mounted, the container's /home is a
+    # session overlay, and what %post changes under it (e.g. removing the
+    # CI image's /home/user repositories) never reaches the image.
+    rc = _run_build(["apptainer", "exec", "--no-home", "--writable", "--pwd", "/", str(rootfs),
                      "/bin/sh", "-e", "/opt/embedeval/.post.sh"], fh, env, definition.parent, timeout)
     script.unlink(missing_ok=True)
     if rc:
@@ -374,6 +377,12 @@ def runnable_image(image: Path) -> Path:
     an image runs from a sandbox extracted once on node-local disk."""
     if not is_i386_sif(image):
         return Path(image)
+    return extract_local_sandbox(image)
+
+
+def extract_local_sandbox(image: Path) -> Path:
+    """The image's files as a node-local sandbox directory, extracted once
+    (the leak check reads every file of an image this way)."""
     target = local_sandbox(image)
     if (target / ".embedeval-complete").exists():
         return target
@@ -407,11 +416,16 @@ def remove_local_sandbox(image: Path) -> list[Path]:
 
 
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
-              overlay: Path | None = None, env: dict | None = None) -> list[str]:
+              overlay: Path | None = None, env: dict | None = None,
+              network: bool = True) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
     gives a fresh home and /tmp, --cleanenv drops the host environment (the
-    cluster's LD_LIBRARY_PATH breaks the SDK's QEMU; its Python confuses CMake)."""
+    cluster's LD_LIBRARY_PATH breaks the SDK's QEMU; its Python confuses CMake).
+    network=False runs it in a network namespace of its own with loopback only
+    (`--net --network none`): nothing inside can reach GitHub or any host."""
     cmd = ["apptainer", "exec", "--containall", "--cleanenv"]
+    if not network:
+        cmd += ["--net", "--network", "none"]
     if overlay:
         cmd += ["--overlay", str(overlay)]
     for src, dst in (binds or {}).items():
@@ -424,12 +438,19 @@ def exec_args(image: Path, binds: dict[Path, str] | None = None,
 # The files an instance image is built from. Their fingerprint is recorded in
 # validation.json, so a recipe changed after validation is never promoted.
 RECIPE_FILES = ("instance.def", "instance.json", "run_tests.py", "test_patch.diff")
+# Contiki-NG: instance.json stays on the host (the oracle); the image gets
+# bench.json, only what run_tests needs to run the selected units.
+CONTIKI_NG_RECIPE_FILES = (*RECIPE_FILES, "bench.json")
+
+
+def recipe_files(instance_dir: Path) -> tuple[str, ...]:
+    return CONTIKI_NG_RECIPE_FILES if (Path(instance_dir) / "bench.json").exists() else RECIPE_FILES
 
 
 def recipe_fingerprint(instance_dir: Path) -> str:
     import hashlib
     h = hashlib.sha256()
-    for name in RECIPE_FILES:
+    for name in recipe_files(instance_dir):
         h.update(name.encode() + b"\0" + (Path(instance_dir) / name).read_bytes() + b"\0")
     return h.hexdigest()
 

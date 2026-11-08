@@ -33,7 +33,8 @@ APPTAINER_INSTANCES = REPO_ROOT / "apptainer" / "instances"
 _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
                   if _override else [layout.generated()] if layout.run_dir()
-                  else [APPTAINER_INSTANCES, REPO_ROOT / "docker" / "instances"])
+                  else [APPTAINER_INSTANCES, APPTAINER_INSTANCES / "contiki-ng",
+                        REPO_ROOT / "docker" / "instances"])
 
 PROJECTS = ("zephyr", "nuttx", "riot", "openthread", "contiki-ng")
 

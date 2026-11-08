@@ -16,8 +16,12 @@ and the tests actually run.
   [docs/pipeline_internals.md](docs/pipeline_internals.md) (how it works).
 - **NuttX and RIOT** instances are hand-built **Docker** images in
   `docker/instances/`.
+- **Contiki-NG** instances run the upstream native unit tests or Cooja
+  scenarios in the upstream CI image of the base's era (Apptainer), with no
+  network; see section 12 of [docs/running_on_scholar.md](docs/running_on_scholar.md).
 
-**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT.
+**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 36 Contiki-NG
+(`apptainer/instances/contiki-ng/`), 6 NuttX, 3 RIOT.
 
 ---
 
