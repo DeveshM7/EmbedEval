@@ -1,0 +1,567 @@
+diff --git a/tests/unittests/tests-ztimer64/Makefile b/tests/unittests/tests-ztimer64/Makefile
+new file mode 100644
+index 0000000000..6c572ed15c
+--- /dev/null
++++ b/tests/unittests/tests-ztimer64/Makefile
+@@ -0,0 +1,6 @@
++# avoid clang warning in tests-ztimer/tests-ztimer-extend.c:141
++ifeq (llvm,$(TOOLCHAIN))
++  CFLAGS += -Wno-gnu-folding-constant
++endif
++
++include $(RIOTBASE)/Makefile.base
+diff --git a/tests/unittests/tests-ztimer64/Makefile.include b/tests/unittests/tests-ztimer64/Makefile.include
+new file mode 100644
+index 0000000000..104c4d02db
+--- /dev/null
++++ b/tests/unittests/tests-ztimer64/Makefile.include
+@@ -0,0 +1,3 @@
++USEMODULE += ztimer_core
++USEMODULE += ztimer_mock
++USEMODULE += ztimer64
+diff --git a/tests/unittests/tests-ztimer64/tests-ztimer64-core.c b/tests/unittests/tests-ztimer64/tests-ztimer64-core.c
+new file mode 100644
+index 0000000000..f5fd837085
+--- /dev/null
++++ b/tests/unittests/tests-ztimer64/tests-ztimer64-core.c
+@@ -0,0 +1,216 @@
++/*
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @{
++ *
++ * @file
++ * @brief       Unittests for ztimer64
++ *
++ */
++
++#include <stdio.h>
++#include <string.h>
++
++#include "ztimer.h"
++#include "ztimer64.h"
++#include "ztimer/mock.h"
++
++#include "embUnit/embUnit.h"
++
++#include "tests-ztimer64.h"
++
++#define ZTIMER64_CHECKPOINT_INTERVAL  (1LLU << 31)
++
++/**
++ * @brief   Simple callback for counting alarms
++ */
++static void cb_incr(void *arg)
++{
++    uint32_t *ptr = arg;
++
++    *ptr += 1;
++}
++
++static ztimer_mock_t zmock;
++static ztimer_clock_t *z = &zmock.super;
++static ztimer64_clock_t z64mock;
++static ztimer64_clock_t *z64 = &z64mock;
++
++static void setup(void)
++{
++    memset(&zmock, '\0', sizeof(ztimer_mock_t));
++    memset(&z64mock, '\0', sizeof(ztimer64_clock_t));
++    /* ztimer base clock is already extended to 32bit */
++    ztimer_mock_init(&zmock, 32);
++    ztimer64_clock_init(z64, z);
++}
++
++/**
++ * @brief
++ */
++static void test_ztimer64_now(void)
++{
++    uint64_t now64 = ztimer64_now(z64);
++
++    TEST_ASSERT_EQUAL_INT(0, now64);
++
++    ztimer_mock_advance(&zmock, 123);
++    now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(123, now64);
++
++    ztimer_mock_jump(&zmock, 0x10000000ul);
++    now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(0x10000000ul, now64);
++
++    ztimer_mock_advance(&zmock, 0x98765432ul);
++    now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(0xa8765432ul, now64);
++    /* 32bit overflow */
++    ztimer_mock_advance(&zmock, 0x41234567ul);
++    ztimer_mock_advance(&zmock, 0x40000000ul);
++    now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(0x129999999ul, now64);
++}
++
++/**
++ * @brief   Testing 32 bit wide mock clock set functionality
++ */
++static void test_ztimer64_set(void)
++{
++    uint64_t now64 = ztimer64_now(z64);
++
++    TEST_ASSERT_EQUAL_INT(0, now64);
++
++    uint32_t count = 0;
++    ztimer64_t alarm = { .callback = cb_incr, .arg = &count, };
++
++    ztimer64_set(z64, &alarm, 1000);
++    ztimer_mock_advance(&zmock,    1);          /* now =    1*/
++    TEST_ASSERT_EQUAL_INT(0, count);
++    ztimer_mock_advance(&zmock,  100);          /* now =  101 */
++    TEST_ASSERT_EQUAL_INT(0, count);
++    ztimer_mock_advance(&zmock,  898);          /* now =  999 */
++    now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(999, now64);
++    TEST_ASSERT_EQUAL_INT(0, count);
++    ztimer_mock_advance(&zmock,    1);          /* now = 1000*/
++    TEST_ASSERT_EQUAL_INT(1, count);
++    ztimer_mock_advance(&zmock,    1);          /* now = 1001*/
++    TEST_ASSERT_EQUAL_INT(1, count);
++    ztimer_mock_advance(&zmock, 1000);          /* now = 2001*/
++    TEST_ASSERT_EQUAL_INT(1, count);
++    ztimer64_set(z64, &alarm, 3);
++    ztimer_mock_advance(&zmock,  999);          /* now = 3000*/
++    TEST_ASSERT_EQUAL_INT(2, count);
++    ztimer64_set(z64, &alarm, 4000001000ul);
++    ztimer_mock_advance(&zmock, 1000);          /* now = 4000*/
++    TEST_ASSERT_EQUAL_INT(2, count);
++    ztimer_mock_advance(&zmock, 4000000000ul);  /* now = 4000004000*/
++    now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(4000004000ul, now64);
++    TEST_ASSERT_EQUAL_INT(3, count);
++    /* 32bit overflow */
++    ztimer64_set(z64, &alarm, 8000000000ul);
++    ztimer_mock_advance(&zmock, 4000000000ul);
++    ztimer_mock_advance(&zmock, 3999999999ul);  /* now = 12000003999*/
++    TEST_ASSERT_EQUAL_INT(3, count);
++    ztimer_mock_advance(&zmock, 1ul);           /* now = 12000004000*/
++    TEST_ASSERT_EQUAL_INT(4, count);
++    ztimer64_set(z64, &alarm, 15);
++    ztimer_mock_advance(&zmock,  14);
++    ztimer64_remove(z64, &alarm);
++    ztimer_mock_advance(&zmock, 1000);
++    TEST_ASSERT_EQUAL_INT(4, count);
++}
++
++/**
++ * @brief   Testing 32 bit wide mock clock set functionality
++ */
++static void test_ztimer64_set_0(void)
++{
++     uint64_t now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(0, now64);
++
++    uint32_t count = 0;
++    ztimer64_t alarm = { .callback = cb_incr, .arg = &count, };
++
++    /* should trigger asap, note that for a real timer this will be
++       to minimal value that guarantees the ISR not to be missed,
++       e.g: CONFIG_ZTIMER_USEC_MIN or RTT_MIN_OFFSET */
++    ztimer64_set(z64, &alarm, 0);
++    ztimer_mock_advance(&zmock, 1);          /* now =    1*/
++    TEST_ASSERT_EQUAL_INT(1, count);
++}
++
++/**
++ * @brief   Testing timers set in the past
++ */
++static void test_ztimer64_set_at(void)
++{
++    uint64_t now64 = ztimer64_now(z64);
++
++    TEST_ASSERT_EQUAL_INT(0, now64);
++
++    uint32_t count = 0;
++    ztimer64_t alarm = { .callback = cb_incr, .arg = &count, };
++
++    /* test setting an offset that is now in the past, should trigger asap */
++    ztimer_mock_advance(&zmock, 1010);          /* now =    1010 */
++    ztimer64_set_at(z64, &alarm, 1000);
++    /* should trigger on next tick */
++    ztimer_mock_advance(&zmock, 1);             /* now =    1011 */
++    TEST_ASSERT_EQUAL_INT(1, count);
++}
++
++static void test_ztimer64_checkpoint(void)
++{
++    uint64_t now64 = ztimer64_now(z64);
++
++    TEST_ASSERT_EQUAL_INT(0, now64);
++
++    /* base_now is 0x7fff_ffff */
++    ztimer_mock_jump(&zmock, ZTIMER64_CHECKPOINT_INTERVAL - 1);
++    now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(ZTIMER64_CHECKPOINT_INTERVAL - 1, now64);
++    /* base_now is 0x8000_0000 */
++    ztimer_mock_jump(&zmock, ZTIMER64_CHECKPOINT_INTERVAL);
++    now64 = ztimer64_now(z64);
++    TEST_ASSERT_EQUAL_INT(ZTIMER64_CHECKPOINT_INTERVAL, now64);
++    /* base_now is 0x0000_0000 */
++    ztimer_mock_jump(&zmock, 0);
++    now64 = ztimer64_now(z64);
++    /* overflow is caught in checkpoint */
++    TEST_ASSERT_EQUAL_INT(2 * ZTIMER64_CHECKPOINT_INTERVAL, now64);
++    /* base_now is 0xffff_ffff, max jump that can be caught */
++    ztimer_mock_jump(&zmock, UINT32_MAX);
++    now64 = ztimer64_now(z64);
++    /* overflow is caught in checkpoint */
++    TEST_ASSERT_EQUAL_INT(2 * ZTIMER64_CHECKPOINT_INTERVAL + UINT32_MAX, now64);
++    /* overflow is missed, 2**32 ticks elapsed
++        - microseconds: 4293 seconds
++        - nanoseconds: 4.29 seconds (e.g.: ptp) -> should not use ztimer as base.
++    */
++    ztimer_mock_jump(&zmock, UINT32_MAX);
++    TEST_ASSERT_EQUAL_INT(2 * ZTIMER64_CHECKPOINT_INTERVAL + UINT32_MAX, now64);
++}
++
++Test *tests_ztimer64_tests(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_ztimer64_now),
++        new_TestFixture(test_ztimer64_set),
++        new_TestFixture(test_ztimer64_set_0),
++        new_TestFixture(test_ztimer64_set_at),
++        new_TestFixture(test_ztimer64_checkpoint),
++    };
++
++    EMB_UNIT_TESTCALLER(ztimer64_tests, setup, NULL, fixtures);
++
++    return (Test *)&ztimer64_tests;
++}
++
++/** @} */
+diff --git a/tests/unittests/tests-ztimer64/tests-ztimer64.c b/tests/unittests/tests-ztimer64/tests-ztimer64.c
+new file mode 100644
+index 0000000000..6fd2339cdd
+--- /dev/null
++++ b/tests/unittests/tests-ztimer64/tests-ztimer64.c
+@@ -0,0 +1,25 @@
++/*
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @{
++ *
++ * @file
++ * @brief       Unittest entry point for the ztimer64 test group
++ *
++ */
++
++#include "embUnit/embUnit.h"
++
++#include "tests-ztimer64.h"
++
++Test *tests_ztimer64_tests(void);
++
++void tests_ztimer64(void)
++{
++    TESTS_RUN(tests_ztimer64_tests());
++}
++/** @} */
+diff --git a/tests/unittests/tests-ztimer64/tests-ztimer64.h b/tests/unittests/tests-ztimer64/tests-ztimer64.h
+new file mode 100644
+index 0000000000..97a7a86cdd
+--- /dev/null
++++ b/tests/unittests/tests-ztimer64/tests-ztimer64.h
+@@ -0,0 +1,34 @@
++/*
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @addtogroup  unittests
++ * @{
++ *
++ * @file
++ * @brief       Unittests for ztimer64
++ *
++ */
++#ifndef TESTS_ZTIMER64_H
++#define TESTS_ZTIMER64_H
++
++#include "embUnit.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   The entry point of this test suite.
++ */
++void tests_ztimer(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* TESTS_ZTIMER64_H */
++/** @} */
+diff --git a/tests/ztimer64_msg/Makefile b/tests/ztimer64_msg/Makefile
+new file mode 100644
+index 0000000000..1a28151454
+--- /dev/null
++++ b/tests/ztimer64_msg/Makefile
+@@ -0,0 +1,11 @@
++include ../Makefile.tests_common
++
++USEMODULE += ztimer64_usec
++
++# uncomment this to test using ztimer64 msec on rtt
++#USEMODULE += ztimer64_msec ztimer_periph_rtt
++
++# uncomment this to test using ztimer64 sec on rtc
++#USEMODULE += ztimer64_sec ztimer_periph_rtc
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/ztimer64_msg/Makefile.ci b/tests/ztimer64_msg/Makefile.ci
+new file mode 100644
+index 0000000000..d5368f025e
+--- /dev/null
++++ b/tests/ztimer64_msg/Makefile.ci
+@@ -0,0 +1,12 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    arduino-duemilanove \
++    arduino-leonardo \
++    arduino-nano \
++    arduino-uno \
++    atmega328p \
++    atmega328p-xplained-mini \
++    nucleo-f031k6 \
++    nucleo-l011k4 \
++    samd10-xmini \
++    stm32f030f4-demo \
++    #
+diff --git a/tests/ztimer64_msg/README.md b/tests/ztimer64_msg/README.md
+new file mode 100644
+index 0000000000..11f77be44b
+--- /dev/null
++++ b/tests/ztimer64_msg/README.md
+@@ -0,0 +1,9 @@
++# Overview
++
++This test application is a direct translation of ztimer_msg to the ztimer64API.
++It is meant mostly as a means to do size comparisons, thus tries to be as close
++as possible to the original.
++
++One notable change is the option to choose a different ztimer clock.
++By default, the test will use ZTIMER64_USEC, unless ZTIMER64_MSEC is compiled in,
++which will be used in that case.
+diff --git a/tests/ztimer64_msg/app.config.test b/tests/ztimer64_msg/app.config.test
+new file mode 100644
+index 0000000000..aba183dfcb
+--- /dev/null
++++ b/tests/ztimer64_msg/app.config.test
+@@ -0,0 +1,3 @@
++# this file enables modules defined in Kconfig. Do not use this file for
++# application configuration. This is only needed during migration.
++CONFIG_ZTIMER64_USEC=y
+diff --git a/tests/ztimer64_msg/main.c b/tests/ztimer64_msg/main.c
+new file mode 100644
+index 0000000000..a27dd9cc5d
+--- /dev/null
++++ b/tests/ztimer64_msg/main.c
+@@ -0,0 +1,152 @@
++/*
++ * Copyright (C) 2015-19 Kaspar Schleiser <kaspar@schleiser.de>
++ *               2013 INRIA
++ *               2017 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup tests
++ * @{
++ *
++ * @file
++ * @brief       ztimer64_msg test application
++ *
++ * @author      Kaspar Schleiser <kaspar@schleiser.de>
++ * @author      Oliver Hahm <oliver.hahm@inria.fr>
++ * @author      Christian Mehlis <mehlis@inf.fu-berlin.de>
++ * @author      Sebastian Meiling <s@mlng.net>
++ * @}
++ */
++
++#include <stdio.h>
++
++#include "ztimer64.h"
++#include "thread.h"
++#include "msg.h"
++#include "timex.h"
++
++#include "test_utils/expect.h"
++
++#ifdef MODULE_ZTIMER64_SEC
++#define ZTIMER64 ZTIMER64_SEC
++#define TICKS_PER_SEC 1
++#elif MODULE_ZTIMER64_MSEC
++#define ZTIMER64 ZTIMER64_MSEC
++#define TICKS_PER_SEC MS_PER_SEC
++#else
++#define ZTIMER64 ZTIMER64_USEC
++#define TICKS_PER_SEC US_PER_SEC
++#endif
++
++char timer_stack[THREAD_STACKSIZE_DEFAULT];
++char timer_stack_local[THREAD_STACKSIZE_DEFAULT];
++
++struct timer_msg {
++    ztimer64_t timer;
++    uint64_t interval;
++    char *text;
++    msg_t msg;
++};
++
++struct timer_msg msg_a = { .interval = (2 * TICKS_PER_SEC),
++                           .text = "Hello World" };
++struct timer_msg msg_b = { .interval = (5 * TICKS_PER_SEC),
++                           .text = "This is a Test" };
++
++void *timer_thread(void *arg)
++{
++    (void)arg;
++
++    printf("This is thread %" PRIkernel_pid "\n", thread_getpid());
++
++    /* The queue is required to avoid loss of a 2nd message, when the 1st is
++     * still processed. The timing ensures that at most 1 message is queued.
++     */
++    msg_t msgq[1];
++
++    msg_init_queue(msgq, 1);
++
++    while (1) {
++        msg_t m;
++        msg_receive(&m);
++        struct timer_msg *tmsg = m.content.ptr;
++        uint64_t now = ztimer64_now(ZTIMER64);
++        /* casts are needed to solve for sometimes TICKS_PER_SEC being UL
++         * result of / and % of uint32_t will always fit into uint32_t
++         */
++        printf(
++            "now=%" PRIu32 ":%" PRIu32 " -> every %" PRIu32 ".%" PRIu32 "s: %s\n",
++            (uint32_t)(now / TICKS_PER_SEC),
++            (uint32_t)(now % TICKS_PER_SEC),
++            (uint32_t)(tmsg->interval / TICKS_PER_SEC),
++            (uint32_t)(tmsg->interval % TICKS_PER_SEC),
++            tmsg->text);
++
++        tmsg->msg.type = 12345;
++        tmsg->msg.content.ptr = tmsg;
++        ztimer64_set_msg(ZTIMER64, &tmsg->timer, tmsg->interval, &tmsg->msg,
++                         thread_getpid());
++    }
++}
++
++void *timer_thread_local(void *arg)
++{
++    (void)arg;
++
++    printf("This is thread %" PRIkernel_pid "\n", thread_getpid());
++
++    while (1) {
++        msg_t m;
++        msg_receive(&m);
++
++        uint64_t now = ztimer64_now(ZTIMER64);
++        uint32_t sec = now / TICKS_PER_SEC;
++        uint32_t min = sec / 60;
++        uint32_t hr = sec / 3600;
++        printf("sec=%" PRIu32 " min=%" PRIu32 " hour=%" PRIu32 "\n", sec, min,
++               hr);
++    }
++}
++
++int main(void)
++{
++    msg_t m;
++    kernel_pid_t pid = thread_create(
++        timer_stack,
++        sizeof(timer_stack),
++        THREAD_PRIORITY_MAIN - 1,
++        THREAD_CREATE_STACKTEST,
++        timer_thread,
++        NULL,
++        "timer");
++
++    expect(pid_is_valid(pid));
++
++    puts("sending 1st msg");
++    m.content.ptr = &msg_a;
++    msg_try_send(&m, pid);
++
++    puts("sending 2nd msg");
++    m.content.ptr = &msg_b;
++    msg_try_send(&m, pid);
++
++    kernel_pid_t pid2 = thread_create(
++        timer_stack_local,
++        sizeof(timer_stack_local),
++        THREAD_PRIORITY_MAIN - 1,
++        THREAD_CREATE_STACKTEST,
++        timer_thread_local,
++        NULL,
++        "timer local");
++
++    expect(pid_is_valid(pid2));
++
++    while (1) {
++        ztimer64_sleep(ZTIMER64, 1LLU * TICKS_PER_SEC);
++        msg_try_send(&m, pid2);
++    }
++}
+diff --git a/tests/ztimer64_msg/tests/01-run.py b/tests/ztimer64_msg/tests/01-run.py
+new file mode 100755
+index 0000000000..136b6443a4
+--- /dev/null
++++ b/tests/ztimer64_msg/tests/01-run.py
+@@ -0,0 +1,30 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2017 HAW Hamburg
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import sys
++from testrunner import run
++
++
++def testfunc(child):
++    # 1st check for periodic 2s Hello World message, i.e., 2 output + 1 msg
++    for _ in range(7):
++        child.expect(r"sec=\d+ min=\d+ hour=\d+")
++        child.expect(r"sec=\d+ min=\d+ hour=\d+")
++        child.expect(r"now=\d+:\d+ -> every 2.0s: Hello World")
++    # 2nd check for periodic 5s test message, i.e., 5 output + 1 msg
++    for _ in range(3):
++        child.expect(r"sec=\d+ min=\d+ hour=\d+")
++        child.expect(r"sec=\d+ min=\d+ hour=\d+")
++        child.expect(r"sec=\d+ min=\d+ hour=\d+")
++        child.expect(r"sec=\d+ min=\d+ hour=\d+")
++        child.expect(r"sec=\d+ min=\d+ hour=\d+")
++        child.expect(r"now=\d+:\d+ -> every 5.0s: This is a Test")
++
++
++if __name__ == "__main__":
++    sys.exit(run(testfunc))

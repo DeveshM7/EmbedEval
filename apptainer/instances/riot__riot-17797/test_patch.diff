@@ -1,0 +1,467 @@
+diff --git a/tests/pkg_tinyvcdiff/Makefile b/tests/pkg_tinyvcdiff/Makefile
+new file mode 100644
+index 0000000000..6bb74da9e2
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/Makefile
+@@ -0,0 +1,19 @@
++include ../Makefile.tests_common
++
++BLOBS += source.bin delta.bin target.bin
++
++# Only run on native ...
++TEST_ON_CI_WHITELIST += native
++
++USEMODULE += embunit
++
++# Library under test
++USEPKG += tinyvcdiff
++
++# MTD backend
++USEMODULE += mtd
++
++# VFS backend
++USEPKG += littlefs2
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/pkg_tinyvcdiff/Makefile.ci b/tests/pkg_tinyvcdiff/Makefile.ci
+new file mode 100644
+index 0000000000..34fdb7387d
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/Makefile.ci
+@@ -0,0 +1,25 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    arduino-duemilanove \
++    arduino-leonardo \
++    arduino-mega2560 \
++    arduino-nano \
++    arduino-uno \
++    atmega328p \
++    atmega328p-xplained-mini \
++    bluepill-stm32f030c8 \
++    i-nucleo-lrwan1 \
++    nucleo-f030r8 \
++    nucleo-f031k6 \
++    nucleo-f042k6 \
++    nucleo-l011k4 \
++    nucleo-l031k6 \
++    nucleo-l053r8 \
++    samd10-xmini \
++    slstk3400a \
++    stk3200 \
++    stm32f030f4-demo \
++    stm32f0discovery \
++    stm32g0316-disco \
++    stm32l0538-disco \
++    waspmote-pro \
++    #
+diff --git a/tests/pkg_tinyvcdiff/README.md b/tests/pkg_tinyvcdiff/README.md
+new file mode 100644
+index 0000000000..832645155e
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/README.md
+@@ -0,0 +1,10 @@
++pkg_tinyvcdiff
++==============
++
++This test patches the binary file `source.bin` using `delta.bin` and reconstructs `target.bin`.
++
++`delta.bin` has been created with open-vcdiff:
++
++```
++vcdiff delta -interleaved -dictionary source.bin <target.bin >delta.bin
++```
+diff --git a/tests/pkg_tinyvcdiff/app.config.test b/tests/pkg_tinyvcdiff/app.config.test
+new file mode 100644
+index 0000000000..ffc066de1d
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/app.config.test
+@@ -0,0 +1,5 @@
++CONFIG_MODULE_EMBUNIT=y
++CONFIG_MODULE_MTD=y
++CONFIG_MODULE_LITTLEFS2_FS=y
++CONFIG_PACKAGE_TINYVCDIFF=y
++CONFIG_PACKAGE_LITTLEFS2=y
+diff --git a/tests/pkg_tinyvcdiff/delta.bin b/tests/pkg_tinyvcdiff/delta.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8750f5f66f63c4b750cfd71aea744cb360f7368
+GIT binary patch
+literal 32
+ncmcb1_((7Vqc(%M9s`3A1HVUVPENi;X<lYoYEf~jumU##nFa|4
+
+literal 0
+HcmV?d00001
+
+diff --git a/tests/pkg_tinyvcdiff/fakemtd.c b/tests/pkg_tinyvcdiff/fakemtd.c
+new file mode 100644
+index 0000000000..4bbdd810c8
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/fakemtd.c
+@@ -0,0 +1,104 @@
++/*
++ * Copyright (C) 2022 Juergen Fitschen
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @{
++ *
++ * @file
++ * @ingroup  tests
++ * @brief    Fake MTD device
++ *
++ * @author   Juergen Fitschen <me@jue.yt>
++ */
++
++#include <string.h>
++#include <errno.h>
++#include "fakemtd.h"
++
++#define ENABLE_DEBUG 0
++#include "debug.h"
++
++static inline uint32_t sector2offset(fake_mtd_t *ctx, uint32_t sector)
++{
++    return sector * ctx->mtd.page_size * ctx->mtd.pages_per_sector;
++}
++
++static inline uint32_t page2offset(fake_mtd_t *ctx, uint32_t page)
++{
++    return page * ctx->mtd.page_size;
++}
++
++static inline bool within_bounds(fake_mtd_t *ctx, uint32_t offset, uint32_t count)
++{
++    return (offset + count) <= sizeof(ctx->buffer);
++}
++
++static int _init(mtd_dev_t *dev)
++{
++    (void) dev;
++
++    return 0;
++}
++
++static int _read_page(mtd_dev_t *dev, void *buff, uint32_t page, uint32_t offset, uint32_t size)
++{
++    fake_mtd_t *ctx = container_of(dev, fake_mtd_t, mtd);
++
++    DEBUG("fake_mtd: _read_page(%"PRIu32", %"PRIu32", %"PRIu32")\n", page, offset, size);
++
++    offset += page2offset(ctx, page);
++    if (!within_bounds(ctx, offset, size)) {
++        return -EOVERFLOW;
++    }
++
++    memcpy(buff, &ctx->buffer[offset], size);
++
++    return size;
++}
++
++static int _write_page(mtd_dev_t *dev, const void *buff, uint32_t page, uint32_t offset, uint32_t size)
++{
++    fake_mtd_t *ctx = container_of(dev, fake_mtd_t, mtd);
++
++    DEBUG("fake_mtd: _write_page(%"PRIu32", %"PRIu32", %"PRIu32")\n", page, offset, size);
++
++    offset += page2offset(ctx, page);
++    if (!within_bounds(ctx, offset, size)) {
++        return -EOVERFLOW;
++    }
++
++    memcpy(&ctx->buffer[offset], buff, size);
++
++    return size;
++}
++
++static int _erase_sector(mtd_dev_t *dev, uint32_t sector, uint32_t count)
++{
++    fake_mtd_t *ctx = container_of(dev, fake_mtd_t, mtd);
++
++    DEBUG("fake_mtd: _erase_sector(%"PRIu32", %"PRIu32")\n", sector, count);
++
++    uint32_t offset = sector2offset(ctx, sector);
++    uint32_t size = sector2offset(ctx, count);
++    if (!within_bounds(ctx, offset, count)) {
++        return -EOVERFLOW;
++    }
++
++    memset(&ctx->buffer[offset], 0xff, size);
++
++    return 0;
++}
++
++const mtd_desc_t fake_mtd_driver = {
++    .init = _init,
++    .read_page = _read_page,
++    .write_page = _write_page,
++    .erase_sector = _erase_sector,
++};
++
++/** @} */
+diff --git a/tests/pkg_tinyvcdiff/fakemtd.h b/tests/pkg_tinyvcdiff/fakemtd.h
+new file mode 100644
+index 0000000000..319dddd6ec
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/fakemtd.h
+@@ -0,0 +1,75 @@
++/*
++ * Copyright (C) 2022 Juergen Fitschen
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @{
++ *
++ * @file
++ * @ingroup  tests
++ * @brief    Fake MTD device
++ *
++ * @author   Juergen Fitschen <me@jue.yt>
++ */
++#ifndef FAKEMTD_H
++#define FAKEMTD_H
++
++#include "mtd.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Page size
++ */
++#define FAKE_MTD_PAGE_SIZE        128
++
++/**
++ * @brief Pages per sector
++ */
++#define FAKE_MTD_PAGES_PER_SECTOR 4
++
++/**
++ * @brief Sector count
++ */
++#define FAKE_MTD_SECTOR_COUNT     4
++
++/**
++ * @brief Storage size in byte
++ */
++#define MAKE_MTD_MEM_SIZE         (FAKE_MTD_PAGE_SIZE * \
++                                   FAKE_MTD_PAGES_PER_SECTOR * \
++                                   FAKE_MTD_SECTOR_COUNT)
++
++/**
++ * @brief Driver for fake MTD
++ */
++extern const mtd_desc_t fake_mtd_driver;
++
++/**
++ * @brief Context for the fake MTD
++ */
++typedef struct {
++    mtd_dev_t mtd;                     /**< MTD instance */
++    uint8_t buffer[MAKE_MTD_MEM_SIZE]; /**< Storage of the MTD */
++} fake_mtd_t;
++
++/**
++ * @brief Initializes fake_mtd_t
++ */
++#define FAKE_MTD_INIT { .mtd = { .driver = &fake_mtd_driver, \
++                                 .sector_count = FAKE_MTD_SECTOR_COUNT, \
++                                 .pages_per_sector = FAKE_MTD_PAGES_PER_SECTOR, \
++                                 .page_size = FAKE_MTD_PAGE_SIZE } }
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* FAKEMTD_H */
++/** @} */
+diff --git a/tests/pkg_tinyvcdiff/main.c b/tests/pkg_tinyvcdiff/main.c
+new file mode 100644
+index 0000000000..c22c0447fa
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/main.c
+@@ -0,0 +1,139 @@
++/*
++ * Copyright (C) 2022 Juergen Fitschen
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       tinyvcdiff library backend tests
++ *
++ * @author      Juergen Fitschen <me@jue.yt>
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <fcntl.h>
++#include "embUnit.h"
++#include "vcdiff.h"
++#include "vcdiff_mtd.h"
++#include "vcdiff_vfs.h"
++#include "fakemtd.h"
++#include "fs/littlefs2_fs.h"
++
++/* Generated using open-vcdiff:
++ * $ echo "Hello world! I hope you are doing well ..." >source.bin
++ * $ echo "Hello universe! I hope you are doing well ..." >target.bin
++ * $ vcdiff delta -interleaved -dictionary source.bin <target.bin >delta.bin */
++#include "blob/source.bin.h"
++#include "blob/target.bin.h"
++#include "blob/delta.bin.h"
++
++static vcdiff_t vcdiff;
++static fake_mtd_t storage_a = FAKE_MTD_INIT;
++static fake_mtd_t storage_b = FAKE_MTD_INIT;
++
++static void test_tinyvcdiff_mtd(void)
++{
++    int rc;
++
++    mtd_dev_t * source_mtd = &storage_a.mtd;
++    vcdiff_mtd_t source_vcdiff = VCDIFF_MTD_INIT(source_mtd);
++
++    mtd_dev_t * target_mtd = &storage_b.mtd;
++    vcdiff_mtd_t target_vcdiff = VCDIFF_MTD_INIT(target_mtd);
++
++    /* write source data to fake-mtd */
++    mtd_write(source_mtd, source_bin, 0, source_bin_len);
++
++    /* setup vcdiff */
++    vcdiff_init(&vcdiff);
++    vcdiff_set_source_driver(&vcdiff, &vcdiff_mtd_driver, &source_vcdiff);
++    vcdiff_set_target_driver(&vcdiff, &vcdiff_mtd_driver, &target_vcdiff);
++
++    /* apply diff */
++    rc = vcdiff_apply_delta(&vcdiff, delta_bin, delta_bin_len);
++    TEST_ASSERT_EQUAL_INT(0, rc);
++    rc = vcdiff_finish(&vcdiff);
++    TEST_ASSERT_EQUAL_INT(0, rc);
++
++    /* check reconsturcted target */
++    uint8_t target_buf[target_bin_len];
++    mtd_read(target_mtd, target_buf, 0, sizeof(target_buf));
++    TEST_ASSERT_EQUAL_INT(0, memcmp(target_bin, target_buf, sizeof(target_buf)));
++}
++
++static void test_tinyvcdiff_vfs(void)
++{
++    int rc;
++    int source_fd, target_fd;
++
++    littlefs2_desc_t fs = { .dev = &storage_a.mtd };
++    vfs_mount_t mnt = {
++        .mount_point = "/mnt",
++        .fs = &littlefs2_file_system,
++        .private_data = &fs,
++    };
++    vfs_format(&mnt);
++    vfs_mount(&mnt);
++
++    /* write source data to fs */
++    source_fd = vfs_open("/mnt/source", O_WRONLY | O_CREAT, 0);
++    vfs_write(source_fd, source_bin, source_bin_len);
++    vfs_close(source_fd);
++
++    /* open source and target file */
++    source_fd = vfs_open("/mnt/source", O_RDONLY, 0);
++    vcdiff_vfs_t source_vcdiff = VCDIFF_VFS_INIT(source_fd);
++    target_fd = vfs_open("/mnt/target", O_WRONLY | O_CREAT, 0);
++    vcdiff_vfs_t target_vcdiff = VCDIFF_VFS_INIT(target_fd);
++
++    /* setup vcdiff */
++    vcdiff_init(&vcdiff);
++    vcdiff_set_source_driver(&vcdiff, &vcdiff_vfs_driver, &source_vcdiff);
++    vcdiff_set_target_driver(&vcdiff, &vcdiff_vfs_driver, &target_vcdiff);
++
++    /* apply diff */
++    rc = vcdiff_apply_delta(&vcdiff, delta_bin, delta_bin_len);
++    TEST_ASSERT_EQUAL_INT(0, rc);
++    rc = vcdiff_finish(&vcdiff);
++    TEST_ASSERT_EQUAL_INT(0, rc);
++
++    vfs_close(source_fd);
++    vfs_close(target_fd);
++
++    /* check reconsturcted target */
++    target_fd = vfs_open("/mnt/target", O_RDONLY, 0);
++    uint8_t target_buf[target_bin_len];
++    vfs_read(target_fd, target_buf, sizeof(target_buf));
++    TEST_ASSERT_EQUAL_INT(0, memcmp(target_bin, target_buf, sizeof(target_buf)));
++    vfs_close(target_fd);
++
++    vfs_umount(&mnt);
++}
++
++Test *tests_tinyvcdiff(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_tinyvcdiff_mtd),
++        new_TestFixture(test_tinyvcdiff_vfs),
++    };
++
++    EMB_UNIT_TESTCALLER(tinycvdiff_tests, NULL, NULL, fixtures);
++    return (Test*)&tinycvdiff_tests;
++}
++
++int main(void)
++{
++    TESTS_START();
++    TESTS_RUN(tests_tinyvcdiff());
++    TESTS_END();
++    return 0;
++}
+diff --git a/tests/pkg_tinyvcdiff/source.bin b/tests/pkg_tinyvcdiff/source.bin
+new file mode 100644
+index 0000000000..5100f66106
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/source.bin
+@@ -0,0 +1 @@
++Hello world! I hope you are doing well ...
+diff --git a/tests/pkg_tinyvcdiff/target.bin b/tests/pkg_tinyvcdiff/target.bin
+new file mode 100644
+index 0000000000..71d34c107f
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/target.bin
+@@ -0,0 +1 @@
++Hello universe! I hope you are doing well ...
+diff --git a/tests/pkg_tinyvcdiff/tests/01-run.py b/tests/pkg_tinyvcdiff/tests/01-run.py
+new file mode 100755
+index 0000000000..6ece31cee3
+--- /dev/null
++++ b/tests/pkg_tinyvcdiff/tests/01-run.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2022 Juergen Fitschen
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import sys
++from testrunner import run
++
++
++def testfunc(child):
++    child.expect("OK")
++
++
++if __name__ == "__main__":
++    sys.exit(run(testfunc))

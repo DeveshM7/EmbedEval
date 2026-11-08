@@ -1,0 +1,147 @@
+diff --git a/tests/pkg_nanors/Makefile b/tests/pkg_nanors/Makefile
+new file mode 100644
+index 0000000000..8d8738fc4c
+--- /dev/null
++++ b/tests/pkg_nanors/Makefile
+@@ -0,0 +1,6 @@
++include ../Makefile.tests_common
++
++USEPKG += nanors
++USEMODULE += random
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/pkg_nanors/Makefile.ci b/tests/pkg_nanors/Makefile.ci
+new file mode 100644
+index 0000000000..159d19d084
+--- /dev/null
++++ b/tests/pkg_nanors/Makefile.ci
+@@ -0,0 +1,13 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    arduino-uno \
++    atmega328p-xplained-mini \
++    atmega328p \
++    nucleo-l011k4 \
++    arduino-nano \
++    arduino-leonardo \
++    samd10-xmini \
++    arduino-duemilanove \
++    nucleo-f031k6 \
++    stm32f030f4-demo \
++    stk3200 \
++    #
+diff --git a/tests/pkg_nanors/main.c b/tests/pkg_nanors/main.c
+new file mode 100644
+index 0000000000..313e9ef5cc
+--- /dev/null
++++ b/tests/pkg_nanors/main.c
+@@ -0,0 +1,91 @@
++/*
++ * Copyright (C) 2022 ML!PA Consulting GmbH
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Test application for Reed-Solomon codec
++ *
++ * @author      Benjamin Valentin <benjamin.valentin@ml-pa.com>
++ * @}
++ */
++
++#include <stdio.h>
++#include <string.h>
++
++#include "kernel_defines.h"
++#include "random.h"
++#include "rs.h"
++
++#define DATA_SHARDS     20
++#define RECOVERY_SHARDS 10
++#define SHARD_SIZE      64
++
++typedef reed_solomon rs_t;
++
++int main(void)
++{
++    /* data + recovery */
++    static uint8_t data[(DATA_SHARDS + RECOVERY_SHARDS) * SHARD_SIZE];
++    /* copy of data for comparison */
++    static uint8_t data_cmp[DATA_SHARDS * SHARD_SIZE];
++    /* pointer to shards */
++    static uint8_t *shards[DATA_SHARDS + RECOVERY_SHARDS];
++    /* map of missing shards */
++    static uint8_t marks[DATA_SHARDS + RECOVERY_SHARDS];
++
++    /* generate random data */
++    random_bytes(data, sizeof(data_cmp));
++    memcpy(data_cmp, data, sizeof(data_cmp));
++
++    /* set up shard pointers */
++    for (unsigned i = 0; i < ARRAY_SIZE(shards); ++i) {
++        shards[i] = &data[i * SHARD_SIZE];
++    }
++
++    puts("START");
++    reed_solomon_init();
++    rs_t *rs = reed_solomon_new(DATA_SHARDS, RECOVERY_SHARDS);
++    if (!rs) {
++        puts("failed to init codec");
++        return -1;
++    }
++
++    printf("total: %u shards (%u bytes)\n",
++           (unsigned)ARRAY_SIZE(marks), (unsigned)sizeof(data));
++
++    /* generate parity shards */
++    reed_solomon_encode(rs, shards, ARRAY_SIZE(shards), SHARD_SIZE);
++
++    /* delete up to N shards */
++    for (unsigned i = 0; i < RECOVERY_SHARDS; i++) {
++        unsigned at = random_uint32_range(0, ARRAY_SIZE(shards));
++        printf("clear shard %u (%u byte)\n", at, SHARD_SIZE);
++        memset(shards[at], 0, SHARD_SIZE);
++        marks[at] = 1;
++    }
++
++    puts("reconstruct…");
++    if (reed_solomon_reconstruct(rs, shards, marks,
++                                 ARRAY_SIZE(shards), SHARD_SIZE)) {
++        puts("failed.");
++    } else {
++        puts("done.");
++    }
++    reed_solomon_release(rs);
++
++    if (memcmp(data, data_cmp, sizeof(data_cmp))) {
++        puts("FAILED");
++    } else {
++        puts("SUCCESS");
++    }
++
++    return 0;
++}
+diff --git a/tests/pkg_nanors/tests/01-run.py b/tests/pkg_nanors/tests/01-run.py
+new file mode 100755
+index 0000000000..abf3ed6931
+--- /dev/null
++++ b/tests/pkg_nanors/tests/01-run.py
+@@ -0,0 +1,13 @@
++#!/usr/bin/env python3
++
++import sys
++from testrunner import run
++
++
++def testfunc(child):
++    child.expect_exact('START')
++    child.expect_exact('SUCCESS')
++
++
++if __name__ == "__main__":
++    sys.exit(run(testfunc))

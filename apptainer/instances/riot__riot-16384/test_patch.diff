@@ -1,0 +1,562 @@
+diff --git a/tests/senml_cbor/Makefile b/tests/senml_cbor/Makefile
+new file mode 100644
+index 0000000000..8fb4ddec77
+--- /dev/null
++++ b/tests/senml_cbor/Makefile
+@@ -0,0 +1,16 @@
++include ../Makefile.tests_common
++
++USEMODULE += senml_cbor
++USEMODULE += fmt
++USEMODULE += embunit
++
++CFLAGS += -DCONFIG_SENML_ATTR_SUM
++CFLAGS += -DCONFIG_SENML_ATTR_VERSION
++CFLAGS += -DCONFIG_SENML_ATTR_UPDATE_TIME
++
++CFLAGS += -DTHREAD_STACKSIZE_DEFAULT=1536
++
++# The following BOARDs redefine THREAD_STACKSIZE_DEFAULT
++BOARD_BLACKLIST += nucleo-l011k4 stk3200
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/senml_cbor/Makefile.ci b/tests/senml_cbor/Makefile.ci
+new file mode 100644
+index 0000000000..696e4e21c7
+--- /dev/null
++++ b/tests/senml_cbor/Makefile.ci
+@@ -0,0 +1,10 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    arduino-duemilanove \
++    arduino-leonardo \
++    arduino-nano \
++    arduino-uno \
++    atmega328p \
++    atmega328p-xplained-mini \
++    nucleo-f031k6 \
++    nucleo-l011k4 \
++    #
+diff --git a/tests/senml_cbor/app.config.test b/tests/senml_cbor/app.config.test
+new file mode 100644
+index 0000000000..ff0dae5786
+--- /dev/null
++++ b/tests/senml_cbor/app.config.test
+@@ -0,0 +1,3 @@
++CONFIG_MODULE_SENML_CBOR=y
++CONFIG_MODULE_FMT=y
++CONFIG_MODULE_EMBUNIT=y
+diff --git a/tests/senml_cbor/main.c b/tests/senml_cbor/main.c
+new file mode 100644
+index 0000000000..0d7f5203a0
+--- /dev/null
++++ b/tests/senml_cbor/main.c
+@@ -0,0 +1,126 @@
++/*
++ * Copyright (C) 2021 Silke Hofstra
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Short SenML CBOR test
++ *
++ * @author      Silke Hofstra <silke@slxh.eu>
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include <string.h>
++
++#include "embUnit.h"
++#include "senml/cbor.h"
++#include "fmt.h"
++
++#define BUF_SIZE (128)
++
++static uint8_t cbor_buf[BUF_SIZE];
++static char result[2 * BUF_SIZE];
++static char expect[] = "89A5216943424F522074657374221A608404D001616D07187802F953B0A206"
++                       "0102F953B0A2060202183DA2060302183DA2060402C48220190267A2060504"
++                       "F5A20606036752494F54204F53A20607084400010203A201626B6705183D";
++
++void test_senml_encode(void)
++{
++    nanocbor_encoder_t enc;
++
++    /* Some common attributes to set on the first element */
++    senml_attr_t attr = {
++        .base_name = "CBOR test",
++        .base_time = senml_duration_s(1619264720),
++        .update_time = senml_duration_s(120),
++        .unit = SENML_UNIT_METER,
++    };
++
++    /* A numeric (float) value */
++    senml_value_t vf = { .attr = attr, .value = senml_float(61.5) };
++
++    /* A numeric (double) value */
++    senml_value_t vd = { .attr = { .time = senml_duration_s(1) },
++                         .value = senml_double(61.5) };
++
++    /* A numeric (int) value */
++    senml_value_t vi = { .attr = { .time = senml_duration_s(2) },
++                         .value = senml_int(61) };
++
++    /* A numeric (uint) value */
++    senml_value_t vu = { .attr = { .time = senml_duration_s(3) },
++                         .value = senml_uint(61) };
++
++    /* A numeric (decimal fraction) value */
++    senml_value_t vdf = { .attr = { .time = senml_duration_s(4) },
++                          .value = senml_decfrac(615, -1) };
++
++    /* A boolean value */
++    senml_bool_value_t vb = { .attr = { .time = senml_duration_s(5) },
++                              .value = true };
++
++    /* A string value */
++    char string[] = "RIOT OS";
++    senml_string_value_t vs = { .attr = { .time = senml_duration_s(6) },
++                                .value = string, .len = sizeof string - 1 };
++
++    /* A data value */
++    uint8_t data[] = { 0x00, 0x01, 0x02, 0x03 };
++    senml_data_value_t vdat = { .attr = { .time = senml_duration_s(7) },
++                                .value = data, .len = sizeof data };
++
++    /* A numeric (float) sum value */
++    senml_attr_t sum = {
++        .sum = senml_int(61),
++        .unit = SENML_UNIT_KILOGRAM,
++    };
++
++    /* Initialize encoder, and start array */
++    nanocbor_encoder_init(&enc, cbor_buf, sizeof cbor_buf);
++    nanocbor_fmt_array(&enc, 9);
++
++    /* Encode the values */
++    senml_encode_value_cbor(&enc, &vf);
++    senml_encode_value_cbor(&enc, &vd);
++    senml_encode_value_cbor(&enc, &vi);
++    senml_encode_value_cbor(&enc, &vu);
++    senml_encode_value_cbor(&enc, &vdf);
++    senml_encode_bool_cbor(&enc, &vb);
++    senml_encode_string_cbor(&enc, &vs);
++    senml_encode_data_cbor(&enc, &vdat);
++    senml_encode_sum_cbor(&enc, &sum);
++
++    size_t len = nanocbor_encoded_len(&enc);
++
++    fmt_bytes_hex(result, cbor_buf, len);
++
++    /* Compare hex result */
++    TEST_ASSERT_EQUAL_INT(2 * len, sizeof expect - 1);
++    TEST_ASSERT_EQUAL_INT(0, strncmp(expect, result, len));
++}
++
++Test *tests_senml(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_senml_encode),
++    };
++    EMB_UNIT_TESTCALLER(senml_tests, NULL, NULL, fixtures);
++    return (Test *)&senml_tests;
++}
++
++int main(void)
++{
++    TESTS_START();
++    TESTS_RUN(tests_senml());
++    TESTS_END();
++    return 0;
++}
+diff --git a/tests/senml_cbor/tests/01-run.py b/tests/senml_cbor/tests/01-run.py
+new file mode 100755
+index 0000000000..8b4e23f2e7
+--- /dev/null
++++ b/tests/senml_cbor/tests/01-run.py
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2017 Freie Universität Berlin
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import sys
++from testrunner import run_check_unittests
++
++
++if __name__ == "__main__":
++    sys.exit(run_check_unittests())
+diff --git a/tests/senml_phydat/Makefile b/tests/senml_phydat/Makefile
+new file mode 100644
+index 0000000000..452d330fda
+--- /dev/null
++++ b/tests/senml_phydat/Makefile
+@@ -0,0 +1,7 @@
++include ../Makefile.tests_common
++
++USEMODULE += senml_phydat
++USEMODULE += embunit
++USEMODULE += printf_float
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/senml_phydat/Makefile.ci b/tests/senml_phydat/Makefile.ci
+new file mode 100644
+index 0000000000..0f18f55cfa
+--- /dev/null
++++ b/tests/senml_phydat/Makefile.ci
+@@ -0,0 +1,16 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    arduino-duemilanove \
++    arduino-leonardo \
++    arduino-nano \
++    arduino-uno \
++    atmega328p \
++    atmega328p-xplained-mini \
++    nucleo-f031k6 \
++    nucleo-f042k6 \
++    nucleo-l011k4 \
++    nucleo-l031k6 \
++    samd10-xmini \
++    stk3200 \
++    stm32f030f4-demo \
++    stm32g0316-disco \
++    #
+diff --git a/tests/senml_phydat/app.config.test b/tests/senml_phydat/app.config.test
+new file mode 100644
+index 0000000000..16bdcfd387
+--- /dev/null
++++ b/tests/senml_phydat/app.config.test
+@@ -0,0 +1,3 @@
++CONFIG_MODULE_SENML_PHYDAT=y
++CONFIG_MODULE_EMBUNIT=y
++CONFIG_MODULE_PRINTF_FLOAT=y
+diff --git a/tests/senml_phydat/main.c b/tests/senml_phydat/main.c
+new file mode 100644
+index 0000000000..0781912f11
+--- /dev/null
++++ b/tests/senml_phydat/main.c
+@@ -0,0 +1,174 @@
++/*
++ * Copyright (C) 2021 Silke Hofstra
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       SenML Phydat tests
++ *
++ * @author      Silke Hofstra <silke@slxh.eu>
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <math.h>
++
++#include "embUnit.h"
++#include "senml/phydat.h"
++
++#define ENABLE_DEBUG (0)
++#include "debug.h"
++
++#ifndef PRIi64
++#define PRIi64 "lli"
++#endif
++
++typedef struct {
++    phydat_t phydat;
++    senml_value_t senml;
++} time_test_t;
++
++typedef struct {
++    phydat_t phydat;
++    senml_value_t senml1;
++    senml_value_t senml2;
++    uint8_t dim;
++} value_test_t;
++
++#define senml_s(s) { .attr = { .unit = SENML_UNIT_SECOND }, \
++                     .value = { SENML_TYPE_NUMERIC_INT, { .i = s } } }
++
++#define senml_f(v, u) { .attr = { .unit = u }, \
++                        .value = { SENML_TYPE_NUMERIC_FLOAT, { .f = v } } }
++
++#define senml_df(m, e, u) { .attr = { .unit = u }, \
++                            .value = { SENML_TYPE_NUMERIC_DECFRAC, { .df = { e, m } } } }
++
++static value_test_t value_tests[] = {
++    {
++        .phydat = { { 360, 0, 0 }, UNIT_M, 6 },
++        .senml1 = senml_f(360e6, SENML_UNIT_METER),
++        .senml2 = senml_df(360, 6, SENML_UNIT_METER),
++        .dim = 0
++    },
++    {
++        .phydat = { { 864, 0, 0 }, UNIT_TIME, 2 },
++        .senml1 = senml_f(86400, SENML_UNIT_SECOND),
++        .senml2 = senml_df(864, 2, SENML_UNIT_SECOND),
++        .dim = 0
++    },
++    {
++        .phydat = { { 0, 144, 0 }, UNIT_TIME, 1 },
++        .senml1 = senml_f(1440, SENML_UNIT_MINUTE),
++        .senml2 = senml_df(144, 1, SENML_UNIT_MINUTE),
++        .dim = 1
++    },
++    {
++        .phydat = { { 0, 0, 24 }, UNIT_TIME, 0 },
++        .senml1 = senml_f(24, SENML_UNIT_HOUR),
++        .senml2 = senml_df(24, 0, SENML_UNIT_HOUR),
++        .dim = 2
++    },
++    {
++        .phydat = { { 0, 0, 0 }, UNIT_TEMP_F, 3 },
++        .senml1 = senml_f(255.37, SENML_UNIT_KELVIN),
++        .senml2 = senml_df(0, 3, SENML_UNIT_NONE),
++    },
++    {
++        .phydat = { { 314, 0, 0 }, UNIT_G, -2 },
++        .senml1 = senml_f(30.792881, SENML_UNIT_METER_PER_SQUARE_SECOND),
++        .senml2 = senml_df(314, -2, SENML_UNIT_NONE),
++    },
++    {
++        .phydat = { { 988, 0, 0 }, UNIT_BAR, -3 },
++        .senml1 = senml_f(98.8e3, SENML_UNIT_PASCAL),
++        .senml2 = senml_df(988, 2, SENML_UNIT_PASCAL),
++    },
++    {
++        .phydat = { { 193, 0, 0 }, UNIT_GPM3, 5 },
++        .senml1 = senml_f(19.3e3, SENML_UNIT_KILOGRAM_PER_CUBIC_METER),
++        .senml2 = senml_df(193, 2, SENML_UNIT_KILOGRAM_PER_CUBIC_METER),
++    },
++    {
++        .phydat = { { 220, 0, 0 }, UNIT_GS, 3 },
++        .senml1 = senml_f(22, SENML_UNIT_TESLA),
++        .senml2 = senml_df(220, -1, SENML_UNIT_TESLA),
++    }
++};
++
++void test_phydat_to_senml_float(void)
++{
++    senml_value_t res;
++
++    for (size_t i = 0; i < ARRAY_SIZE(value_tests); i++) {
++        senml_value_t *exp = &(value_tests[i].senml1);
++
++        phydat_to_senml_float(&res, &(value_tests[i].phydat), value_tests[i].dim);
++
++        DEBUG("Float: %" PRIi16 "e%" PRIi16 " %s -> %.f %s\n",
++              value_tests[i].phydat.val[value_tests[i].dim], value_tests[i].phydat.scale,
++              phydat_unit_to_str(value_tests[i].phydat.unit),
++              res.value.value.f,
++              senml_unit_to_str(res.attr.unit));
++
++        TEST_ASSERT_EQUAL_STRING(senml_unit_to_str(exp->attr.unit),
++                                 senml_unit_to_str(res.attr.unit));
++        TEST_ASSERT_EQUAL_INT(exp->value.type, res.value.type);
++        TEST_ASSERT_EQUAL_INT((int)roundf(exp->value.value.f * 100),
++                              (int)roundf(res.value.value.f * 100));
++    }
++}
++
++void test_phydat_to_senml_decimal(void)
++{
++    senml_value_t res;
++
++    for (size_t i = 0; i < ARRAY_SIZE(value_tests); i++) {
++        senml_value_t *exp = &(value_tests[i].senml2);
++
++        phydat_to_senml_decimal(&res, &(value_tests[i].phydat), value_tests[i].dim);
++
++        DEBUG("Decimal: %" PRIi16 "e%" PRIi16 " %s -> %" PRIi32 "e%" PRIi32 " %s\n",
++              value_tests[i].phydat.val[value_tests[i].dim], value_tests[i].phydat.scale,
++              phydat_unit_to_str(value_tests[i].phydat.unit),
++              res.value.value.df.m, res.value.value.df.e,
++              senml_unit_to_str(res.attr.unit));
++
++        TEST_ASSERT_EQUAL_STRING(senml_unit_to_str(exp->attr.unit),
++                                 senml_unit_to_str(res.attr.unit));
++        TEST_ASSERT_EQUAL_INT(exp->value.type, res.value.type);
++        TEST_ASSERT_EQUAL_INT(exp->value.value.df.m, res.value.value.df.m);
++        TEST_ASSERT_EQUAL_INT(exp->value.value.df.e, res.value.value.df.e);
++    }
++}
++
++
++Test *tests_senml(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++/* Don't run this test on CPUs with unpredictable rounding */
++#if !defined(__AVR__) && !defined(CPU_MSP430FXYZ)
++        new_TestFixture(test_phydat_to_senml_float),
++#endif
++        new_TestFixture(test_phydat_to_senml_decimal),
++    };
++    EMB_UNIT_TESTCALLER(senml_tests, NULL, NULL, fixtures);
++    return (Test *)&senml_tests;
++}
++
++int main(void)
++{
++    TESTS_START();
++    TESTS_RUN(tests_senml());
++    TESTS_END();
++    return 0;
++}
+diff --git a/tests/senml_phydat/tests/01-run.py b/tests/senml_phydat/tests/01-run.py
+new file mode 100755
+index 0000000000..8b4e23f2e7
+--- /dev/null
++++ b/tests/senml_phydat/tests/01-run.py
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2017 Freie Universität Berlin
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import sys
++from testrunner import run_check_unittests
++
++
++if __name__ == "__main__":
++    sys.exit(run_check_unittests())
+diff --git a/tests/senml_saul/Makefile b/tests/senml_saul/Makefile
+new file mode 100644
+index 0000000000..a69acec8c5
+--- /dev/null
++++ b/tests/senml_saul/Makefile
+@@ -0,0 +1,8 @@
++include ../Makefile.tests_common
++
++USEMODULE += saul_default
++USEMODULE += senml_saul
++USEMODULE += fmt
++USEMODULE += embunit
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/senml_saul/Makefile.ci b/tests/senml_saul/Makefile.ci
+new file mode 100644
+index 0000000000..d5368f025e
+--- /dev/null
++++ b/tests/senml_saul/Makefile.ci
+@@ -0,0 +1,12 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    arduino-duemilanove \
++    arduino-leonardo \
++    arduino-nano \
++    arduino-uno \
++    atmega328p \
++    atmega328p-xplained-mini \
++    nucleo-f031k6 \
++    nucleo-l011k4 \
++    samd10-xmini \
++    stm32f030f4-demo \
++    #
+diff --git a/tests/senml_saul/main.c b/tests/senml_saul/main.c
+new file mode 100644
+index 0000000000..002f7bcde2
+--- /dev/null
++++ b/tests/senml_saul/main.c
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (C) 2021 Silke Hofstra
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Short SenML SAUL test
++ *
++ * @author      Silke Hofstra <silke@slxh.eu>
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include <string.h>
++
++#include "embUnit.h"
++#include "senml/saul.h"
++#include "fmt.h"
++
++#define BUF_SIZE (128)
++
++static uint8_t cbor_buf[BUF_SIZE];
++static char result[2 * BUF_SIZE];
++static char expect[] = "9FFF";
++
++void test_senml_encode(void)
++{
++    size_t len = senml_saul_encode_cbor(cbor_buf, sizeof cbor_buf, saul_reg);
++
++    /* Encode as hex */
++    fmt_bytes_hex(result, cbor_buf, len);
++
++    /* Compare hex result */
++    TEST_ASSERT_EQUAL_INT(2 * len, sizeof expect - 1);
++    TEST_ASSERT_EQUAL_INT(0, strncmp(expect, result, len));
++}
++
++Test *tests_senml(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_senml_encode),
++    };
++    EMB_UNIT_TESTCALLER(senml_tests, NULL, NULL, fixtures);
++    return (Test *)&senml_tests;
++}
++
++int main(void)
++{
++    TESTS_START();
++    TESTS_RUN(tests_senml());
++    TESTS_END();
++    return 0;
++}
+diff --git a/tests/senml_saul/tests/01-run.py b/tests/senml_saul/tests/01-run.py
+new file mode 100755
+index 0000000000..8b4e23f2e7
+--- /dev/null
++++ b/tests/senml_saul/tests/01-run.py
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2017 Freie Universität Berlin
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import sys
++from testrunner import run_check_unittests
++
++
++if __name__ == "__main__":
++    sys.exit(run_check_unittests())

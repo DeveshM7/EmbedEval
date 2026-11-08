@@ -1,0 +1,92 @@
+diff --git a/tests/sys/walltime/Makefile b/tests/sys/walltime/Makefile
+index 9b4b7b1aeb..03a1943961 100644
+--- a/tests/sys/walltime/Makefile
++++ b/tests/sys/walltime/Makefile
+@@ -2,7 +2,8 @@ include ../Makefile.sys_common
+ 
+ USEMODULE += shell
+ USEMODULE += shell_cmds_default
+-USEMODULE += walltime
++USEMODULE += walltime_default
++USEMODULE += rtc_utils
+ USEMODULE += ztimer_msec
+ 
+ include $(RIOTBASE)/Makefile.include
+diff --git a/tests/sys/walltime/main.c b/tests/sys/walltime/main.c
+index f72097d127..6f090ca27d 100644
+--- a/tests/sys/walltime/main.c
++++ b/tests/sys/walltime/main.c
+@@ -12,6 +12,8 @@
+  */
+ 
+ #include "shell.h"
++#include "fmt.h"
++#include "rtc_utils.h"
+ #include "walltime.h"
+ 
+ static void _time_change_cb(void *ctx, int32_t diff_sec, int16_t diff_ms)
+@@ -46,6 +48,46 @@ static void _add_and_remove_dummy_cb(void)
+     walltime_change_unsubscribe(&sub_b);
+ }
+ 
++#define TEST_RES(res, func)                                         \
++    if (res < 0) {                                                  \
++        printf(func " failed (%d) on line %u\n", res, __LINE__);    \
++        goto fail;                                                  \
++    }
++
++static int _cmd_test(int argc, char **argv)
++{
++    (void)argc;
++    (void)argv;
++
++    struct tm now, expect;
++    int res;
++
++    res = scn_time_tm_iso8601(&expect, "2020-01-01 12:34:56", ' ');
++    TEST_RES(res, "parse time");
++    res = walltime_set(&expect);
++    TEST_RES(res, "walltime_set()");
++    res = walltime_get(&now, NULL);
++    TEST_RES(res, "walltime_get()");
++    res = rtc_tm_compare(&now, &expect);
++    TEST_RES(res, "rtc_tm_compare()");
++
++    res = scn_time_tm_iso8601(&expect, "2046-01-01 12:34:56", ' ');
++    TEST_RES(res, "parse time");
++    res = walltime_set(&expect);
++    TEST_RES(res, "walltime_set()");
++    res = walltime_get(&now, NULL);
++    TEST_RES(res, "walltime_get()");
++    res = rtc_tm_compare(&now, &expect);
++    TEST_RES(res, "rtc_tm_compare()");
++
++    puts("TEST PASSED");
++    return res;
++fail:
++    puts("TEST FAILED");
++    return res;
++}
++SHELL_COMMAND(test, "test the walltime backend", _cmd_test);
++
+ int main(void)
+ {
+     _add_and_remove_dummy_cb();
+diff --git a/tests/sys/walltime/tests/01-run.py b/tests/sys/walltime/tests/01-run.py
+new file mode 100755
+index 0000000000..66306ee9e6
+--- /dev/null
++++ b/tests/sys/walltime/tests/01-run.py
+@@ -0,0 +1,12 @@
++#!/usr/bin/env python3
++import sys
++from testrunner import run
++
++
++def testfunc(child):
++    child.sendline("test")
++    child.expect("TEST PASSED")
++
++
++if __name__ == "__main__":
++    sys.exit(run(testfunc))

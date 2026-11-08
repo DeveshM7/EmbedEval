@@ -1,0 +1,1147 @@
+diff --git a/tests/sys/psa_crypto_cbor_encoder/Makefile b/tests/sys/psa_crypto_cbor_encoder/Makefile
+new file mode 100644
+index 0000000000..b26ebdcc1d
+--- /dev/null
++++ b/tests/sys/psa_crypto_cbor_encoder/Makefile
+@@ -0,0 +1,24 @@
++include ../Makefile.sys_common
++
++USEMODULE += embunit
++
++# This configuration also builds the backend implementations for all those selected
++# modules, some of which depend on the PSA hash functions. So to make this test
++# compile, we add the psa_hash module.
++USEMODULE += psa_hash
++USEMODULE += psa_hash_sha_256
++
++USEMODULE += psa_crypto
++USEMODULE += psa_persistent_storage
++
++USEMODULE += psa_cipher
++USEMODULE += psa_cipher_aes_128_cbc
++
++USEMODULE += psa_asymmetric
++USEMODULE += psa_asymmetric_ecc_p256r1
++
++CFLAGS += -DCONFIG_PSA_ASYMMETRIC_KEYPAIR_COUNT=1
++CFLAGS += -DCONFIG_PSA_SINGLE_KEY_COUNT=1
++CFLAGS += -DCONFIG_PSA_PROTECTED_KEY_COUNT=1
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/sys/psa_crypto_cbor_encoder/Makefile.ci b/tests/sys/psa_crypto_cbor_encoder/Makefile.ci
+new file mode 100644
+index 0000000000..6a2fca3caf
+--- /dev/null
++++ b/tests/sys/psa_crypto_cbor_encoder/Makefile.ci
+@@ -0,0 +1,14 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    arduino-duemilanove \
++    arduino-leonardo \
++    arduino-nano \
++    arduino-uno \
++    atmega328p \
++    atmega328p-xplained-mini \
++    atmega8 \
++    nucleo-f031k6 \
++    nucleo-l011k4 \
++    samd10-xmini \
++    stk3200 \
++    stm32f030f4-demo \
++    #
+diff --git a/tests/sys/psa_crypto_cbor_encoder/main.c b/tests/sys/psa_crypto_cbor_encoder/main.c
+new file mode 100644
+index 0000000000..e45476afb8
+--- /dev/null
++++ b/tests/sys/psa_crypto_cbor_encoder/main.c
+@@ -0,0 +1,31 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Test application for the PSA Crypto key encoding module
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "tests_psa_cbor_enc_dec.h"
++
++int main(void)
++{
++    TESTS_START();
++    TESTS_RUN(tests_psa_crypto_enc_dec_single_key());
++    TESTS_RUN(tests_psa_crypto_enc_dec_keypair());
++    TESTS_RUN(tests_psa_crypto_enc_dec_protected_key());
++    TESTS_END();
++    return 0;
++}
+diff --git a/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_keypair.c b/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_keypair.c
+new file mode 100644
+index 0000000000..c4ee2463e4
+--- /dev/null
++++ b/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_keypair.c
+@@ -0,0 +1,117 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Tests CBOR encoding of a PSA Crypto asymmetric key pair slot.
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "embUnit.h"
++#include "psa/crypto.h"
++#include "psa_crypto_cbor_encoder.h"
++#include "tests_psa_cbor_enc_dec.h"
++
++/**
++ * @brief   Data has been obtained by manually encoding and decoding keys,
++ *          until they fit the desired format and checking the output with
++ *          https://cbor.me.
++ *
++ *          Diagnostic notation:
++ *          [
++ *              [268435459, 28946, 256, 1, [12288, 100664841]],
++ *              [h'27FC4D41F3DE49F786314B74AA67DE4BA961C38F4F896F045A537102B43D2039',
++ *               h'0456CB81D1CBDE44F51DCCB12602670D76DDE784ED8D30721CCA5059F920AD62
++ *               87749EC9CB2675C51B69A68956102E8F6F7257B9B993ED8899EAFD53823DCAB641']
++ *          ]
++ */
++static uint8_t cbor_encoded_data[] = {
++    0x82, 0x85, 0x1a, 0x10, 0x00, 0x00, 0x03, 0x19,
++    0x71, 0x12, 0x19, 0x01, 0x00, 0x01, 0x82, 0x19,
++    0x30, 0x00, 0x1a, 0x06, 0x00, 0x06, 0x09, 0x82,
++    0x58, 0x20, 0x27, 0xfc, 0x4d, 0x41, 0xf3, 0xde,
++    0x49, 0xf7, 0x86, 0x31, 0x4b, 0x74, 0xaa, 0x67,
++    0xde, 0x4b, 0xa9, 0x61, 0xc3, 0x8f, 0x4f, 0x89,
++    0x6f, 0x04, 0x5a, 0x53, 0x71, 0x02, 0xb4, 0x3d,
++    0x20, 0x39, 0x58, 0x41, 0x04, 0x56, 0xcb, 0x81,
++    0xd1, 0xcb, 0xde, 0x44, 0xf5, 0x1d, 0xcc, 0xb1,
++    0x26, 0x02, 0x67, 0x0d, 0x76, 0xdd, 0xe7, 0x84,
++    0xed, 0x8d, 0x30, 0x72, 0x1c, 0xca, 0x50, 0x59,
++    0xf9, 0x20, 0xad, 0x62, 0x87, 0x74, 0x9e, 0xc9,
++    0xcb, 0x26, 0x75, 0xc5, 0x1b, 0x69, 0xa6, 0x89,
++    0x56, 0x10, 0x2e, 0x8f, 0x6f, 0x72, 0x57, 0xb9,
++    0xb9, 0x93, 0xed, 0x88, 0x99, 0xea, 0xfd, 0x53,
++    0x82, 0x3d, 0xca, 0xb6, 0x41
++};
++
++static void _init_key_slot(psa_key_pair_slot_t *slot)
++{
++    psa_key_lifetime_t lifetime = 1;
++    psa_key_usage_t usage = PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH;
++
++    psa_set_key_lifetime(&slot->attr, lifetime);
++    psa_set_key_algorithm(&slot->attr, ECC_ALG);
++    psa_set_key_usage_flags(&slot->attr, usage);
++    psa_set_key_type(&slot->attr, ECC_KEY_TYPE);
++    psa_set_key_bits(&slot->attr, ECC_KEY_SIZE);
++    psa_set_key_id(&slot->attr, 0x10000003);
++
++    memcpy(slot->key.privkey_data, privkey, sizeof(privkey));
++    slot->key.privkey_data_len = sizeof(privkey);
++
++    memcpy(slot->key.pubkey_data, pubkey, sizeof(pubkey));
++    slot->key.pubkey_data_len = sizeof(pubkey);
++}
++
++/**
++ * @brief   CBOR encoding of key pair slot should equal @c cbor_encoded_data
++ */
++static void test_encode_asymmetric_keypair_slot(void)
++{
++    size_t encoded_size;
++    uint8_t cbor_enc[sizeof(cbor_encoded_data)];
++    psa_key_pair_slot_t slot;
++    _init_key_slot(&slot);
++
++    TEST_ASSERT_PSA(psa_encode_key_slot((psa_key_slot_t *)&slot, cbor_enc, sizeof(cbor_enc), &encoded_size));
++    TEST_ASSERT_EQUAL_INT(sizeof(cbor_encoded_data), encoded_size);
++    TEST_ASSERT_MESSAGE(0 == memcmp(cbor_enc, cbor_encoded_data,
++                                     encoded_size), "wrong cbor encoding");
++}
++
++/**
++ * @brief   Decoded key slot should equal key slot structure initialized
++ *          in @c test_encode_asymmetric_keypair_slot.
++ */
++static void test_decode_asymmetric_keypair_slot(void)
++{
++    psa_key_pair_slot_t slot;
++
++    TEST_ASSERT_PSA(psa_decode_key_attributes(&slot.attr, cbor_encoded_data, sizeof(cbor_encoded_data)));
++    TEST_ASSERT_PSA(psa_decode_key_slot_data((psa_key_slot_t *)&slot, cbor_encoded_data, sizeof(cbor_encoded_data)));
++    TEST_ASSERT_MESSAGE(0 == memcmp((uint8_t *)&slot, (uint8_t *)&slot,
++                                     sizeof(psa_key_pair_slot_t)), "wrong cbor decoding");
++}
++
++Test* tests_psa_crypto_enc_dec_keypair(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_encode_asymmetric_keypair_slot),
++        new_TestFixture(test_decode_asymmetric_keypair_slot),
++    };
++
++    EMB_UNIT_TESTCALLER(psa_crypto_enc_dec_keypair_tests, NULL, NULL, fixtures);
++
++    return (Test *)&psa_crypto_enc_dec_keypair_tests;
++}
+diff --git a/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_prot_key.c b/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_prot_key.c
+new file mode 100644
+index 0000000000..a47171f289
+--- /dev/null
++++ b/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_prot_key.c
+@@ -0,0 +1,171 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Tests CBOR encoding of PSA Crypto protected key slots
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "embUnit.h"
++#include "psa/crypto.h"
++#include "psa_crypto_cbor_encoder.h"
++#include "tests_psa_cbor_enc_dec.h"
++
++/**
++ * @brief   Testdata has been obtained by manually encoding and decoding keys,
++ *          until they fit the desired format and checking the output with
++ *          https://cbor.me.
++ *
++ *          Diagnostic notation:
++ *          [
++ *              [8, 9216, 128, 2147483648, [768, 71319552]],
++ *              [4]
++ *          ]
++ */
++static uint8_t cbor_encoded_data[] = {
++    0x82, 0x85, 0x08, 0x19, 0x24, 0x00, 0x18, 0x80,
++    0x1a, 0x80, 0x00, 0x00, 0x00, 0x82, 0x19, 0x03,
++    0x00, 0x1a, 0x04, 0x40, 0x40, 0x00, 0x81, 0x04
++};
++
++/**
++ * @brief   Testdata has been obtained by manually encoding and decoding keys,
++ *          until they fit the desired format and checking the output with
++ *          https://cbor.me.
++ *
++ *          Diagnostic notation:
++ *          [
++ *              [8, 28946, 256, 2147483648, [12288, 100664841]],
++ *              [4, h'0456CB81D1CBDE44F51DCCB12602670D76DDE784ED8D30721CCA5059F920AD62877
++ *                    49EC9CB2675C51B69A68956102E8F6F7257B9B993ED8899EAFD53823DCAB641']
++ *          ]
++ */
++static uint8_t cbor_encoded_data_with_pubkey[] = {
++    0x82, 0x85, 0x08, 0x19, 0x71, 0x12, 0x19, 0x01,
++    0x00, 0x1a, 0x80, 0x00, 0x00, 0x00, 0x82, 0x19,
++    0x30, 0x00, 0x1a, 0x06, 0x00, 0x06, 0x09, 0x82,
++    0x04, 0x58, 0x41, 0x04, 0x56, 0xcb, 0x81, 0xd1,
++    0xcb, 0xde, 0x44, 0xf5, 0x1d, 0xcc, 0xb1, 0x26,
++    0x02, 0x67, 0x0d, 0x76, 0xdd, 0xe7, 0x84, 0xed,
++    0x8d, 0x30, 0x72, 0x1c, 0xca, 0x50, 0x59, 0xf9,
++    0x20, 0xad, 0x62, 0x87, 0x74, 0x9e, 0xc9, 0xcb,
++    0x26, 0x75, 0xc5, 0x1b, 0x69, 0xa6, 0x89, 0x56,
++    0x10, 0x2e, 0x8f, 0x6f, 0x72, 0x57, 0xb9, 0xb9,
++    0x93, 0xed, 0x88, 0x99, 0xea, 0xfd, 0x53, 0x82,
++    0x3d, 0xca, 0xb6, 0x41
++};
++
++static void _init_key_slot(psa_prot_key_slot_t *slot, int is_pubkey)
++{
++    psa_key_lifetime_t lifetime = PSA_KEY_LIFETIME_FROM_PERSISTENCE_AND_LOCATION
++                                      (PSA_KEY_LIFETIME_VOLATILE, PSA_KEY_LOCATION_SE_MIN);
++    psa_set_key_lifetime(&slot->attr, lifetime);
++    psa_set_key_id(&slot->attr, 8);
++    slot->key.slot_number = 4;
++
++    if (!is_pubkey) {
++        psa_key_usage_t usage = PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT;
++        psa_set_key_algorithm(&slot->attr, PSA_ALG_CBC_NO_PADDING);
++        psa_set_key_usage_flags(&slot->attr, usage);
++        psa_set_key_type(&slot->attr, PSA_KEY_TYPE_AES);
++        psa_set_key_bits(&slot->attr, PSA_BYTES_TO_BITS(sizeof(AES_KEY)));
++    }
++    else {
++        psa_key_usage_t usage = PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH;
++        psa_set_key_algorithm(&slot->attr, ECC_ALG);
++        psa_set_key_usage_flags(&slot->attr, usage);
++        psa_set_key_type(&slot->attr, ECC_KEY_TYPE);
++        psa_set_key_bits(&slot->attr, ECC_KEY_SIZE);
++        psa_set_key_id(&slot->attr, 8);
++
++        memcpy(slot->key.pubkey_data, pubkey, sizeof(pubkey));
++        slot->key.pubkey_data_len = sizeof(pubkey);
++    }
++}
++
++/**
++ * @brief   CBOR encoding of key pair slot should equal @c cbor_encoded_data
++ */
++static void test_encode_protected_key_slot(void)
++{
++    size_t encoded_size;
++    uint8_t cbor_enc[sizeof(cbor_encoded_data)];
++    psa_prot_key_slot_t slot;
++    _init_key_slot(&slot, 0);
++
++    TEST_ASSERT_PSA(psa_encode_key_slot((psa_key_slot_t *)&slot, cbor_enc, sizeof(cbor_enc), &encoded_size));
++    TEST_ASSERT_EQUAL_INT(sizeof(cbor_encoded_data), encoded_size);
++    TEST_ASSERT_MESSAGE(0 == memcmp(cbor_enc, cbor_encoded_data, encoded_size),
++                                                                "wrong cbor encoding");
++}
++
++/**
++ * @brief   CBOR encoding of key pair slot should equal @c cbor_encoded_data_with_pubkey
++ */
++static void test_encode_protected_key_slot_with_pubkey(void)
++{
++    size_t encoded_size;
++    uint8_t cbor_enc_with_pubkey[sizeof(cbor_encoded_data_with_pubkey)];
++    psa_prot_key_slot_t slot;
++    _init_key_slot(&slot, 1);
++
++    TEST_ASSERT_PSA(psa_encode_key_slot((psa_key_slot_t *)&slot, cbor_enc_with_pubkey, sizeof(cbor_enc_with_pubkey), &encoded_size));
++    TEST_ASSERT_EQUAL_INT(sizeof(cbor_encoded_data_with_pubkey), encoded_size);
++    TEST_ASSERT_MESSAGE(0 == memcmp(cbor_enc_with_pubkey, cbor_encoded_data_with_pubkey,
++                                     encoded_size), "wrong cbor encoding");
++}
++
++/**
++ * @brief   Decoded key slot should equal key slot structure initialized
++ *          in @c test_encode_protected_key_slot.
++ */
++static void test_decode_protected_key_slot(void)
++{
++    psa_prot_key_slot_t slot;
++
++    TEST_ASSERT_PSA(psa_decode_key_attributes(&slot.attr, cbor_encoded_data, sizeof(cbor_encoded_data)));
++    TEST_ASSERT_PSA(psa_decode_key_slot_data((psa_key_slot_t *)&slot, cbor_encoded_data, sizeof(cbor_encoded_data)));
++    TEST_ASSERT_MESSAGE(0 == memcmp((uint8_t *)&slot, (uint8_t *)&slot,
++                                     sizeof(psa_prot_key_slot_t)), "wrong cbor decoding");
++}
++
++/**
++ * @brief   Decoded key slot should equal key slot structure initialized
++ *          in @c test_encode_protected_key_slot_with_pubkey.
++ */
++static void test_decode_protected_key_slot_with_pubkey(void)
++{
++    psa_prot_key_slot_t slot;
++
++    TEST_ASSERT_PSA(psa_decode_key_attributes(&slot.attr, cbor_encoded_data_with_pubkey, sizeof(cbor_encoded_data_with_pubkey)));
++    TEST_ASSERT_PSA(psa_decode_key_slot_data((psa_key_slot_t *)&slot, cbor_encoded_data_with_pubkey, sizeof(cbor_encoded_data_with_pubkey)));
++
++    TEST_ASSERT_MESSAGE(0 == memcmp((uint8_t *)&slot, (uint8_t *)&slot,
++                                     sizeof(psa_prot_key_slot_t)), "wrong cbor decoding");
++}
++
++Test* tests_psa_crypto_enc_dec_protected_key(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_encode_protected_key_slot),
++        new_TestFixture(test_decode_protected_key_slot),
++        new_TestFixture(test_encode_protected_key_slot_with_pubkey),
++        new_TestFixture(test_decode_protected_key_slot_with_pubkey)
++    };
++
++    EMB_UNIT_TESTCALLER(psa_crypto_enc_dec_protected_key_tests, NULL, NULL, fixtures);
++
++    return (Test *)&psa_crypto_enc_dec_protected_key_tests;
++}
+diff --git a/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_single_key.c b/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_single_key.c
+new file mode 100644
+index 0000000000..9d14ebe541
+--- /dev/null
++++ b/tests/sys/psa_crypto_cbor_encoder/test_psa_crypto_enc_dec_single_key.c
+@@ -0,0 +1,98 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Tests CBOR encoding of a PSA Crypto key slot containing one single key
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "embUnit.h"
++#include "psa/crypto.h"
++#include "psa_crypto_cbor_encoder.h"
++#include "tests_psa_cbor_enc_dec.h"
++
++/**
++ * @brief   Data has been obtained by manually encoding and decoding keys,
++ *          until they fit the desired format and checking the output with
++ *          https://cbor.me.
++ *
++ *          Diagnostic notation:
++ *          [
++ *              [268435459, 9216, 128, 1, [256, 71319552]],
++ *              h'2B7E151628AED218ABF7158809CF4F3C'
++ *          ]
++ */
++static uint8_t cbor_encoded_data[] = {
++    0x82, 0x85, 0x1a, 0x10, 0x00, 0x00, 0x03, 0x19,
++    0x24, 0x00, 0x18, 0x80, 0x01, 0x82, 0x19, 0x01,
++    0x00, 0x1a, 0x04, 0x40, 0x40, 0x00, 0x50, 0x2b,
++    0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0x18, 0xab,
++    0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c
++};
++
++static void _init_key_slot(psa_key_slot_t *slot)
++{
++    psa_set_key_type(&slot->attr, PSA_KEY_TYPE_AES);
++    psa_set_key_algorithm(&slot->attr, PSA_ALG_CBC_NO_PADDING);
++    psa_set_key_bits(&slot->attr, PSA_BYTES_TO_BITS(sizeof(AES_KEY)));
++    psa_set_key_lifetime(&slot->attr, 0x00000001);
++    psa_set_key_usage_flags(&slot->attr, PSA_KEY_USAGE_ENCRYPT);
++    psa_set_key_id(&slot->attr, 0x10000003);
++
++    memcpy(slot->key.data, AES_KEY, sizeof(AES_KEY));
++    slot->key.data_len = sizeof(AES_KEY);
++}
++
++/**
++ * @brief   CBOR encoding of key pair slot should equal @c cbor_encoded_data
++ */
++static void test_encode_single_key_slot(void)
++{
++    size_t encoded_size;
++    uint8_t cbor_enc[sizeof(cbor_encoded_data)];
++    psa_key_slot_t slot;
++    _init_key_slot(&slot);
++
++    TEST_ASSERT_PSA(psa_encode_key_slot(&slot, cbor_enc, sizeof(cbor_enc), &encoded_size));
++    TEST_ASSERT_EQUAL_INT(sizeof(cbor_encoded_data), encoded_size);
++    TEST_ASSERT_MESSAGE(0 == memcmp(cbor_enc, cbor_encoded_data,
++                                     encoded_size), "wrong cbor encoding");
++}
++
++/**
++ * @brief   Decoded key slot should equal key slot structure initialized
++ *          in @c test_encode_single_key_slot.
++ */
++static void test_decode_single_key_slot(void)
++{
++    psa_key_slot_t slot;
++
++    TEST_ASSERT_PSA(psa_decode_key_attributes(&(slot.attr), cbor_encoded_data, sizeof(cbor_encoded_data)));
++    TEST_ASSERT_PSA(psa_decode_key_slot_data(&slot, cbor_encoded_data, sizeof(cbor_encoded_data)));
++    TEST_ASSERT_MESSAGE(0 == memcmp((uint8_t *)&slot, (uint8_t *)&slot,
++                                     sizeof(psa_key_slot_t)), "wrong cbor decoding");
++}
++
++Test* tests_psa_crypto_enc_dec_single_key(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_encode_single_key_slot),
++        new_TestFixture(test_decode_single_key_slot),
++    };
++
++    EMB_UNIT_TESTCALLER(psa_crypto_enc_dec_single_key_tests, NULL, NULL, fixtures);
++
++    return (Test *)&psa_crypto_enc_dec_single_key_tests;
++}
+diff --git a/tests/sys/psa_crypto_cbor_encoder/tests/01-run.py b/tests/sys/psa_crypto_cbor_encoder/tests/01-run.py
+new file mode 100755
+index 0000000000..dc56107fc3
+--- /dev/null
++++ b/tests/sys/psa_crypto_cbor_encoder/tests/01-run.py
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2023 TU Dresden
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import sys
++from testrunner import run_check_unittests
++
++
++if __name__ == "__main__":
++    sys.exit(run_check_unittests())
+diff --git a/tests/sys/psa_crypto_cbor_encoder/tests_psa_cbor_enc_dec.h b/tests/sys/psa_crypto_cbor_encoder/tests_psa_cbor_enc_dec.h
+new file mode 100644
+index 0000000000..085df037a5
+--- /dev/null
++++ b/tests/sys/psa_crypto_cbor_encoder/tests_psa_cbor_enc_dec.h
+@@ -0,0 +1,71 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup
++ * @defgroup       <name> <description>
++ * @{
++ *
++ * @file        tests_psa_cbor_enc_dec.h
++ * @brief
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ */
++
++#ifndef TESTS_PSA_CBOR_ENC_DEC_H
++#define TESTS_PSA_CBOR_ENC_DEC_H
++
++#include <stdint.h>
++#include "embUnit.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define TEST_ASSERT_PSA(func_) TEST_ASSERT_MESSAGE((func_) == PSA_SUCCESS, #func_ " failed");
++
++#define ECC_KEY_SIZE (256)
++#define ECC_KEY_TYPE (PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1))
++#define ECC_ALG_HASH (PSA_ALG_SHA_256)
++#define ECC_ALG (PSA_ALG_ECDSA(ECC_ALG_HASH))
++
++static const uint8_t privkey[] = {
++    0x27, 0xfc, 0x4d, 0x41, 0xf3, 0xde, 0x49, 0xf7,
++    0x86, 0x31, 0x4b, 0x74, 0xaa, 0x67, 0xde, 0x4b,
++    0xa9, 0x61, 0xc3, 0x8f, 0x4f, 0x89, 0x6f, 0x04,
++    0x5a, 0x53, 0x71, 0x02, 0xb4, 0x3d, 0x20, 0x39
++};
++
++static const uint8_t pubkey[] = {
++    0x04,
++    0x56, 0xcb, 0x81, 0xd1, 0xcb, 0xde, 0x44, 0xf5,
++    0x1d, 0xcc, 0xb1, 0x26, 0x02, 0x67, 0x0d, 0x76,
++    0xdd, 0xe7, 0x84, 0xed, 0x8d, 0x30, 0x72, 0x1c,
++    0xca, 0x50, 0x59, 0xf9, 0x20, 0xad, 0x62, 0x87,
++    0x74, 0x9e, 0xc9, 0xcb, 0x26, 0x75, 0xc5, 0x1b,
++    0x69, 0xa6, 0x89, 0x56, 0x10, 0x2e, 0x8f, 0x6f,
++    0x72, 0x57, 0xb9, 0xb9, 0x93, 0xed, 0x88, 0x99,
++    0xea, 0xfd, 0x53, 0x82, 0x3d, 0xca, 0xb6, 0x41
++};
++
++static const uint8_t AES_KEY[] = {
++    0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0x18,
++    0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c
++};
++
++Test* tests_psa_crypto_enc_dec_single_key(void);
++Test* tests_psa_crypto_enc_dec_keypair(void);
++Test* tests_psa_crypto_enc_dec_protected_key(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* TESTS_PSA_CBOR_ENC_DEC_H */
++/** @} */
+diff --git a/tests/sys/psa_crypto_persistent_storage/Makefile b/tests/sys/psa_crypto_persistent_storage/Makefile
+new file mode 100644
+index 0000000000..fe4271977e
+--- /dev/null
++++ b/tests/sys/psa_crypto_persistent_storage/Makefile
+@@ -0,0 +1,23 @@
++include ../Makefile.sys_common
++
++BOARD_WHITELIST = \
++  native \
++  nrf52840dk \
++  #
++
++USEMODULE += embunit
++
++USEMODULE += psa_crypto
++USEMODULE += psa_persistent_storage
++
++USEMODULE += psa_cipher
++USEMODULE += psa_cipher_aes_128_cbc
++
++USEMODULE += psa_asymmetric
++USEMODULE += psa_asymmetric_ecc_ed25519
++
++CFLAGS += -DCONFIG_PSA_SINGLE_KEY_COUNT=1
++CFLAGS += -DCONFIG_PSA_ASYMMETRIC_KEYPAIR_COUNT=1
++CFLAGS += -DTHREAD_STACKSIZE_MAIN=\(4*THREAD_STACKSIZE_DEFAULT\)
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/sys/psa_crypto_persistent_storage/main.c b/tests/sys/psa_crypto_persistent_storage/main.c
+new file mode 100644
+index 0000000000..76c3aba904
+--- /dev/null
++++ b/tests/sys/psa_crypto_persistent_storage/main.c
+@@ -0,0 +1,33 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Test application for the PSA Crypto key encoding module
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "psa/crypto.h"
++#include "tests_psa_persistent_storage.h"
++
++int main(void)
++{
++    TESTS_START();
++    psa_crypto_init();
++    TESTS_RUN(tests_psa_persistent_single_key_storage());
++    TESTS_RUN(tests_psa_persistent_asym_keypair_storage());
++    TESTS_RUN(tests_psa_fail_overwrite_existing_key());
++    TESTS_END();
++    return 0;
++}
+diff --git a/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_fail_overwrite_persistent_key.c b/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_fail_overwrite_persistent_key.c
+new file mode 100644
+index 0000000000..b4d66c8904
+--- /dev/null
++++ b/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_fail_overwrite_persistent_key.c
+@@ -0,0 +1,90 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Verify that PSA Crypto keys cannot be overwritten in storage
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "embUnit.h"
++#include "psa/crypto.h"
++#include "tests_psa_persistent_storage.h"
++
++static psa_key_id_t key_id = 1;
++
++/**
++ * @brief   A persistently stored key must not be overwritten by new key with same ID
++ */
++static void test_psa_fail_overwrite_existing_key(void)
++{
++    psa_key_attributes_t attr = psa_key_attributes_init();
++    psa_key_usage_t usage = PSA_KEY_USAGE_ENCRYPT;
++
++    psa_set_key_algorithm(&attr, PSA_ALG_CBC_NO_PADDING);
++    psa_set_key_usage_flags(&attr, usage);
++    psa_set_key_bits(&attr, 128);
++    psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
++    psa_set_key_id(&attr, key_id);
++
++    psa_key_lifetime_t lifetime = PSA_KEY_LIFETIME_FROM_PERSISTENCE_AND_LOCATION
++                                      (PSA_KEY_LIFETIME_PERSISTENT, PSA_KEY_LOCATION_LOCAL_STORAGE);
++    psa_set_key_lifetime(&attr, lifetime);
++
++    /* Import persistent key */
++    TEST_ASSERT_PSA_SUCCESS(psa_import_key(&attr, KEY_128, AES_128_KEY_SIZE, &key_id));
++
++    /* Import different key with same ID, should fail */
++    TEST_ASSERT_PSA_ALREADY_EXISTS(psa_import_key(&attr, OVERWRITE_KEY_128, AES_128_KEY_SIZE, &key_id));
++}
++
++/**
++ * @brief   After deleting a persistent key, a new key with same ID can be imported
++ */
++static void test_psa_delete_key_and_import_key_with_same_id(void)
++{
++    psa_key_attributes_t attr = psa_key_attributes_init();
++    psa_key_usage_t usage = PSA_KEY_USAGE_ENCRYPT;
++
++    psa_set_key_algorithm(&attr, PSA_ALG_CBC_NO_PADDING);
++    psa_set_key_usage_flags(&attr, usage);
++    psa_set_key_bits(&attr, 128);
++    psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
++    psa_set_key_id(&attr, key_id);
++
++    psa_key_lifetime_t lifetime = PSA_KEY_LIFETIME_FROM_PERSISTENCE_AND_LOCATION
++                                      (PSA_KEY_LIFETIME_PERSISTENT, PSA_KEY_LOCATION_LOCAL_STORAGE);
++    psa_set_key_lifetime(&attr, lifetime);
++
++    /* Destroy persistent key */
++    TEST_ASSERT_PSA_SUCCESS(psa_destroy_key(key_id));
++
++    /* Import different key with same ID, should succeed */
++    TEST_ASSERT_PSA_SUCCESS(psa_import_key(&attr, OVERWRITE_KEY_128, AES_128_KEY_SIZE, &key_id));
++
++    /* Destroy persistent key again, to clean up */
++    TEST_ASSERT_PSA_SUCCESS(psa_destroy_key(key_id));
++}
++
++Test* tests_psa_fail_overwrite_existing_key(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_psa_fail_overwrite_existing_key),
++        new_TestFixture(test_psa_delete_key_and_import_key_with_same_id),
++    };
++
++    EMB_UNIT_TESTCALLER(tests_psa_fail_overwrite_existing_key_tests, NULL, NULL, fixtures);
++
++    return (Test *)&tests_psa_fail_overwrite_existing_key_tests;
++}
+diff --git a/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_store_persistent_asym_keypair.c b/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_store_persistent_asym_keypair.c
+new file mode 100644
+index 0000000000..b8210a702f
+--- /dev/null
++++ b/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_store_persistent_asym_keypair.c
+@@ -0,0 +1,152 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Tests CBOR encoding of a PSA Crypto asymmetric key pair slot.
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "embUnit.h"
++#include "psa/crypto.h"
++#include "tests_psa_persistent_storage.h"
++
++#define EDDSA_MESSAGE_SIZE  (127)
++
++#define ECC_KEY_SIZE    (255)
++#define ECC_KEY_TYPE (PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_TWISTED_EDWARDS))
++#define ECC_ALG (PSA_ALG_PURE_EDDSA)
++
++#define ECC_PUBLIC_KEY_SIZE     (PSA_EXPORT_PUBLIC_KEY_OUTPUT_SIZE(ECC_KEY_TYPE, ECC_KEY_SIZE))
++#define SIGNATURE_SIZE    (PSA_SIGN_OUTPUT_SIZE(ECC_KEY_TYPE, ECC_KEY_SIZE, ECC_ALG))
++
++static psa_key_attributes_t privkey_attr;
++static psa_key_attributes_t pubkey_attr;
++
++static psa_key_id_t privkey_id = 1;
++static psa_key_id_t pubkey_id = 2;
++static psa_key_id_t overwrite_privkey_id = 3;
++
++static const uint8_t msg[EDDSA_MESSAGE_SIZE] = { 0x0b };
++
++static void _test_setup(void)
++{
++    uint8_t public_key[ECC_PUBLIC_KEY_SIZE];
++    size_t pubkey_length;
++
++    privkey_attr = psa_key_attributes_init();
++    pubkey_attr = psa_key_attributes_init();
++
++    psa_key_usage_t usage = PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE;
++    psa_key_lifetime_t lifetime = PSA_KEY_LIFETIME_FROM_PERSISTENCE_AND_LOCATION
++                                      (PSA_KEY_LIFETIME_PERSISTENT, PSA_KEY_LOCATION_LOCAL_STORAGE);
++
++    psa_set_key_algorithm(&privkey_attr, ECC_ALG);
++    psa_set_key_usage_flags(&privkey_attr, usage);
++    psa_set_key_type(&privkey_attr, ECC_KEY_TYPE);
++    psa_set_key_bits(&privkey_attr, ECC_KEY_SIZE);
++    psa_set_key_id(&privkey_attr, privkey_id);
++    psa_set_key_lifetime(&privkey_attr, lifetime);
++
++    /* Generate persistent key */
++    TEST_ASSERT_PSA_SUCCESS(psa_generate_key(&privkey_attr, &privkey_id));
++
++    /* Export and import public key for verification */
++    TEST_ASSERT_PSA_SUCCESS(psa_export_public_key(privkey_id, public_key,
++                                                            sizeof(public_key), &pubkey_length));
++
++    psa_set_key_usage_flags(&pubkey_attr, PSA_KEY_USAGE_VERIFY_MESSAGE);
++    psa_set_key_algorithm(&pubkey_attr, ECC_ALG);
++    psa_set_key_bits(&pubkey_attr, PSA_BYTES_TO_BITS(pubkey_length));
++    psa_set_key_type(&pubkey_attr, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_TWISTED_EDWARDS));
++
++    TEST_ASSERT_PSA_SUCCESS(psa_import_key(&pubkey_attr, public_key, pubkey_length, &pubkey_id));
++}
++
++static void _test_destroy_keys(int cleanup)
++{
++    /* Destroy first key */
++    TEST_ASSERT_PSA_SUCCESS(psa_destroy_key(privkey_id));
++
++    /* Destroy second key */
++    TEST_ASSERT_PSA_SUCCESS(psa_destroy_key(pubkey_id));
++
++    if (cleanup) {
++        /* Destroy last key, just to clean up */
++        TEST_ASSERT_PSA_SUCCESS(psa_destroy_key(overwrite_privkey_id));
++    }
++}
++
++/**
++ * @brief   A persistently stored key should still be accessible after
++ *          overwriting it in local memory
++ */
++static void test_psa_store_persistent_asym_keypair(void)
++{
++    uint8_t signature[SIGNATURE_SIZE];
++    size_t sig_length;
++
++    _test_setup();
++
++    /* Generate second keypair to overwrite the first one in volatile memory */
++    psa_set_key_id(&privkey_attr, overwrite_privkey_id);
++    TEST_ASSERT_PSA_SUCCESS(psa_generate_key(&privkey_attr, &overwrite_privkey_id));
++
++    /* Generate message signature with first key */
++    TEST_ASSERT_PSA_SUCCESS(psa_sign_message(privkey_id, ECC_ALG, msg, sizeof(msg), signature, sizeof(signature), &sig_length));
++
++    /* Verify signature with public key of first keypair */
++    TEST_ASSERT_PSA_SUCCESS(psa_verify_message(pubkey_id, ECC_ALG, msg,
++                                                            sizeof(msg), signature, sig_length));
++
++    _test_destroy_keys(1);
++}
++
++/**
++ * @brief   After destroying a persistent key, it should not be available anymore
++ */
++static void test_psa_delete_persistent_asym_keypair(void)
++{
++    uint8_t signature[SIGNATURE_SIZE];
++    size_t sig_length;
++
++    _test_setup();
++
++    /* Generate message signature with first key */
++    TEST_ASSERT_PSA_SUCCESS(psa_sign_message(privkey_id, ECC_ALG, msg, sizeof(msg), signature, sizeof(signature), &sig_length));
++
++    /* Verify signature with public key of first keypair */
++    TEST_ASSERT_PSA_SUCCESS(psa_verify_message(pubkey_id, ECC_ALG, msg,
++                                                            sizeof(msg), signature, sig_length));
++
++    _test_destroy_keys(0);
++
++    /* Signature and verification with deleted keys should fail */
++    TEST_ASSERT_PSA_DOES_NOT_EXIST(psa_sign_message(privkey_id, ECC_ALG, msg, sizeof(msg),
++                                                        signature, sizeof(signature), &sig_length));
++    TEST_ASSERT_PSA_DOES_NOT_EXIST(psa_verify_message(pubkey_id, ECC_ALG, msg, sizeof(msg),
++                                                                            signature, sig_length));
++}
++
++Test* tests_psa_persistent_asym_keypair_storage(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_psa_store_persistent_asym_keypair),
++        new_TestFixture(test_psa_delete_persistent_asym_keypair),
++    };
++
++    EMB_UNIT_TESTCALLER(tests_psa_persistent_asym_keypair_storage_tests, NULL, NULL, fixtures);
++
++    return (Test *)&tests_psa_persistent_asym_keypair_storage_tests;
++}
+diff --git a/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_store_persistent_single_key.c b/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_store_persistent_single_key.c
+new file mode 100644
+index 0000000000..a91e94c10b
+--- /dev/null
++++ b/tests/sys/psa_crypto_persistent_storage/test_psa_crypto_store_persistent_single_key.c
+@@ -0,0 +1,144 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     tests
++ * @{
++ *
++ * @file
++ * @brief       Generate and use a persistently stored key in PSA Crypto
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "embUnit.h"
++#include "psa/crypto.h"
++#include "tests_psa_persistent_storage.h"
++
++#define PLAINTEXT_LEN       (32)
++#define ENCR_OUTPUT_SIZE    (PSA_CIPHER_ENCRYPT_OUTPUT_SIZE(PSA_KEY_TYPE_AES, \
++                                                            PSA_ALG_CBC_NO_PADDING, \
++                                                            PLAINTEXT_LEN))
++
++static uint8_t PLAINTEXT[] = {
++    0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
++    0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
++    0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
++    0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51
++};
++
++static psa_key_id_t key_id_1 = 1;
++static psa_key_id_t key_id_2 = 2;
++
++static void _test_setup(void)
++{
++    psa_key_attributes_t attr = psa_key_attributes_init();
++
++    psa_key_usage_t usage = PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT;
++
++    psa_set_key_algorithm(&attr, PSA_ALG_CBC_NO_PADDING);
++    psa_set_key_usage_flags(&attr, usage);
++    psa_set_key_bits(&attr, 128);
++    psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
++    psa_set_key_id(&attr, key_id_1);
++
++    psa_key_lifetime_t lifetime = PSA_KEY_LIFETIME_FROM_PERSISTENCE_AND_LOCATION
++                                      (PSA_KEY_LIFETIME_PERSISTENT, PSA_KEY_LOCATION_LOCAL_STORAGE);
++    psa_set_key_lifetime(&attr, lifetime);
++
++    /* Import persistent key */
++    TEST_ASSERT_PSA_SUCCESS(psa_import_key(&attr, KEY_128, AES_128_KEY_SIZE, &key_id_1));
++
++    /* Import second key to overwrite the first one */
++    psa_set_key_id(&attr, key_id_2);
++    TEST_ASSERT_PSA_SUCCESS(psa_import_key(&attr, OVERWRITE_KEY_128, AES_128_KEY_SIZE,
++                                                                            &key_id_2));
++}
++
++static void _test_destroy_keys(void)
++{
++    /* Destroy first key */
++    TEST_ASSERT_PSA_SUCCESS(psa_destroy_key(key_id_1));
++
++    /* Destroy second key */
++    TEST_ASSERT_PSA_SUCCESS(psa_destroy_key(key_id_2));
++}
++
++/**
++ * @brief   A persistently stored key should still be accessible after
++ *          overwriting it in local memory
++ */
++static void test_psa_store_single_persistent_key(void)
++{
++    uint8_t cipher_out[ENCR_OUTPUT_SIZE];
++    uint8_t plain_out[PLAINTEXT_LEN];
++    size_t output_len = 0;
++
++    _test_setup();
++
++    /* Generate cipher with first key */
++    TEST_ASSERT_PSA_SUCCESS(psa_cipher_encrypt(key_id_1, PSA_ALG_CBC_NO_PADDING, PLAINTEXT,
++                                PLAINTEXT_LEN, cipher_out, ENCR_OUTPUT_SIZE, &output_len));
++
++    TEST_ASSERT_PSA_SUCCESS(psa_cipher_decrypt(key_id_1, PSA_ALG_CBC_NO_PADDING, cipher_out,
++                                sizeof(cipher_out), plain_out, sizeof(plain_out), &output_len));
++    TEST_ASSERT_MESSAGE(0 == memcmp(plain_out, PLAINTEXT, PLAINTEXT_LEN),
++                                                                "first key, wrong plaintext");
++
++    /* Generate cipher with second key */
++    TEST_ASSERT_PSA_SUCCESS(psa_cipher_encrypt(key_id_2, PSA_ALG_CBC_NO_PADDING, PLAINTEXT,
++                                PLAINTEXT_LEN, cipher_out, ENCR_OUTPUT_SIZE, &output_len));
++
++    TEST_ASSERT_PSA_SUCCESS(psa_cipher_decrypt(key_id_2, PSA_ALG_CBC_NO_PADDING, cipher_out,
++                                sizeof(cipher_out), plain_out, sizeof(plain_out), &output_len));
++    TEST_ASSERT_MESSAGE(0 == memcmp(plain_out, PLAINTEXT, PLAINTEXT_LEN),
++                                                                "second key, wrong plaintext");
++
++    _test_destroy_keys();
++}
++
++/**
++ * @brief   After destroying a persistent key, it should not be available anymore
++ */
++static void test_psa_delete_single_persistent_key(void)
++{
++    uint8_t cipher_out[ENCR_OUTPUT_SIZE];
++    size_t output_len = 0;
++
++    _test_setup();
++
++    /* Generate cipher with first key */
++    TEST_ASSERT_PSA_SUCCESS(psa_cipher_encrypt(key_id_1, PSA_ALG_CBC_NO_PADDING, PLAINTEXT,
++                                PLAINTEXT_LEN, cipher_out, ENCR_OUTPUT_SIZE, &output_len));
++    /* Generate cipher with second key */
++    TEST_ASSERT_PSA_SUCCESS(psa_cipher_encrypt(key_id_2, PSA_ALG_CBC_NO_PADDING, PLAINTEXT,
++                                PLAINTEXT_LEN, cipher_out, ENCR_OUTPUT_SIZE, &output_len));
++
++    _test_destroy_keys();
++
++    /* Encryption with deleted keys should fail */
++    TEST_ASSERT_PSA_DOES_NOT_EXIST(psa_cipher_encrypt(key_id_1, PSA_ALG_CBC_NO_PADDING, PLAINTEXT,
++                                PLAINTEXT_LEN, cipher_out, ENCR_OUTPUT_SIZE, &output_len));
++    TEST_ASSERT_PSA_DOES_NOT_EXIST(psa_cipher_encrypt(key_id_2, PSA_ALG_CBC_NO_PADDING,
++                                    PLAINTEXT, PLAINTEXT_LEN, cipher_out, ENCR_OUTPUT_SIZE,
++                                    &output_len));
++}
++
++Test* tests_psa_persistent_single_key_storage(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++        new_TestFixture(test_psa_store_single_persistent_key),
++        new_TestFixture(test_psa_delete_single_persistent_key),
++    };
++
++    EMB_UNIT_TESTCALLER(tests_psa_persistent_single_key_storage_tests, NULL, NULL, fixtures);
++
++    return (Test *)&tests_psa_persistent_single_key_storage_tests;
++}
+diff --git a/tests/sys/psa_crypto_persistent_storage/tests/01-run.py b/tests/sys/psa_crypto_persistent_storage/tests/01-run.py
+new file mode 100755
+index 0000000000..dc56107fc3
+--- /dev/null
++++ b/tests/sys/psa_crypto_persistent_storage/tests/01-run.py
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2023 TU Dresden
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import sys
++from testrunner import run_check_unittests
++
++
++if __name__ == "__main__":
++    sys.exit(run_check_unittests())
+diff --git a/tests/sys/psa_crypto_persistent_storage/tests_psa_persistent_storage.h b/tests/sys/psa_crypto_persistent_storage/tests_psa_persistent_storage.h
+new file mode 100644
+index 0000000000..f37779145e
+--- /dev/null
++++ b/tests/sys/psa_crypto_persistent_storage/tests_psa_persistent_storage.h
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (C) 2023 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup
++ * @defgroup       <name> <description>
++ * @{
++ *
++ * @file        tests_psa_cbor_enc_dec.h
++ * @brief
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ */
++
++#ifndef TESTS_PSA_PERSISTENT_STORAGE_H
++#define TESTS_PSA_PERSISTENT_STORAGE_H
++
++#include <stdint.h>
++#include "embUnit.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define AES_128_KEY_SIZE    (16)
++
++#define TEST_ASSERT_PSA_SUCCESS(func_)          TEST_ASSERT_MESSAGE(func_ == PSA_SUCCESS, \
++                                                                                #func_ " failed");
++#define TEST_ASSERT_PSA_DOES_NOT_EXIST(func_)   TEST_ASSERT_MESSAGE(func_ == \
++                                                    PSA_ERROR_DOES_NOT_EXIST, #func_ " failed");
++#define TEST_ASSERT_PSA_ALREADY_EXISTS(func_)   TEST_ASSERT_MESSAGE(func_ == \
++                                                    PSA_ERROR_ALREADY_EXISTS, #func_ " failed");
++
++#define AES_128_KEY_SIZE    (16)
++
++static const uint8_t KEY_128[AES_128_KEY_SIZE] = {
++    0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
++    0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c
++};
++
++static const uint8_t OVERWRITE_KEY_128[AES_128_KEY_SIZE] = {
++    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
++    0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10
++};
++
++Test* tests_psa_persistent_single_key_storage(void);
++Test* tests_psa_persistent_asym_keypair_storage(void);
++Test* tests_psa_fail_overwrite_existing_key(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* TESTS_PSA_PERSISTENT_STORAGE_H */
++/** @} */

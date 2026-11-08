@@ -1,0 +1,143 @@
+diff --git a/tests/ztimer_overhead/Makefile b/tests/ztimer_overhead/Makefile
+index 9c105c8470..c4e52b629f 100644
+--- a/tests/ztimer_overhead/Makefile
++++ b/tests/ztimer_overhead/Makefile
+@@ -1,6 +1,9 @@
+ DEVELHELP ?= 0
++
+ include ../Makefile.tests_common
+ 
+-USEMODULE += ztimer_overhead ztimer_usec
++USEMODULE += ztimer_auto_adjust
++USEMODULE += ztimer_overhead
++USEMODULE += ztimer_usec
+ 
+ include $(RIOTBASE)/Makefile.include
+diff --git a/tests/ztimer_overhead/README.md b/tests/ztimer_overhead/README.md
+index 7724edf39d..0bf1ebc09c 100644
+--- a/tests/ztimer_overhead/README.md
++++ b/tests/ztimer_overhead/README.md
+@@ -3,5 +3,22 @@
+ This test application sets up a ztimer_periph at 1MHz, then measures 1024
+ times how much overhead ztimer adds.
+ 
+-It uses the "ztimer_overhead()" function. See it's documentation for more
++It uses the "ztimer_overhead_set()" function. See it's documentation for more
+ information.
++
++It then sets `adjust_set` parameter and sleeps 1024 times and measure how
++much overhead ztimer_sleep adds.
++
++It uses the "ztimer_overhead_sleep()" function. See it's documentation for more
++information.
++
++At the end of the test `adjust_set` and `adjust_sleep` values are printed
++that can be set for the target `BOARD` in `board.h`.
++
++e.g for dwm1001:
++
++```shell
++ZTIMER_USEC adjust params for dwm1001:
++    CONFIG_ZTIMER_USEC_ADJUST_SET    6
++    CONFIG_ZTIMER_USEC_ADJUST_SLEEP  21
++```
+diff --git a/tests/ztimer_overhead/app.config.test b/tests/ztimer_overhead/app.config.test
+index 1245a93667..a8fe62236a 100644
+--- a/tests/ztimer_overhead/app.config.test
++++ b/tests/ztimer_overhead/app.config.test
+@@ -3,3 +3,4 @@
+ CONFIG_MODULE_ZTIMER=y
+ CONFIG_ZTIMER_USEC=y
+ CONFIG_MODULE_ZTIMER_OVERHEAD=y
++CONFIG_MODULE_ZTIMER_AUTO_ADJUST=y
+diff --git a/tests/ztimer_overhead/main.c b/tests/ztimer_overhead/main.c
+index 448913dcf0..70bce271df 100644
+--- a/tests/ztimer_overhead/main.c
++++ b/tests/ztimer_overhead/main.c
+@@ -23,26 +23,25 @@
+ #include <stdlib.h>
+ #include <inttypes.h>
+ 
++#include "board.h"
+ #include "ztimer.h"
+ #include "ztimer/overhead.h"
+ 
+ #define BASE    1000
+ #define SAMPLES 1024
+ 
+-int main(void)
++static int32_t _ztimer_usec_overhead(unsigned samples, unsigned base,
++                                     int32_t (*overhead_fn)(ztimer_clock_t *clock, uint32_t base))
+ {
+     uint32_t total = 0;
+ 
+     int32_t min = INT32_MAX;
+     int32_t max = INT32_MIN;
+ 
+-    /* unset configured adjustment */
+-    /* ZTIMER_USEC->adjust_set = 0; */
+-    printf("ZTIMER_USEC->adjust_set = %" PRIu16 "\n", ZTIMER_USEC->adjust_set);
++    unsigned n = samples;
+ 
+-    unsigned n = SAMPLES;
+     while (n--) {
+-        int32_t overhead = ztimer_overhead(ZTIMER_USEC, BASE);
++        int32_t overhead = overhead_fn(ZTIMER_USEC, base);
+         total += labs(overhead);
+         if (overhead < min) {
+             min = overhead;
+@@ -55,5 +54,26 @@ int main(void)
+     printf("min=%" PRIi32 " max=%" PRIi32 " avg_diff=%" PRIi32 "\n", min, max,
+            (total / SAMPLES));
+ 
++    return min;
++}
++
++int main(void)
++{
++    /* unset configured adjustment */
++    printf("ZTIMER_USEC auto_adjust params:\n");
++    printf("    ZTIMER_USEC->adjust_set = %" PRIu16 "\n", ZTIMER_USEC->adjust_set);
++    ZTIMER_USEC->adjust_set = 0;
++    printf("    ZTIMER_USEC->adjust_sleep = %" PRIu16 "\n", ZTIMER_USEC->adjust_sleep);
++    ZTIMER_USEC->adjust_sleep = 0;
++    printf("ZTIMER_USEC auto_adjust params cleared\n");
++
++    printf("zitmer_overhead_set...\n");
++    ZTIMER_USEC->adjust_set = _ztimer_usec_overhead(SAMPLES, BASE, ztimer_overhead_set);
++    printf("zitmer_overhead_sleep...\n");
++    ZTIMER_USEC->adjust_sleep = _ztimer_usec_overhead(SAMPLES, BASE, ztimer_overhead_sleep);
++    printf("ZTIMER_USEC adjust params for %s:\n", RIOT_BOARD);
++    printf("    CONFIG_ZTIMER_USEC_ADJUST_SET    %" PRIi16 "\n", ZTIMER_USEC->adjust_set);
++    printf("    CONFIG_ZTIMER_USEC_ADJUST_SLEEP  %" PRIi16 "\n", ZTIMER_USEC->adjust_sleep);
++
+     return 0;
+ }
+diff --git a/tests/ztimer_overhead/tests/01-run.py b/tests/ztimer_overhead/tests/01-run.py
+index d838f7a72d..6b3b0b415a 100755
+--- a/tests/ztimer_overhead/tests/01-run.py
++++ b/tests/ztimer_overhead/tests/01-run.py
+@@ -10,8 +10,23 @@ import sys
+ from testrunner import run
+ 
+ 
++ADJUST_SET_MARGIN = 1
++ADJUST_SLEEP_MARGIN = 1
++
++
+ def testfunc(child):
++    child.expect(r"ZTIMER_USEC->adjust_set = (\d+)\r\n")
++    auto_adjust_set = int(child.match.group(1))
++    child.expect(r"ZTIMER_USEC->adjust_sleep = (\d+)\r\n")
++    auto_adjust_sleep = int(child.match.group(1))
++    child.expect(r"min=-?\d+ max=-?\d+ avg_diff=\d+\r\n")
+     child.expect(r"min=-?\d+ max=-?\d+ avg_diff=\d+\r\n")
++    child.expect(r"CONFIG_ZTIMER_USEC_ADJUST_SET\s+(\d+)\r\n")
++    adjust_set = int(child.match.group(1))
++    child.expect(r"CONFIG_ZTIMER_USEC_ADJUST_SLEEP\s+(\d+)\r\n")
++    adjust_sleep = int(child.match.group(1))
++    assert auto_adjust_set >= adjust_set - ADJUST_SET_MARGIN
++    assert auto_adjust_sleep >= adjust_sleep - ADJUST_SLEEP_MARGIN
+ 
+ 
+ if __name__ == "__main__":

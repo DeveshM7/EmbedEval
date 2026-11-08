@@ -1,0 +1,265 @@
+diff --git a/tests/pkg_libcose/main.c b/tests/pkg_libcose/main.c
+index 1f64f1bb32..cbda85ab29 100644
+--- a/tests/pkg_libcose/main.c
++++ b/tests/pkg_libcose/main.c
+@@ -47,15 +47,6 @@ static cose_sign_dec_t verify;
+ static cose_signature_t signature1, signature2;
+ static cose_key_t signer1, signer2;
+ 
+-#if defined(MODULE_LIBCOSE_CRYPT_HACL) || defined(MODULE_LIBCOSE_CRYPT_MONOCYPHER)
+-static unsigned char symmkey[COSE_CRYPTO_AEAD_CHACHA20POLY1305_KEYBYTES];
+-static uint8_t nonce[COSE_CRYPTO_AEAD_CHACHA20POLY1305_NONCEBYTES] = { 0 };
+-static cose_key_t symm;
+-static cose_encrypt_t test_encrypt;
+-static cose_encrypt_dec_t test_decrypt;
+-static cose_recp_dec_t test_derecp;
+-#endif
+-
+ /* COSE sign buffer */
+ static uint8_t buf[2048];
+ /* Signature Verification buffer */
+@@ -185,45 +176,11 @@ static void test_libcose_02(void)
+                                            sizeof(vbuf)));
+ }
+ 
+-#if defined(MODULE_LIBCOSE_CRYPT_HACL) || defined(MODULE_LIBCOSE_CRYPT_MONOCYPHER)
+-/* Untagged 1 encrypt test with chacha20poly1305*/
+-static void test_libcose_03(void)
+-{
+-    cose_key_init(&symm);
+-    cose_encrypt_init(&test_encrypt, 0);
+-
+-    cose_crypto_keygen(symmkey, sizeof(symmkey), COSE_ALGO_CHACHA20POLY1305);
+-    cose_key_set_kid(&symm, (uint8_t *)kid, sizeof(kid) - 1);
+-    cose_key_set_keys(&symm, 0, COSE_ALGO_CHACHA20POLY1305, NULL, NULL,
+-                      symmkey);
+-
+-    cose_encrypt_add_recipient(&test_encrypt, &symm);
+-    cose_encrypt_set_payload(&test_encrypt, payload, sizeof(payload) - 1);
+-    cose_encrypt_set_algo(&test_encrypt, COSE_ALGO_DIRECT);
+-
+-    uint8_t *out = NULL;
+-    ssize_t len = cose_encrypt_encode(&test_encrypt, buf, sizeof(buf), nonce,
+-                                      &out);
+-    TEST_ASSERT(len > 0);
+-    TEST_ASSERT_EQUAL_INT(0, cose_encrypt_decode(&test_decrypt, out, len));
+-    size_t plaintext_len = 0;
+-    cose_encrypt_recp_iter(&test_decrypt, &test_derecp);
+-    TEST_ASSERT_EQUAL_INT(0,
+-                          cose_encrypt_decrypt(&test_decrypt, &test_derecp,
+-                                               &symm, buf, sizeof(buf),
+-                                               vbuf, &plaintext_len));
+-    TEST_ASSERT_EQUAL_INT( sizeof(payload) - 1, plaintext_len);
+-}
+-#endif
+-
+ Test *tests_libcose(void)
+ {
+     EMB_UNIT_TESTFIXTURES(fixtures) {
+         new_TestFixture(test_libcose_01),
+         new_TestFixture(test_libcose_02),
+-#if defined(MODULE_LIBCOSE_CRYPT_HACL) || defined(MODULE_LIBCOSE_CRYPT_MONOCYPHER)
+-        new_TestFixture(test_libcose_03),
+-#endif
+     };
+ 
+     EMB_UNIT_TESTCALLER(libcose_tests, setUp, NULL, fixtures);
+diff --git a/tests/pkg_libcose_encrypt/Makefile b/tests/pkg_libcose_encrypt/Makefile
+new file mode 100644
+index 0000000000..cc0351a471
+--- /dev/null
++++ b/tests/pkg_libcose_encrypt/Makefile
+@@ -0,0 +1,14 @@
++include ../Makefile.tests_common
++
++TEST_ON_CI_WHITELIST += native
++
++USEPKG += libcose
++# crypto backend.
++USEMODULE += libcose_crypt_riot
++# USEMODULE += libcose_crypt_hacl
++# USEMODULE += libcose_crypt_monocypher
++# USEMODULE += libcose_crypt_tinycrypt
++USEMODULE += memarray
++USEMODULE += embunit
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/pkg_libcose_encrypt/Makefile.ci b/tests/pkg_libcose_encrypt/Makefile.ci
+new file mode 100644
+index 0000000000..4b35a19ef7
+--- /dev/null
++++ b/tests/pkg_libcose_encrypt/Makefile.ci
+@@ -0,0 +1,25 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    arduino-duemilanove \
++    arduino-leonardo \
++    arduino-nano \
++    arduino-uno \
++    atmega328p \
++    atmega328p-xplained-mini \
++    bluepill-stm32f030c8 \
++    i-nucleo-lrwan1 \
++    msb-430 \
++    msb-430h \
++    nucleo-f030r8 \
++    nucleo-f031k6 \
++    nucleo-f042k6 \
++    nucleo-l011k4 \
++    nucleo-l031k6 \
++    nucleo-l053r8 \
++    samd10-xmini \
++    slstk3400a \
++    stk3200 \
++    stm32f030f4-demo \
++    stm32f0discovery \
++    stm32g0316-disco \
++    stm32l0538-disco \
++    #
+diff --git a/tests/pkg_libcose_encrypt/app.config.test b/tests/pkg_libcose_encrypt/app.config.test
+new file mode 100644
+index 0000000000..3d18bb4d15
+--- /dev/null
++++ b/tests/pkg_libcose_encrypt/app.config.test
+@@ -0,0 +1,9 @@
++CONFIG_MODULE_EMBUNIT=y
++CONFIG_MODULE_LIBCOSE_CRYPT_RIOT=y
++CONFIG_MODULE_MEMARRAY=y
++# Should be autoselecting the MODULE_PRNG_HWRNG if possible
++# Since the makefile cannot we have to override until end of migration
++# Remove when TEST_KCONFIG is complete
++CONFIG_MODULE_PRNG_MUSL_LCG=y
++CONFIG_MODULE_RANDOM=y
++CONFIG_PACKAGE_LIBCOSE=y
+diff --git a/tests/pkg_libcose_encrypt/main.c b/tests/pkg_libcose_encrypt/main.c
+new file mode 100644
+index 0000000000..d8c373117a
+--- /dev/null
++++ b/tests/pkg_libcose_encrypt/main.c
+@@ -0,0 +1,99 @@
++/*
++ * Copyright (C) 2018 Freie Universität Berlin
++ * Copyright (C) 2018 Inria
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++/**
++ * @ingroup    tests
++ * @{
++ *
++ * @file
++ * @brief      Tests for pkg libcose encryption
++ *
++ * @author     Koen Zandberg <koen@bergzand.net>
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "cose.h"
++#include "cose/sign.h"
++#include "cose/crypto.h"
++#include "embUnit.h"
++#include "memarray.h"
++#include "random.h"
++
++static uint8_t payload[] = "This is the content.";
++static uint8_t buf[2048];
++static uint8_t plaintext[2048];
++static uint8_t kid[] = "sec-256";
++
++static void setUp(void)
++{
++    /* Initialize */
++    random_init(0);
++    /* Clear buffer */
++    memset(plaintext, 0, sizeof(plaintext));
++    memset(buf, 0, sizeof(buf));
++}
++
++static void _test_encrypt_generic(cose_algo_t algo)
++{
++    uint8_t *out;
++    uint8_t key_bytes[64];
++    static const uint8_t nonce_bytes[32] = { 0 };
++    cose_encrypt_t crypt;
++    cose_key_t key;
++
++    cose_crypto_keygen(key_bytes, sizeof(key_bytes), algo);
++
++    cose_key_init(&key); /* Generate key */
++    cose_key_set_kid(&key, kid, sizeof(kid) - 1);
++    cose_key_set_keys(&key, 0, algo, NULL, NULL, key_bytes);
++
++    cose_encrypt_init(&crypt, COSE_FLAGS_ENCRYPT0);
++    cose_encrypt_add_recipient(&crypt, &key);
++    cose_encrypt_set_payload(&crypt, payload, sizeof(payload) - 1);
++    cose_encrypt_set_algo(&crypt, COSE_ALGO_DIRECT);
++    COSE_ssize_t len = cose_encrypt_encode(&crypt, buf, sizeof(buf), nonce_bytes, &out);
++    cose_encrypt_dec_t decrypt;
++
++    TEST_ASSERT_EQUAL_INT(0, cose_encrypt_decode(&decrypt, out, len));
++    size_t plaintext_len = 0;
++
++    TEST_ASSERT_EQUAL_INT(0,
++                          cose_encrypt_decrypt(&decrypt, NULL, &key, buf, sizeof(buf), plaintext,
++                                               &plaintext_len));
++    TEST_ASSERT_EQUAL_INT(sizeof(payload) - 1, plaintext_len);
++}
++
++#ifdef HAVE_ALGO_CHACHA20POLY1305
++static void test_libcose_chacha20poly1305(void)
++{
++    _test_encrypt_generic(COSE_ALGO_CHACHA20POLY1305);
++}
++#endif
++
++Test *tests_libcose_encrypt(void)
++{
++    EMB_UNIT_TESTFIXTURES(fixtures) {
++#ifdef HAVE_ALGO_CHACHA20POLY1305
++        new_TestFixture(test_libcose_chacha20poly1305),
++#endif
++    };
++
++    EMB_UNIT_TESTCALLER(libcose_encrypt_tests, setUp, NULL, fixtures);
++    return (Test *)&libcose_encrypt_tests;
++}
++
++int main(void)
++{
++    TESTS_START();
++    TESTS_RUN(tests_libcose_encrypt());
++    TESTS_END();
++    return 0;
++}
+diff --git a/tests/pkg_libcose_encrypt/tests/01-run.py b/tests/pkg_libcose_encrypt/tests/01-run.py
+new file mode 100755
+index 0000000000..9810ad9cd6
+--- /dev/null
++++ b/tests/pkg_libcose_encrypt/tests/01-run.py
+@@ -0,0 +1,22 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2017 Freie Universität Berlin
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import os
++import sys
++from testrunner import run_check_unittests
++from testrunner import TIMEOUT as DEFAULT_TIMEOUT
++
++
++BOARD = os.environ['BOARD']
++# on real hardware, this test application can take several minutes to
++# complete (>5min on nrf51dk)
++TIMEOUT = 400 if BOARD != 'native' else DEFAULT_TIMEOUT
++
++
++if __name__ == "__main__":
++    sys.exit(run_check_unittests(timeout=TIMEOUT))
