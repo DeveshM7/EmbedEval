@@ -1,0 +1,617 @@
+diff --git a/tests/pkg_littlefs/Makefile b/tests/pkg_littlefs/Makefile
+index 0cff046cf2..d3c0eab1a7 100644
+--- a/tests/pkg_littlefs/Makefile
++++ b/tests/pkg_littlefs/Makefile
+@@ -2,5 +2,6 @@ include ../Makefile.tests_common
+ 
+ USEMODULE += littlefs
+ USEMODULE += embunit
++USEMODULE += mtd_emulated
+ 
+ include $(RIOTBASE)/Makefile.include
+diff --git a/tests/pkg_littlefs/Makefile.ci b/tests/pkg_littlefs/Makefile.ci
+index 1de338a5bd..0e4d2fbd23 100644
+--- a/tests/pkg_littlefs/Makefile.ci
++++ b/tests/pkg_littlefs/Makefile.ci
+@@ -5,18 +5,12 @@ BOARD_INSUFFICIENT_MEMORY := \
+     arduino-uno \
+     atmega328p \
+     atmega328p-xplained-mini \
+-    i-nucleo-lrwan1 \
+     msb-430 \
+     msb-430h \
+-    nucleo-f030r8 \
+     nucleo-f031k6 \
+     nucleo-f042k6 \
+     nucleo-l011k4 \
+-    nucleo-l031k6 \
+-    nucleo-l053r8 \
+     samd10-xmini \
+     stk3200 \
+     stm32f030f4-demo \
+-    stm32f0discovery \
+-    stm32l0538-disco \
+     #
+diff --git a/tests/pkg_littlefs/main.c b/tests/pkg_littlefs/main.c
+index 1586148ba5..dc7f63b96a 100644
+--- a/tests/pkg_littlefs/main.c
++++ b/tests/pkg_littlefs/main.c
+@@ -27,12 +27,16 @@
+  * CONFIG_USE_HARDWARE_MTD is defined (add CFLAGS=-DCONFIG_USE_HARDWARE_MTD to
+  * the command line to enable it */
+ #if defined(MTD_0) && IS_ACTIVE(CONFIG_USE_HARDWARE_MTD)
+-#define USE_MTD_0
++
+ #define _dev (MTD_0)
++
+ #else
++
++#include "mtd_emulated.h"
++
+ /* Test mock object implementing a simple RAM-based mtd */
+ #ifndef SECTOR_COUNT
+-#define SECTOR_COUNT 16
++#define SECTOR_COUNT 12
+ #endif
+ #ifndef PAGE_PER_SECTOR
+ #define PAGE_PER_SECTOR 4
+@@ -41,84 +45,10 @@
+ #define PAGE_SIZE 64
+ #endif
+ 
+-static uint8_t dummy_memory[PAGE_PER_SECTOR * PAGE_SIZE * SECTOR_COUNT];
+-
+-static int _init(mtd_dev_t *dev)
+-{
+-    (void)dev;
+-
+-    return 0;
+-}
+-
+-static int _read(mtd_dev_t *dev, void *buff, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    memcpy(buff, dummy_memory + addr, size);
++MTD_EMULATED_DEV(0, SECTOR_COUNT, PAGE_PER_SECTOR, PAGE_SIZE);
+ 
+-    return 0;
+-}
++#define _dev (&mtd_emulated_dev0.base)
+ 
+-static int _write(mtd_dev_t *dev, const void *buff, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    if (size > PAGE_SIZE) {
+-        return -EOVERFLOW;
+-    }
+-    memcpy(dummy_memory + addr, buff, size);
+-
+-    return 0;
+-}
+-
+-static int _erase(mtd_dev_t *dev, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (size % (PAGE_PER_SECTOR * PAGE_SIZE) != 0) {
+-        return -EOVERFLOW;
+-    }
+-    if (addr % (PAGE_PER_SECTOR * PAGE_SIZE) != 0) {
+-        return -EOVERFLOW;
+-    }
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    memset(dummy_memory + addr, 0xff, size);
+-
+-    return 0;
+-}
+-
+-static int _power(mtd_dev_t *dev, enum mtd_power_state power)
+-{
+-    (void)dev;
+-    (void)power;
+-    return 0;
+-}
+-
+-static const mtd_desc_t driver = {
+-    .init = _init,
+-    .read = _read,
+-    .write = _write,
+-    .erase = _erase,
+-    .power = _power,
+-};
+-
+-static mtd_dev_t dev = {
+-    .driver = &driver,
+-    .sector_count = SECTOR_COUNT,
+-    .pages_per_sector = PAGE_PER_SECTOR,
+-    .page_size = PAGE_SIZE,
+-    .write_size = 1,
+-};
+-
+-static mtd_dev_t *_dev = (mtd_dev_t*) &dev;
+ #endif /* MTD_0 */
+ 
+ static littlefs_desc_t littlefs_desc;
+@@ -414,10 +344,6 @@ static void tests_littlefs_statvfs(void)
+ 
+ Test *tests_littlefs(void)
+ {
+-#ifndef USE_MTD_0
+-    memset(dummy_memory, 0xff, sizeof(dummy_memory));
+-#endif
+-
+     EMB_UNIT_TESTFIXTURES(fixtures) {
+         new_TestFixture(tests_littlefs_format),
+         new_TestFixture(tests_littlefs_mount_umount),
+diff --git a/tests/pkg_littlefs2/Makefile b/tests/pkg_littlefs2/Makefile
+index 07eef1db2c..ec9c0568a6 100644
+--- a/tests/pkg_littlefs2/Makefile
++++ b/tests/pkg_littlefs2/Makefile
+@@ -2,5 +2,6 @@ include ../Makefile.tests_common
+ 
+ USEPKG += littlefs2
+ USEMODULE += embunit
++USEMODULE += mtd_emulated
+ 
+ include $(RIOTBASE)/Makefile.include
+diff --git a/tests/pkg_littlefs2/app.config.test b/tests/pkg_littlefs2/app.config.test
+index 3a3d184936..5aa1b1e84e 100644
+--- a/tests/pkg_littlefs2/app.config.test
++++ b/tests/pkg_littlefs2/app.config.test
+@@ -1,2 +1,3 @@
+ CONFIG_MODULE_EMBUNIT=y
++CONFIG_MODULE_MTD_EMULATED=y
+ CONFIG_PACKAGE_LITTLEFS2=y
+diff --git a/tests/pkg_littlefs2/main.c b/tests/pkg_littlefs2/main.c
+index df33d559fb..b555ff1bdd 100644
+--- a/tests/pkg_littlefs2/main.c
++++ b/tests/pkg_littlefs2/main.c
+@@ -27,9 +27,13 @@
+  * CONFIG_USE_HARDWARE_MTD is defined (add CFLAGS=-DCONFIG_USE_HARDWARE_MTD to
+  * the command line to enable it */
+ #if defined(MTD_0) && IS_ACTIVE(CONFIG_USE_HARDWARE_MTD)
+-#define USE_MTD_0
++
+ #define _dev (MTD_0)
++
+ #else
++
++#include "mtd_emulated.h"
++
+ /* Test mock object implementing a simple RAM-based mtd */
+ #ifndef SECTOR_COUNT
+ #define SECTOR_COUNT 16
+@@ -41,84 +45,10 @@
+ #define PAGE_SIZE 64
+ #endif
+ 
+-static uint8_t dummy_memory[PAGE_PER_SECTOR * PAGE_SIZE * SECTOR_COUNT];
+-
+-static int _init(mtd_dev_t *dev)
+-{
+-    (void)dev;
+-
+-    return 0;
+-}
+-
+-static int _read(mtd_dev_t *dev, void *buff, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    memcpy(buff, dummy_memory + addr, size);
+-
+-    return 0;
+-}
+-
+-static int _write(mtd_dev_t *dev, const void *buff, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    if (size > PAGE_SIZE) {
+-        return -EOVERFLOW;
+-    }
+-    memcpy(dummy_memory + addr, buff, size);
+-
+-    return 0;
+-}
+-
+-static int _erase(mtd_dev_t *dev, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
++MTD_EMULATED_DEV(0, SECTOR_COUNT, PAGE_PER_SECTOR, PAGE_SIZE);
+ 
+-    if (size % (PAGE_PER_SECTOR * PAGE_SIZE) != 0) {
+-        return -EOVERFLOW;
+-    }
+-    if (addr % (PAGE_PER_SECTOR * PAGE_SIZE) != 0) {
+-        return -EOVERFLOW;
+-    }
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    memset(dummy_memory + addr, 0xff, size);
+-
+-    return 0;
+-}
++#define _dev (&mtd_emulated_dev0.base)
+ 
+-static int _power(mtd_dev_t *dev, enum mtd_power_state power)
+-{
+-    (void)dev;
+-    (void)power;
+-    return 0;
+-}
+-
+-static const mtd_desc_t driver = {
+-    .init = _init,
+-    .read = _read,
+-    .write = _write,
+-    .erase = _erase,
+-    .power = _power,
+-};
+-
+-static mtd_dev_t dev = {
+-    .driver = &driver,
+-    .sector_count = SECTOR_COUNT,
+-    .pages_per_sector = PAGE_PER_SECTOR,
+-    .page_size = PAGE_SIZE,
+-    .write_size = 1,
+-};
+-
+-static mtd_dev_t *_dev = (mtd_dev_t*) &dev;
+ #endif /* MTD_0 */
+ 
+ static littlefs2_desc_t littlefs_desc;
+@@ -416,10 +346,6 @@ static void tests_littlefs_statvfs(void)
+ 
+ Test *tests_littlefs(void)
+ {
+-#ifndef USE_MTD_0
+-    memset(dummy_memory, 0xff, sizeof(dummy_memory));
+-#endif
+-
+     EMB_UNIT_TESTFIXTURES(fixtures) {
+         new_TestFixture(tests_littlefs_format),
+         new_TestFixture(tests_littlefs_mount_umount),
+diff --git a/tests/pkg_spiffs/Makefile b/tests/pkg_spiffs/Makefile
+index d52effe4bf..c7c7a08147 100644
+--- a/tests/pkg_spiffs/Makefile
++++ b/tests/pkg_spiffs/Makefile
+@@ -2,5 +2,6 @@ include ../Makefile.tests_common
+ 
+ USEMODULE += spiffs
+ USEMODULE += embunit
++USEMODULE += mtd_emulated
+ 
+ include $(RIOTBASE)/Makefile.include
+diff --git a/tests/pkg_spiffs/main.c b/tests/pkg_spiffs/main.c
+index e66a383f9f..08ea7a205f 100644
+--- a/tests/pkg_spiffs/main.c
++++ b/tests/pkg_spiffs/main.c
+@@ -25,9 +25,13 @@
+  * CONFIG_USE_HARDWARE_MTD is defined (add CFLAGS=-DCONFIG_USE_HARDWARE_MTD to
+  * the command line to enable it */
+ #if defined(MTD_0) && IS_ACTIVE(CONFIG_USE_HARDWARE_MTD)
+-#define USE_MTD_0
++
+ #define _dev (MTD_0)
++
+ #else
++
++#include "mtd_emulated.h"
++
+ /* Test mock object implementing a simple RAM-based mtd */
+ #ifndef SECTOR_COUNT
+ #define SECTOR_COUNT 4
+@@ -39,83 +43,10 @@
+ #define PAGE_SIZE 128
+ #endif
+ 
+-static uint8_t dummy_memory[PAGE_PER_SECTOR * PAGE_SIZE * SECTOR_COUNT];
+-
+-static int _init(mtd_dev_t *dev)
+-{
+-    (void)dev;
+-    return 0;
+-}
+-
+-static int _read(mtd_dev_t *dev, void *buff, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    memcpy(buff, dummy_memory + addr, size);
+-
+-    return 0;
+-}
+-
+-static int _write(mtd_dev_t *dev, const void *buff, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    if (size > PAGE_SIZE) {
+-        return -EOVERFLOW;
+-    }
+-    memcpy(dummy_memory + addr, buff, size);
+-
+-    return 0;
+-}
+-
+-static int _erase(mtd_dev_t *dev, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (size % (PAGE_PER_SECTOR * PAGE_SIZE) != 0) {
+-        return -EOVERFLOW;
+-    }
+-    if (addr % (PAGE_PER_SECTOR * PAGE_SIZE) != 0) {
+-        return -EOVERFLOW;
+-    }
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    memset(dummy_memory + addr, 0xff, size);
+-
+-    return 0;
+-}
+-
+-static int _power(mtd_dev_t *dev, enum mtd_power_state power)
+-{
+-    (void)dev;
+-    (void)power;
+-    return 0;
+-}
++MTD_EMULATED_DEV(0, SECTOR_COUNT, PAGE_PER_SECTOR, PAGE_SIZE);
+ 
+-static const mtd_desc_t driver = {
+-    .init = _init,
+-    .read = _read,
+-    .write = _write,
+-    .erase = _erase,
+-    .power = _power,
+-};
++#define _dev (&mtd_emulated_dev0.base)
+ 
+-static mtd_dev_t dev = {
+-    .driver = &driver,
+-    .sector_count = SECTOR_COUNT,
+-    .pages_per_sector = PAGE_PER_SECTOR,
+-    .page_size = PAGE_SIZE,
+-    .write_size = 1,
+-};
+-
+-static mtd_dev_t *_dev = (mtd_dev_t*) &dev;
+ #endif /* MTD_0 */
+ 
+ static struct spiffs_desc spiffs_desc = {
+@@ -439,9 +370,6 @@ static void tests_spiffs_partition(void)
+ 
+ Test *tests_spiffs(void)
+ {
+-#ifndef USE_MTD_0
+-    memset(dummy_memory, 0xff, sizeof(dummy_memory));
+-#endif
+     EMB_UNIT_TESTFIXTURES(fixtures) {
+         new_TestFixture(tests_spiffs_format),
+         new_TestFixture(tests_spiffs_mount_umount),
+diff --git a/tests/unittests/tests-mtd/Makefile.include b/tests/unittests/tests-mtd/Makefile.include
+index d663df8acc..e3ea225579 100644
+--- a/tests/unittests/tests-mtd/Makefile.include
++++ b/tests/unittests/tests-mtd/Makefile.include
+@@ -1,2 +1,3 @@
+ USEMODULE += mtd
++USEMODULE += mtd_emulated
+ USEMODULE += vfs
+diff --git a/tests/unittests/tests-mtd/tests-mtd.c b/tests/unittests/tests-mtd/tests-mtd.c
+index 23174f2c43..f22e95ab2d 100644
+--- a/tests/unittests/tests-mtd/tests-mtd.c
++++ b/tests/unittests/tests-mtd/tests-mtd.c
+@@ -29,6 +29,9 @@
+ #ifdef MTD_0
+ #define dev (MTD_0)
+ #else
++
++#include "mtd_emulated.h"
++
+ /* Test mock object implementing a simple RAM-based mtd */
+ #ifndef SECTOR_COUNT
+ #define SECTOR_COUNT 4
+@@ -39,89 +42,10 @@
+ #ifndef PAGE_SIZE
+ #define PAGE_SIZE 128
+ #endif
+-#ifndef WRITE_SIZE
+-#define WRITE_SIZE 1
+-#endif
+-
+-static uint8_t dummy_memory[PAGE_PER_SECTOR * PAGE_SIZE * SECTOR_COUNT];
+-
+-static int _init(mtd_dev_t *dev)
+-{
+-    (void)dev;
+ 
+-    memset(dummy_memory, 0xff, sizeof(dummy_memory));
+-    return 0;
+-}
+-
+-static int _read(mtd_dev_t *dev, void *buff, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    memcpy(buff, dummy_memory + addr, size);
+-
+-    return 0;
+-}
+-
+-static int _write(mtd_dev_t *dev, const void *buff, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    if (((addr % PAGE_SIZE) + size) > PAGE_SIZE) {
+-        return -EOVERFLOW;
+-    }
+-    memcpy(dummy_memory + addr, buff, size);
+-
+-    return 0;
+-}
+-
+-static int _erase(mtd_dev_t *dev, uint32_t addr, uint32_t size)
+-{
+-    (void)dev;
+-
+-    if (size % (PAGE_PER_SECTOR * PAGE_SIZE) != 0) {
+-        return -EOVERFLOW;
+-    }
+-    if (addr % (PAGE_PER_SECTOR * PAGE_SIZE) != 0) {
+-        return -EOVERFLOW;
+-    }
+-    if (addr + size > sizeof(dummy_memory)) {
+-        return -EOVERFLOW;
+-    }
+-    memset(dummy_memory + addr, 0xff, size);
+-
+-    return 0;
+-}
+-
+-static int _power(mtd_dev_t *dev, enum mtd_power_state power)
+-{
+-    (void)dev;
+-    (void)power;
+-    return 0;
+-}
++MTD_EMULATED_DEV(0, SECTOR_COUNT, PAGE_PER_SECTOR, PAGE_SIZE);
+ 
+-static const mtd_desc_t driver = {
+-    .init = _init,
+-    .read = _read,
+-    .write = _write,
+-    .erase = _erase,
+-    .power = _power,
+-};
+-
+-static mtd_dev_t _dev = {
+-    .driver = &driver,
+-    .sector_count = SECTOR_COUNT,
+-    .pages_per_sector = PAGE_PER_SECTOR,
+-    .page_size = PAGE_SIZE,
+-    .write_size = WRITE_SIZE,
+-};
+-
+-static mtd_dev_t *dev = (mtd_dev_t*) &_dev;
++#define dev (&mtd_emulated_dev0.base)
+ 
+ #endif /* MTD_0 */
+ 
+diff --git a/tests/usbus_msc/Makefile b/tests/usbus_msc/Makefile
+index b30038d251..b9f051727b 100644
+--- a/tests/usbus_msc/Makefile
++++ b/tests/usbus_msc/Makefile
+@@ -5,7 +5,7 @@ include ../Makefile.tests_common
+  # This has to be the absolute path to the RIOT base directory:
+ RIOTBASE ?= $(CURDIR)/../..
+ 
+- # Comment this out to disable code in RIOT that does safety checking
++# Comment this out to disable code in RIOT that does safety checking
+ # which is not needed in a production environment but helps in the
+ # development process:
+ DEVELHELP ?= 1
+@@ -19,6 +19,11 @@ USEMODULE += shell
+ USEMODULE += usbus_msc
+ USEMODULE += ztimer_msec
+ 
++# If your board does not provide a MTD for testing, use the following line
++# to emulate an MTD with 64 sectors with 4 pages of 128 bytes each in RAM. You
++# can override these parameters by SECTOR_COUNT, PAGES_PER_SECTOR and PAGE_SIZE.
++# USEMODULE += mtd_emulated
++
+ # Change this to 0 show compiler invocation lines by default:
+ QUIET ?= 1
+ 
+diff --git a/tests/usbus_msc/README.md b/tests/usbus_msc/README.md
+index 4ba3fe49fe..001396f5e3 100644
+--- a/tests/usbus_msc/README.md
++++ b/tests/usbus_msc/README.md
+@@ -39,6 +39,19 @@ by attaching it to the host with the command:
+ At this point, the USBUS stack will export the selected MTD devices.
+ Devices should appears under /dev/sdX entries.
+ 
++If the board does not provide a MTD device, a MTD device can be emulated in RAM
++for testing using module `mtd_emulated`:
++```
++USEMODULE=mtd_emulated BOARD=... make ...
++```
++The emulated MTD device has by default 64 sectors with 4 pages of 128 bytes
++each, the minimum size to be able to create a partition with FAT file system.
++These default parameters can be overridden e.g. by `SECTOR_COUNT`,
++`PAGES_PER_SECTOR` and `PAGE_SIZE`:
++```
++CFLAGS='-DSECTOR_COUNT=128' USEMODULE=mtd_emulated BOARD=... make ...
++```
++
+ **Notes:** Depending on the MTD device and the USB speed, this operation can take some times.
+ 
+ USB operation can be stopped at any time using:
+diff --git a/tests/usbus_msc/main.c b/tests/usbus_msc/main.c
+index 17870b693a..56020aff48 100644
+--- a/tests/usbus_msc/main.c
++++ b/tests/usbus_msc/main.c
+@@ -22,6 +22,32 @@
+ #include <stdio.h>
+ #include <string.h>
+ 
++#include "board.h"
++
++#if defined(MODULE_MTD_EMULATED)
++
++#include "mtd_emulated.h"
++
++/* The following parameters are only suitable for testing the basic functions
++ * of USB MSC. To create a partition with a FAT file system, at least 64 sectors
++ * have to be used. */
++
++#ifndef SECTOR_COUNT
++#define SECTOR_COUNT        64
++#endif
++
++#ifndef PAGES_PER_SECTOR
++#define PAGES_PER_SECTOR    4
++#endif
++
++#ifndef PAGE_SIZE
++#define PAGE_SIZE           128
++#endif
++
++MTD_EMULATED_DEV(0, SECTOR_COUNT, PAGES_PER_SECTOR, PAGE_SIZE);
++
++#endif /* MODULE_MTD_EMULATED */
++
+ #include "mtd_default.h"
+ #include "shell.h"
+ #include "usb/usbus.h"

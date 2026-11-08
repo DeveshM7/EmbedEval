@@ -186,6 +186,19 @@ def sdk_image(sdk: str, py: str) -> Path:
                                  f"{recipe_tag('sdk.def')}.sif")
 
 
+def riot_image(tag: str) -> Path:
+    """RIOT's own build image of one release (riot/riotbuild), x86 only."""
+    return shared_path("images", f"riotbuild-{tag}.sif")
+
+
+def instance_container(meta: dict, image: Path) -> tuple[Path, Path | None]:
+    """(what to run, its read-only layer). `image` is the file validated and published
+    for the instance: its own image, or, for RIOT, a layer on the era's shared image."""
+    if meta.get("pipeline") == "riot-layer":
+        return riot_image(meta["base_image"].removeprefix("riotbuild-")), image
+    return image, None
+
+
 def instance_image(instance_id: str) -> Path:
     return path("images", "instances", f"{instance_id}.sif")
 
@@ -255,11 +268,16 @@ def ensure_base_images(py: str, sdk: str, sdk_archive: str, logdir: Path) -> Pat
 
 
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
-              overlay: Path | None = None, env: dict | None = None) -> list[str]:
+              overlay: Path | None = None, env: dict | None = None,
+              home: Path | None = None, layer: Path | None = None) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
     gives a fresh home and /tmp, --cleanenv drops the host environment (the
     cluster's LD_LIBRARY_PATH breaks the SDK's QEMU; its Python confuses CMake)."""
     cmd = ["apptainer", "exec", "--containall", "--cleanenv"]
+    if home:        # the fresh home is a small tmpfs; Apptainer refuses --env HOME=
+        cmd += ["--home", f"{home}:/home/build"]
+    if layer:       # read-only, below the writable overlay
+        cmd += ["--overlay", f"{layer}:ro"]
     if overlay:
         cmd += ["--overlay", str(overlay)]
     for src, dst in (binds or {}).items():

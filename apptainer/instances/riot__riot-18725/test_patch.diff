@@ -1,0 +1,72 @@
+diff --git a/tests/gcoap_fileserver/Makefile b/tests/gcoap_fileserver/Makefile
+index 90f0de5ac3..375773c24f 100644
+--- a/tests/gcoap_fileserver/Makefile
++++ b/tests/gcoap_fileserver/Makefile
+@@ -10,6 +10,8 @@ USEMODULE += shell
+ USEMODULE += shell_commands
+ 
+ USEMODULE += gcoap_fileserver
++USEMODULE += gcoap_fileserver_put
++
+ USEMODULE += nanocoap_vfs
+ 
+ USEMODULE += constfs
+diff --git a/tests/gcoap_fileserver/Makefile.ci b/tests/gcoap_fileserver/Makefile.ci
+index 6ff479fbaa..a2a48fffd2 100644
+--- a/tests/gcoap_fileserver/Makefile.ci
++++ b/tests/gcoap_fileserver/Makefile.ci
+@@ -7,6 +7,7 @@ BOARD_INSUFFICIENT_MEMORY := \
+     atmega1284p \
+     atmega328p \
+     atmega328p-xplained-mini \
++    atxmega-a1-xplained \
+     atxmega-a3bu-xplained \
+     blackpill \
+     bluepill \
+diff --git a/tests/gcoap_fileserver/main.c b/tests/gcoap_fileserver/main.c
+index c336b1eadc..750b22738c 100644
+--- a/tests/gcoap_fileserver/main.c
++++ b/tests/gcoap_fileserver/main.c
+@@ -28,7 +28,18 @@ static msg_t _main_msg_queue[MAIN_QUEUE_SIZE];
+ 
+ /* CoAP resources. Must be sorted by path (ASCII order). */
+ static const coap_resource_t _resources[] = {
+-    { "/const", COAP_GET | COAP_MATCH_SUBTREE, gcoap_fileserver_handler, "/const" },
++    {
++        .path = "/const",
++        .methods = COAP_GET | COAP_MATCH_SUBTREE,
++        .handler = gcoap_fileserver_handler,
++        .context = "/const"
++    },
++    {
++        .path = "/vfs",
++        .methods = COAP_GET | COAP_PUT | COAP_MATCH_SUBTREE,
++        .handler = gcoap_fileserver_handler,
++        .context = VFS_DEFAULT_DATA
++    },
+ };
+ 
+ static gcoap_listener_t _listener = {
+diff --git a/tests/gcoap_fileserver/tests/01-run.py b/tests/gcoap_fileserver/tests/01-run.py
+index 17412e311d..049fdc0426 100755
+--- a/tests/gcoap_fileserver/tests/01-run.py
++++ b/tests/gcoap_fileserver/tests/01-run.py
+@@ -98,11 +98,18 @@ def test_linear_topology(factory, zep_dispatch):
+ 
+     # Download file from CoAP server
+     B.cmd("vfs rm /nvm0/song.txt")
++    B.cmd("vfs rm /nvm0/song2.txt")
+     B.cmd("ncget coap://[2001:db8::1]/const/song.txt", timeout=60)
+ 
+     # make sure the content matches
+     assert A.cmd("md5sum /const/song.txt").split()[2] == B.cmd("md5sum /nvm0/song.txt").split()[2]
+ 
++    # upload the file to node B (only one node should write MEMORY.bin)
++    A.cmd("ncput /const/song.txt coap://[" + global_addr(B.cmd("ifconfig 7"))[1] + "]/vfs/song2.txt", timeout=60)
++
++    # make sure the content matches
++    assert B.cmd("md5sum /nvm0/song.txt").split()[2] == B.cmd("md5sum /nvm0/song2.txt").split()[2]
++
+     # terminate nodes
+     for n in nodes:
+         n.stop_term()

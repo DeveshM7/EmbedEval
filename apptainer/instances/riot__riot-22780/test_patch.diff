@@ -1,0 +1,148 @@
+diff --git a/tests/build_system/riot_version/Makefile b/tests/build_system/riot_version/Makefile
+index f98ab26028..3923139944 100644
+--- a/tests/build_system/riot_version/Makefile
++++ b/tests/build_system/riot_version/Makefile
+@@ -5,3 +5,4 @@ include $(RIOTBASE)/Makefile.include
+ # Exported to be available in the automated test
+ test: export RIOT_VERSION ?=
+ test: export RIOT_EXTRAVERSION ?=
++test: export RIOT_DUMMY_VERSION ?=
+diff --git a/tests/build_system/riot_version/README.md b/tests/build_system/riot_version/README.md
+index 9be29c4739..66ad066207 100644
+--- a/tests/build_system/riot_version/README.md
++++ b/tests/build_system/riot_version/README.md
+@@ -18,16 +18,19 @@ make flash test
+ Other versions can be tested by overriding the variables:
+ 
+ ```shell
+-RIOT_VERSION=2026.10-devel-123-gabcd make flash test
+-RIOT_VERSION=2026.10 make flash test
++RIOT_VERSION=2026.04.08 make flash test
+ RIOT_VERSION=2026.04.1 RIOT_EXTRAVERSION=3 make flash test
++RIOT_VERSION=2026.08.1 make flash test
++RIOT_VERSION=2026.10 make flash test
++RIOT_VERSION=2026.10-devel-123-gabcd make flash test
+ ```
+ 
+ `Makefile.include` will define `RIOT_VERSION` as `buildtest` and define
+-`RIOT_VERSION_CODE` as `RIOT_VERSION_DUMMY_CODE` when running in CI:
++`RIOT_VERSION_CODE` from `RIOT_DUMMY_VERSION` when running in CI:
+ 
+ ```shell
+ RIOT_CI_BUILD=1 make flash test
++RIOT_CI_BUILD=1 RIOT_EXTRAVERSION=6 make flash test
+ ```
+ 
+ ## Expected result
+diff --git a/tests/build_system/riot_version/tests/01-run.py b/tests/build_system/riot_version/tests/01-run.py
+index 4bcc3ddfe2..2e72ed007a 100755
+--- a/tests/build_system/riot_version/tests/01-run.py
++++ b/tests/build_system/riot_version/tests/01-run.py
+@@ -16,20 +16,20 @@ import sys
+ from testrunner import run
+ 
+ 
+-# Must match RIOT_VERSION_DUMMY_CODE in Makefile.include
+-DUMMY_CODE = (2042, 5, 23, 0)
+-
+-
+-def expected_code(version, extra):
++def expected_code(version, extra, dummy):
+     """
+     Computes the parts of the version code that the build system should
+-    generate for the given version string and extra version.
++    generate for the given version string, extra version and comma separated
++    dummy version.
+     """
+ 
+     parts = version.split("-", 1)[0].split(".")
+ 
+     if len(parts) < 2 or not all(part.isdigit() for part in parts):
+-        return DUMMY_CODE
++        parts = dummy.split("-", 1)[0].split(".")
++
++        if (len(parts) < 2 or not all(part.isdigit() for part in parts)):
++            raise ValueError("RIOT_DUMMY_VERSION is not a valid version.")
+ 
+     major, minor, patch = (int(part) for part in (parts + ["0"])[:3])
+ 
+@@ -39,10 +39,11 @@ def expected_code(version, extra):
+ def testfunc(child):
+     version = os.environ["RIOT_VERSION"]
+     extra = os.environ["RIOT_EXTRAVERSION"]
++    dummy = os.environ["RIOT_DUMMY_VERSION"]
+ 
+     child.expect_exact("RIOT_VERSION: {}".format(version))
+     child.expect_exact("RIOT_VERSION_CODE: {}.{}.{}.{}".format(
+-        *expected_code(version, extra)))
++        *expected_code(version, extra, dummy)))
+ 
+     child.expect_exact("[SUCCESS]")
+ 
+diff --git a/tests/build_system/utils/Makefile b/tests/build_system/utils/Makefile
+index b6aa429f47..b0db61a6f6 100644
+--- a/tests/build_system/utils/Makefile
++++ b/tests/build_system/utils/Makefile
+@@ -20,6 +20,7 @@ COMPILE_TESTS += test-chars_from
+ COMPILE_TESTS += test-chars_upto
+ COMPILE_TESTS += test-ensure_value test-ensure_value-negative
+ COMPILE_TESTS += test-exported-variables
++COMPILE_TESTS += test-is_number
+ COMPILE_TESTS += test-lowercase
+ COMPILE_TESTS += test-max_number
+ COMPILE_TESTS += test-memoized-variables
+@@ -28,6 +29,7 @@ COMPILE_TESTS += test-uppercase
+ COMPILE_TESTS += test-uppercase_and_underscore
+ COMPILE_TESTS += test-version_is_greater
+ COMPILE_TESTS += test-version_is_greater_or_equal
++COMPILE_TESTS += test-version_tuple
+ 
+ # Tests will be run both in the host machine and in `docker`
+ all: build-system-utils-tests
+@@ -75,3 +77,9 @@ test-version_is_greater_or_equal:
+ 
+ test-max_number:
+ 	$(Q)$(call command_should_succeed,"$(MAKE)" -C $(MAKEFILES_UTILS) -f test-strings.mk test-max_number)
++
++test-is_number:
++	$(Q)$(call command_should_succeed,"$(MAKE)" -C $(MAKEFILES_UTILS) -f test-strings.mk test-is_number)
++
++test-version_tuple:
++	$(Q)$(call command_should_succeed,"$(MAKE)" -C $(MAKEFILES_UTILS) -f test-strings.mk test-version_tuple)
+diff --git a/tests/net/l2util/Makefile b/tests/net/l2util/Makefile
+index 0ca40c7b8c..a78e1b99dd 100644
+--- a/tests/net/l2util/Makefile
++++ b/tests/net/l2util/Makefile
+@@ -2,23 +2,17 @@ DEVELHELP = 0
+ 
+ include ../Makefile.net_common
+ 
+-# needed for 'uppercase' below, as 'Makefile.include' is only included at the end
+-include $(RIOTBASE)/makefiles/utils/strings.mk
+-
+ USEMODULE += embunit
+ USEMODULE += l2util
+ 
+-# defining the "module" path defines this way in the hopes to make it more
+-#clearer.
+-CHECKED_IFDEF_PATHS = cc110x \
+-                      esp_now \
+-                      netdev_eth \
+-                      netdev_ieee802154 \
+-                      xbee \
+-                      nrfmin \
+-                      nimble_netif
+-
+-CFLAGS += $(foreach path,$(CHECKED_IFDEF_PATHS),\
+-            -DMODULE_$(call uppercase,$(path)))
++# enable all code paths in l2util without pulling in the actual
++# drivers
++CFLAGS += -DMODULE_CC110X \
++          -DMODULE_ESP_NOW \
++          -DMODULE_NETDEV_ETH \
++          -DMODULE_NETDEV_IEEE802154 \
++          -DMODULE_NIMBLE_NETIF \
++          -DMODULE_NRFMIN \
++          -DMODULE_XBEE
+ 
+ include $(RIOTBASE)/Makefile.include

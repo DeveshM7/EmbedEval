@@ -1,0 +1,149 @@
+diff --git a/tests/sys/shell_scripting/Makefile b/tests/sys/shell_scripting/Makefile
+new file mode 100644
+index 0000000000..4f3814cb10
+--- /dev/null
++++ b/tests/sys/shell_scripting/Makefile
+@@ -0,0 +1,13 @@
++include ../Makefile.sys_common
++
++USEMODULE += shell
++USEMODULE += vfs_default
++USEMODULE += vfs_util
++USEMODULE += ztimer_msec
++
++DISABLE_MODULE += test_utils_interactive_sync
++
++# only boards with MTD are eligible
++TEST_ON_CI_WHITELIST += native native64
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/sys/shell_scripting/Makefile.ci b/tests/sys/shell_scripting/Makefile.ci
+new file mode 100644
+index 0000000000..363d4f3a79
+--- /dev/null
++++ b/tests/sys/shell_scripting/Makefile.ci
+@@ -0,0 +1,4 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    atmega8 \
++    nucleo-l011k4 \
++    #
+diff --git a/tests/sys/shell_scripting/main.c b/tests/sys/shell_scripting/main.c
+new file mode 100644
+index 0000000000..e6eec909ea
+--- /dev/null
++++ b/tests/sys/shell_scripting/main.c
+@@ -0,0 +1,94 @@
++/*
++ * Copyright (C) 2024 ML!PA Consulting GmbH
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup tests
++ * @{
++ *
++ * @file
++ * @brief   Shell Scripting Test Application
++ *
++ * @author  Benjamin Valentin <benjamin.valentin@ml-pa.com>
++ * @}
++ */
++
++#include <stdlib.h>
++
++#include "shell.h"
++#include "vfs_default.h"
++#include "vfs_util.h"
++#include "ztimer.h"
++
++#ifndef SCRIPT_FILE
++#define SCRIPT_FILE VFS_DEFAULT_DATA "/script.sh"
++#endif
++
++static int cmd_msleep(int argc, char **argv)
++{
++    if (argc != 2) {
++        return -1;
++    }
++
++    ztimer_sleep(ZTIMER_MSEC, atoi(argv[1]));
++    return 0;
++}
++
++static int cmd_echo(int argc, char **argv)
++{
++    for (int i = 1; i < argc; ++i) {
++        printf("%s ", argv[i]);
++    }
++    puts("");
++
++    return 0;
++}
++
++static int cmd_add(int argc, char **argv)
++{
++    int sum = 0;
++
++    for (int i = 1; i < argc; ++i) {
++        sum += atoi(argv[i]);
++    }
++
++    printf("%d\n", sum);
++    return 0;
++}
++
++static const shell_command_t shell_commands[] = {
++    { "msleep", "sleep for a number of ms", cmd_msleep },
++    { "echo", "echo parameters to console", cmd_echo },
++    { "add", "add up a list of numbers", cmd_add },
++    { NULL, NULL, NULL }
++};
++
++static int _create_script(void)
++{
++    const char file[] = {
++        "# this is a comment\n"
++        "msleep 500\n"
++        "echo Hello RIOT!\n"
++        "\n"
++        "add 10 23 9\n"
++        "01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
++    };
++
++    return vfs_file_from_buffer(SCRIPT_FILE, file, sizeof(file) - 1);
++}
++
++int main(void)
++{
++    _create_script();
++
++    unsigned line;
++    int res = shell_parse_file(shell_commands, SCRIPT_FILE, &line);
++    if (res) {
++        fprintf(stderr, "%s:%u: error %d\n", SCRIPT_FILE, line, res);
++    }
++    return res;
++}
+diff --git a/tests/sys/shell_scripting/tests/01-run.py b/tests/sys/shell_scripting/tests/01-run.py
+new file mode 100755
+index 0000000000..85f6bff134
+--- /dev/null
++++ b/tests/sys/shell_scripting/tests/01-run.py
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++
++import sys
++from testrunner import run
++
++
++def testfunc(child):
++    child.expect_exact('Hello RIOT!')
++    child.expect_exact('42')
++    child.expect_exact('/nvm0/script.sh:6: error -7')
++
++
++if __name__ == "__main__":
++    sys.exit(run(testfunc))

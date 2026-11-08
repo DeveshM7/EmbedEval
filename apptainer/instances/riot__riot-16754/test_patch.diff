@@ -1,0 +1,124 @@
+diff --git a/tests/deferred_yield_higher/Makefile b/tests/deferred_yield_higher/Makefile
+new file mode 100644
+index 0000000000..79926b6af7
+--- /dev/null
++++ b/tests/deferred_yield_higher/Makefile
+@@ -0,0 +1,5 @@
++include ../Makefile.tests_common
++
++FEATURES_BLACKLIST += arch_avr8 arch_msp430 arch_riscv arch_mips32r2
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/tests/deferred_yield_higher/Makefile.ci b/tests/deferred_yield_higher/Makefile.ci
+new file mode 100644
+index 0000000000..b9ff275375
+--- /dev/null
++++ b/tests/deferred_yield_higher/Makefile.ci
+@@ -0,0 +1,3 @@
++BOARD_INSUFFICIENT_MEMORY := \
++    nucleo-l011k4 \
++    #
+diff --git a/tests/deferred_yield_higher/README.md b/tests/deferred_yield_higher/README.md
+new file mode 100644
+index 0000000000..337c04da68
+--- /dev/null
++++ b/tests/deferred_yield_higher/README.md
+@@ -0,0 +1,14 @@
++Introduction
++============
++
++This test verifies that a thread can call "thread_yield_higher()" with IRQs
++disabled, and that the actual context switch is deferred until IRQs are
++re-enabled.
++
++For the test to be successful, the printed messages must be in order, as follows:
++
++```
++1. post yield
++2. second thread scheduled
++3. post irq enable
++```
+diff --git a/tests/deferred_yield_higher/main.c b/tests/deferred_yield_higher/main.c
+new file mode 100644
+index 0000000000..ad86c5ad3d
+--- /dev/null
++++ b/tests/deferred_yield_higher/main.c
+@@ -0,0 +1,52 @@
++/*
++ * Copyright (C) 2021 Inria
++ *               2021 Freie Universität Berlin
++ *               2021 Kaspar Schleiser <kaspar@schleiser.de>
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup tests
++ * @{
++ *
++ * @file
++ * @brief   Application for testing thread_yield_higher() with IRQs disabled
++ *
++ * @author  Kaspar Schleiser <kaspar@schleiser.de>
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include "irq.h"
++#include "thread.h"
++
++static char t2_stack[THREAD_STACKSIZE_DEFAULT];
++
++static void *second_thread(void *arg)
++{
++    puts("2. second thread scheduled");
++    return arg;
++}
++
++int main(void)
++{
++    thread_create(
++        t2_stack, sizeof(t2_stack),
++        THREAD_PRIORITY_MAIN - 1,
++        THREAD_CREATE_WOUT_YIELD | THREAD_CREATE_STACKTEST,
++        second_thread, NULL, "nr2");
++
++    irq_disable();
++    thread_yield_higher();
++    puts("1. post yield");
++    irq_enable();
++    puts("3. post irq enable");
++
++    puts("if above messages are in order, this test succeeded.");
++
++    return 0;
++}
+diff --git a/tests/deferred_yield_higher/tests/test.py b/tests/deferred_yield_higher/tests/test.py
+new file mode 100755
+index 0000000000..a0ecac5ea9
+--- /dev/null
++++ b/tests/deferred_yield_higher/tests/test.py
+@@ -0,0 +1,20 @@
++#!/usr/bin/env python3
++
++# Copyright (C) 2017 Kaspar Schleiser <kaspar@schleiser.de>
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++import sys
++from testrunner import run
++
++
++def testfunc(child):
++    child.expect_exact('1. post yield')
++    child.expect_exact('2. second thread scheduled')
++    child.expect_exact('3. post irq enable')
++
++
++if __name__ == "__main__":
++    sys.exit(run(testfunc))

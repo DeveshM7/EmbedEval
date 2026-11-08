@@ -1,0 +1,419 @@
+diff --git a/tests/thread_priority_inversion/Makefile b/tests/thread_priority_inversion/Makefile
+index d4295ed547..f48eecd09c 100644
+--- a/tests/thread_priority_inversion/Makefile
++++ b/tests/thread_priority_inversion/Makefile
+@@ -1,6 +1,17 @@
+ include ../Makefile.tests_common
+ 
++USEMODULE += fmt
++USEMODULE += core_mutex_priority_inheritance
+ 
+-USEMODULE += xtimer
++ifneq ($(RIOT_CI_BUILD),1)
++  # For human beings add a busy delay to the mid priority task to make the problem more approachable
++  FANCY ?= 1
++else
++  # Skip the fancy delay for the CI to not waste precious CI time
++  FANCY ?= 0
++endif
+ 
+ include $(RIOTBASE)/Makefile.include
++
++CFLAGS += -DFANCY=$(FANCY)
++CFLAGS += -DTHREAD_STACKSIZE_MAIN=THREAD_STACKSIZE_SMALL
+diff --git a/tests/thread_priority_inversion/Makefile.ci b/tests/thread_priority_inversion/Makefile.ci
+deleted file mode 100644
+index d5368f025e..0000000000
+--- a/tests/thread_priority_inversion/Makefile.ci
++++ /dev/null
+@@ -1,12 +0,0 @@
+-BOARD_INSUFFICIENT_MEMORY := \
+-    arduino-duemilanove \
+-    arduino-leonardo \
+-    arduino-nano \
+-    arduino-uno \
+-    atmega328p \
+-    atmega328p-xplained-mini \
+-    nucleo-f031k6 \
+-    nucleo-l011k4 \
+-    samd10-xmini \
+-    stm32f030f4-demo \
+-    #
+diff --git a/tests/thread_priority_inversion/README.md b/tests/thread_priority_inversion/README.md
+index 0c0e4498c8..d18783ab1c 100644
+--- a/tests/thread_priority_inversion/README.md
++++ b/tests/thread_priority_inversion/README.md
+@@ -1,45 +1,58 @@
+-# thread_priority_inversion test application
++Priority Inversion
++==================
+ 
+-This application uses three threads for demonstrating the
+-priority inversion problem. In theory, the highest priority thread (**t_high**)
+-should be scheduled periodically and produce some output:
+-```
+-2017-07-17 17:00:29,337 - INFO # t_high: got resource.
+-...
+-2017-07-17 17:00:30,343 - INFO # t_high: freeing resource...
+-```
+-During this phase of 1s, **t_high** lockes the mutex **res_mtx** which
+-represents a shared resource. After unlocking the mutex, **t_high** waits 1s
+-before restaring its cycle again.
++Scenario: A low priority thread holds a shared resource when a mid priority and a high
++priority thread become runnable. The high priority thread needs exclusive access to the
++resource the low priority one is holding and blocks. This mid priority thread does not
++compete with the other for resources but takes a long to complete. The scheduler must
++prefer the low priority thread over the mid priority thread while it is holding the
++resource the high priority thread is waiting for - otherwise the high priority thread
++effectively waits for the mid priority thread, which is an inversion of priority.
++
++Output On Failure
++-----------------
+ 
+-A low priority thread **t_low** is doing the same. Since both threads sharing
+-the same resource **res_mtx**, they have to wait for each other until the mutex
+-is unlocked. On startup, **t_low** starts immediately, while **t_high** waits
+-0.5s before so that **t_low** allocates the resource first. Together, the output
+-looks like this:
+ ```
+-2017-07-17 17:00:28,339 - INFO # t_low: allocating resource...
+-2017-07-17 17:00:28,339 - INFO # t_low: got resource.
+-2017-07-17 17:00:28,340 - INFO # t_high: allocating resource...
+-2017-07-17 17:00:29,337 - INFO # t_low: freeing resource...
+-2017-07-17 17:00:29,337 - INFO # t_high: got resource.
+-2017-07-17 17:00:29,338 - INFO # t_low: freed resource.
+-2017-07-17 17:00:30,343 - INFO # t_high: freeing resource...
+-2017-07-17 17:00:30,344 - INFO # t_high: freed resource.
+-2017-07-17 17:00:30,345 - INFO # t_low: allocating resource...
+-2017-07-17 17:00:30,346 - INFO # t_low: got resource.
+-...
++main(): This is RIOT! (Version: ...)
++low priority thread has started
++low priority thread started to work on its task
++high priority thread has started
++mid priority thread has started
++mid priority thread started to work on its task
++    ... this ...
++    ... takes ...
++    ... bloody ...
++    ... ages ...
++    ... to ...
++    ... complete ...
++mid priority thread is done
++low priority thread is done
++high priority thread started to work on its task
++high priority thread is done
++==> Priority inversion occurred
++TEST FAILED
+ ```
+ 
+-After 3s, a third thread with medium priority (**t_mid**) is started. This
+-thread does not touch **res_mtx**, but it runs an infinite loop without leaving
+-some CPU time to lower priority tasks. This prevents **t_low** from freeing the
+-resource and thus, **t_high** from running (**Priority Inversion**). In this
+-situation, the test program output stops with the following lines:
++
++Output On Success
++-----------------
++
+ ```
+-2017-07-17 17:00:31,335 - INFO # t_mid: doing some stupid stuff...
+-2017-07-17 17:00:31,340 - INFO # t_high: allocating resource...
++main(): This is RIOT! (Version: ...)
++low priority thread has started
++low priority thread started to work on its task
++high priority thread has started
++low priority thread is done
++high priority thread started to work on its task
++high priority thread is done
++mid priority thread has started
++mid priority thread started to work on its task
++    ... this ...
++    ... takes ...
++    ... bloody ...
++    ... ages ...
++    ... to ...
++    ... complete ...
++mid priority thread is done
++TEST PASSED
+ ```
+-
+-If the scheduler contains a mechanism for handling this problem, the program
+-should continue with output from **t_high**.
+diff --git a/tests/thread_priority_inversion/main.c b/tests/thread_priority_inversion/main.c
+index 231e951821..09c8a0f869 100644
+--- a/tests/thread_priority_inversion/main.c
++++ b/tests/thread_priority_inversion/main.c
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2017 Technische Universität Berlin
++ *               2021 Otto-von-Guericke-Universität Magdeburg
+  *
+  * This file is subject to the terms and conditions of the GNU Lesser
+  * General Public License v2.1. See the file LICENSE in the top level
+@@ -14,103 +15,166 @@
+  * @brief       Thread test application for priority inversion problem
+  *
+  * @author      Thomas Geithner <thomas.geithner@dai-labor.de>
++ * @author      Marian Buschsieweke <marian.buschsieweke@ovgu.de>
+  *
+  * @}
+  */
+ 
+-#include <stdio.h>
+ #include <string.h>
+-#include <stdint.h>
+ 
+-#include "thread.h"
++#include "board.h"
++#include "fmt.h"
++#include "irq.h"
+ #include "mutex.h"
+-#include "xtimer.h"
++#include "periph_conf.h"
++#include "thread.h"
++#include "macros/units.h"
++
++#ifndef FANCY
++#define FANCY 0
++#endif
++
++/* Fallback in case core clock isn't define - should only be the case on native.
++ * We don't need a correct value here any, it is only used for the fancy busy delay to make the
++ * problem more approachable to human beings. */
++#ifndef CLOCK_CORECLOCK
++#define CLOCK_CORECLOCK GHZ(1)
++#endif
++
++static mutex_t mtx_res = MUTEX_INIT;
++static mutex_t mtx_start_low = MUTEX_INIT_LOCKED;
++static mutex_t mtx_start_mid = MUTEX_INIT_LOCKED;
++static mutex_t mtx_start_high = MUTEX_INIT_LOCKED;
+ 
+-mutex_t res_mtx;
++static char stack_high[THREAD_STACKSIZE_SMALL];
++static char stack_mid[THREAD_STACKSIZE_SMALL];
++static char stack_low[THREAD_STACKSIZE_SMALL];
+ 
+-char stack_high[THREAD_STACKSIZE_DEFAULT];
+-char stack_mid[THREAD_STACKSIZE_DEFAULT];
+-char stack_low[THREAD_STACKSIZE_DEFAULT];
++static char run_order[16] = "";
++static size_t run_order_pos = 0;
+ 
+-void *t_low_handler(void *arg)
++static void busy_delay(void)
+ {
+-    (void) arg;
+-
+-    /* starting working loop immediately */
+-    while (1) {
+-        puts("t_low: allocating resource...");
+-        mutex_lock(&res_mtx);
+-        puts("t_low: got resource.");
+-        xtimer_sleep(1);
+-
+-        puts("t_low: freeing resource...");
+-        mutex_unlock(&res_mtx);
+-        puts("t_low: freed resource.");
+-        xtimer_sleep(1);
+-    }
+-    return NULL;
++    /* About 1 second if assuming one loop iteration takes ~20 CPU cycles. Actual duration doesn't
++     * matter at all, but this delay has to be busy (not yielding during wait). */
++    for (volatile uint32_t i = 0; i < CLOCK_CORECLOCK / 20; i++) { }
+ }
+ 
+-void *t_mid_handler(void *arg)
++static void record_thread_started(const char *priority)
+ {
+-    (void) arg;
++    print_str(priority);
++    print_str(" priority thread has started\n");
++}
+ 
+-    /* starting working loop after 3s */
+-    xtimer_sleep(3);
++static void record_thread_working(const char *priority)
++{
++    print_str(priority);
++    print_str(" priority thread started to work on its task\n");
++
++    /* make recording of running thread atomic by disabling IRQs. We could have used a mutex here
++     * as well, but for something so short just disabling IRQs is more sensible */
++    unsigned irq_state = irq_disable();
++    run_order[run_order_pos++] = priority[0];
++    irq_restore(irq_state);
++}
+ 
+-    puts("t_mid: doing some stupid stuff...");
+-    while (1) {
+-        thread_yield_higher();
+-    }
++static void record_thread_done(const char *priority)
++{
++    print_str(priority);
++    print_str(" priority thread is done\n");
++}
++
++static void *low_handler(void *arg)
++{
++    (void)arg;
++    mutex_lock(&mtx_start_low);
++    record_thread_started("low");
++
++    mutex_lock(&mtx_res);
++    record_thread_working("low");
++
++    /* launch mid and high priority thread now */
++    mutex_unlock(&mtx_start_high);
++    mutex_unlock(&mtx_start_mid);
++
++    record_thread_done("low");
++    mutex_unlock(&mtx_res);
++
++    return NULL;
+ }
+ 
+-void *t_high_handler(void *arg)
++static void *mid_handler(void *arg)
+ {
+-    (void) arg;
+-
+-    /* starting working loop after 500 ms */
+-    xtimer_msleep(500U);
+-    while (1) {
+-        puts("t_high: allocating resource...");
+-        mutex_lock(&res_mtx);
+-        puts("t_high: got resource.");
+-        xtimer_sleep(1);
+-
+-        puts("t_high: freeing resource...");
+-        mutex_unlock(&res_mtx);
+-        puts("t_high: freed resource.");
+-        xtimer_sleep(1);
++    (void)arg;
++    mutex_lock(&mtx_start_mid);
++    record_thread_started("mid");
++
++    record_thread_working("mid");
++    if (FANCY) {
++        busy_delay();
++        print_str("    ... this ...\n");
++        busy_delay();
++        print_str("    ... takes ...\n");
++        busy_delay();
++        print_str("    ... bloody ...\n");
++        busy_delay();
++        print_str("    ... ages ...\n");
++        busy_delay();
++        print_str("    ... to ...\n");
++        busy_delay();
++        print_str("    ... complete ...\n");
+     }
++
++    record_thread_done("mid");
+     return NULL;
+ }
+ 
+-kernel_pid_t pid_low;
+-kernel_pid_t pid_mid;
+-kernel_pid_t pid_high;
++static void *high_handler(void *arg)
++{
++    (void)arg;
++    mutex_lock(&mtx_start_high);
++    record_thread_started("high");
++
++    mutex_lock(&mtx_res);
++    record_thread_working("high");
++    record_thread_done("high");
++    mutex_unlock(&mtx_res);
++
++    return NULL;
++}
+ 
+ int main(void)
+ {
+-    mutex_init(&res_mtx);
+-    puts("This is a scheduling test for Priority Inversion");
+-
+-    pid_low = thread_create(stack_low, sizeof(stack_low),
+-        THREAD_PRIORITY_MAIN - 1,
+-        THREAD_CREATE_STACKTEST,
+-        t_low_handler, NULL,
+-        "t_low");
+-
+-    pid_mid = thread_create(stack_mid, sizeof(stack_mid),
+-        THREAD_PRIORITY_MAIN - 2,
+-        THREAD_CREATE_STACKTEST,
+-        t_mid_handler, NULL,
+-        "t_mid");
+-
+-    pid_high = thread_create(stack_high, sizeof(stack_high),
+-        THREAD_PRIORITY_MAIN - 3,
+-        THREAD_CREATE_STACKTEST,
+-        t_high_handler, NULL,
+-        "t_high");
+-
+-    thread_sleep();
++    thread_create(stack_low, sizeof(stack_low),
++                  THREAD_PRIORITY_MAIN - 1, THREAD_CREATE_STACKTEST,
++                  low_handler, NULL, "low");
++
++    thread_create(stack_mid, sizeof(stack_mid),
++                  THREAD_PRIORITY_MAIN - 2, THREAD_CREATE_STACKTEST,
++                  mid_handler, NULL, "mid");
++
++    thread_create(stack_high, sizeof(stack_high),
++                  THREAD_PRIORITY_MAIN - 3, THREAD_CREATE_STACKTEST,
++                  high_handler, NULL, "high");
++
++    /* Start low priority thread first, which will start high and mid priority ones after the
++     * shared resource is obtained */
++    mutex_unlock(&mtx_start_low);
++
++    if (strcmp("lhm", run_order) == 0) {
++        print_str("TEST PASSED\n");
++        return 0;
++    }
++    else if (strcmp("lmh", run_order) == 0) {
++        print_str("==> Priority inversion occurred\n");
++    }
++    else {
++        /* This should occur neither with nor without priority inversion! */
++        print_str("BUG: \"");
++        print_str(run_order);
++        print_str("\"\n");
++    }
++
++    print_str("TEST FAILED\n");
+     return 0;
+ }
+diff --git a/tests/thread_priority_inversion/tests/01-run.py b/tests/thread_priority_inversion/tests/01-run.py
+new file mode 100755
+index 0000000000..dfd6149a1e
+--- /dev/null
++++ b/tests/thread_priority_inversion/tests/01-run.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python3
++
++#  Copyright (C) 2021 Otto-von-Guericke-Universität Magdeburg
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++# @author      Marian Buschsieweke <marian.buschsieweke@ovgu.de>
++
++import sys
++from testrunner import run
++
++
++def testfunc(child):
++    child.expect(r"TEST ([A-Z]+)\r\n")
++    assert child.match.group(1) == "PASSED"
++
++
++if __name__ == "__main__":
++    sys.exit(run(testfunc))

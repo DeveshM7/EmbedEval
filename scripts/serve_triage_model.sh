@@ -41,6 +41,18 @@ SCRATCH_ROOT="${EMBEDEVAL_SCRATCH:-/scratch/scholar/$USER}"
 export EMBEDEVAL_MODELS="${EMBEDEVAL_MODELS:-$SCRATCH_ROOT/hf/models}"
 IMAGE="${EMBEDEVAL_VLLM_IMAGE:-$SCRATCH_ROOT/images/vllm-0.27.1.sif}"
 PORT="${PORT:-8000}"
+# Defaults are for a whole node, with the client beside the server. To be reached
+# from an x86 node (RIOT's agent), from a smaller allocation: HOST=0.0.0.0, with
+# VLLM_API_KEY set, and less GPU memory, sequences and context.
+HOST="${HOST:-127.0.0.1}"
+GPU_MEMORY="${GPU_MEMORY:-0.80}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
+if [ "$HOST" != 127.0.0.1 ] && [ -z "${VLLM_API_KEY:-}" ]; then
+    echo "HOST=$HOST needs VLLM_API_KEY: this would open the server to the whole cluster" >&2
+    exit 1
+fi
+[ -n "${VLLM_API_KEY:-}" ] && export APPTAINERENV_VLLM_API_KEY="$VLLM_API_KEY"
 
 # Read the profile. Printed one argument per line so JSON-bearing arguments
 # (speculative configs) survive intact.
@@ -93,7 +105,8 @@ echo "profile=$PROFILE node=$(hostname) port=$PORT start=$(date +%T)"
 echo "weights=$WEIGHTS"
 exec apptainer exec --cleanenv --bind "$(IFS=,; echo "${BINDS[*]}")" "$IMAGE" \
     vllm serve "$WEIGHTS" --served-model-name "$PROFILE" \
-        --host 127.0.0.1 --port "$PORT" \
+        --host "$HOST" --port "$PORT" \
         --safetensors-load-strategy eager \
-        --gpu-memory-utilization 0.80 --max-num-seqs 4 --max-model-len 262144 \
+        --gpu-memory-utilization "$GPU_MEMORY" --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-model-len "$MAX_MODEL_LEN" \
         "${SERVE_ARGS[@]}"

@@ -1,0 +1,200 @@
+diff --git a/tests/net/nanocoap_cli/Makefile b/tests/net/nanocoap_cli/Makefile
+index cf7031ffee..442ba18699 100644
+--- a/tests/net/nanocoap_cli/Makefile
++++ b/tests/net/nanocoap_cli/Makefile
+@@ -15,6 +15,7 @@ USEMODULE += gnrc_ipv6_default
+ 
+ USEMODULE += nanocoap_sock
+ USEMODULE += nanocoap_resources
++USEMODULE += fmt # scn_buf_hex() for shell cmd client_token
+ 
+ # boards where basic nanocoap functionality fits, but no VFS
+ LOW_MEMORY_BOARDS := \
+diff --git a/tests/net/nanocoap_cli/nanocli_client.c b/tests/net/nanocoap_cli/nanocli_client.c
+index 3a67e15113..a9df7ab547 100644
+--- a/tests/net/nanocoap_cli/nanocli_client.c
++++ b/tests/net/nanocoap_cli/nanocli_client.c
+@@ -23,6 +23,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#include "fmt.h"
+ #include "net/coap.h"
+ #include "net/gnrc/netif.h"
+ #include "net/nanocoap.h"
+@@ -80,6 +81,14 @@ static ssize_t _send(coap_pkt_t *pkt, size_t len,
+     return nanocoap_request(pkt, NULL, &remote, len);
+ }
+ 
++#if MODULE_NANOCOAP_TOKEN_EXT
++#  define CLIENT_TOKEN_LENGTH_MAX   16
++#else
++#  define CLIENT_TOKEN_LENGTH_MAX   COAP_TOKEN_LENGTH_MAX
++#endif
++static uint8_t _client_token[CLIENT_TOKEN_LENGTH_MAX] = {0xDA, 0xEC};
++static uint8_t _client_token_len = 2;
++
+ static int _cmd_client(int argc, char **argv)
+ {
+     /* Ordered like the RFC method code numbers, but off by 1. GET is code 0. */
+@@ -88,7 +97,6 @@ static int _cmd_client(int argc, char **argv)
+     uint8_t buf[buflen];
+     coap_pkt_t pkt;
+     size_t len;
+-    uint8_t token[2] = {0xDA, 0xEC};
+ 
+     if (argc == 1) {
+         /* show help for commands */
+@@ -109,7 +117,8 @@ static int _cmd_client(int argc, char **argv)
+ 
+     /* parse options */
+     if (argc == 5 || argc == 6) {
+-        ssize_t hdrlen = coap_build_hdr(pkt.hdr, COAP_TYPE_CON, &token[0], 2,
++        ssize_t hdrlen = coap_build_hdr(pkt.hdr, COAP_TYPE_CON,
++                                        _client_token, _client_token_len,
+                                         code_pos+1, 1);
+         coap_pkt_init(&pkt, &buf[0], buflen, hdrlen);
+         coap_opt_add_string(&pkt, COAP_OPT_URI_PATH, argv[4], '/');
+@@ -164,9 +173,33 @@ static int _cmd_client(int argc, char **argv)
+            argv[0]);
+     return 1;
+ }
+-
+ SHELL_COMMAND(client, "CoAP client", _cmd_client);
+ 
++static int _cmd_client_token(int argc, char **argv){
++    if (argc != 2) {
++        printf("Usage: %s <TOKEN_HEX>\n", argv[0]);
++        return 1;
++    }
++
++    ssize_t tkl = scn_buf_hex(_client_token, sizeof(_client_token),
++                              argv[1], strlen(argv[1]));
++
++    if (tkl == -EOVERFLOW) {
++        puts("Token too long");
++        return 1;
++    }
++
++    if (tkl < 0) {
++        puts("Failed to parse token");
++        return 1;
++    }
++
++    _client_token_len = tkl;
++
++    return 0;
++}
++SHELL_COMMAND(client_token, "Set Token for CoAP client", _cmd_client_token);
++
+ static int _blockwise_cb(void *arg, size_t offset, uint8_t *buf,
+                          size_t len, int more)
+ {
+diff --git a/tests/unittests/tests-fmt/tests-fmt.c b/tests/unittests/tests-fmt/tests-fmt.c
+index 5606a2b0e2..c9d4b45d98 100644
+--- a/tests/unittests/tests-fmt/tests-fmt.c
++++ b/tests/unittests/tests-fmt/tests-fmt.c
+@@ -869,6 +869,34 @@ static void test_scn_u32_hex(void)
+     TEST_ASSERT_EQUAL_INT(0xab, scn_u32_hex("aB", 9));
+ }
+ 
++static void test_scn_buf_hex(void)
++{
++    uint8_t buf[8];
++    const char *input_invalid = "hallo";
++    const char *input_valid = "deadbeef";
++    const uint8_t expected[] = { 0xde, 0xad, 0xbe, 0xef };
++    const size_t len_valid = strlen(input_valid);
++    const size_t len_invalid = strlen(input_invalid);
++    const size_t len_expected = sizeof(expected);
++
++    /* invalid due to odd length */
++    TEST_ASSERT_EQUAL_INT(-EINVAL, scn_buf_hex(buf, sizeof(buf),
++                                               input_valid, len_valid - 1));
++    /* invalid due to non-hex chars */
++    TEST_ASSERT_EQUAL_INT(-EINVAL, scn_buf_hex(buf, sizeof(buf),
++                                               input_invalid, len_invalid));
++    /* overflow */
++    TEST_ASSERT_EQUAL_INT(-EOVERFLOW, scn_buf_hex(buf, 2,
++                                                  input_valid, len_valid));
++
++    memset(buf, 0x55, sizeof(buf));
++    TEST_ASSERT_EQUAL_INT(len_expected, scn_buf_hex(buf, sizeof(buf),
++                                                    input_valid, len_valid));
++    TEST_ASSERT(0 == memcmp(expected, buf, len_expected));
++    /* did not overwrite */
++    TEST_ASSERT_EQUAL_INT(0x55, buf[len_expected]);
++}
++
+ static void test_fmt_lpad(void)
+ {
+     const char base[] = "abcd";
+@@ -935,6 +963,7 @@ Test *tests_fmt_tests(void)
+         new_TestFixture(test_fmt_to_lower),
+         new_TestFixture(test_scn_u32_dec),
+         new_TestFixture(test_scn_u32_hex),
++        new_TestFixture(test_scn_buf_hex),
+         new_TestFixture(test_fmt_lpad),
+     };
+ 
+diff --git a/tests/unittests/tests-nanocoap/tests-nanocoap.c b/tests/unittests/tests-nanocoap/tests-nanocoap.c
+index 098e243251..b6493b7b76 100644
+--- a/tests/unittests/tests-nanocoap/tests-nanocoap.c
++++ b/tests/unittests/tests-nanocoap/tests-nanocoap.c
+@@ -1185,6 +1185,48 @@ static void test_nanocoap__token_length_ext_269(void)
+     TEST_ASSERT_EQUAL_INT(14, hdr->ver_t_tkl & 0xf);
+ }
+ 
++/*
++ * Test that a RST message can be generated and parsed
++ */
++static void test_nanocoap___rst_message(void)
++{
++    static const uint8_t rst_expected[4] = {
++        0x70, /* Version = 0b01, Type = 0b11 (RST), Token Length = 0b0000 */
++        0x00, /* Code = 0x00 */
++        0x13, 0x37 /* Message ID = 0x1337 */
++    };
++
++    uint8_t buf[16];
++    /* trivial case: build a reset message */
++    memset(buf, 0x55, sizeof(buf));
++    TEST_ASSERT_EQUAL_INT(sizeof(rst_expected),
++                          coap_build_hdr((void *)buf, COAP_TYPE_RST, NULL, 0,
++                                         0, 0x1337));
++    TEST_ASSERT(0 == memcmp(rst_expected, buf, sizeof(rst_expected)));
++    /* did it write past the expected bytes? */
++    TEST_ASSERT_EQUAL_INT(0x55, buf[sizeof(rst_expected)]);
++
++    /* now check that parsing it back works */
++    coap_pkt_t pkt;
++    TEST_ASSERT_EQUAL_INT(0, coap_parse(&pkt, buf, sizeof(rst_expected)));
++    TEST_ASSERT_EQUAL_INT(COAP_TYPE_RST, coap_get_type(&pkt));
++    TEST_ASSERT_EQUAL_INT(0, coap_get_code_raw(&pkt));
++    TEST_ASSERT_EQUAL_INT(0, coap_get_token_len(&pkt));
++
++    /* now check that generating a RST reply works */
++    static uint8_t con_request[8] = {
++        0x44, /* Version = 0b01, Type = 0b00 (CON), Token Length = 0b0100 */
++        0x01, /* Code = 0.01 (GET) */
++        0x13, 0x37, /* Message ID = 0x1337 */
++        0xde, 0xed, 0xbe, 0xef, /* Token = 0xdeadbeef */
++    };
++    memset(buf, 0x55, sizeof(buf));
++    TEST_ASSERT_EQUAL_INT(0, coap_parse(&pkt, con_request, sizeof(con_request)));
++    TEST_ASSERT_EQUAL_INT(sizeof(rst_expected), coap_build_reply(&pkt, 0, buf, sizeof(buf), 0));
++    TEST_ASSERT(0 == memcmp(rst_expected, buf, sizeof(rst_expected)));
++    TEST_ASSERT_EQUAL_INT(0x55, buf[sizeof(rst_expected)]);
++}
++
+ Test *tests_nanocoap_tests(void)
+ {
+     EMB_UNIT_TESTFIXTURES(fixtures) {
+@@ -1223,6 +1265,7 @@ Test *tests_nanocoap_tests(void)
+         new_TestFixture(test_nanocoap__token_length_over_limit),
+         new_TestFixture(test_nanocoap__token_length_ext_16),
+         new_TestFixture(test_nanocoap__token_length_ext_269),
++        new_TestFixture(test_nanocoap___rst_message),
+     };
+ 
+     EMB_UNIT_TESTCALLER(nanocoap_tests, NULL, NULL, fixtures);

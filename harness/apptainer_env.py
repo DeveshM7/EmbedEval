@@ -41,10 +41,12 @@ SUBMIT = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 class ApptainerEnvironment:
     def __init__(self, *, image: str | Path, name: str, cwd: str = "/testbed",
+                 layer: str | Path | None = None,
                  timeout: int = 900, setup_commands: list[str] | None = None,
                  logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
+        self.layer = Path(layer) if layer else None
         if not self.image.exists():
             raise FileNotFoundError(f"instance image not built: {self.image}")
         self.cwd, self.timeout = cwd, timeout
@@ -71,7 +73,7 @@ class ApptainerEnvironment:
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         command = action.get("command", "")
-        cmd = au.exec_args(self.image, overlay=self.overlay)
+        cmd = au.exec_args(self.image, overlay=self.overlay, layer=self.layer)
         cmd[2:2] = ["--pwd", cwd or self.cwd]
         cmd += ["bash", "-c", command]
         try:

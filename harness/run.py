@@ -127,8 +127,9 @@ PROVIDER_KEYS = {
 # Models served locally by scripts/serve_triage_model.sh: vLLM's
 # OpenAI-compatible API, so LiteLLM's openai/ route with an api_base. The
 # sampling settings come from the same profile triage uses (triage/models.json).
-# EMBEDEVAL_LOCAL_API_BASE overrides the address; the server listens on
-# 127.0.0.1, so the harness must run on the server's node.
+# EMBEDEVAL_LOCAL_API_BASE overrides the address, and EMBEDEVAL_LOCAL_API_KEY the key,
+# for a server on another node. By default the server listens on 127.0.0.1, so the
+# harness must run on its node.
 LOCAL_MODELS = {"openai/qwen38-nvfp4": "qwen38-nvfp4"}
 REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
 
@@ -142,7 +143,8 @@ def model_config(full_model: str) -> dict:
     sampling = dict(prof.get("sampling", {}))
     extra = {k: sampling.pop(k) for k in ("top_k", "min_p") if k in sampling}
     kwargs = dict(api_base=os.environ.get("EMBEDEVAL_LOCAL_API_BASE", "http://127.0.0.1:8000/v1"),
-                  api_key="local", timeout=REQUEST_TIMEOUT, num_retries=0,
+                  api_key=os.environ.get("EMBEDEVAL_LOCAL_API_KEY", "local"),
+                  timeout=REQUEST_TIMEOUT, num_retries=0,
                   max_tokens=prof.get("max_tokens", 32768), **sampling)
     if extra:
         kwargs["extra_body"] = extra
@@ -240,7 +242,9 @@ def make_environment(meta: dict):
                         "-c user.email=embedeval@localhost commit -q -m "
                         "'The PR test changes, without its fix'")
         import registry   # the validated image: pulled from the registry if published
-        return ApptainerEnvironment(image=registry.image_for(meta["instance_id"]),
+        image, layer = apptainer_util.instance_container(
+            meta, registry.image_for(meta["instance_id"]))
+        return ApptainerEnvironment(image=image, layer=layer,
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
                                     setup_commands=[commit_tests])
