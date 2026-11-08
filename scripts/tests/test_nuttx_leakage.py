@@ -423,6 +423,17 @@ class CompileAttestation(unittest.TestCase):
         proofs = self.vi.attest_build_failure(self.up.kernel, meta, [("primary", fix)], d)
         self.assertEqual(proofs[0]["proof"], "the fix changes its declaration in include/lib.h")
 
+    def test_host_header_in_place_of_one_the_fix_adds(self):
+        fix = self.fix.replace("include/nuttx/limit.h", "include/malloc.h")
+        out = ("/usr/include/malloc.h:82:8: error: redefinition of ‘struct mallinfo’\n"
+               "ostest_main.c:113:40: error: ‘struct mallinfo’ has no member named ‘lib’\n")
+        d = self.vi.test_diagnostics(self.meta, out.replace("ostest_main.c", "lib_test.c"))
+        proofs = self.vi.attest_build_failure(self.up.kernel, self.meta, [("primary", fix)], d, "", out)
+        self.assertIn("the fix adds include/malloc.h", proofs[0]["proof"])
+        # a host header the fix does not add explains nothing
+        self.assertEqual(self.vi.attest_build_failure(self.up.kernel, self.meta, [("primary", self.fix)],
+                                                      d, "", out), [])
+
     def test_name_at_base_is_not_attested(self):
         _, proofs = self.attest("lib_test.c:3:7: error: too few arguments to function 'lib'\n")
         self.assertEqual(proofs, [])

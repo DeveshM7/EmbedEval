@@ -384,12 +384,15 @@ def test_diagnostics(meta: dict, output: str) -> list[str]:
 
 
 def attest_build_failure(clone: Path, meta: dict, fixes: list[tuple[str, str]],
-                         diagnostics: list[str], base_patch: str = "") -> list[dict]:
+                         diagnostics: list[str], base_patch: str = "", output: str = "") -> list[dict]:
     """The before build's diagnostics that the fix explains, each with its
     proof (kept host-side, in validation.json): a name the diagnostic quotes
     that the fix adds and the starting tree lacks, a name whose declaration
     the fix changes in a public header (include/: a signature change the test
-    already uses), or a header it reports missing that the fix adds. Derived
+    already uses), or a header it reports missing that the fix adds. Failing
+    that, an error inside a host header /usr/include/<h> (`output`, the whole
+    build log) where the fix adds include/<h>: without it the build read the
+    host's header in its place. Derived
     from the fix alone, not from triage's missing_api."""
     added_lines = [l[1:] for _, p in fixes for l in p.splitlines()
                    if l.startswith("+") and not l.startswith("+++")]
@@ -434,6 +437,15 @@ def attest_build_failure(clone: Path, meta: dict, fixes: list[tuple[str, str]],
             if at_base and changed:
                 proofs.append({"diagnostic": d, "name": name,
                                "proof": f"the fix changes its declaration in {changed}"})
+                break
+    if not proofs and diagnostics:
+        for m in re.finditer(r"/usr/include/([\w./-]+\.h):\d+(?::\d+)?: (?:fatal )?error:[^\n]*",
+                             re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", output)):
+            header = f"include/{m[1]}"
+            if header in new_files:
+                proofs.append({"diagnostic": m[0].strip(), "name": m[1],
+                               "proof": f"the fix adds {header}; without it the build reads the host's "
+                                        f"/usr/include/{m[1]}"})
                 break
     return proofs
 
@@ -609,7 +621,7 @@ def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, time
         # its ostest run.
         if rc != 0:
             diagnostics = test_diagnostics(meta, out)
-            proofs = attest_build_failure(clone, meta, gold, diagnostics, base_patch)
+            proofs = attest_build_failure(clone, meta, gold, diagnostics, base_patch, out)
             report["before"]["diagnostics"] = diagnostics
             report["before"]["attested"] = proofs
             if not diagnostics:
