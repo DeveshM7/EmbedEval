@@ -104,7 +104,7 @@ class Prepare(unittest.TestCase):
                              (INSTANCES / iid / "test_patch.diff").read_bytes())
         self.assertEqual(sorted(status.validate_todo(run)), [2327, 2725])
         self.assertEqual(sorted(status.statement_todo(run)), [2327, 2725])
-        self.assertEqual(status.evaluate_todo(run), [])
+        self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4-50steps-40min"), [])
 
     def test_id_must_match_metadata(self):
         (self.s.instances / ARM).rename(self.s.instances / "nuttx__nuttx-11889-a9999")
@@ -251,7 +251,8 @@ class Worker(unittest.TestCase):
         cfg["derived"] = {"vllm_cache": str(self.s.root / "vc")}
         cfg["nuttx"]["data"] = str(self.s.root / "data")
         (self.s.root / "data").mkdir()
-        out = self.run / "outputs" / "nuttx" / "qwen38-nvfp4" / "11889-a2327"
+        label = "qwen38-nvfp4-50steps-40min"
+        out = self.run / "outputs" / label / "nuttx" / "qwen38-nvfp4" / "11889-a2327"
 
         def fake_step(cmd, logfile, minutes, env, cwd=REPO):
             if "harness/run.py" in cmd:
@@ -273,11 +274,24 @@ class Worker(unittest.TestCase):
             node_worker.evaluate(cfg, self.run, {}, self.s.root / "node")
         self.assertEqual(start.call_args[0][3], "qwen38-nvfp4")
         kill.assert_called_with(4242)
-        ev = status.read(self.run, 2327)["evaluate"]
+        ev = status.read(self.run, 2327)[f"evaluate:{label}"]
         self.assertEqual((ev["state"], ev["grade"], ev["timed_out"], ev["steps"], ev["network"]),
                          ("done", "fail", True, 31, "isolated"))
         self.assertEqual(ev["limits"], {"steps": 50, "minutes": 40})
-        self.assertEqual(status.evaluate_todo(self.run), [])
+        self.assertEqual(status.evaluate_todo(self.run, label), [])
+        self.assertEqual(status.evaluate_todo(self.run, "qwen38-nvfp4-50steps-80min"), [2327])
+        # a git-generated diff that git apply calls corrupt is the harness's fault: run again
+        status.write_stage(self.run, 2327, f"evaluate:{label}", {**ev, "grade": "fail",
+                                                                  "error": "git apply failed: error: corrupt patch"})
+        self.assertEqual(status.evaluate_todo(self.run, label), [2327])
+
+    def test_unlabeled_results_count_for_their_limits(self):
+        """Results of the first evaluate jobs (stage "evaluate") keep counting."""
+        status.write_stage(self.run, 2327, "validate", {"state": "done", "outcome": "VALID"})
+        status.write_stage(self.run, 2327, "evaluate", {"state": "done", "grade": "pass", "model": "qwen38-nvfp4",
+                                                        "limits": {"steps": 50, "minutes": 40}})
+        self.assertEqual(status.evaluate_todo(self.run, "qwen38-nvfp4-50steps-40min"), [])
+        self.assertEqual(status.evaluate_todo(self.run, "qwen38-nvfp4-50steps-80min"), [2327])
 
     def test_lost_server_runs_again(self):
         status.write_stage(self.run, 2327, "validate", {"state": "done", "outcome": "VALID"})
@@ -292,8 +306,9 @@ class Worker(unittest.TestCase):
                 mock.patch.object(node_worker, "server_alive", return_value=False), \
                 mock.patch.object(node_worker, "kill_group"):
             node_worker.evaluate(cfg, self.run, {}, self.s.root / "node")
-        self.assertEqual(status.read(self.run, 2327)["evaluate"]["state"], "failed")
-        self.assertEqual(status.evaluate_todo(self.run), [2327])
+        label = "qwen38-nvfp4-50steps-40min"
+        self.assertEqual(status.read(self.run, 2327)[f"evaluate:{label}"]["state"], "failed")
+        self.assertEqual(status.evaluate_todo(self.run, label), [2327])
 
 
 if __name__ == "__main__":

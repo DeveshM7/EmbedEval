@@ -190,9 +190,15 @@ python scripts/promote_instance.py --run-dir <runs>/R nuttx__nuttx-<k>-a<a> ...
 `evaluate.time_limit`, recorded with each result. A GPU node serves the model
 itself; an x86 evaluate job submits a model-server job on the GPU partition,
 reaches it over SSH, and cancels it when its workers are done (the account
-runs two jobs at once, so the ARM64 evaluate job queues meanwhile). The
-report counts agent outcomes as pass, fail, timeout (the time limit, not the
-patch) and steps (the step limit).
+runs two jobs at once, so the ARM64 evaluate job queues meanwhile). Each evaluation is labeled by
+model and limits (`qwen38-nvfp4-50steps-80min`): its status is
+`evaluate:<label>` and its trajectories, patches and grades are under
+`<run>/outputs/<label>/`, so models and limits are compared on the same
+instances without overwriting each other. The report counts agent outcomes
+per label as pass, fail, timeout (the time limit, not the patch) and steps
+(the step limit). Size the time limit from the measured time per step: with
+qwen38-nvfp4 on a Spark node, two agents per node, a step took 80-100 s, so
+50 steps need about 80 minutes.
 
 The triage tools read full bare clones of both repositories, linked where the
 scripts look for them:

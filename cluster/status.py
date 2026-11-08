@@ -95,14 +95,44 @@ def statement_todo(run: Path) -> list[int]:
             and (read(run, e["pr"]).get("statement") or {}).get("state") != "done"]
 
 
-def evaluate_todo(run: Path) -> list[int]:
-    """VALID instances with no agent outcome yet; one that failed for a
-    reason not the agent's (build, model server, cap) is run again."""
+def eval_label(ev_cfg: dict) -> str:
+    """One evaluation: a model under its limits (config "evaluate"), e.g.
+    qwen38-nvfp4-50steps-40min. Each label has its own status stage
+    ("evaluate:<label>") and outputs (<run>/outputs/<label>/), so models and
+    limits are compared on the same instances without overwriting each other."""
+    return f"{ev_cfg['model']}-{ev_cfg['step_limit']}steps-{ev_cfg['time_limit']:g}min"
+
+
+def evaluation(st: dict, label: str) -> dict:
+    """A PR's outcome for `label`; also the unlabeled "evaluate" stage of runs
+    before labels, when its model and limits are this label's."""
+    ev = st.get(f"evaluate:{label}")
+    old = st.get("evaluate")
+    if ev is None and old and old.get("limits"):
+        lim = old["limits"]
+        if eval_label({"model": old.get("model"), "step_limit": lim["steps"],
+                       "time_limit": lim["minutes"]}) == label:
+            return old
+    return ev or {}
+
+
+def harness_fault(ev: dict) -> bool:
+    """A grade the harness, not the agent, caused: git apply calling the
+    git-generated diff corrupt (patch capture before 2026-11-08 read the diff
+    as text, and a lone carriage return broke it)."""
+    return ev.get("state") == "done" and "corrupt patch" in (ev.get("error") or "")
+
+
+def evaluate_todo(run: Path, label: str) -> list[int]:
+    """VALID instances with no outcome for evaluation `label` yet; one that
+    failed for a reason not the agent's (build, model server, cap,
+    harness_fault) is run again."""
     out = []
     for e in manifest(run)["prs"]:
         st = read(run, e["pr"])
+        ev = evaluation(st, label)
         if e.get("instance") and (st.get("validate") or {}).get("outcome") == "VALID" and \
-                (st.get("evaluate") or {}).get("state") != "done":
+                (ev.get("state") != "done" or harness_fault(ev)):
             out.append(e["pr"])
     return out
 

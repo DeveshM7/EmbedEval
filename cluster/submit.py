@@ -141,11 +141,12 @@ def server_export(cfg: dict, run: Path, stamp: str) -> str:
     return ",".join(f"{k}={v}" for k, v in env.items())
 
 
-def phase_todo(run: Path, mode: str, arch: str) -> list[int]:
+def phase_todo(run: Path, mode: str, arch: str, cfg: dict) -> list[int]:
     """The phase's work on `arch`: entries without an "arch" (apps PRs to
     triage or validate) go to either."""
-    todo = {"triage": status.triage_todo, "statement": status.statement_todo,
-            "validate": status.validate_todo, "evaluate": status.evaluate_todo}[mode](run)
+    todo = (status.evaluate_todo(run, status.eval_label(cfg["evaluate"])) if mode == "evaluate" else
+            {"triage": status.triage_todo, "statement": status.statement_todo,
+             "validate": status.validate_todo}[mode](run))
     if mode in ("triage", "statement"):          # the model's work: any instance
         return todo
     entries = {e["pr"]: e for e in status.manifest(run)["prs"]}
@@ -184,7 +185,7 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     if live and not args.after:
         sys.exit(f"run {run.name} already has a {mode} job on {arch} ({'; '.join(live)}); wait for it, "
                  "scancel it, or chain this one with --after")
-    todo = phase_todo(run, mode, arch)
+    todo = phase_todo(run, mode, arch, cfg)
     n = len(todo)
     if not n:
         if not args.after:

@@ -74,6 +74,22 @@ def evaluation(ev: dict | None) -> str | None:
     return "timeout" if ev.get("timed_out") else "steps" if ev.get("step_limit_hit") else "fail"
 
 
+def evaluations(st: dict) -> dict:
+    """A PR's agent outcome per evaluation label (status.eval_label); the
+    unlabeled stage of the first evaluate jobs is labeled from its info."""
+    out = {}
+    for key, ev in sorted(st.items()):        # "evaluate" first: a labeled stage overrides it
+        if key == "evaluate" and ev.get("limits"):
+            label = status.eval_label({"model": ev.get("model"), "step_limit": ev["limits"]["steps"],
+                                       "time_limit": ev["limits"]["minutes"]})
+        elif key.startswith("evaluate:"):
+            label = key.split(":", 1)[1]
+        else:
+            continue
+        out[label] = "harness fault" if status.harness_fault(ev) else evaluation(ev)
+    return out
+
+
 def build(run: Path) -> dict:
     m = status.manifest(run)
     rows = []
@@ -88,14 +104,16 @@ def build(run: Path) -> dict:
             row |= {"instance": e["instance"], "arch": e.get("arch"),
                     "statement": (st.get("statement") or {}).get("result")
                     or (st.get("statement") or {}).get("state"),
-                    "evaluate": evaluation(st.get("evaluate"))}
+                    "evaluate": evaluations(st)}
         rows.append(row)
     counts = Counter(r["outcome"] for r in rows)
     extra = {}
     if any("instance" in r for r in rows):
+        labels = sorted({k for r in rows for k in (r.get("evaluate") or {})})
         extra = {"statements": dict(Counter(r.get("statement") or "not yet" for r in rows)),
-                 "evaluations": dict(Counter(r.get("evaluate") or "not yet" for r in rows
-                                             if r["outcome"] == "VALID"))}
+                 "evaluations": {label: dict(Counter((r.get("evaluate") or {}).get(label) or "not yet"
+                                                     for r in rows if r["outcome"] == "VALID"))
+                                 for label in labels}}
     return extra | {"run": m["name"], "generated": datetime.now().isoformat(timespec="seconds"),
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
@@ -106,9 +124,11 @@ def markdown(rep: dict) -> str:
     out = [f"# Run {rep['run']}", "", f"{rep['prs']} PRs; report made {rep['generated']}.", "",
            "| Outcome | PRs |", "|---|---|"]
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
-    for key in ("statements", "evaluations"):
-        if key in rep:
-            out += ["", f"**{key.capitalize()}:** " + ", ".join(f"{k} {v}" for k, v in rep[key].items())]
+    if "statements" in rep:
+        out += ["", "**Statements:** " + ", ".join(f"{k} {v}" for k, v in rep["statements"].items())]
+    for label, counts in rep.get("evaluations", {}).items():
+        out += ["", f"**Agents, {label}:** " + ", ".join(f"{k} {v}" for k, v in counts.items())
+                + " (timeout: the time limit, steps: the step limit)"]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
             "| PR | outcome | detail | pair | triage min | validation min |"
@@ -118,7 +138,8 @@ def markdown(rep: dict) -> str:
         out.append(f"| {r['pr']} | {r['outcome']} | {r['detail'][:100]} | {r['pair'] or ''} | "
                    f"{r['triage_min'] if r['triage_min'] is not None else ''} | "
                    f"{r['validate_min'] if r['validate_min'] is not None else ''} |"
-                   + (f" {r.get('arch')} | {r.get('statement') or ''} | {r.get('evaluate') or ''} |"
+                   + (f" {r.get('arch')} | {r.get('statement') or ''} | "
+                      f"{'; '.join(f'{k}: {v}' for k, v in (r.get('evaluate') or {}).items())} |"
                       if "instance" in r else ""))
     return "\n".join(out) + "\n"
 

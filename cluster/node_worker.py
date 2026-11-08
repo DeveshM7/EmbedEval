@@ -131,7 +131,7 @@ def my_share(prs: list[int]) -> list[int]:
     return [pr for i, pr in enumerate(sorted(prs)) if i % NN == N]
 
 
-def assigned_work(run: Path, phase: str) -> list[int]:
+def assigned_work(run: Path, phase: str, label: str | None = None) -> list[int]:
     """Keep node ownership fixed as other nodes write status during a phase.
     In validate and evaluate, an entry with an "arch" (a prepared NuttX
     instance) goes only to nodes of that architecture; a statement is
@@ -140,8 +140,9 @@ def assigned_work(run: Path, phase: str) -> list[int]:
     planned = [e["pr"] for e in status.manifest(run)["prs"]
                if e["stage"] in ("to triage", "to validate")
                and (anywhere or e.get("arch", MACHINE) == MACHINE)]
-    todo = set({"triage": status.triage_todo, "validate": status.validate_todo,
-                "statement": status.statement_todo, "evaluate": status.evaluate_todo}[phase](run))
+    todo = set(status.evaluate_todo(run, label) if phase == "evaluate" else
+               {"triage": status.triage_todo, "validate": status.validate_todo,
+                "statement": status.statement_todo}[phase](run))
     return [pr for pr in my_share(planned) if pr in todo]
 
 
@@ -928,7 +929,8 @@ def evaluate(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
     with evaluate_server_job (x86 nodes, no GPU), by that job's node through an
     SSH tunnel. Limits are evaluate.step_limit and evaluate.time_limit for
     every model, recorded with each result."""
-    mine = assigned_work(run, "evaluate")
+    label = status.eval_label(cfg["evaluate"])
+    mine = assigned_work(run, "evaluate", label)
     log(f"evaluate: {len(mine)} instances {mine}")
     if not mine:
         return
@@ -951,6 +953,8 @@ def evaluate(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
             return
         cache_filled(cfg)
     venv["EMBEDEVAL_LOCAL_API_BASE"] = base
+    outputs = run / "outputs" / label                  # this evaluation's own outputs
+    venv["EMBEDEVAL_OUTPUTS_DIR"] = str(outputs)
     log(f"model {ev['model']} answers at {base} after {(time.time() - t0) / 60:.1f} min")
     limits = {"steps": ev["step_limit"], "minutes": ev["time_limit"]}
     lost = threading.Event()
@@ -966,7 +970,7 @@ def evaluate(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
 
         def done(state: str, **more) -> None:
             info.update(state=state, minutes=round((time.time() - start) / 60, 1), **more)
-            if record(run, pr, "evaluate", info):
+            if record(run, pr, f"evaluate:{label}", info):
                 log(f"evaluate {pr}: {info.get('grade') or info.get('note')}")
 
         step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
@@ -984,9 +988,9 @@ def evaluate(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
             if not server_alive(base):
                 lost.set()       # the agent lost its model: not its outcome, so it runs again
                 return done("failed", note="model server gone during the run")
-            out_dir = run / "outputs" / "nuttx" / ev["model"] / iid.split("nuttx__nuttx-", 1)[1]
+            out_dir = outputs / "nuttx" / ev["model"] / iid.split("nuttx__nuttx-", 1)[1]
             result = json.loads((out_dir / "result.json").read_text()) if (out_dir / "result.json").exists() else {}
-            grade_file = run / "outputs" / "grades" / ev["model"] / f"{iid}.json"
+            grade_file = outputs / "grades" / f"{iid}.json"
             grade_file.parent.mkdir(parents=True, exist_ok=True)
             rc = step([PY, "harness/evaluate_patches.py", "--instance", iid, "--model", ev["model"],
                        "--output", str(grade_file)], lg, 30, venv)

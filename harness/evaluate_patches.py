@@ -73,7 +73,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     if not patch_path.exists():
         result.update(grade="missing", error="no patch file (run not found)")
         return result
-    if not patch_path.read_text().strip():
+    if not patch_path.read_bytes().strip():
         result.update(patch_empty=True, error="empty patch — agent made no changes")
         return result
     image = au.instance_image(instance_id)
@@ -85,7 +85,8 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
     overlay = run_dir / "overlay"
     overlay.mkdir(parents=True)
-    (run_dir / "agent.patch").write_text(patch_path.read_text())
+    # bytes, not text: universal newlines would turn a lone \r into a line break
+    (run_dir / "agent.patch").write_bytes(patch_path.read_bytes())
     container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay,
                              network=not isolated)
     try:
