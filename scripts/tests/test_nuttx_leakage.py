@@ -238,9 +238,28 @@ class VersionFile(unittest.TestCase):
                 inst = rn.render({**meta, "needs_version_file": flag}, src / "test_patch.diff", out,
                                  runtime="apptainer")
                 recipe = (inst / "instance.def").read_text()
-                self.assertEqual("tools/version.sh -v 0.0.0 .version" in recipe, flag)
-                self.assertNotIn("@@", recipe)
+                self.assertEqual("backport of cb9ff5ff99" in recipe, flag)
+                self.assertIsNone(re.search(r"@@[A-Z_]+@@", recipe))     # every placeholder rendered
                 self.assertIs(json.loads((inst / "metadata.json").read_text())["needs_version_file"], flag)
+
+
+    def test_backport_applies_to_the_old_script(self):
+        import re as _re
+        import render_nuttx_instance as rn
+        patch = _re.search(r"<<'EOF_CB9FF5FF99'\n(.*?)EOF_CB9FF5FF99", rn.VERSION_FILE, _re.S)[1]
+        old = ("#!/bin/bash\n" + "#\n" * 82 + "# Make sure we know what is going on\n\n"
+               "if [ -z ${VERSION} ] ; then\n  echo \"Missing versioning information\"\n  echo $USAGE\n"
+               "  echo $ADVICE\n  exit 1\nfi\n\nif [ -z ${OUTFILE} ] ; then\n  exit 1\nfi\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "tools").mkdir()
+            (Path(tmp) / "tools" / "version.sh").write_text(old)
+            r = subprocess.run(["git", "apply", "--unsafe-paths", "--directory=", "-"], input=patch, text=True,
+                               cwd=tmp, capture_output=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            new = (Path(tmp) / "tools" / "version.sh").read_text()
+            self.assertIn('VERSION="0.0.0"', new)
+            self.assertNotIn("exit 1\nfi\n\nif [ -z ${OUTFILE}", new.split("Using the dummy value")[0])
+        self.assertIn("commit -q -a \\\n", rn.VERSION_FILE)     # a line continuation, not a literal backslash
 
 
 class Network(unittest.TestCase):

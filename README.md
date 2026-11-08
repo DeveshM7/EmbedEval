@@ -22,8 +22,8 @@ and the tests actually run.
   check, no network and 5 deterministic before runs.
 - **RIOT** instances are **Docker** images in `docker/instances/`.
 
-**Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 24 NuttX (in
-`apptainer/instances/nuttx/`: 16 ARM64, 8 x86_64 hosts), 3 RIOT.
+**Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 26 NuttX (in
+`apptainer/instances/nuttx/`: 17 ARM64, 9 x86_64 hosts), 3 RIOT.
 
 ---
 

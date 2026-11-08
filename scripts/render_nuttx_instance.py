@@ -27,11 +27,30 @@ from pathlib import Path
 import nuttx_platforms as platforms
 
 # Kernels before cb9ff5ff99 (2021-03-06) stop the build when git has no release
-# tag to describe; a depth-1 repository has none. Their recipe writes the
-# version file as later kernels do then (0.0.0); .version is git-ignored.
-VERSION_FILE = """    # Before cb9ff5ff99 the build needs a release tag; write 0.0.0 as later kernels do.
-    if [ -f tools/version.sh ] && ! grep -q 'Using the dummy value' tools/version.sh; then
-        tools/version.sh -v 0.0.0 .version
+# tag to describe, as in a depth-1 repository: their Makefile regenerates
+# .version from `git tag` whenever .git exists. Their recipe applies that
+# commit's change to tools/version.sh (fall back to 0.0.0) and commits it, so it
+# is part of the base the agent starts from, never of its patch.
+VERSION_FILE = """    if [ -f tools/version.sh ] && ! grep -q 'Using the dummy value' tools/version.sh; then
+        git apply <<'EOF_CB9FF5FF99'
+--- a/tools/version.sh
++++ b/tools/version.sh
+@@ -84,10 +84,8 @@ fi
+ # Make sure we know what is going on
+ 
+ if [ -z ${VERSION} ] ; then
+-  echo "Missing versioning information"
+-  echo $USAGE
+-  echo $ADVICE
+-  exit 1
++  echo "Missing versioning information. Using the dummy value. (0.0.0)"
++  VERSION="0.0.0"
+ fi
+ 
+ if [ -z ${OUTFILE} ] ; then
+EOF_CB9FF5FF99
+        git -c user.name=EmbedEval -c user.email=embedeval@localhost commit -q -a \\
+            -m "tools/version.sh: use 0.0.0 without version information (backport of cb9ff5ff99)"
     fi
 """
 
