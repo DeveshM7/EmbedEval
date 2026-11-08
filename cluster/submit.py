@@ -25,8 +25,10 @@ partition. The model is the job's parameter (--model, a profile of
 triage/models.json); the limits are the config's evaluate section, the same
 for every model. Unless --server-job names a running model server, the model
 is served by a job of its own on the GPU partition (scripts/serve_triage_model.sh,
-with a clean environment); the evaluate job starts once that one runs, reaches
-it through an SSH tunnel, and cancels it when its workers are done.
+with a clean environment), which starts only once the evaluate job runs (so it
+never holds a job slot while the agents wait for one); the evaluate job waits
+caps.server_start for it, reaches it through an SSH tunnel, and cancels it
+when its workers are done.
 """
 
 from __future__ import annotations
@@ -271,29 +273,18 @@ def main() -> None:
         source_manifest = freeze_source(REPO, source_root)
     deps = [f"afterany:{args.after}"] if args.after else []
     end_server = ""
+    own_server = args.mode == "evaluate" and not args.server_job
+    server_id = jobs / f"server-{stamp}.job"      # written once the server is submitted
     if args.mode == "evaluate":
         cfg["evaluate_model"] = args.model
-        server = args.server_job
-        if not server and not args.dry_run:
-            r = subprocess.run(["sbatch", "--parsable", "-p", s["partition"],
-                                "-J", f"embedeval-contiki-{run.name}-server", f"--gres={s['gres']}",
-                                f"--mem={s['mem']}", f"--cpus-per-task={s['cpus_per_node']}",
-                                "-t", s["time_limit"], "--chdir", str(source_root),
-                                # chained: the server starts only when the evaluate job could
-                                *([f"--dependency=afterany:{args.after}"] if args.after else []),
-                                "--export=" + server_export(cfg, run, stamp),
-                                "-o", str(jobs / "server-%j.log"),
-                                str(source_root / "scripts" / "serve_triage_model.sh"), args.model],
-                               capture_output=True, text=True)
-            if r.returncode:
-                sys.exit(f"sbatch of the model server failed: {r.stderr.strip()}")
-            server = r.stdout.strip().split(";")[0]
-            # the evaluate job ends the server it was given here when its workers are done
-            end_server = f"/usr/bin/scancel {server}\n"
-            print(f"  model server: job {server} ({args.model}, {s['partition']})")
-        if server:
-            cfg["evaluate_server_job"] = server
-            deps.append(f"after:{server}")
+        if args.server_job:
+            cfg["evaluate_server_job"] = args.server_job
+            deps.append(f"after:{args.server_job}")
+        else:
+            # The server is submitted after this job and starts only once it
+            # runs, so it never holds a job slot while its agents wait for
+            # one; this job ends it (or the still-pending job) when done.
+            end_server = f"S=$(cat {server_id} 2>/dev/null) && /usr/bin/scancel \"$S\"\n"
         frozen.write_text(json.dumps(cfg, indent=2) + "\n")
     script = jobs / f"{args.mode}-{stamp}.sbatch"
     template = "pipeline.sbatch" if args.mode == "pipeline" else "phase.sbatch"
@@ -320,12 +311,31 @@ def main() -> None:
     if args.dry_run:
         print("  --dry-run: not submitted")
         return
-    r = subprocess.run(["sbatch", "--parsable",
+    r = subprocess.run(["sbatch", "--parsable", *(["--hold"] if own_server else []),
                         *([f"--dependency={','.join(deps)}"] if deps else []), str(script)],
                        capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"sbatch failed: {r.stderr.strip()}")
     job = r.stdout.strip().split(";")[0]
+    if own_server:
+        r = subprocess.run(["sbatch", "--parsable", "-p", s["partition"],
+                            "-J", f"embedeval-contiki-{run.name}-server", f"--gres={s['gres']}",
+                            f"--mem={s['mem']}", f"--cpus-per-task={s['cpus_per_node']}",
+                            "-t", s["time_limit"], "--chdir", str(source_root),
+                            f"--dependency=after:{job}",       # once the evaluate job runs
+                            "--export=" + server_export(cfg, run, stamp),
+                            "-o", str(jobs / "server-%j.log"),
+                            str(source_root / "scripts" / "serve_triage_model.sh"), args.model],
+                           capture_output=True, text=True)
+        if r.returncode:
+            subprocess.run(["scancel", job])
+            sys.exit(f"sbatch of the model server failed (evaluate job {job} cancelled): {r.stderr.strip()}")
+        server = r.stdout.strip().split(";")[0]
+        cfg["evaluate_server_job"] = server
+        frozen.write_text(json.dumps(cfg, indent=2) + "\n")
+        server_id.write_text(server + "\n")
+        subprocess.run(["scontrol", "release", job], check=True)
+        print(f"  model server: job {server} ({args.model}, {s['partition']}), starts after job {job}")
     with open(jobs / "submitted.jsonl", "a") as fh:
         fh.write(json.dumps({"job": job, "script": script.name, "submitted": stamp,
                              "nodes": f"{lowest}-{wanted}", "mode": args.mode,

@@ -184,9 +184,12 @@ def evaluate_key(model: str) -> str:
 
 def evaluate_needed(run: Path, pr: int, model: str) -> bool:
     """No outcome for this model yet, or one cut short by the infrastructure
-    (the model server went away): a finished agent run is never redone."""
+    (the model server went away, or queued the agent's requests until its
+    time ran out): a finished agent run is never redone. A time-out recorded
+    before the server's queue was watched (no `server_queued`) is redone."""
     e = read(run, pr).get(evaluate_key(model))
-    return not e or (e["state"] == "failed" and e.get("retry", False))
+    return (not e or (e["state"] == "failed" and e.get("retry", False))
+            or (e["state"] == "done" and e.get("timed_out", False) and "server_queued" not in e))
 
 
 def evaluate_todo(run: Path, model: str) -> list[int]:

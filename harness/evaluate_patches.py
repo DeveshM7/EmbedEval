@@ -63,12 +63,12 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     if not patch_path.exists():
         result.update(grade="missing", error="no patch file (run not found)")
         return result
-    if not patch_path.read_text().strip():
+    if not patch_path.read_bytes().strip():
         result.update(patch_empty=True, error="empty patch — agent made no changes")
         return result
     if meta["project"] == "contiki-ng":
         from contiki_ng_pipeline import protected_test_change
-        if protected_test_change(patch_path.read_text()):
+        if protected_test_change(patch_path.read_bytes().decode("utf-8", errors="replace")):
             result["error"] = "patch modifies protected upstream tests"
             return result
     import registry       # the validated image: pulled from the registry if published
@@ -83,7 +83,8 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-grade-", dir="/tmp") if meta["project"] == "contiki-ng" else None
     overlay = (Path(local_overlay.name) if local_overlay else run_dir) / "overlay"
     overlay.mkdir(parents=True)
-    (run_dir / "agent.patch").write_text(patch_path.read_text())
+    # bytes, not text: universal newlines would turn a lone \r into a line break
+    (run_dir / "agent.patch").write_bytes(patch_path.read_bytes())
     # Contiki-NG: graded without a network, as it was validated.
     container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay,
                              network=meta["project"] != "contiki-ng")

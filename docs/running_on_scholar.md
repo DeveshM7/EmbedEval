@@ -749,11 +749,23 @@ What differs from Zephyr:
   VALID instance of the run on the CPU partition, with the config's
   `evaluate.step_limit` and `evaluate.time_limit` for every model, and grades
   each patch in a fresh container. It submits the model's server on the GPU
-  partition with a clean environment (or uses `--server-job`); the evaluate
-  job tunnels to it and cancels it at the end. `evaluate.python` is an x86
+  partition with a clean environment (or uses `--server-job`), which starts
+  only once the evaluate job runs, so an idle server never holds one of the
+  two job slots; the evaluate job waits `caps.server_start` for it, tunnels to
+  it and cancels it at the end. `evaluate.python` is an x86
   Python with mini-swe-agent. Results: status `evaluate:<model>`,
   `<run>/outputs/grades/<model>/`; `report.py` counts time-outs apart from
   failed patches. `--queue` submits even when both job slots are busy.
+  The server must hold `evaluate.per_node` requests of the full
+  `model.max_model_len` at once: the worker reads vLLM's "Maximum concurrency"
+  from the server's log and runs no more agents than that (none below 1).
+  Spark interactive's 60 GB job limit leaves a 27B model about 1.4 of 131k
+  tokens (`gpu_memory_utilization` 0.4), so an evaluate config puts the
+  server on `spark-batch` with `slurm.mem: 120500M` and 0.8. While an agent
+  runs, the worker samples the server's waiting requests (`/metrics`) into
+  `server_queued`; a time-out during which requests waited is the server's,
+  not the model's, and is run again by the next evaluate job (as is a
+  time-out recorded before `server_queued` existed).
 - **promotion** stays manual, after review: `scripts/promote_instance.py
   --source <run>/instances` (triage and revalidation runs) or `--source
   <run>/finalized` (observation runs), into `apptainer/instances/contiki-ng/`.

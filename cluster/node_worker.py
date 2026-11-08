@@ -33,6 +33,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -664,6 +665,34 @@ def server_alive(base: str, tunnel) -> bool:
         return False
 
 
+def server_capacity(job: str) -> float | None:
+    """How many requests of the full context length the server's KV cache
+    holds at once (vLLM's "Maximum concurrency" line in the server job's
+    log), or None when the log cannot be read."""
+    r = subprocess.run(["scontrol", "show", "job", job], capture_output=True, text=True)
+    m = re.search(r"StdOut=(\S+)", r.stdout)
+    try:
+        text = Path(m.group(1).replace("%j", job)).read_text(errors="replace") if m else ""
+    except OSError:
+        return None
+    found = re.findall(r"Maximum concurrency for [\d,]+ tokens per request: ([\d.]+)x", text)
+    return float(found[-1]) if found else None
+
+
+def watch_queue(base: str, stop: threading.Event, samples: list, every: float = 30) -> None:
+    """Append the server's waiting requests (vLLM /metrics) every `every`
+    seconds until `stop` is set."""
+    url = base.removesuffix("/v1") + "/metrics"
+    while not stop.wait(every):
+        try:
+            text = urllib.request.urlopen(url, timeout=10).read().decode(errors="replace")
+        except Exception:
+            continue
+        waiting = re.findall(r"^vllm:num_requests_waiting\{[^}]*\} ([\d.]+)", text, re.M)
+        if waiting:
+            samples.append(sum(float(w) for w in waiting))
+
+
 def agent_record(run: Path, model: str, iid: str) -> dict:
     """What the trajectory says of an agent run: exit status, model calls."""
     sys.path.insert(0, str(REPO / "harness"))
@@ -691,11 +720,22 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         return
     venv["EMBEDEVAL_LOCAL_API_BASE"] = base
     log(f"model server of job {cfg['evaluate_server_job']} answers at {base}")
+    # one agent per full-length request the server holds: more would wait on
+    # each other, and the time limit would measure the server, not the model
+    held = server_capacity(cfg["evaluate_server_job"])
+    lanes = ev["per_node"] if held is None else min(ev["per_node"], int(held))
+    log(f"model server holds {held if held is not None else '?'} full-length requests: {lanes} agents")
+    if lanes < 1:
+        log("the model server holds no full-length request; size its memory "
+            "(model.gpu_memory_utilization, slurm.mem). Taking no instances")
+        kill_group(tunnel.pid)
+        return
     sweep(Path(env["EMBEDEVAL_WORK"]))
     grades = run / "outputs" / "grades" / model
     grades.mkdir(parents=True, exist_ok=True)
     key = status.evaluate_key(model)
     lost = threading.Event()        # the model server is gone: take no more instances
+    later: set[int] = set()         # given back for the next job, not again on this server
     # an instance is started only with time for its build, the agent and the grading
     enough = lambda: (deadline - time.time()) / 60 >= ev["time_limit"] + caps["build"] + 25
 
@@ -722,13 +762,20 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
                 return
             if rc:
                 return done("failed", note="build failed" if rc != 124 else "build hit the cap")
-            agent_start = time.time()
-            rc = step([PY, "harness/run.py", "--instance", iid, "--model", model,
-                       "--step-limit", str(ev["step_limit"]), "--time-limit", str(ev["time_limit"])],
-                      lg, ev["time_limit"] + 15, venv)
+            agent_start, waiting, watched = time.time(), [], threading.Event()
+            watcher = threading.Thread(target=watch_queue, args=(base, watched, waiting), daemon=True)
+            watcher.start()
+            try:
+                rc = step([PY, "harness/run.py", "--instance", iid, "--model", model,
+                           "--step-limit", str(ev["step_limit"]), "--time-limit", str(ev["time_limit"])],
+                          lg, ev["time_limit"] + 15, venv)
+            finally:
+                watched.set()
             if rc == 143:
                 return
-            agent = {**agent_record(run, model, iid), "agent_minutes": round((time.time() - agent_start) / 60, 1)}
+            agent = {**agent_record(run, model, iid), "agent_minutes": round((time.time() - agent_start) / 60, 1),
+                     # share of the run's samples in which the server had requests waiting
+                     "server_queued": round(sum(w > 0 for w in waiting) / len(waiting), 2) if waiting else None}
             if not server_alive(base, tunnel):
                 # the agent lost its model: not the agent's outcome, so it is run again
                 lost.set()
@@ -741,15 +788,20 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
             if not out.exists():
                 return done("failed", note=f"no grade (rc={rc}); see the log", **agent)
             g = json.loads(out.read_text())["results"][0]
-            done("done", grade=g.get("grade"), error=g.get("error"),
-                 timed_out=agent["exit_status"] == "TimeExceeded",
+            timed_out = agent["exit_status"] == "TimeExceeded"
+            if timed_out and agent["server_queued"]:
+                # its requests waited for the server: the limit measured the server
+                later.add(pr)
+                return done("failed", retry=True, note="timed out while the model server queued requests",
+                            grade=g.get("grade"), error=g.get("error"), timed_out=True, **agent)
+            done("done", grade=g.get("grade"), error=g.get("error"), timed_out=timed_out,
                  step_limit_hit=agent["exit_status"] == "LimitsExceeded", **agent)
         finally:
             step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
 
-    q = claims.Queue(run, key, ME, lambda pr: status.evaluate_needed(run, pr, model))
+    q = claims.Queue(run, key, ME, lambda pr: pr not in later and status.evaluate_needed(run, pr, model))
     try:
-        drain(q, todo, one, ev["per_node"], deadline - 5 * 60, stop=lambda: lost.is_set() or not enough())
+        drain(q, todo, one, lanes, deadline - 5 * 60, stop=lambda: lost.is_set() or not enough())
         if lost.is_set():
             log("the model server is gone: the rest stays to do for the next evaluate job")
     finally:

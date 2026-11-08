@@ -321,17 +321,34 @@ def capture_patch(env, meta: dict, start: str = "HEAD") -> tuple[str, list[str]]
     filtered to files_changed_by_fix and silently discarded anything else.
     Protected paths are excluded from the patch but reported, so test tampering
     is visible rather than quietly dropped.
+
+    The diff crosses the environment base64-encoded: command output is read
+    as text with universal newlines, which turns a lone carriage return (in a
+    console log the agent saved, say) into a line break and corrupts the
+    patch; nothing else in the output (a container warning) can mix in.
     """
     protected = projects.config_for(meta)["protected_paths"]
     excludes = " ".join(f"':(exclude){p}'" for p in protected)
-    patch = env.execute({"command": f"cd /testbed && git add -A && "
-                                    f"git diff --cached --binary {start} -- . {excludes}"}
-                        ).get("output", "")
+    out = env.execute({"command": f"cd /testbed && git add -A && "
+                                  f"git diff --cached --binary {start} -- . {excludes} | base64 -w0 "
+                                  f"&& echo && echo EMBEDEVAL-PATCH-END"}).get("output", "")
+    patch = decode_patch(out)
     touched = env.execute(
         {"command": f"cd /testbed && git diff --cached --name-only {start} -- "
                     + " ".join(f"'{p}'" for p in protected)}
     ).get("output", "")
     return patch, [t for t in touched.splitlines() if t.strip()]
+
+
+def decode_patch(output: str) -> str:
+    """The patch from capture_patch's command output: the base64 line just
+    before the end marker, decoded exactly."""
+    import base64
+    lines = output.splitlines()
+    if "EMBEDEVAL-PATCH-END" not in lines:
+        raise RuntimeError(f"could not capture the patch: {output[-300:]}")
+    encoded = lines[lines.index("EMBEDEVAL-PATCH-END") - 1].strip()
+    return base64.b64decode(encoded).decode("utf-8", errors="surrogateescape") if encoded else ""
 
 
 # The run in progress, for the SIGTERM handler: {"save": callable, "env": env}.
@@ -393,7 +410,7 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
 
     def save_patch() -> None:
         patch, touched = capture_patch(env, meta, base)
-        paths.patch_path(instance_id, full_model).write_text(patch)
+        paths.patch_path(instance_id, full_model).write_bytes(patch.encode("utf-8", errors="surrogateescape"))
         result["patch_empty"] = not patch.strip()
         result["protected_touched"] = touched
 

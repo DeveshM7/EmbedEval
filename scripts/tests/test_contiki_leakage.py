@@ -196,6 +196,21 @@ class BenchFileTest(unittest.TestCase):
                                  "submodules": ["tools/cooja"]})
 
 
+class PatchCaptureTest(unittest.TestCase):
+    def test_a_lone_carriage_return_survives_capture(self):
+        import base64
+        import subprocess as sp
+        import run
+        patch = "diff --git a/os/x.log b/os/x.log\n+progress 10%\rprogress 20%\n"
+        # what a container prints, read back as text with universal newlines
+        raw = base64.b64encode(patch.encode()).decode() + "\nEMBEDEVAL-PATCH-END\n"
+        out = sp.run(["printf", "%s", "WARNING: x\r\n" + raw], capture_output=True, text=True).stdout
+        self.assertEqual(run.decode_patch(out), patch)
+        self.assertEqual(run.decode_patch("\nEMBEDEVAL-PATCH-END\n"), "")
+        with self.assertRaises(RuntimeError):
+            run.decode_patch("base64: command not found\n")
+
+
 class PromptTest(unittest.TestCase):
     def test_the_task_names_no_fix_file_and_no_test_list(self):
         import run

@@ -442,13 +442,13 @@ class EvaluateTest(unittest.TestCase):
         status.write_stage(run, 2, "validate", {"state": "done", "outcome": "INVALID: x"})
         return cfg_file, run
 
-    def test_model_server_gets_a_clean_environment_and_ends_with_the_job(self):
+    def test_model_server_gets_a_clean_environment_and_starts_after_its_agents(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg_file, run = self.run_dir(tmp)
-            calls = []
+            calls, ids = [], iter(["900", "901"])
             def fake(cmd, **kw):
                 calls.append(cmd)
-                out = "900;cluster\n" if cmd[0] == "sbatch" and "--parsable" in cmd else ""
+                out = next(ids) + ";cluster\n" if cmd[0] == "sbatch" and "--parsable" in cmd else ""
                 return SimpleNamespace(returncode=0, stdout=out, stderr="")
             with (patch.object(sys, "argv", ["submit.py", "evaluate", "--run", "reval", "--config", str(cfg_file),
                                              "--model", "qwen38-nvfp4", "--idle", "1"]),
@@ -456,20 +456,25 @@ class EvaluateTest(unittest.TestCase):
                   patch.object(submit.subprocess, "run", side_effect=fake),
                   contextlib.redirect_stdout(io.StringIO())):
                 submit.main()
-            server = next(c for c in calls if c[0] == "sbatch" and "serve_triage_model.sh" in c[-2])
+            sbatch = [c for c in calls if c[0] == "sbatch" and "--parsable" in c]
+            job, server = sbatch
+            # the agents' job is submitted held, the server after it and only
+            # once it runs, then the agents' job is released
+            self.assertIn("--hold", job)
+            self.assertIn("--dependency=after:900", server)
+            self.assertEqual(calls[-1], ["scontrol", "release", "900"])
             export = next(a for a in server if a.startswith("--export="))
             self.assertIn("PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin,", export)
             self.assertNotIn("conda", export)
             self.assertEqual(server[-1], "qwen38-nvfp4")
             self.assertIn("spark-interactive", server)
-            job = [c for c in calls if c[0] == "sbatch" and "--parsable" in c][-1]
-            self.assertIn("--dependency=after:900", job)
             script = Path(job[-1]).read_text()
-            self.assertIn("/usr/bin/scancel 900\n", script)
+            self.assertIn("/usr/bin/scancel \"$S\"", script)
+            self.assertEqual(next(run.glob("jobs/server-*.job")).read_text(), "901\n")
             self.assertIn("/x86/agent-venv/python cluster/node_worker.py", script)
             self.assertIn("#SBATCH -p cpu", script)
             frozen = json.loads(next(run.glob("jobs/config-*.json")).read_text())
-            self.assertEqual((frozen["evaluate_model"], frozen["evaluate_server_job"]), ("qwen38-nvfp4", "900"))
+            self.assertEqual((frozen["evaluate_model"], frozen["evaluate_server_job"]), ("qwen38-nvfp4", "901"))
 
     def test_hosted_models_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -479,29 +484,45 @@ class EvaluateTest(unittest.TestCase):
                   self.assertRaises(SystemExit)):
                 submit.main()
 
+    def evaluate(self, run, cfg, capacity=4.0, waiting=(), exit_status="TimeExceeded", job="test"):
+        """Run the worker's evaluate phase with a fake server: `capacity`
+        full-length requests held, `waiting` the queue samples during a run."""
+        calls = []
+        def fake_step(cmd, *args):
+            calls.append(cmd)
+            if "evaluate_patches.py" in cmd[1]:
+                out = Path(cmd[cmd.index("--output") + 1])
+                out.write_text(json.dumps({"results": [{"grade": "fail", "error": "tests failed"}]}))
+            return 0
+        def fake_watch(base, stop, samples, every=30):
+            samples.extend(waiting)
+        lanes = []
+        real_drain = node_worker.drain
+        def spy_drain(q, todo, one, slots, *a, **kw):
+            lanes.append(slots)
+            return real_drain(q, todo, one, slots, *a, **kw)
+        tunnel = SimpleNamespace(pid=1, poll=lambda: None)
+        with (patch.object(node_worker, "LOGS", run / "logs", create=True),
+              patch.object(node_worker, "ME", f"{job}-node0", create=True),
+              patch.object(node_worker, "N", 0, create=True),
+              patch.object(node_worker, "step", side_effect=fake_step),
+              patch.object(node_worker, "sweep"),
+              patch.object(node_worker, "kill_group"),
+              patch.object(node_worker, "model_tunnel", return_value=(tunnel, "http://127.0.0.1:8000/v1")),
+              patch.object(node_worker, "server_alive", return_value=True),
+              patch.object(node_worker, "server_capacity", return_value=capacity),
+              patch.object(node_worker, "watch_queue", side_effect=fake_watch),
+              patch.object(node_worker, "drain", side_effect=spy_drain),
+              patch.object(node_worker, "agent_record", return_value={"exit_status": exit_status, "steps": 40}),
+              patch.object(node_worker.report, "to_ledger")):
+            node_worker.evaluate(cfg, run, {"EMBEDEVAL_WORK": str(run / "work")}, 240)
+        return calls, lanes
+
     def test_worker_grades_only_valid_instances_and_keys_by_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg_file, run = self.run_dir(tmp)
             cfg = {**config.load(cfg_file), "evaluate_model": "qwen38-nvfp4", "evaluate_server_job": "900"}
-            calls = []
-            def fake_step(cmd, *args):
-                calls.append(cmd)
-                if "evaluate_patches.py" in cmd[1]:
-                    out = Path(cmd[cmd.index("--output") + 1])
-                    out.write_text(json.dumps({"results": [{"grade": "fail", "error": "tests failed"}]}))
-                return 0
-            tunnel = SimpleNamespace(pid=1, poll=lambda: None)
-            with (patch.object(node_worker, "LOGS", run / "logs", create=True),
-                  patch.object(node_worker, "ME", "test-node0", create=True),
-                  patch.object(node_worker, "N", 0, create=True),
-                  patch.object(node_worker, "step", side_effect=fake_step),
-                  patch.object(node_worker, "sweep"),
-                  patch.object(node_worker, "kill_group"),
-                  patch.object(node_worker, "model_tunnel", return_value=(tunnel, "http://127.0.0.1:8000/v1")),
-                  patch.object(node_worker, "server_alive", return_value=True),
-                  patch.object(node_worker, "agent_record", return_value={"exit_status": "TimeExceeded", "steps": 40}),
-                  patch.object(node_worker.report, "to_ledger")):
-                node_worker.evaluate(cfg, run, {"EMBEDEVAL_WORK": str(run / "work")}, 240)
+            calls, _ = self.evaluate(run, cfg, waiting=[0, 0])
             agent = next(c for c in calls if "harness/run.py" in c[1])
             self.assertEqual(agent[agent.index("--instance") + 1], "contiki-ng__contiki-ng-1")
             self.assertEqual(agent[agent.index("--model") + 1], "qwen38-nvfp4")
@@ -512,3 +533,59 @@ class EvaluateTest(unittest.TestCase):
                                            "time_limit": cfg["evaluate"]["time_limit"]})
             self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4"), [])
             self.assertEqual(status.evaluate_todo(run, "nemotron"), [1])
+            self.assertEqual(e["server_queued"], 0.0)
+
+    def test_agents_are_limited_to_what_the_server_holds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            cfg = {**config.load(cfg_file), "evaluate_model": "qwen38-nvfp4", "evaluate_server_job": "900"}
+            cfg["evaluate"]["per_node"] = 4
+            _, lanes = self.evaluate(run, cfg, capacity=1.56, waiting=[0])
+            self.assertEqual(lanes, [1])
+            calls, lanes = self.evaluate(run, cfg, capacity=0.8)     # holds no full request
+            self.assertEqual((lanes, calls), ([], []))
+
+    def test_a_time_out_behind_a_queueing_server_is_run_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            cfg = {**config.load(cfg_file), "evaluate_model": "qwen38-nvfp4", "evaluate_server_job": "900"}
+            calls, _ = self.evaluate(run, cfg, waiting=[0, 2, 1, 0])
+            e = status.read(run, 1)["evaluate:qwen38-nvfp4"]
+            self.assertEqual((e["state"], e["retry"], e["server_queued"]), ("failed", True, 0.5))
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4"), [1])
+            self.assertEqual(sum("harness/run.py" in c[1] for c in calls), 1)   # not again on this server
+            # the next job runs it; a run that ends in time is the model's result however the server did
+            self.evaluate(run, cfg, waiting=[3], exit_status="Submitted", job="next")
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4"), [])
+
+    def test_a_time_out_from_before_the_queue_was_watched_is_run_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, run = self.run_dir(tmp)
+            status.write_stage(run, 1, "evaluate:m", {"state": "done", "grade": "fail", "timed_out": True})
+            self.assertEqual(status.evaluate_todo(run, "m"), [1])
+            status.write_stage(run, 1, "evaluate:m", {"state": "done", "grade": "fail", "timed_out": False})
+            self.assertEqual(status.evaluate_todo(run, "m"), [])
+
+    def test_server_capacity_and_queue_are_read_from_vllm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "server-901.log"
+            log.write_text("INFO GPU KV cache size: 178,366 tokens\n"
+                           "INFO Maximum concurrency for 131,072 tokens per request: 1.36x\n")
+            shown = SimpleNamespace(stdout=f"JobId=901 StdOut={tmp}/server-%j.log\n", returncode=0)
+            with patch.object(node_worker.subprocess, "run", return_value=shown):
+                self.assertEqual(node_worker.server_capacity("901"), 1.36)
+            log.write_text("starting\n")
+            with patch.object(node_worker.subprocess, "run", return_value=shown):
+                self.assertIsNone(node_worker.server_capacity("901"))
+        metrics = (b'# HELP vllm:num_requests_waiting\n'
+                   b'vllm:num_requests_waiting{engine="0",model_name="q"} 2.0\n'
+                   b'vllm:num_requests_running{engine="0",model_name="q"} 4.0\n')
+        stop, samples = SimpleNamespace(n=0), []
+        def wait(_):
+            stop.n += 1
+            return stop.n > 2
+        with patch.object(node_worker.urllib.request, "urlopen",
+                          return_value=SimpleNamespace(read=lambda: metrics)) as urlopen:
+            node_worker.watch_queue("http://127.0.0.1:8000/v1", SimpleNamespace(wait=wait), samples)
+        self.assertEqual(samples, [2.0, 2.0])
+        self.assertEqual(urlopen.call_args[0][0], "http://127.0.0.1:8000/metrics")
