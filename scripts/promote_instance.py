@@ -16,6 +16,13 @@ edited after validation is refused until it is validated again.
 --host-arch records in the promoted metadata that the instance must build,
 validate and run on that architecture, for one found to validate on it only.
 
+A NuttX instance also needs, in its validation.json, a clean leak check with
+the network isolated (scripts/nuttx_leakcheck.py) and a before state judged
+the same in 5 runs (validate_instance.py --determinism 5), and in its
+metadata a problem statement that passed the current statement check
+(scripts/nuttx_statement.py). Its host_arch is the architecture it validated
+on, unless --host-arch says otherwise.
+
 Copies the recipe and its record -- instance.def, instance.json,
 run_tests.py, test_patch.diff (NuttX: instance.def, run_tests.sh,
 test_patch.diff), metadata.json, validation.json. Images are not in git;
@@ -25,6 +32,7 @@ build_instances.py rebuilds them from the recipe.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -34,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au  # noqa: E402
 import instances  # noqa: E402
+import nuttx_statement  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GENERATED = layout.generated()
@@ -57,6 +66,11 @@ def promote(instance_id: str, source: Path = GENERATED,
         return False, "validation.json predates recipe fingerprints; validate it again"
     if au.recipe_fingerprint(src, recipe) != want:
         return False, "recipe changed since it was validated; validate it again"
+    if nuttx:
+        why = nuttx_gate(report, json.loads((src / "metadata.json").read_text()))
+        if why:
+            return False, why
+        host_arch = host_arch or report.get("host")
     files = (*recipe, *RECORD_FILES)
     missing = [f for f in files if not (src / f).exists()]
     if missing:
@@ -70,6 +84,30 @@ def promote(instance_id: str, source: Path = GENERATED,
         meta["host_arch"] = host_arch
         (dst / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
     return True, f"promoted to {layout.show(dst)}"
+
+
+def nuttx_gate(report: dict, meta: dict) -> str | None:
+    """Why a valid NuttX instance cannot be promoted, or None."""
+    leak = report.get("leak_check")
+    if not leak:
+        return "no leak check record; validate it again"
+    if not leak.get("ok") or leak.get("network") != "isolated":
+        return f"leak check failed: {leak.get('findings')}"
+    if "statement_ok" not in leak:
+        return "the leak check predates the statement record; validate it again"
+    if not leak["statement_ok"]:
+        return f"the problem statement names the fix: {leak.get('statement_fix_identifiers')}"
+    if leak.get("statement_sha256") != hashlib.sha256(
+            (meta.get("problem_statement") or "").strip().encode()).hexdigest():
+        return "the problem statement changed after its leak check; validate it again"
+    d = report.get("determinism")
+    if not d or d.get("runs", 0) < 5 or not d.get("ok"):
+        return "no deterministic before state (validate with --determinism 5)"
+    check = meta.get("statement_check") or {}
+    if (check.get("version") != nuttx_statement.STATEMENT_CHECK or check.get("result") not in ("kept", "written")
+            or not (meta.get("problem_statement") or "").strip()):
+        return "no problem statement that passes the current statement check"
+    return None
 
 
 def main() -> None:

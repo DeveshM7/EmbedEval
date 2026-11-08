@@ -9,11 +9,11 @@ An instance is a Docker image by default (Dockerfile). With --runtime apptainer
 it is an Apptainer recipe instead (instance.def, FROM the shared image of
 templates/nuttx/apptainer/base.def), for hosts without Docker such as
 Scholar's ARM64 nodes; its metadata says "runtime": "apptainer". An existing
-instance is re-rendered that way from its own files:
+Apptainer instance is rendered again from its own files, with the current
+templates (as cluster/prepare.py --instances does for a revalidation):
 
-    python scripts/render_nuttx_instance.py --runtime apptainer \
-        --metadata docker/instances/nuttx__nuttx-11889/metadata.json \
-        --test-patch docker/instances/nuttx__nuttx-11889/test_patch.diff
+    python scripts/render_nuttx_instance.py --instance \
+        apptainer/instances/nuttx/nuttx__nuttx-11889-a2327 --out generated
 """
 
 from __future__ import annotations
@@ -246,7 +246,8 @@ def render(meta: dict, patch_file: Path, out_root: Path,
             "    git apply /opt/embedeval/base_patch.diff\n"
             "    git add -A\n"
             "    git -c user.name=EmbedEval -c user.email=embedeval@localhost commit -q \\\n"
-            f"        -m \"prerequisites: {', '.join(f'apache/nuttx#{p['kernel_pr']}' for p in meta['base_prs'])}\"\n")
+            "        -m \"prerequisites: "
+            + ", ".join(f"apache/nuttx#{p['kernel_pr']}" for p in meta["base_prs"]) + "\"\n")
             if base_patch else "")
         # No Docker image: scripts/build_instances.py builds a .sif from the
         # recipe, and the harness takes "runtime" over the project default.
@@ -261,14 +262,37 @@ def render(meta: dict, patch_file: Path, out_root: Path,
     return inst
 
 
+def rerender(instance: Path, out_root: Path) -> Path:
+    """An Apptainer instance rendered again from its own metadata.json,
+    test_patch.diff and base_patch.diff, into out_root/<id>: the recipe of the
+    current templates (a revalidation, cluster/prepare.py --instances)."""
+    meta = json.loads((instance / "metadata.json").read_text())
+    if meta.get("runtime") != "apptainer":
+        raise ValueError(f"{instance.name}: not an Apptainer instance")
+    base = instance / "base_patch.diff"
+    inst = render(meta, instance / "test_patch.diff", out_root, runtime="apptainer",
+                  base_patch=base.read_text() if base.exists() else "")
+    for name in ("validation.json",):     # the receipt goes with the recipe it was for
+        if (instance / name).exists():
+            (inst / f"previous-{name}").write_bytes((instance / name).read_bytes())
+    return inst
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--metadata", type=Path, required=True)
-    parser.add_argument("--test-patch", type=Path, required=True)
+    parser.add_argument("--metadata", type=Path)
+    parser.add_argument("--test-patch", type=Path)
+    parser.add_argument("--instance", type=Path,
+                        help="render this Apptainer instance again from its own files")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--tag-suffix", default="-gen")
     parser.add_argument("--runtime", choices=("docker", "apptainer"), default="docker")
     args = parser.parse_args()
+    if args.instance:
+        print(rerender(args.instance, args.out))
+        return
+    if not args.metadata or not args.test_patch:
+        parser.error("give --metadata and --test-patch, or --instance")
     inst = render(json.loads(args.metadata.read_text()), args.test_patch,
                   args.out, args.tag_suffix, args.runtime)
     print(inst)

@@ -34,6 +34,7 @@ default work root, where the shared images have always been.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -340,11 +341,17 @@ def nuttx_reconfigure(overrides: dict) -> str:
 
 
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
-              overlay: Path | None = None, env: dict | None = None) -> list[str]:
+              overlay: Path | None = None, env: dict | None = None,
+              network: bool = True) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
     gives a fresh home and /tmp, --cleanenv drops the host environment (the
-    cluster's LD_LIBRARY_PATH breaks the SDK's QEMU; its Python confuses CMake)."""
+    cluster's LD_LIBRARY_PATH breaks the SDK's QEMU; its Python confuses CMake).
+    network=False: a network namespace of its own with loopback only, so
+    nothing inside can reach GitHub (the fix, the PR page) or any other host;
+    NuttX agent runs, validation and grading all run this way."""
     cmd = ["apptainer", "exec", "--containall", "--cleanenv"]
+    if not network:
+        cmd += ["--net", "--network", "none"]
     if overlay:
         cmd += ["--overlay", str(overlay)]
     for src, dst in (binds or {}).items():
@@ -358,6 +365,34 @@ def exec_args(image: Path, binds: dict[Path, str] | None = None,
 # validation.json, so a recipe changed after validation is never promoted.
 RECIPE_FILES = ("instance.def", "instance.json", "run_tests.py", "test_patch.diff")
 NUTTX_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff")
+
+
+# Run inside a container: its network interfaces, and REACHABLE if a TCP
+# connection out (to github.com's address, no DNS needed) succeeds.
+NETWORK_PROBE = ("echo interfaces: $(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | sort); "
+                 "timeout 5 bash -c 'exec 3<>/dev/tcp/140.82.112.3/443' 2>/dev/null && echo REACHABLE; true")
+
+
+def network_isolated(probe_output: str) -> bool:
+    """NETWORK_PROBE's output: loopback only and no connection out."""
+    m = re.search(r"^interfaces: (.*)$", probe_output, re.M)
+    return bool(m) and m[1].split() == ["lo"] and "REACHABLE" not in probe_output
+
+
+def unpack_sandbox(image: Path, parent: Path) -> Path:
+    """The image unpacked to a sandbox directory under `parent` (inside the
+    work root), for checks from the host on its files; remove() it after."""
+    root = Path(parent) / "sandbox"
+    tmp = Path(parent) / "sandbox-tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["apptainer", "build", "--sandbox", "--force", str(root), str(image)],
+                       capture_output=True, text=True, env=build_env(tmp), timeout=3600)
+    remove(tmp)
+    if r.returncode:
+        if root.exists():
+            remove(root)
+        raise RuntimeError(f"could not unpack {Path(image).name}: {r.stderr.strip()[-300:]}")
+    return root
 
 
 def nuttx_recipe_files(instance_dir: Path) -> tuple[str, ...]:

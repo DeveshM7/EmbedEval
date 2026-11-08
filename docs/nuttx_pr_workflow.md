@@ -96,8 +96,10 @@ the benchmark with `scripts/promote_instance.py` (into
 
 ### Reviewed recipes
 
-The 7 Docker instances in `docker/instances/` were generated from the
-hand-reviewed recipes in `triage/nuttx_reviewed/`, one pair per file:
+The hand-reviewed recipes in `triage/nuttx_reviewed/`, one pair per file,
+generated the first Docker instances (retired on 2026-11-08: their images
+held both repositories' full history, and each pair is an Apptainer instance
+in `apptainer/instances/nuttx/` now):
 
 ```json
 {
@@ -117,10 +119,39 @@ hand-reviewed recipes in `triage/nuttx_reviewed/`, one pair per file:
 ```
 
 For compile failures, `fail_type` is `compile_error` with
-`compile_test_source` and the literal `missing_api`. Regenerate one with
-`--out docker/instances --tag-suffix=` (the standard `embedeval:nuttx-<PR>`
-tag); a recipe without a `case` field also needs `--apps-pr` and
+`compile_test_source` and the literal `missing_api` (the validator attests a
+build failure from the fix itself; `missing_api` only names the expected
+error). A recipe without a `case` field also needs `--apps-pr` and
 `--kernel-pr`.
+
+## What the agent gets
+
+The agent sees the kernel at `/testbed` and the apps at `/testbed/apps`, each
+a depth-1 repository holding only its base commit (plus the recipe's own
+commits: ARM64 compatibility backports, `base_prs` prerequisites), the apps
+test change applied, and the problem statement. Nothing else:
+
+- no history, remote, tag, other ref, reflog or `FETCH_HEAD` in either
+  repository (`instance.def` fetches each base by SHA at depth 1);
+- no network: every container command -- agent, validation, grading -- runs
+  with `apptainer exec --net --network none` (loopback only);
+- no oracle hints: the task lists the failing tests, never the files the fix
+  changes;
+- a problem statement written or rechecked by the served model
+  (`scripts/nuttx_statement.py`) that names nothing of the fix the tests do
+  not use.
+
+`validate_instance.py` checks the image before any test
+(`scripts/nuttx_leakcheck.py`: history, refs, fix commits and fixed blobs,
+fix lines anywhere in the image, other repositories, the statement, the
+network) and records the result in `validation.json` (`leak_check`). It also
+builds the before state with `make -k` and attests a build failure from the
+fix alone: at least one error in a changed test source must name something
+the fix adds (a symbol absent from the starting tree, or a header the fix
+creates); the proof stays in `validation.json`. `--determinism 5` judges the
+before state five times, each in a fresh overlay. `promote_instance.py`
+refuses a NuttX instance without a clean leak record, a 5-run determinism
+record, and a statement that passed the current check.
 
 ## Running on Scholar
 
@@ -131,6 +162,37 @@ Triage and validation at scale run as the cluster pipeline with
 `cluster/prepare.py --all-ostest` takes every ostest apps PR, and
 `--verdicts-from <run>` re-validates an earlier run's verdicts without
 re-triaging them.
+
+Each phase is its own job, chained with `--after`, running a frozen copy of
+the code with a clean environment. ARM64 work runs on the GPU partition
+(`slurm.partition`, which takes only jobs that request a GPU), x86-only
+instances on `slurm.build_partition`:
+
+```bash
+# apps PRs: triage, then validate their pairs
+python cluster/prepare.py --name R --pr 2794 3342 --verdicts-from nuttx-apps-all --redo
+python cluster/submit.py triage   --run R
+python cluster/submit.py validate --run R --arch aarch64 --after <job>
+
+# existing instances: rendered again with the current templates, statements
+# rechecked, revalidated with the leak check and 5 before runs, evaluated
+python cluster/prepare.py --name R --instances apptainer/instances/nuttx
+python cluster/submit.py statement --run R
+python cluster/submit.py validate --run R --arch aarch64 --after <statement job>
+python cluster/submit.py validate --run R --arch x86_64  --after <statement job>
+python cluster/submit.py evaluate --run R --arch aarch64 --model qwen38-nvfp4 --after <job>
+python cluster/submit.py evaluate --run R --arch x86_64  --model qwen38-nvfp4 --after <job>
+python scripts/promote_instance.py --run-dir <runs>/R nuttx__nuttx-<k>-a<a> ...
+```
+
+`--model` is any profile of `triage/models.json` (or a hosted model
+`harness/paths.py` knows); every model gets `evaluate.step_limit` and
+`evaluate.time_limit`, recorded with each result. A GPU node serves the model
+itself; an x86 evaluate job submits a model-server job on the GPU partition,
+reaches it over SSH, and cancels it when its workers are done (the account
+runs two jobs at once, so the ARM64 evaluate job queues meanwhile). The
+report counts agent outcomes as pass, fail, timeout (the time limit, not the
+patch) and steps (the step limit).
 
 The triage tools read full bare clones of both repositories, linked where the
 scripts look for them:

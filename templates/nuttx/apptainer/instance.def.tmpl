@@ -29,16 +29,24 @@ From: {{ BASE_IMAGE }}
     set -e
     retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i: $*"; sleep 20; done; return 1; }
 
-    # Blobless from GitHub, as in Docker; a local clone is copied whole.
-    # Either way origin is GitHub afterwards.
-    retry git clone -q --filter=blob:none {{ KERNEL_REPO }} /testbed
+    # Only the base commits: each repository is fetched at depth 1 by SHA (from
+    # GitHub, or a local clone scripts/build_instances.py binds in), so nothing
+    # after the base -- the fix, later commits, other refs -- is in the image.
+    # No remote, tag, FETCH_HEAD or reflog stays (scripts/nuttx_leakcheck.py).
+    shallow() {   # shallow <repo> <commit> <dir>
+        git init -q "$3"
+        retry git -C "$3" -c uploadpack.allowAnySHA1InWant=true fetch -q --depth 1 --no-tags "$1" "$2"
+        git -C "$3" checkout -q --detach "$2"
+        rm -f "$3/.git/FETCH_HEAD"
+    }
+    forget() {    # forget <dir>: what fetch and checkout left besides the commits
+        git -C "$1" reflog expire --expire=now --all
+        git -C "$1" gc -q --prune=now
+    }
+    shallow {{ KERNEL_REPO }} @@KERNEL_BASE_COMMIT@@ /testbed
     cd /testbed
-    git checkout -q @@KERNEL_BASE_COMMIT@@
 @@BASE_PATCH@@
-    git remote set-url origin https://github.com/apache/nuttx.git
-    retry git clone -q --filter=blob:none {{ APPS_REPO }} apps
-    git -C apps checkout -q @@APPS_BASE_COMMIT@@
-    git -C apps remote set-url origin https://github.com/apache/nuttx-apps.git
+    shallow {{ APPS_REPO }} @@APPS_BASE_COMMIT@@ apps
     # apps is a repository of its own inside the kernel's tree. Kept out of the
     # kernel's git, or the agent's patch (`git add -A` in /testbed) would carry
     # it as a submodule entry that no longer applies.
@@ -64,6 +72,10 @@ From: {{ BASE_IMAGE }}
         git -c user.name=EmbedEval -c user.email=embedeval@localhost commit -q -a \
             -m "sim: omit x86 code model on ARM64 host"
     fi
+    forget /testbed
+    forget /testbed/apps
+    # The compatibility patches and the prerequisites are committed now.
+    rm -rf /opt/embedeval/compat /opt/embedeval/base_patch.diff
 
     # RISC-V boards (templates/nuttx/qemu-misc): kernels whose -march lacks
     # _zicsr need the older toolchain.

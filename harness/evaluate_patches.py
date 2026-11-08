@@ -83,7 +83,11 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     overlay = run_dir / "overlay"
     overlay.mkdir(parents=True)
     (run_dir / "agent.patch").write_text(patch_path.read_text())
-    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay)
+    # NuttX grades without a network, as its agent runs and validation do.
+    isolated = meta["project"] == "nuttx"
+    result["network"] = "isolated" if isolated else "host"
+    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay,
+                             network=not isolated)
     try:
         print("  applying patch ...")
         ap = subprocess.run(container + ["git", "-C", "/testbed", "apply",

@@ -126,7 +126,7 @@ PROVIDER_KEYS = {
 # sampling settings come from the same profile triage uses (triage/models.json).
 # EMBEDEVAL_LOCAL_API_BASE overrides the address; the server listens on
 # 127.0.0.1, so the harness must run on the server's node.
-LOCAL_MODELS = {"openai/qwen38-nvfp4": "qwen38-nvfp4"}
+LOCAL_MODELS = {f"openai/{name}": name for name in paths.LOCAL_PROFILES}
 REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
 
 
@@ -219,7 +219,11 @@ def _build_and_test(meta: dict) -> str:
 
 
 def build_task(meta: dict) -> str:
-    """The first user message: the problem plus its test context."""
+    """The first user message: the problem plus its test context.
+
+    Nothing derived from the fix: the files the upstream fix changed
+    (files_changed_by_fix) are not shown -- that is SWE-bench's "oracle"
+    retrieval setting, which tells the agent where the answer is."""
     def bullets(items):
         return "\n".join(f"  - {i}" for i in items) or "  (none)"
 
@@ -235,10 +239,6 @@ def build_task(meta: dict) -> str:
 ## Tests That Must Continue Passing
 
 {bullets(meta.get("pass_to_pass", []))}
-
-## Relevant Source File(s)
-
-{bullets(meta.get("files_changed_by_fix", []))}
 """
 
 
@@ -272,7 +272,9 @@ def make_environment(meta: dict):
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
                                     setup_commands=[commit_tests] if meta["project"] == "zephyr"
-                                    else [])
+                                    else [],
+                                    # NuttX: no network for the agent
+                                    network=meta["project"] != "nuttx")
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed",
@@ -479,6 +481,15 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
                 env.cleanup()
             except Exception:
                 pass
+        # The run's record beside its patch, with the limits it ran under
+        # (cluster/node_worker.py's evaluate phase reads it).
+        result["limits"] = {"steps": args.step_limit, "minutes": args.time_limit,
+                            "cost": args.cost_limit}
+        try:
+            (paths.run_dir(instance_id, full_model) / "result.json").write_text(
+                json.dumps(result, indent=2) + "\n")
+        except OSError:
+            pass
     return result
 
 

@@ -32,9 +32,12 @@ import status  # noqa: E402
 
 def outcome(entry: dict, st: dict) -> tuple[str, str]:
     """(where the PR ended up, detail)."""
-    if entry["stage"] != "to triage":
+    if entry["stage"] == "to validate":          # a prepared instance: no triage
+        t = {"state": "done", "verdict": "accept"}
+    elif entry["stage"] != "to triage":
         return entry["stage"], entry.get("note", "")
-    t = st.get("triage")
+    else:
+        t = st.get("triage")
     if not t:
         return "triage: not yet", ""
     if t["state"] != "done":
@@ -59,18 +62,41 @@ ORDER = ["in ledger", "hard filter", "enrich failed", "dry run error", "dry run:
          "qemu_pending", "needs_x86", "arm64_env_failure", "INVALID", "VALID"]
 
 
+def evaluation(ev: dict | None) -> str | None:
+    """An agent outcome in a word: pass, fail, timeout (the time limit, not
+    the patch), steps (the step limit), or the failure note."""
+    if not ev:
+        return None
+    if ev["state"] != "done":
+        return f"not run: {ev.get('note', '')}"
+    if ev.get("grade") == "pass":
+        return "pass"
+    return "timeout" if ev.get("timed_out") else "steps" if ev.get("step_limit_hit") else "fail"
+
+
 def build(run: Path) -> dict:
     m = status.manifest(run)
     rows = []
     for e in m["prs"]:
         st = status.read(run, e["pr"])
         where, detail = outcome(e, st)
-        rows.append({"pr": e["pr"], "outcome": where, "detail": detail,
-                     "triage_min": (st.get("triage") or {}).get("minutes"),
-                     "validate_min": (st.get("validate") or {}).get("minutes"),
-                     "pair": (st.get("triage") or {}).get("pair")})
+        row = {"pr": e["pr"], "outcome": where, "detail": detail,
+               "triage_min": (st.get("triage") or {}).get("minutes"),
+               "validate_min": (st.get("validate") or {}).get("minutes"),
+               "pair": (st.get("triage") or {}).get("pair") or e.get("instance")}
+        if e.get("instance"):
+            row |= {"instance": e["instance"], "arch": e.get("arch"),
+                    "statement": (st.get("statement") or {}).get("result")
+                    or (st.get("statement") or {}).get("state"),
+                    "evaluate": evaluation(st.get("evaluate"))}
+        rows.append(row)
     counts = Counter(r["outcome"] for r in rows)
-    return {"run": m["name"], "generated": datetime.now().isoformat(timespec="seconds"),
+    extra = {}
+    if any("instance" in r for r in rows):
+        extra = {"statements": dict(Counter(r.get("statement") or "not yet" for r in rows)),
+                 "evaluations": dict(Counter(r.get("evaluate") or "not yet" for r in rows
+                                             if r["outcome"] == "VALID"))}
+    return extra | {"run": m["name"], "generated": datetime.now().isoformat(timespec="seconds"),
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
             "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"], "rows": rows}
@@ -80,14 +106,20 @@ def markdown(rep: dict) -> str:
     out = [f"# Run {rep['run']}", "", f"{rep['prs']} PRs; report made {rep['generated']}.", "",
            "| Outcome | PRs |", "|---|---|"]
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
+    for key in ("statements", "evaluations"):
+        if key in rep:
+            out += ["", f"**{key.capitalize()}:** " + ", ".join(f"{k} {v}" for k, v in rep[key].items())]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
-            "| PR | outcome | detail | pair | triage min | validation min |",
-            "|---|---|---|---|---|---|"]
+            "| PR | outcome | detail | pair | triage min | validation min |"
+            + (" arch | statement | agent |" if "statements" in rep else ""),
+            "|---|---|---|---|---|---|" + ("---|---|---|" if "statements" in rep else "")]
     for r in rep["rows"]:
         out.append(f"| {r['pr']} | {r['outcome']} | {r['detail'][:100]} | {r['pair'] or ''} | "
                    f"{r['triage_min'] if r['triage_min'] is not None else ''} | "
-                   f"{r['validate_min'] if r['validate_min'] is not None else ''} |")
+                   f"{r['validate_min'] if r['validate_min'] is not None else ''} |"
+                   + (f" {r.get('arch')} | {r.get('statement') or ''} | {r.get('evaluate') or ''} |"
+                      if "instance" in r else ""))
     return "\n".join(out) + "\n"
 
 
@@ -111,6 +143,9 @@ def main() -> None:
     for k, v in rep["funnel"].items():
         print(f"  {v:>5}  {k}")
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
+    for key in ("statements", "evaluations"):
+        if key in rep:
+            print(f"  {key}: {rep[key]}")
     print(f"  -> {run / 'report.md'}")
     m = status.manifest(run)
     book = Path(m.get("ledger") or Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl")

@@ -86,18 +86,19 @@ For NuttX PR discovery and instance generation, see
 
 ## Quick start
 
-Run one agent on one instance and grade the result. NuttX (Docker):
+Run one agent on one instance and grade the result. NuttX (Apptainer; the
+image is built from the recipe in `apptainer/instances/nuttx/`, on the
+architecture its metadata's `host_arch` names):
 
 ```bash
-# 1. build the images (once per project, slow)
-python scripts/build_bases.py --repo nuttx
-python scripts/build_instances.py --instance nuttx__nuttx-11889
+# 1. build the image (the shared NuttX layer is built the first time)
+python scripts/build_instances.py --instance nuttx__nuttx-11889-a2327
 
-# 2. run the agent
-python harness/run.py --instance nuttx__nuttx-11889 --model claude-opus-4-6 -v
+# 2. run the agent (no network inside the container)
+python harness/run.py --instance nuttx__nuttx-11889-a2327 --model qwen38-nvfp4 -v
 
-# 3. grade the patch it produced
-python harness/evaluate_patches.py --instance nuttx__nuttx-11889 --model claude-opus-4-6
+# 3. grade the patch it produced, in a fresh overlay
+python harness/evaluate_patches.py --instance nuttx__nuttx-11889-a2327 --model qwen38-nvfp4
 ```
 
 Zephyr (Apptainer): the same three steps. The instances are read from
@@ -197,14 +198,18 @@ An instance is only useful if it **fails before the fix and passes after**.
 commit, expects failure, applies the real upstream fix, and expects a pass.
 
 ```bash
-python scripts/validate_instance.py nuttx__nuttx-11889 --verbose
+python scripts/validate_instance.py nuttx__nuttx-11889-a2327 --determinism 5
 python scripts/validate_instance.py zephyr__zephyr-65697
 ```
 
 Run this on any instance you build or change. An instance that passes step 1 is
 broken — it means the test cannot detect the bug, and every agent will score a
-free pass on it. This is not theoretical; see the `CONFIG_NDEBUG` note in
-`docker/instances/nuttx__nuttx-11889/Dockerfile` for a case where it happened.
+free pass on it. This is not theoretical: with `CONFIG_NDEBUG` set, ostest's
+`ASSERT()`s compile away and 11889's test passed before the fix, which is why
+every NuttX image sets `CONFIG_NDEBUG=n`. For NuttX the validator also checks,
+before any test, that the image holds nothing of the fix or of either
+repository's later history and has no network
+([docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md#what-the-agent-gets)).
 
 ---
 
@@ -248,35 +253,37 @@ together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 
 ## NuttX in Apptainer
 
-The same NuttX instance can be an Apptainer recipe instead of a Dockerfile,
-for hosts with no Docker -- on Scholar, the ARM64 Spark nodes, where sim:nsh
-builds natively. Render it with `--runtime apptainer`; the recipe goes to
-`generated/` and its metadata says `"runtime": "apptainer"`, which is what
-every tool below checks:
+NuttX instances are Apptainer recipes (metadata `"runtime": "apptainer"`),
+built natively on the host -- on Scholar, ARM64 Spark nodes or x86 CPU nodes,
+as the instance's `host_arch` says. A recipe is rendered again from its own
+files with the current templates by `--instance` (as
+`cluster/prepare.py --instances` does for a revalidation):
 
 ```bash
-python scripts/render_nuttx_instance.py --runtime apptainer \
-    --metadata docker/instances/nuttx__nuttx-11889/metadata.json \
-    --test-patch docker/instances/nuttx__nuttx-11889/test_patch.diff
+python scripts/render_nuttx_instance.py --out generated \
+    --instance apptainer/instances/nuttx/nuttx__nuttx-11889-a2327
 
 # inside a spark-batch job; local clones instead of GitHub, if you have them
 export EMBEDEVAL_INSTANCES_DIR=generated
 export EMBEDEVAL_NUTTX_CLONE=/scratch/scholar/$USER/repos/nuttx.git
 export EMBEDEVAL_NUTTX_APPS_CLONE=/scratch/scholar/$USER/repos/nuttx-apps.git
-python scripts/build_instances.py --instance nuttx__nuttx-11889
-python scripts/validate_instance.py nuttx__nuttx-11889
-python harness/run.py --instance nuttx__nuttx-11889 --model <model>
-python harness/evaluate_patches.py --instance nuttx__nuttx-11889 --model <model>
+python scripts/build_instances.py --instance nuttx__nuttx-11889-a2327
+python scripts/validate_instance.py nuttx__nuttx-11889-a2327 --determinism 5
+python harness/run.py --instance nuttx__nuttx-11889-a2327 --model <model>
+python harness/evaluate_patches.py --instance nuttx__nuttx-11889-a2327 --model <model>
 ```
 
 - **Images** (`templates/nuttx/apptainer/`): `base.def` is the shared layer
   (Ubuntu 24.04 and sim:nsh's tools, built once, named by a hash of its
-  recipe); `instance.def` adds the kernel and apps at their base commits,
-  configured exactly as the Dockerfile does, with the test patch. Both go
-  under the work root (`scripts/apptainer_util.py`), as Zephyr's do.
-- **Validation** runs the Docker validator's NuttX steps in one overlay and
-  writes `validation.json`. Grading builds, then runs `run_tests`, in a fresh
-  overlay.
+  recipe); `instance.def` adds the kernel and apps, each a depth-1
+  repository of its base commit alone, configured for ostest, with the test
+  patch. Both go under the work root (`scripts/apptainer_util.py`), as
+  Zephyr's do.
+- **Validation** checks the image for leaks, then builds and runs ostest in
+  one overlay (the before state N times with `--determinism N`, each in a
+  fresh overlay), and writes `validation.json`. Grading builds, then runs
+  `run_tests`, in a fresh overlay. Every container command runs without a
+  network.
 - **apps/** is kept out of the kernel's git in the image, so the agent's patch
   holds kernel changes only. (Under Docker, `git add -A` picks up the nested
   apps repository as a submodule entry.)
@@ -285,12 +292,10 @@ python harness/evaluate_patches.py --instance nuttx__nuttx-11889 --model <model>
   `sim_tcbinfo.c` and do not build; the image backports it from upstream
   (`sim_tcbinfo_arm64.patch`) and commits it before the agent starts, so it is
   never part of a patch.
-- **Not every instance carries over to ARM64**; validate each one there.
-  Of the seven, 11889, 11898, 12802 and 9923 are valid on Scholar's nodes.
-  14152's fix is in the x86 setjmp code, so on ARM64 its test passes before
-  the fix. 8832 and 8885 fail correctly at their base, but with the fix ostest
-  still dies (SIGBUS) later, in its vfork() test: the sim's ARM64 vfork crashes
-  on kernels from before the 2023-07 fork rework (c33d1c9c97).
+- **Not every instance carries over to ARM64**; each is validated, and
+  evaluated, on its `host_arch` only. 14152's fix is in the x86 setjmp code,
+  so on ARM64 its test passes before the fix; kernels from before the 2023-07
+  fork rework (c33d1c9c97) crash in the ARM64 sim's vfork().
 - **Speed.** Builds in an overlay on `/scratch` are slower than in a plain
   directory: a full sim:nsh build takes about two minutes, an ostest run
   about two.

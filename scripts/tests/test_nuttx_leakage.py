@@ -1,0 +1,356 @@
+"""Local checks that a NuttX agent gets the kernel and apps at their base
+commits and the problem statement, and nothing that leads to the fix.
+
+    python3 -m unittest discover -s scripts/tests -p 'test_nuttx_*.py'
+"""
+
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(REPO / "scripts"), str(REPO / "harness")]
+
+import apptainer_util as au  # noqa: E402
+import nuttx_leakcheck as lc  # noqa: E402
+import nuttx_statement as ns  # noqa: E402
+
+GIT = ["git", "-c", "user.email=t@t", "-c", "init.defaultBranch=master", "-c", "gc.auto=0"]
+TEMPLATE = (REPO / "templates" / "nuttx" / "apptainer" / "instance.def.tmpl").read_text()
+
+
+def git(repo, *args, author="Upstream"):
+    return subprocess.run([*GIT, "-c", f"user.name={author}", "-C", str(repo), *args],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def recipe_functions() -> str:
+    """The shallow() and forget() shell functions of the instance recipe."""
+    post = TEMPLATE.split("%post", 1)[1]
+    retry = re.search(r"^    retry\(\).*$", post, re.M)[0]
+    body = re.search(r"^    shallow\(\).*?^    }\n    forget\(\).*?^    }\n", post, re.M | re.S)[0]
+    return retry + "\n" + body
+
+
+class Upstream:
+    """A tiny kernel (base, then a fix of sched/lib.c) and apps (base, then
+    the test PR)."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.kernel = root / "kernel"
+        self.kernel.mkdir()
+        git(self.kernel, "init", "-q")
+        (self.kernel / "sched").mkdir()
+        (self.kernel / "sched" / "lib.c").write_text("int lib(int x)\n{\n    return x;\n}\n")
+        git(self.kernel, "add", "-A")
+        git(self.kernel, "commit", "-qm", "base")
+        self.base = git(self.kernel, "rev-parse", "HEAD")
+        (self.kernel / "sched" / "lib.c").write_text(
+            "int lib(int x)\n{\n    if (x > g_lib_limit_for_fix) { return g_lib_limit_for_fix; }\n"
+            "    return x;\n}\n")
+        git(self.kernel, "commit", "-qam", "fix")
+        git(self.kernel, "tag", "v1")
+        self.fix = git(self.kernel, "rev-parse", "HEAD")
+        self.patch = git(self.kernel, "diff", f"{self.base}..{self.fix}")
+
+        self.apps = root / "apps"
+        self.apps.mkdir()
+        git(self.apps, "init", "-q")
+        (self.apps / "testing").mkdir()
+        (self.apps / "testing" / "ostest.c").write_text("int main(void) { return 0; }\n")
+        git(self.apps, "add", "-A")
+        git(self.apps, "commit", "-qm", "apps base")
+        self.apps_base = git(self.apps, "rev-parse", "HEAD")
+        (self.apps / "testing" / "lib_test.c").write_text("void lib_test(void) { lib(1); }\n")
+        git(self.apps, "add", "-A")
+        git(self.apps, "commit", "-qm", "the test")
+        self.apps_merge = git(self.apps, "rev-parse", "HEAD")
+        self.test_patch = git(self.apps, "diff", f"{self.apps_base}..{self.apps_merge}")
+        self.meta = {"kernel_base_commit": self.base, "kernel_merge_commit": self.fix,
+                     "apps_base_commit": self.apps_base, "apps_merge_commit": self.apps_merge,
+                     "problem_statement": "lib() returns values above the limit the test expects."}
+
+    def facts(self, **meta) -> dict:
+        return lc.fix_facts(self.kernel, {**self.meta, **meta}, [("primary", self.fix, self.patch)],
+                            self.test_patch)
+
+    def image(self) -> Path:
+        """An unpacked image as the recipe makes it, with the recipe's own
+        shell functions: both repositories at depth 1, the test applied."""
+        root = self.root / "image"
+        (root / "embedeval-src" / "nuttx.git").mkdir(parents=True)
+        script = recipe_functions() + f"""
+set -e
+shallow {self.kernel} {self.base} {root}/testbed
+cd {root}/testbed
+git -c user.name=EmbedEval -c user.email=e@e commit -q --allow-empty -m compat
+shallow {self.apps} {self.apps_base} apps
+echo /apps/ >> .git/info/exclude
+forget {root}/testbed
+forget {root}/testbed/apps
+"""
+        subprocess.run(["bash", "-c", script], check=True, capture_output=True, text=True)
+        (root / "testbed" / "apps" / "testing" / "lib_test.c").write_text("void lib_test(void) { lib(1); }\n")
+        return root
+
+
+class LeakCheck(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.up = Upstream(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def scan(self, image=None, **meta):
+        return lc.scan(image or self.up.image(), self.up.facts(**meta))
+
+    def test_recipe_image_is_clean(self):
+        r = self.scan()
+        self.assertTrue(r["ok"], r["findings"])
+        self.assertEqual(r["commits"], {"kernel": 2, "apps": 1})
+        self.assertEqual(r["fix_blobs_checked"], 1)
+        self.assertEqual(r["fix_lines_checked"], 1)
+
+    def test_full_clone_is_history(self):
+        image = self.up.image()
+        tb = image / "testbed"
+        subprocess.run(["rm", "-rf", str(tb / ".git")], check=True)
+        subprocess.run(["git", "clone", "-q", "--no-checkout", str(self.up.kernel), str(tb / "full")], check=True)
+        (tb / "full" / ".git").rename(tb / ".git")
+        findings = " ".join(self.scan(image)["findings"])
+        self.assertIn("history: kernel commits other than", findings)
+        self.assertIn("shallow boundary", findings)
+        self.assertIn("refs:", findings)
+        self.assertIn("fix: the kernel commit", findings)
+
+    def test_fetch_head_and_remote_are_refs(self):
+        image = self.up.image()
+        tb = image / "testbed"
+        (tb / ".git" / "FETCH_HEAD").write_text(f"{self.up.fix}\t\tbranch 'master'\n")
+        git(tb, "remote", "add", "origin", "https://github.com/apache/nuttx.git")
+        findings = " ".join(self.scan(image)["findings"])
+        self.assertIn("FETCH_HEAD", findings)
+        self.assertIn("remote config remote.origin.url", findings)
+
+    def test_fixed_blob_in_object_store(self):
+        image = self.up.image()
+        blob = subprocess.run(["git", "-C", str(image / "testbed"), "hash-object", "-w", "--stdin"],
+                              input=(self.up.kernel / "sched" / "lib.c").read_text(),
+                              capture_output=True, text=True, check=True).stdout.strip()
+        self.assertIn(blob, self.up.facts()["fix_blobs"])
+        findings = " ".join(self.scan(image)["findings"])
+        self.assertIn("fixed versions of ['sched/lib.c']", findings)
+
+    def test_apps_history_after_base(self):
+        image = self.up.image()
+        apps = image / "testbed" / "apps"
+        subprocess.run(["git", "-C", str(apps), "fetch", "-q", str(self.up.apps), self.up.apps_merge],
+                       check=True, capture_output=True)
+        findings = " ".join(self.scan(image)["findings"])
+        self.assertIn("history: apps commits other than", findings)
+        self.assertIn("fix: the apps commit", findings)
+
+    def test_fix_line_in_a_file(self):
+        image = self.up.image()
+        (image / "opt").mkdir()
+        (image / "opt" / "notes.txt").write_text(
+            "    if (x > g_lib_limit_for_fix) { return g_lib_limit_for_fix; }\n")
+        findings = " ".join(self.scan(image)["findings"])
+        self.assertIn("lines: files hold lines the fix adds: ['/opt/notes.txt']", findings)
+
+    def test_second_repository(self):
+        image = self.up.image()
+        subprocess.run(["git", "clone", "-q", "--bare", str(self.up.kernel), str(image / "root" / "nuttx.git")],
+                       check=True)
+        findings = " ".join(self.scan(image)["findings"])
+        self.assertIn("copies: other repositories: ['/root/nuttx.git']", findings)
+
+    def test_non_empty_mount_point(self):
+        image = self.up.image()
+        (image / "embedeval-src" / "nuttx.git" / "HEAD").write_text("ref: refs/heads/master\n")
+        self.assertIn("copies", " ".join(self.scan(image)["findings"]))
+
+    def test_statement_naming_fix_identifier(self):
+        r = self.scan(problem_statement="lib() ignores g_lib_limit_for_fix.")
+        self.assertTrue(r["ok"], r["findings"])            # the image is clean
+        self.assertFalse(r["statement_ok"])
+        self.assertEqual(r["statement_fix_identifiers"], ["g_lib_limit_for_fix"])
+
+    def test_false_positive_fix_line_inside_test_line(self):
+        """A fix line that is part of a line the tests add is shown by design."""
+        test_patch = self.up.test_patch + (
+            "\n+/* expect: if (x > g_lib_limit_for_fix) { return g_lib_limit_for_fix; } */\n")
+        facts = lc.fix_facts(self.up.kernel, self.up.meta, [("primary", self.up.fix, self.up.patch)], test_patch)
+        self.assertEqual(facts["fix_lines"], [])
+
+    def test_false_positive_line_already_at_base(self):
+        (self.up.kernel / "sched" / "other.c").write_text(
+            "    if (x > g_lib_limit_for_fix) { return g_lib_limit_for_fix; }\n")
+        git(self.up.kernel, "add", "-A")
+        git(self.up.kernel, "commit", "-qm", "unrelated")
+        facts = lc.fix_facts(self.up.kernel, {**self.up.meta, "kernel_base_commit": git(self.up.kernel, "rev-parse", "HEAD")},
+                             [("primary", self.up.fix, self.up.patch)], self.up.test_patch)
+        self.assertEqual(facts["fix_lines"], [])
+
+    def test_false_positive_statement_names_test_identifier(self):
+        r = self.scan(problem_statement="lib_test() fails: lib() returns too large values.")
+        self.assertTrue(r["ok"] and r["statement_ok"], r)
+
+    def test_false_positive_prerequisite_line(self):
+        """A fix line the base patch (prerequisites, committed onto the base) adds is in the starting tree."""
+        base_patch = "+    if (x > g_lib_limit_for_fix) { return g_lib_limit_for_fix; }\n"
+        facts = lc.fix_facts(self.up.kernel, self.up.meta, [("primary", self.up.fix, self.up.patch)],
+                             self.up.test_patch, base_patch)
+        self.assertEqual(facts["fix_lines"], [])
+
+
+class Network(unittest.TestCase):
+    def test_exec_args_isolates_when_asked(self):
+        self.assertIn("--network", au.exec_args(Path("i.sif"), network=False))
+        self.assertNotIn("--network", au.exec_args(Path("i.sif")))
+
+    def test_probe_reading(self):
+        self.assertTrue(au.network_isolated("interfaces: lo\n"))
+        self.assertFalse(au.network_isolated("interfaces: eth0 lo\n"))
+        self.assertFalse(au.network_isolated("interfaces: lo\nREACHABLE\n"))
+        self.assertFalse(au.network_isolated("FATAL: no network\n"))
+
+
+class Prompt(unittest.TestCase):
+    def test_no_fix_files_in_the_task(self):
+        import run
+        meta = json.loads((REPO / "apptainer" / "instances" / "nuttx" / "nuttx__nuttx-11889-a2327"
+                           / "metadata.json").read_text())
+        task = run.build_task(meta)
+        self.assertNotIn("Relevant Source", task)
+        for f in meta["files_changed_by_fix"]:
+            self.assertNotIn(f, task)
+
+
+class Statement(unittest.TestCase):
+    FIX = "+++ b/sched/lib.c\n-    return x;\n+    if (x > g_lib_limit) return g_lib_limit;\n+    return x;\n"
+    TEST = "+void lib_test(void) { ASSERT(lib(9) <= 4); }\n"
+
+    def test_names_fix_identifier(self):
+        issues = ns.check("lib() returns values above g_lib_limit when called with large inputs.",
+                          self.FIX, self.TEST)
+        self.assertTrue(any("g_lib_limit" in i for i in issues), issues)
+
+    def test_test_names_allowed_and_review_consulted(self):
+        seen = []
+        ok = ns.check("lib_test fails: lib() returns a value above the documented limit for large inputs.",
+                      self.FIX, self.TEST, review=lambda s: seen.append(s) or [])
+        self.assertEqual(ok, [])
+        self.assertEqual(len(seen), 1)
+
+    def test_review_phrases_fail(self):
+        issues = ns.check("lib_test fails: lib() returns a value above the documented limit for large inputs.",
+                          self.FIX, self.TEST, review=lambda s: ["a value above the documented limit"])
+        self.assertIn("gives the fix away", issues[0])
+
+
+class PromoteGate(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        import promote_instance
+        self.gate = promote_instance.nuttx_gate
+        self.meta = {"problem_statement": "lib_test fails for large inputs.",
+                     "statement_check": {"version": ns.STATEMENT_CHECK, "result": "written"}}
+        self.report = {"leak_check": {"ok": True, "network": "isolated", "statement_ok": True,
+                                      "statement_sha256": hashlib.sha256(b"lib_test fails for large inputs.").hexdigest()},
+                       "determinism": {"runs": 5, "ok": True}}
+
+    def test_passes(self):
+        self.assertIsNone(self.gate(self.report, self.meta))
+
+    def test_refusals(self):
+        import copy
+        cases = {"no leak check record": lambda r, m: r.pop("leak_check"),
+                 "leak check failed": lambda r, m: r["leak_check"].update(ok=False),
+                 "network": lambda r, m: r["leak_check"].update(network="reachable"),
+                 "names the fix": lambda r, m: r["leak_check"].update(statement_ok=False),
+                 "changed after its leak check": lambda r, m: m.update(problem_statement="other"),
+                 "deterministic": lambda r, m: r["determinism"].update(runs=1),
+                 "statement check": lambda r, m: m["statement_check"].update(version=0)}
+        for why, change in cases.items():
+            r, m = copy.deepcopy(self.report), copy.deepcopy(self.meta)
+            change(r, m)
+            if why == "statement check":
+                self.assertIn("current statement check", self.gate(r, m))
+            elif why == "network":
+                self.assertIn("leak check failed", self.gate(r, m))
+            else:
+                self.assertIn(why, self.gate(r, m))
+
+
+class CompileAttestation(unittest.TestCase):
+    """A build-failure before state is attested from the fix alone."""
+
+    def setUp(self):
+        import validate_instance as vi
+        self.vi = vi
+        self.tmp = tempfile.TemporaryDirectory()
+        self.up = Upstream(Path(self.tmp.name))
+        self.meta = {**self.up.meta, "files_changed_by_test_patch": ["testing/lib_test.c", "testing/ostest.h"]}
+        self.fix = self.up.patch + "\n" + (
+            "diff --git a/include/nuttx/limit.h b/include/nuttx/limit.h\nnew file mode 100644\n"
+            "--- /dev/null\n+++ b/include/nuttx/limit.h\n@@ -0,0 +1 @@\n+extern int g_lib_limit_for_fix;\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def attest(self, output: str):
+        d = self.vi.test_diagnostics(self.meta, output)
+        return d, self.vi.attest_build_failure(self.up.kernel, self.meta, [("primary", self.fix)], d)
+
+    def test_every_test_error_listed_once_without_lines(self):
+        d, _ = self.attest("CC: x\n/apps/testing/lib_test.c:3:7: error: 'g_lib_limit_for_fix' undeclared\n"
+                           "lib_test.c:9:1: error: 'g_lib_limit_for_fix' undeclared\n"
+                           "sched/other.c:2:1: error: unrelated\n")
+        self.assertEqual(d, ["lib_test.c: error: 'g_lib_limit_for_fix' undeclared"])
+
+    def test_name_the_fix_adds(self):
+        _, proofs = self.attest("lib_test.c:3:7: error: implicit declaration of function ‘g_lib_limit_for_fix’\n")
+        self.assertEqual(proofs[0]["name"], "g_lib_limit_for_fix")
+
+    def test_header_the_fix_adds(self):
+        _, proofs = self.attest("lib_test.c:1:10: fatal error: nuttx/limit.h: No such file or directory\n")
+        self.assertIn("include/nuttx/limit.h", proofs[0]["proof"])
+
+    def test_link_error(self):
+        _, proofs = self.attest("ld: lib_test.c:5:(.text+0x10): undefined reference to `g_lib_limit_for_fix'\n")
+        self.assertEqual(len(proofs), 1)
+
+    def test_declaration_the_fix_changes(self):
+        """A test calling an interface with the signature the fix gives it."""
+        (self.up.kernel / "include").mkdir()
+        (self.up.kernel / "include" / "lib.h").write_text("int lib(int x);\n")
+        git(self.up.kernel, "add", "-A")
+        git(self.up.kernel, "commit", "-qm", "header")
+        base = git(self.up.kernel, "rev-parse", "HEAD")
+        (self.up.kernel / "include" / "lib.h").write_text("int lib(int x, int limit);\n")
+        git(self.up.kernel, "commit", "-qam", "new signature")
+        fix = git(self.up.kernel, "diff", f"{base}..HEAD") + "\n"
+        meta = {**self.meta, "kernel_base_commit": base}
+        d = self.vi.test_diagnostics(meta, "lib_test.c:3:7: error: too many arguments to function ‘lib’\n")
+        proofs = self.vi.attest_build_failure(self.up.kernel, meta, [("primary", fix)], d)
+        self.assertEqual(proofs[0]["proof"], "the fix changes its declaration in include/lib.h")
+
+    def test_name_at_base_is_not_attested(self):
+        _, proofs = self.attest("lib_test.c:3:7: error: too few arguments to function 'lib'\n")
+        self.assertEqual(proofs, [])
+
+    def test_name_in_prerequisites_is_not_attested(self):
+        d = self.vi.test_diagnostics(self.meta, "lib_test.c:3:7: error: 'g_lib_limit_for_fix' undeclared\n")
+        self.assertEqual(self.vi.attest_build_failure(self.up.kernel, self.meta, [("primary", self.fix)], d,
+                                                      "+int g_lib_limit_for_fix;\n"), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

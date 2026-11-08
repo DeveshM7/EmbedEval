@@ -25,6 +25,11 @@ Creates <scratch_root>/runs/<name>/ and, in it:
     --verdicts-from RUN (project nuttx): the PRs' triage verdicts are taken from
     an earlier run, so the job only validates them.
 
+    --instances DIR (project nuttx): a revalidation of existing instances,
+    each rendered again into <run>/instances/ with the current templates; no
+    triage. Its phases are separate jobs (submit.py statement, validate,
+    evaluate).
+
 Then `python cluster/submit.py pipeline --run <name>`. Run this from an
 interactive session on a Spark node: the SDK images are built here.
 """
@@ -34,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -70,7 +76,8 @@ def script(name: str, *args: str, env: dict, logfile: Path, timeout: int = 7200)
 
 
 def write_manifest(run: Path, name: str, cfg: dict, env: dict, source: dict, prs: list,
-                   stage: dict, notes: dict, timings: dict, missing_sdk: list, t0: float) -> None:
+                   stage: dict, notes: dict, timings: dict, missing_sdk: list, t0: float,
+                   extra: dict | None = None) -> None:
     git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
                                     text=True).stdout.strip()
     manifest = {
@@ -80,7 +87,7 @@ def write_manifest(run: Path, name: str, cfg: dict, env: dict, source: dict, prs
         "config": {k: v for k, v in cfg.items() if k != "derived"},
         "environment": env, "ledger": cfg["derived"]["ledger"],
         "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
-                for pr in prs],
+                | (extra or {}).get(pr, {}) for pr in prs],
         "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
         "missing_sdk_images": missing_sdk,
         "seconds": {k: round(v) for k, v in timings.items()},
@@ -93,7 +100,59 @@ def write_manifest(run: Path, name: str, cfg: dict, env: dict, source: dict, prs
         print(f"    {n:>5}  {s}")
     if manifest["missing_sdk_images"]:
         print(f"  WARNING: SDK images could not be built: {manifest['missing_sdk_images']}")
-    print(f"\nnext: python cluster/submit.py pipeline --run {name}")
+    if extra:
+        archs = sorted({e["arch"] for e in extra.values()})
+        print(f"\nnext: python cluster/submit.py statement --run {name}; then, --after it, "
+              + "; ".join(f"submit.py validate --run {name} --arch {a}" for a in archs))
+    elif cfg["project"] == "nuttx":
+        print(f"\nnext: python cluster/submit.py triage --run {name} (none left with --verdicts-from); "
+              f"then submit.py validate --run {name} --arch aarch64 (and x86_64) --after <job>")
+    else:
+        print(f"\nnext: python cluster/submit.py pipeline --run {name}")
+
+
+INSTANCE_ID = re.compile(r"nuttx__nuttx-(\d+)-a(\d+)")
+
+
+def instance_entry(folder: Path) -> tuple[int, dict]:
+    """(the apps PR a run keys the instance by, its manifest fields). The id
+    nuttx__nuttx-<kernel PR>-a<apps PR> must agree with the metadata. The
+    instance's architecture: its host_arch, else where it last validated."""
+    meta = json.loads((folder / "metadata.json").read_text())
+    m = INSTANCE_ID.fullmatch(folder.name)
+    if not m or meta.get("instance_id") != folder.name or \
+            (int(m[1]), int(m[2])) != (meta.get("kernel_pr"), meta.get("apps_pr")):
+        raise ValueError(f"{folder.name}: not a nuttx__nuttx-<kernel PR>-a<apps PR> instance "
+                         "matching its metadata")
+    receipt = folder / "validation.json"
+    arch = meta.get("host_arch") or (json.loads(receipt.read_text()).get("host") if receipt.exists() else None)
+    if arch not in ("aarch64", "x86_64"):
+        raise ValueError(f"{folder.name}: no host_arch and no validation host")
+    return int(m[2]), {"instance": folder.name, "arch": arch}
+
+
+def prepare_instances(args, cfg: dict, run: Path, env: dict) -> None:
+    """A revalidation of existing NuttX instances: each is rendered again
+    into <run>/instances/ with the current templates
+    (render_nuttx_instance.py --instance), keyed by its apps PR, "to
+    validate", with no triage."""
+    t0 = time.time()
+    sys.path.insert(0, str(REPO / "scripts"))
+    import render_nuttx_instance as rn
+    root = Path(args.instances).resolve()
+    folders = sorted(d for d in root.iterdir() if (d / "metadata.json").exists())
+    prs, stage, extra = [], {}, {}
+    for folder in folders:
+        pr, fields = instance_entry(folder)
+        if pr in extra:
+            sys.exit(f"apps PR {pr} has two instances ({extra[pr]['instance']}, {folder.name}); "
+                     "a run keys instances by apps PR")
+        rn.rerender(folder, run / "instances")
+        prs.append(pr)
+        stage[pr], extra[pr] = "to validate", fields
+    log(f"{len(prs)} instances from {root}, rendered into {run / 'instances'}")
+    write_manifest(run, args.name, cfg, env, {"instances": str(root)}, prs, stage, {},
+                   {"render": time.time() - t0}, [], t0, extra)
 
 
 def seed_verdicts(src: Path, run: Path, prs: list[int], stage: dict,
@@ -170,6 +229,9 @@ def main() -> None:
     src.add_argument("--pr", type=int, nargs="+", help="these PRs, hard filters applied")
     src.add_argument("--all-ostest", action="store_true",
                      help="project nuttx: every merged apps PR that changes testing/ostest/")
+    src.add_argument("--instances", metavar="DIR",
+                     help="project nuttx: revalidate the instances in DIR (e.g. "
+                          "apptainer/instances/nuttx), rendered again with the current templates")
     p.add_argument("--no-filter", action="store_true", help="with --pr: skip the hard filters")
     p.add_argument("--redo", action="store_true",
                    help="also take PRs the ledger has already settled in an earlier run")
@@ -189,8 +251,8 @@ def main() -> None:
     cfg = cluster_config.load_or_exit(args.config)
     if args.all_ostest and cfg["project"] != "nuttx":
         p.error("--all-ostest needs project: nuttx in the config")
-    if args.verdicts_from and cfg["project"] != "nuttx":
-        p.error("--verdicts-from needs project: nuttx in the config")
+    if (args.verdicts_from or args.instances) and cfg["project"] != "nuttx":
+        p.error("--verdicts-from and --instances need project: nuttx in the config")
     run = Path(cfg["derived"]["runs"]) / args.name
     if (run / "manifest.json").exists():
         sys.exit(f"{run} is already prepared; pick another --name "
@@ -198,6 +260,9 @@ def main() -> None:
     run.mkdir(parents=True, exist_ok=True)
     env = cluster_config.env_for(cfg, run)
     os.environ.update(env)              # for the modules imported below
+    if args.instances:
+        prepare_instances(args, cfg, run, env)
+        return
     if cfg["project"] == "nuttx":
         prepare_nuttx(args, cfg, run, env,
                       {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"])))

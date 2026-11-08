@@ -10,7 +10,7 @@
 
     # rewrite an existing instance's run_tests.sh from the current template
     python scripts/generate_nuttx_instance.py \
-        --rerender-runner docker/instances/nuttx__nuttx-8832
+        --rerender-runner generated/nuttx__nuttx-8832-a1665
 
 The apps test patch is diffed from the apps PR branch, and the validator's
 kernel fix range is the kernel PR branch. Neither range ends at a merge commit.

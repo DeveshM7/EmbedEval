@@ -10,6 +10,11 @@ The model classifies one merged apps PR and finds its kernel PRs itself
     python scripts/triage_nuttx_prs.py apps --profile qwen38-nvfp4 --all-ostest
     python scripts/triage_nuttx_prs.py eval triage/nuttx_runs/<run>
     python scripts/triage_nuttx_prs.py gold-promote generated/nuttx__nuttx-20112
+    python scripts/triage_nuttx_prs.py statement --profile qwen38-nvfp4 \
+        --instance <run>/instances/nuttx__nuttx-20112-a3790 --recheck
+
+`statement` writes (or rechecks) an instance's problem statement with the
+served model: scripts/nuttx_statement.py.
 """
 
 from __future__ import annotations
@@ -1247,6 +1252,37 @@ def promote(instance_dirs: list[Path], gold_path: Path | None = None) -> None:
     path.write_text(json.dumps(gold, indent=2) + "\n")
 
 
+def cmd_statement(args) -> None:
+    """One instance's problem statement (scripts/nuttx_statement.py)."""
+    import tempfile
+
+    import nuttx_statement
+    import validate_instance
+
+    profiles = json.loads(MODELS.read_text())
+    if args.profile not in profiles or args.profile.startswith("_"):
+        raise SystemExit(f"unknown profile: {args.profile}")
+    folder = args.instance.resolve()
+    meta = json.loads((folder / "metadata.json").read_text())
+    with tempfile.TemporaryDirectory() as work:
+        fix = "\n".join(p for _, p in validate_instance.nuttx_fix_patches(meta, Path(work)))
+    try:            # the PR texts help the writer; the diff and tests suffice
+        kernel = candidates.kernel_record(meta["kernel_pr"])
+        apps = candidates.apps_record(meta["apps_pr"])["apps"]
+    except (RuntimeError, OSError, ValueError, KeyError) as exc:
+        print(f"  no PR records ({exc}); writing from the fix and the tests alone")
+        kernel, apps = {}, {}
+    context = {"kernel_title": kernel.get("title"), "kernel_body": kernel.get("body"),
+               "apps_title": apps.get("title"), "apps_body": apps.get("body")}
+    out = nuttx_statement.statement_one(
+        folder, args.profile, model_options(args.profile, profiles[args.profile], args.api_base),
+        parse_verdict, context, fix, args.trace_dir or folder.parent.parent / "statements", args.recheck)
+    print(f"  {meta['instance_id']}: " + ("statement kept (passes the check)" if out["kept"] else
+                                         "statement written" if out["ok"] else
+                                         "no statement: " + "; ".join(out["issues"] or [out["error"] or "?"])))
+    raise SystemExit(0 if out["ok"] else 1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1274,8 +1310,20 @@ def main() -> None:
         "gold-promote", help="add validation results to the per-apps-PR gold")
     promote_parser.add_argument("instance", type=Path, nargs="+",
                                 help="instance directories with metadata.json and validation.json")
+    statement_parser = commands.add_parser(
+        "statement", help="write or recheck an instance's problem statement")
+    statement_parser.add_argument("--profile", required=True)
+    statement_parser.add_argument("--instance", type=Path, required=True,
+                                  help="an instance directory (metadata.json, test_patch.diff)")
+    statement_parser.add_argument("--recheck", action="store_true",
+                                  help="keep a statement that passes the current check")
+    statement_parser.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
+    statement_parser.add_argument("--trace-dir", type=Path,
+                                  help="default: <instance>/../../statements")
     args = parser.parse_args()
-    if args.command == "apps":
+    if args.command == "statement":
+        cmd_statement(args)
+    elif args.command == "apps":
         run_apps(args)
     elif args.command == "gold-promote":
         promote(args.instance)

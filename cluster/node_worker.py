@@ -5,6 +5,8 @@ phase, with srun:
 
     node_worker.py --run RUN --config FROZEN.json --phase triage
     node_worker.py --run RUN --config FROZEN.json --phase validate
+    node_worker.py --run RUN --config FROZEN.json --phase statement   (NuttX instances)
+    node_worker.py --run RUN --config FROZEN.json --phase evaluate    (NuttX instances)
 
 Its share (fixed split): the PRs still to do in this phase, sorted, every
 NN-th one starting at its index N (SLURM_PROCID of SLURM_NTASKS).
@@ -16,6 +18,16 @@ triage    start the node's own model server (caches in nodes/node<N>-job<ID>/),
 validate  generate, build and validate its accepted PRs
           parallel.validate_per_node at a time, each capped; a PR's image and
           overlays are always removed afterwards. No model server runs.
+          A prepared NuttX instance (prepare.py --instances) is built and
+          validated as rendered into the run, with the leak check and
+          nuttx.determinism before-state runs.
+statement write or recheck each instance's problem statement with the
+          node's own model server (scripts/nuttx_statement.py).
+evaluate  an agent on each VALID instance, its patch graded in a fresh
+          overlay; the model is served by the node itself or, for x86
+          nodes, by evaluate_server_job through an SSH tunnel.
+
+Prepared instances go only to nodes of their architecture (manifest "arch").
 
 Every PR gets status/<pr>.json once a phase is through with it (status.py).
 Each step runs in its own process group, killed whole on a timeout. On
@@ -51,6 +63,7 @@ import nuttx_platforms  # noqa: E402
 import status  # noqa: E402
 
 PY = sys.executable
+MACHINE = platform_module.machine()
 WARM = ".warm"                       # in the compile cache once a server filled it
 _children: set[int] = set()          # process groups of running steps
 _lock = threading.Lock()
@@ -119,9 +132,16 @@ def my_share(prs: list[int]) -> list[int]:
 
 
 def assigned_work(run: Path, phase: str) -> list[int]:
-    """Keep node ownership fixed as other nodes write status during a phase."""
-    planned = [e["pr"] for e in status.manifest(run)["prs"] if e["stage"] == "to triage"]
-    todo = set(status.triage_todo(run) if phase == "triage" else status.validate_todo(run))
+    """Keep node ownership fixed as other nodes write status during a phase.
+    In validate and evaluate, an entry with an "arch" (a prepared NuttX
+    instance) goes only to nodes of that architecture; a statement is
+    written on any node."""
+    anywhere = phase in ("triage", "statement")
+    planned = [e["pr"] for e in status.manifest(run)["prs"]
+               if e["stage"] in ("to triage", "to validate")
+               and (anywhere or e.get("arch", MACHINE) == MACHINE)]
+    todo = set({"triage": status.triage_todo, "validate": status.validate_todo,
+                "statement": status.statement_todo, "evaluate": status.evaluate_todo}[phase](run))
     return [pr for pr in my_share(planned) if pr in todo]
 
 
@@ -171,14 +191,14 @@ def cache_filled(cfg: dict) -> None:
         _filling = None
 
 
-def start_server(cfg: dict, env: dict, node_dir: Path) -> subprocess.Popen:
+def start_server(cfg: dict, env: dict, node_dir: Path, profile: str | None = None) -> subprocess.Popen:
     scr = node_dir / "scr"
     senv = {**env, "EMBEDEVAL_SCRATCH": str(scr), "PORT": "8000",
             "EMBEDEVAL_VLLM_CACHE": str(compile_cache(cfg, node_dir))}
     senv.pop("SLURM_SUBMIT_DIR", None)    # the script then reads models.json from the repo
     out = open(LOGS / "server.log", "a")
     p = subprocess.Popen(["bash", str(REPO / "scripts" / "serve_triage_model.sh"),
-                          cfg["model"]["profile"]], cwd=REPO, env=senv, stdout=out,
+                          profile or cfg["model"]["profile"]], cwd=REPO, env=senv, stdout=out,
                          stderr=subprocess.STDOUT, start_new_session=True)
     with _lock:
         _children.add(p.pid)
@@ -385,6 +405,9 @@ def validate(cfg: dict, run: Path, env: dict) -> None:
         if used > cfg["disk_guard_gb"]:
             done("skipped", f"disk guard: instance images at {used:.0f} GB "
                             f"(limit {cfg['disk_guard_gb']} GB)")
+            return
+        if cfg["project"] == "nuttx" and status.entry(run, pr).get("instance"):
+            revalidate_nuttx(cfg, run, pr, venv, Path(env["EMBEDEVAL_WORK"]).parent, left, done)
             return
         if cfg["project"] == "nuttx":
             validate_nuttx(cfg, run, pr, venv, Path(env["EMBEDEVAL_WORK"]).parent, left, done)
@@ -762,6 +785,239 @@ def other_board(run: Path, pr: int, verdict: Path, tried: list[str]) -> Path | N
         list(pool.map(one, mine))
 
 
+# ---------------------------------------------------------------- NuttX instances
+
+
+
+def nuttx_instance_env(cfg: dict, env: dict, node_dir: Path) -> dict:
+    """The environment of a step on a prepared NuttX instance: this node's
+    data copy and its kernel and apps clones (images check out from them; the
+    validator diffs the fix there)."""
+    data = nuttx_data(cfg, node_dir)
+    return {**env, "EMBEDEVAL_NUTTX_DATA": str(data), "EMBEDEVAL_NUTTX_CLONE": str(data / "kernel.git"),
+            "EMBEDEVAL_NUTTX_APPS_CLONE": str(data / "apps.git"),
+            "EMBEDEVAL_BUILD_TIMEOUT_MIN": str(cfg["caps"]["build"])}
+
+
+def statements(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
+    """Write or recheck the problem statement of each of this node's
+    instances (triage_nuttx_prs.py statement --recheck) with the node's own
+    model server."""
+    mine = assigned_work(run, "statement")
+    log(f"statement: {len(mine)} instances {mine}")
+    if not mine:
+        return
+    caps, profile = cfg["caps"], cfg["model"]["profile"]
+    venv = nuttx_instance_env(cfg, env, node_dir)
+    t0 = time.time()
+    server = start_server(cfg, env, node_dir)
+    try:
+        if not server_ready(server, caps["server_start"]):
+            log("model server did not come up; see server.log")
+            return                                         # stays to do
+        cache_filled(cfg)
+        deadline = t0 + (caps["triage_phase"] - 3) * 60
+
+        def one(pr: int) -> None:
+            left = (deadline - time.time()) / 60
+            if left < 2 or _stopping.is_set():
+                return
+            iid, start = status.entry(run, pr)["instance"], time.time()
+            folder = run / "instances" / iid
+            rc = step([PY, "scripts/triage_nuttx_prs.py", "statement", "--profile", profile,
+                       "--instance", str(folder), "--recheck", "--trace-dir", str(run / "statements")],
+                      LOGS / f"statement-{pr}.log", min(caps["triage_pr"], left), venv)
+            if rc == 143:
+                return
+            check = json.loads((folder / "metadata.json").read_text()).get("statement_check") or {}
+            minutes = round((time.time() - start) / 60, 1)
+            if rc in (0, 1) and check.get("result") in ("kept", "written", "failed"):
+                info = {"state": "done", "result": check["result"], "version": check.get("version"),
+                        "minutes": minutes, "node": N}
+                if check.get("issues"):
+                    info["note"] = "; ".join(check["issues"])[:300]
+            else:
+                info = {"state": "failed", "minutes": minutes, "node": N,
+                        "note": "stopped at the cap" if rc == 124 else
+                        f"no result (rc={rc}); log: {LOGS / f'statement-{pr}.log'}"}
+            if record(run, pr, "statement", info):
+                log(f"statement {pr}: {info.get('result') or info['state']} ({minutes} min)")
+
+        with ThreadPoolExecutor(cfg["parallel"]["triage_per_node"]) as pool:
+            list(pool.map(one, mine))
+    finally:
+        kill_group(server.pid)
+        with _lock:
+            _children.discard(server.pid)
+        log("model server stopped")
+
+
+def revalidate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, left, done) -> None:
+    """Build and validate a prepared instance (prepare.py --instances) as
+    rendered into the run, with the leak check and nuttx.determinism
+    before-state runs; its image is removed afterwards."""
+    iid = status.entry(run, pr)["instance"]
+    lg = LOGS / f"validate-{pr}.log"
+    venv = nuttx_instance_env(cfg, env, node_dir)
+    step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+    try:
+        rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
+                  min(2 * cfg["caps"]["build"] + 5, left()), venv)
+        if rc == 143:
+            return
+        if rc:
+            return done("failed", "build failed" if rc != 124 else "build hit the cap")
+        rc = step([PY, "scripts/validate_instance.py", iid, "--determinism",
+                   str(cfg["nuttx"]["determinism"])], lg, left(), venv)
+        if rc == 143:
+            return
+        report = run / "instances" / iid / "validation.json"
+        rep = json.loads(report.read_text()) if report.exists() else {}
+        if rc == 124:
+            return done("failed", "validation hit the cap")
+        if rep.get("valid"):
+            return done("done", outcome="VALID")
+        done("done", outcome=f"INVALID: {rep.get('reason') or f'rc={rc}'}")
+    finally:
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+
+
+def model_tunnel(job: str, minutes: float, port: int = 8000):
+    """(the tunnel process, api base) to the model server of job `job`, once
+    it answers; (None, why) if it does not."""
+    deadline = time.time() + minutes * 60
+    node = ""
+    while time.time() < deadline and not _stopping.is_set():
+        r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T %N"], capture_output=True, text=True)
+        state, _, node = r.stdout.strip().partition(" ")
+        if state == "RUNNING" and node:
+            break
+        if not state:
+            return None, f"server job {job} is not in the queue"
+        time.sleep(30)
+    else:
+        return None, f"server job {job} did not start"
+    tunnel = subprocess.Popen(["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                               "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=60",
+                               "-N", "-L", f"{port}:127.0.0.1:8000", node], start_new_session=True)
+    with _lock:
+        _children.add(tunnel.pid)
+    base = f"http://127.0.0.1:{port}/v1"
+    while time.time() < deadline and not _stopping.is_set() and tunnel.poll() is None:
+        try:
+            urllib.request.urlopen(base + "/models", timeout=5)
+            return tunnel, base
+        except Exception:
+            time.sleep(20)
+    kill_group(tunnel.pid)
+    return None, f"server of job {job} on {node} did not answer"
+
+
+def server_alive(base: str) -> bool:
+    try:
+        urllib.request.urlopen(base + "/models", timeout=10)
+        return True
+    except Exception:
+        return False
+
+
+def evaluate(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
+    """An agent (harness/run.py) on each of this node's VALID instances, its
+    patch graded in a fresh overlay (harness/evaluate_patches.py), both without
+    a network. The model is evaluate.model: served by this node itself, or,
+    with evaluate_server_job (x86 nodes, no GPU), by that job's node through an
+    SSH tunnel. Limits are evaluate.step_limit and evaluate.time_limit for
+    every model, recorded with each result."""
+    mine = assigned_work(run, "evaluate")
+    log(f"evaluate: {len(mine)} instances {mine}")
+    if not mine:
+        return
+    ev, caps = cfg["evaluate"], cfg["caps"]
+    venv = nuttx_instance_env(cfg, env, node_dir)
+    t0 = time.time()
+    deadline = t0 + (caps["validate_phase"] - 3) * 60
+    server = tunnel = None
+    if cfg.get("evaluate_server_job"):
+        tunnel, base = model_tunnel(cfg["evaluate_server_job"], caps["server_start"])
+        if tunnel is None:
+            log(f"no model server: {base}. Taking no instances")
+            return
+    else:
+        server = start_server(cfg, env, node_dir, ev["model"])
+        base = "http://127.0.0.1:8000/v1"
+        if not server_ready(server, caps["server_start"]):
+            log("model server did not come up; see server.log")
+            kill_group(server.pid)
+            return
+        cache_filled(cfg)
+    venv["EMBEDEVAL_LOCAL_API_BASE"] = base
+    log(f"model {ev['model']} answers at {base} after {(time.time() - t0) / 60:.1f} min")
+    limits = {"steps": ev["step_limit"], "minutes": ev["time_limit"]}
+    lost = threading.Event()
+
+    def one(pr: int) -> None:
+        if lost.is_set() or _stopping.is_set():
+            return
+        iid, start = status.entry(run, pr)["instance"], time.time()
+        if (deadline - time.time()) / 60 < ev["time_limit"] + 2 * caps["build"] + 30:
+            return                                         # stays to do
+        lg = LOGS / f"evaluate-{pr}.log"
+        info = {"model": ev["model"], "instance": iid, "limits": limits, "node": N}
+
+        def done(state: str, **more) -> None:
+            info.update(state=state, minutes=round((time.time() - start) / 60, 1), **more)
+            if record(run, pr, "evaluate", info):
+                log(f"evaluate {pr}: {info.get('grade') or info.get('note')}")
+
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+        try:
+            rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg, 2 * caps["build"] + 5, venv)
+            if rc == 143:
+                return
+            if rc:
+                return done("failed", note="build failed" if rc != 124 else "build hit the cap")
+            rc = step([PY, "harness/run.py", "--instance", iid, "--model", ev["model"],
+                       "--step-limit", str(ev["step_limit"]), "--time-limit", str(ev["time_limit"])],
+                      lg, ev["time_limit"] + 20, venv)
+            if rc == 143:
+                return
+            if not server_alive(base):
+                lost.set()       # the agent lost its model: not its outcome, so it runs again
+                return done("failed", note="model server gone during the run")
+            out_dir = run / "outputs" / "nuttx" / ev["model"] / iid.split("nuttx__nuttx-", 1)[1]
+            result = json.loads((out_dir / "result.json").read_text()) if (out_dir / "result.json").exists() else {}
+            grade_file = run / "outputs" / "grades" / ev["model"] / f"{iid}.json"
+            grade_file.parent.mkdir(parents=True, exist_ok=True)
+            rc = step([PY, "harness/evaluate_patches.py", "--instance", iid, "--model", ev["model"],
+                       "--output", str(grade_file)], lg, 30, venv)
+            if rc == 143:
+                return
+            if not grade_file.exists():
+                return done("failed", note=f"no grade (rc={rc}); see {lg}")
+            g = json.loads(grade_file.read_text())["results"][0]
+            done("done", grade=g.get("grade"), error=g.get("error"), network=g.get("network"),
+                 exit_status=result.get("exit_status"), steps=result.get("steps"),
+                 agent_seconds=result.get("elapsed_seconds"), agent_error=result.get("error"),
+                 timed_out=result.get("exit_status") == "TimeExceeded",
+                 step_limit_hit=result.get("exit_status") == "LimitsExceeded",
+                 protected_touched=result.get("protected_touched") or [])
+        finally:
+            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
+
+    try:
+        with ThreadPoolExecutor(ev["per_node"]) as pool:
+            list(pool.map(one, mine))
+        if lost.is_set():
+            log("the model server is gone: the rest stays to do for the next evaluate job")
+    finally:
+        for p in (server, tunnel):
+            if p is not None:
+                kill_group(p.pid)
+                with _lock:
+                    _children.discard(p.pid)
+        log("model server or tunnel stopped")
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -781,7 +1037,7 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True)
     p.add_argument("--config", required=True, help="the frozen settings submit.py wrote")
-    p.add_argument("--phase", required=True, choices=["triage", "validate"])
+    p.add_argument("--phase", required=True, choices=["triage", "validate", "statement", "evaluate"])
     args = p.parse_args()
     N = int(os.environ.get("SLURM_PROCID", "0"))
     NN = int(os.environ.get("SLURM_NTASKS", "1"))
@@ -801,6 +1057,10 @@ def main() -> None:
     log(f"phase {args.phase}, node {N} of {NN}, run {run}")
     if args.phase == "triage":
         triage(cfg, run, env, node_dir)
+    elif args.phase == "statement":
+        statements(cfg, run, env, node_dir)
+    elif args.phase == "evaluate":
+        evaluate(cfg, run, env, node_dir)
     else:
         validate(cfg, run, env)
     log(f"phase {args.phase} done")

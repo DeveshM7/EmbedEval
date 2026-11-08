@@ -1,0 +1,262 @@
+"""Local checks of the NuttX phase jobs: prepare --instances, phase
+submission against a fake scheduler, per-architecture work, and the
+evaluate phase's records.
+
+    python3 -m unittest cluster/test_nuttx_cluster.py
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+CLUSTER = Path(__file__).resolve().parent
+REPO = CLUSTER.parent
+sys.path[:0] = [str(CLUSTER), str(REPO / "scripts")]
+
+import node_worker  # noqa: E402
+import status  # noqa: E402
+
+INSTANCES = REPO / "apptainer" / "instances" / "nuttx"
+ARM, X86 = "nuttx__nuttx-11889-a2327", "nuttx__nuttx-14152-a2725"
+
+FAKE = {
+    "sbatch": """#!/bin/bash
+echo "$@" >> "$FAKE_LOG/sbatch.log"
+for a in "$@"; do case "$a" in --test-only) echo "sbatch: Job would start"; exit 0;; esac; done
+n=$(( $(wc -l < "$FAKE_LOG/sbatch.log") + 1000 )); echo "$n"
+""",
+    "squeue": "#!/bin/bash\nexit 0\n",
+    "sinfo": "#!/bin/bash\necho 3\n",
+}
+
+
+class Scholar:
+    """A scratch root, a config, and fake sbatch/squeue/sinfo on PATH."""
+
+    def __init__(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        for name, body in FAKE.items():
+            (self.bin / name).write_text(body)
+            (self.bin / name).chmod(0o755)
+        self.log = self.root / "log"
+        self.log.mkdir()
+        self.config = self.root / "config.yaml"
+        self.config.write_text(f"""project: nuttx
+scratch_root: {self.root / 'scratch'}
+slurm: {{partition: spark-interactive, nodes_min: 1, nodes_max: 4, time_limit: "04:00:00",
+        mem: 60250M, build_partition: cpu, build_path: /opt/x86/bin}}
+caps: {{triage_phase: 120, validate_phase: 220}}
+nuttx: {{validate: true}}
+""")
+        self.instances = self.root / "promoted"
+        self.instances.mkdir()
+        for iid in (ARM, X86):
+            shutil.copytree(INSTANCES / iid, self.instances / iid)
+
+    def run(self, script: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+        env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_LOG": str(self.log)}
+        r = subprocess.run([sys.executable, str(CLUSTER / script), *args, "--config", str(self.config)],
+                           capture_output=True, text=True, env=env, cwd=REPO)
+        if check and r.returncode:
+            raise AssertionError(f"{script} {args}: rc={r.returncode}\n{r.stdout}\n{r.stderr}")
+        return r
+
+    def prepared(self, name="reval") -> Path:
+        self.run("prepare.py", "--name", name, "--instances", str(self.instances))
+        return self.root / "scratch" / "runs" / name
+
+    def sbatch_calls(self) -> list[str]:
+        f = self.log / "sbatch.log"
+        return [l for l in f.read_text().splitlines() if "--test-only" not in l] if f.exists() else []
+
+
+class Prepare(unittest.TestCase):
+    def setUp(self):
+        self.s = Scholar()
+
+    def tearDown(self):
+        self.s.tmp.cleanup()
+
+    def test_instances_round_trip(self):
+        run = self.s.prepared()
+        m = status.manifest(run)
+        self.assertEqual({e["pr"]: (e["instance"], e["arch"], e["stage"]) for e in m["prs"]},
+                         {2327: (ARM, "aarch64", "to validate"), 2725: (X86, "x86_64", "to validate")})
+        for iid in (ARM, X86):
+            d = run / "instances" / iid
+            self.assertIn("--depth 1", (d / "instance.def").read_text())
+            self.assertTrue((d / "previous-validation.json").exists())
+            self.assertEqual((d / "test_patch.diff").read_bytes(),
+                             (INSTANCES / iid / "test_patch.diff").read_bytes())
+        self.assertEqual(sorted(status.validate_todo(run)), [2327, 2725])
+        self.assertEqual(sorted(status.statement_todo(run)), [2327, 2725])
+        self.assertEqual(status.evaluate_todo(run), [])
+
+    def test_id_must_match_metadata(self):
+        (self.s.instances / ARM).rename(self.s.instances / "nuttx__nuttx-11889-a9999")
+        r = self.s.run("prepare.py", "--name", "bad", "--instances", str(self.s.instances), check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("matching its metadata", r.stderr)
+
+
+class Submit(unittest.TestCase):
+    def setUp(self):
+        self.s = Scholar()
+        self.run = self.s.prepared()
+
+    def tearDown(self):
+        self.s.tmp.cleanup()
+
+    def script(self, mode: str, arch: str) -> str:
+        return next((self.run / "jobs").glob(f"{mode}-{arch}-*.sbatch")).read_text()
+
+    def test_validate_per_arch(self):
+        self.s.run("submit.py", "validate", "--run", self.run.name, "--arch", "aarch64")
+        self.s.run("submit.py", "validate", "--run", self.run.name, "--arch", "x86_64")
+        arm, x86 = self.script("validate", "aarch64"), self.script("validate", "x86_64")
+        self.assertIn("#SBATCH -p spark-interactive", arm)
+        self.assertIn("#SBATCH --gres=gpu:1", arm)
+        self.assertIn("#SBATCH -p cpu", x86)
+        self.assertIn('PATH="/opt/x86/bin:$HOME/.local/bin:', x86)
+        self.assertIn('PATH="$HOME/.local/bin:', arm)
+        self.assertNotIn("--gres", x86)
+        for text in (arm, x86):
+            self.assertIn("env -i PATH=", text)
+            self.assertIn("sha256sum --quiet -c source-sha256.txt", text)
+        sub = [json.loads(l) for l in (self.run / "jobs" / "submitted.jsonl").read_text().splitlines()]
+        self.assertEqual([(x["arch"], x["todo"]) for x in sub], [("aarch64", 1), ("x86_64", 1)])
+
+    def test_frozen_source_checks(self):
+        self.s.run("submit.py", "statement", "--run", self.run.name)
+        source = next((self.run / "jobs").glob("source-*"))
+        r = subprocess.run(["sha256sum", "--quiet", "-c", "source-sha256.txt"], cwd=source,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(any(p.name == "config.yaml" for p in source.rglob("*")))
+        self.assertTrue((source / "cluster" / "config.example.yaml").exists())
+        (source / "scripts" / "nuttx_leakcheck.py").write_text("changed")
+        r = subprocess.run(["sha256sum", "--quiet", "-c", "source-sha256.txt"], cwd=source,
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_after_chains(self):
+        self.s.run("submit.py", "validate", "--run", self.run.name, "--arch", "aarch64", "--after", "77")
+        self.assertIn("--dependency=afterany:77", self.s.sbatch_calls()[-1])
+
+    def test_evaluate_x86_owns_its_server(self):
+        self.s.run("submit.py", "evaluate", "--run", self.run.name, "--arch", "x86_64",
+                   "--model", "qwen38-nvfp4", "--after", "77")
+        server, job = self.s.sbatch_calls()[-2:]
+        self.assertIn("serve_triage_model.sh qwen38-nvfp4", server)
+        self.assertIn("--gres=gpu:1", server)
+        self.assertIn("--dependency=afterany:77", server)
+        export = server.split("--export=", 1)[1].split()[0]
+        self.assertNotIn("ALL", export)
+        self.assertIn("PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin,", export)
+        self.assertIn("--dependency=afterany:77,after:1001", job)
+        text = self.script("evaluate", "x86_64")
+        self.assertIn("scancel 1001", text)
+        cfg = json.loads(next((self.run / "jobs").glob("config-*.json")).read_text())
+        self.assertEqual((cfg["evaluate"]["model"], cfg["evaluate_server_job"]), ("qwen38-nvfp4", "1001"))
+
+    def test_evaluate_arm_serves_itself(self):
+        r = self.s.run("submit.py", "evaluate", "--run", self.run.name, "--arch", "aarch64")
+        self.assertIn("nothing left to evaluate", r.stdout)       # nothing VALID yet
+        status.write_stage(self.run, 2327, "validate", {"state": "done", "outcome": "VALID"})
+        self.s.run("submit.py", "evaluate", "--run", self.run.name, "--arch", "aarch64", "--model", "nemotron")
+        self.assertEqual(len(self.s.sbatch_calls()), 1)
+        cfg = json.loads(next((self.run / "jobs").glob("config-*.json")).read_text())
+        self.assertEqual(cfg["evaluate"]["model"], "nemotron")
+        self.assertNotIn("evaluate_server_job", cfg)
+        self.assertNotIn("scancel", self.script("evaluate", "aarch64"))
+
+    def test_unknown_model(self):
+        r = self.s.run("submit.py", "evaluate", "--run", self.run.name, "--arch", "aarch64",
+                       "--model", "nobody", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unknown model", r.stderr)
+
+    def test_arch_needed(self):
+        r = self.s.run("submit.py", "validate", "--run", self.run.name, check=False)
+        self.assertIn("needs --arch", r.stderr)
+
+
+class Worker(unittest.TestCase):
+    def setUp(self):
+        self.s = Scholar()
+        self.run = self.s.prepared()
+        node_worker.N, node_worker.NN, node_worker.LOGS = 0, 1, self.s.root / "logs"
+        node_worker.LOGS.mkdir()
+
+    def tearDown(self):
+        self.s.tmp.cleanup()
+
+    def test_arch_filter(self):
+        with mock.patch.object(node_worker, "MACHINE", "x86_64"):
+            self.assertEqual(node_worker.assigned_work(self.run, "validate"), [2725])
+        with mock.patch.object(node_worker, "MACHINE", "aarch64"):
+            self.assertEqual(node_worker.assigned_work(self.run, "validate"), [2327])
+            self.assertEqual(node_worker.assigned_work(self.run, "statement"), [2327, 2725])
+
+    def test_evaluate_records_timeouts_apart(self):
+        status.write_stage(self.run, 2327, "validate", {"state": "done", "outcome": "VALID"})
+        cfg = json.loads((self.run / "manifest.json").read_text())["config"]
+        cfg["derived"] = {"vllm_cache": str(self.s.root / "vc")}
+        cfg["nuttx"]["data"] = str(self.s.root / "data")
+        (self.s.root / "data").mkdir()
+        out = self.run / "outputs" / "nuttx" / "qwen38-nvfp4" / "11889-a2327"
+
+        def fake_step(cmd, logfile, minutes, env, cwd=REPO):
+            if "harness/run.py" in cmd:
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "result.json").write_text(json.dumps(
+                    {"exit_status": "TimeExceeded", "steps": 31, "elapsed_seconds": 2400}))
+            if "harness/evaluate_patches.py" in cmd:
+                Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(
+                    {"results": [{"grade": "fail", "error": "tests failed", "network": "isolated"}]}))
+            return 0
+
+        server = mock.Mock(pid=4242)
+        with mock.patch.object(node_worker, "MACHINE", "aarch64"), \
+                mock.patch.object(node_worker, "step", fake_step), \
+                mock.patch.object(node_worker, "start_server", return_value=server) as start, \
+                mock.patch.object(node_worker, "server_ready", return_value=True), \
+                mock.patch.object(node_worker, "server_alive", return_value=True), \
+                mock.patch.object(node_worker, "kill_group") as kill:
+            node_worker.evaluate(cfg, self.run, {}, self.s.root / "node")
+        self.assertEqual(start.call_args[0][3], "qwen38-nvfp4")
+        kill.assert_called_with(4242)
+        ev = status.read(self.run, 2327)["evaluate"]
+        self.assertEqual((ev["state"], ev["grade"], ev["timed_out"], ev["steps"], ev["network"]),
+                         ("done", "fail", True, 31, "isolated"))
+        self.assertEqual(ev["limits"], {"steps": 50, "minutes": 40})
+        self.assertEqual(status.evaluate_todo(self.run), [])
+
+    def test_lost_server_runs_again(self):
+        status.write_stage(self.run, 2327, "validate", {"state": "done", "outcome": "VALID"})
+        cfg = json.loads((self.run / "manifest.json").read_text())["config"]
+        cfg["derived"] = {"vllm_cache": str(self.s.root / "vc")}
+        cfg["nuttx"]["data"] = str(self.s.root / "data")
+        (self.s.root / "data").mkdir()
+        with mock.patch.object(node_worker, "MACHINE", "aarch64"), \
+                mock.patch.object(node_worker, "step", return_value=0), \
+                mock.patch.object(node_worker, "start_server", return_value=mock.Mock(pid=1)), \
+                mock.patch.object(node_worker, "server_ready", return_value=True), \
+                mock.patch.object(node_worker, "server_alive", return_value=False), \
+                mock.patch.object(node_worker, "kill_group"):
+            node_worker.evaluate(cfg, self.run, {}, self.s.root / "node")
+        self.assertEqual(status.read(self.run, 2327)["evaluate"]["state"], "failed")
+        self.assertEqual(status.evaluate_todo(self.run), [2327])
+
+
+if __name__ == "__main__":
+    unittest.main()
