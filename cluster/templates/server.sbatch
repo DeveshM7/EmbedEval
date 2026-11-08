@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -p {partition}
-#SBATCH -N 1
+#SBATCH -N {server_nodes}
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --gres={gres}
 #SBATCH --mem={mem}
@@ -8,9 +9,11 @@
 #SBATCH -J {name}
 #SBATCH -o {jobs}/server-%j.log
 #
-# The model server ({model}) of evaluate job {eval_job}, written by
-# cluster/submit.py at {stamp}. That job reaches it over SSH and cancels this
-# one when its workers are done. The account runs two jobs at once, so this
+# The model servers ({model}) of evaluate job {eval_job}, written by
+# cluster/submit.py at {stamp}: one per node, one node per node of that job,
+# so each of its nodes reaches a server of its own over SSH (as many agents
+# per server as on a GPU node). That job cancels this one when its workers
+# are done. The account runs two jobs at once, so this
 # job may start while {eval_job} still waits for a slot: it then serves for
 # at most {grace} minutes after the model answers, and ends, rather than
 # hold a slot that the evaluate job needs. ({eval_job} then finds no server
@@ -18,7 +21,13 @@
 
 set -u
 cd {source}
-bash scripts/serve_triage_model.sh {model} &
+# each server its own compile cache, a copy of the warm shared one if there is
+# one: servers compiling into one cache at once break each other on NFS
+srun -N {server_nodes} -n {server_nodes} --ntasks-per-node=1 /bin/bash -c \
+    'C="$EMBEDEVAL_VLLM_CACHE/node$SLURM_PROCID"; mkdir -p "$C"
+     [ -e {warm_cache}/.warm ] && cp -a {warm_cache}/. "$C"/ && rm -f "$C/.fill.lock"
+     EMBEDEVAL_VLLM_CACHE="$C" EMBEDEVAL_SCRATCH="$EMBEDEVAL_SCRATCH/node$SLURM_PROCID" \
+         exec bash scripts/serve_triage_model.sh {model}' &
 SERVER=$!
 READY=""
 while kill -0 "$SERVER" 2>/dev/null; do

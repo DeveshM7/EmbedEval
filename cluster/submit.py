@@ -198,6 +198,9 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
            "evaluate": cfg["evaluate"]["per_node"]}[mode]
     idle = args.idle if args.idle is not None else idle_nodes(partition)
     lowest, wanted, note = plan_nodes(cfg, math.ceil(n / per), idle)
+    if mode == "evaluate" and x86 and not args.server_job and \
+            cfg["evaluate"]["model"] in harness_paths.LOCAL_PROFILES:
+        lowest = wanted        # every node gets a server of its own (server.sbatch)
 
     stamp = f"{datetime.now():%Y%m%d-%H%M%S-%f}"   # two submissions may come within a second
     jobs = run / "jobs"
@@ -248,7 +251,8 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
         server_script.write_text((CLUSTER / "templates" / "server.sbatch").read_text().format(
             partition=s["partition"], cpus=s["cpus_per_node"], gres=s["gres"], mem=s["mem"],
             time_limit=s["time_limit"], name=f"{name}-server", jobs=jobs, model=cfg["evaluate"]["model"],
-            eval_job=job, stamp=stamp, source=source, grace=SERVER_GRACE_MIN))
+            eval_job=job, stamp=stamp, source=source, grace=SERVER_GRACE_MIN, server_nodes=wanted,
+            warm_cache=cfg["derived"]["vllm_cache"]))
         r = subprocess.run(["sbatch", "--parsable", "--export=" + server_export(cfg, run, stamp),
                             *([f"--dependency={deps[0]}"] if args.after else []), str(server_script)],
                            capture_output=True, text=True, cwd=source)

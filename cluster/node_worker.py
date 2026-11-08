@@ -892,6 +892,10 @@ def model_tunnel(job: str, minutes: float, port: int = 8000):
         r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T %N"], capture_output=True, text=True)
         state, _, node = r.stdout.strip().partition(" ")
         if state == "RUNNING" and node:
+            # a server job of several nodes: this worker's own one
+            hosts = subprocess.run(["scontrol", "show", "hostnames", node], capture_output=True,
+                                   text=True).stdout.split()
+            node = hosts[N % len(hosts)] if hosts else node
             break
         if not state:
             return None, f"server job {job} is not in the queue"

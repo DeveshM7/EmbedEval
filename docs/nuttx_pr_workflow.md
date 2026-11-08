@@ -188,8 +188,11 @@ python scripts/promote_instance.py --run-dir <runs>/R nuttx__nuttx-<k>-a<a> ...
 `--model` is any profile of `triage/models.json` (or a hosted model
 `harness/paths.py` knows); every model gets `evaluate.step_limit` and
 `evaluate.time_limit`, recorded with each result. A GPU node serves the model
-itself; an x86 evaluate job submits a model-server job on the GPU partition,
-reaches it over SSH, and cancels it when its workers are done (the account
+itself to its own agents; an x86 evaluate job submits a model-server job of
+as many GPU nodes as it has nodes (one server each, so every server has as
+many agents as on a GPU node: `--max-num-seqs 4`, two agents), each x86
+node reaches its own over SSH, and the evaluate job cancels the server job
+when its workers are done (the account
 runs two jobs at once, so the ARM64 evaluate job queues meanwhile). Each evaluation is labeled by
 model and limits (`qwen38-nvfp4-50steps-80min`): its status is
 `evaluate:<label>` and its trajectories, patches and grades are under

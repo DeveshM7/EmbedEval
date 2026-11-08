@@ -174,6 +174,8 @@ class Submit(unittest.TestCase):
         self.assertIn("squeue -h -j 1001", server_script)
         self.assertIn("#SBATCH --gres=gpu:1", server_script)
         self.assertIn("serve_triage_model.sh qwen38-nvfp4", server_script)
+        self.assertIn("#SBATCH -N 1\n", server_script)            # one server per evaluate node
+        self.assertIn('node$SLURM_PROCID', server_script)
         self.assertIn("server-of-$SLURM_JOB_ID", self.script("evaluate", "x86_64"))
         self.assertEqual((self.run / "jobs" / "server-of-1001").read_text().strip(), "1002")
         cfg = json.loads(next((self.run / "jobs").glob("config-*.json")).read_text())
@@ -208,14 +210,16 @@ class ServerWatchdog(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             (tmp / "bin").mkdir()
-            for name, body in (("squeue", squeue), ("curl", "exit 0"), ("sleep", "exit 0")):
+            for name, body in (("squeue", squeue), ("curl", "exit 0"), ("sleep", "exit 0"),
+                               ("srun", 'exec "${@: -3}"')):
                 (tmp / "bin" / name).write_text(f"#!/bin/bash\n{body}\n")
                 (tmp / "bin" / name).chmod(0o755)
             (tmp / "scripts").mkdir()
             (tmp / "scripts" / "serve_triage_model.sh").write_text("exec tail -f /dev/null\n")
             text = (CLUSTER / "templates" / "server.sbatch").read_text().format(
                 partition="p", cpus=1, gres="gpu:1", mem="1G", time_limit="1:00", name="n", jobs=tmp,
-                model="m", eval_job="42", stamp="s", source=tmp, grace=grace)
+                model="m", eval_job="42", stamp="s", source=tmp, grace=grace, server_nodes=1,
+                warm_cache=tmp / "warm")
             (tmp / "server.sh").write_text(text)
             r = subprocess.run(["bash", str(tmp / "server.sh")], capture_output=True, text=True, timeout=60,
                                env={**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}"})
