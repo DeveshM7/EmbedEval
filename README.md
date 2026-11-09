@@ -261,7 +261,15 @@ python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <model
 
 On Scholar, campaigns, revalidations and agent evaluations run through
 `cluster/` (triage on Spark, validation and agents on the x86 `cpu`
-partition): [docs/running_on_scholar.md, section 11](docs/running_on_scholar.md#11-mynewt-runs).
+partition, each agent node with a model server of its own on Spark):
+[docs/running_on_scholar.md, section 11](docs/running_on_scholar.md#11-mynewt-runs).
+Each evaluation is labeled by model and limits and keeps its own status and
+outputs; several models queue in one call, one after the other:
+
+```bash
+python cluster/submit.py evaluate --run <run> --model qwen38-nvfp4 nemotron qwen38
+```
+
 The [Mynewt triage document](docs/mynewt_triage.md) is the triage model's
 instructions. Validation records baseline diagnostics, then requires a failure
 attributable to the selected production change and a pass with that change

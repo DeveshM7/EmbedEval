@@ -682,7 +682,7 @@ YAML
 python cluster/prepare.py --name mynewt-full --all             # or --pr N..., or --since/--until
 python cluster/submit.py triage   --run mynewt-full            # the local model on Spark
 python cluster/submit.py validate --run mynewt-full --after <triage job>
-python cluster/submit.py evaluate --run mynewt-full --after <validate job>   # optional: an agent on each VALID one
+python cluster/submit.py evaluate --run mynewt-full --after <validate job>   # optional: an agent on each VALID one (--model M ...)
 
 # a revalidation of instances that exist (no triage)
 python cluster/prepare.py --name mynewt-reval --instances apptainer/instances/mynewt
@@ -709,11 +709,39 @@ python cluster/report.py --run mynewt-reval
   oracle can depend on which file a parallel build stops at; a runtime one on timing).
 - **evaluate** (`submit.py evaluate`) runs `harness/run.py` and `harness/evaluate_patches.py`
   on each VALID instance (`evaluate:` in the config: model, steps, minutes, agents per
-  node). With a local model it first submits the model server on `partition`
-  (`scripts/serve_triage_model.sh`; `--server-job J` uses a running one) and reaches it over
-  an SSH tunnel; the evaluate job ends that server when its workers are done (a
-  continuation job starts its own). The agent sees the repository at the base commit with the PR's tests, the problem statement and the test
-  names: not the fix's files, not the history, not the network.
+  node; `--model` takes a profile of `triage/models.json` in place of `evaluate.model`).
+  The agent sees the repository at the base commit with the PR's tests and the problem
+  statement: not the fix's files, not the history, not the network. Its patch crosses to the
+  grader byte for byte.
+  - *Labels.* Each evaluation is labeled by model and limits, `<model>-<steps>steps-<min>min`
+    (`qwen38-nvfp4-50steps-40min`): its status stage is `evaluate:<label>`, its trajectories,
+    patches and grades are under `<run>/outputs/<label>/`, and the report has one tally per
+    label. A second model, or the same one under other limits, runs on the same instances
+    without being seen as done and without overwriting anything. Results of the first,
+    unlabeled evaluate jobs count for the label of the limits they recorded (those that
+    recorded none are run again).
+  - *Model servers.* With a local model the job submits a model-server job on `partition`
+    (`scripts/serve_triage_model.sh`): as many GPU nodes as the evaluate job has nodes, one
+    server each, and each evaluate node tunnels (SSH) to the server of its own index, so
+    `per_node` agents share a server. The evaluate job is submitted held and released once
+    its server job exists; the server job ends when the evaluate job is gone, serves at most
+    30 minutes after the model answers while the evaluate job still has no slot (the account
+    runs two jobs at once), and is cancelled by the evaluate job when its workers are done.
+    `--server-job J` uses a running server instead and leaves it alone.
+  - *Resuming.* An instance cut short for a reason that is not the agent's (model server
+    gone, a build that hit its cap, no time left in the job, a patch `git apply` calls corrupt) has no outcome
+    for its label: submit the same command again and only those run. A job ends at
+    `slurm.time_limit` (at most 4 hours) and does not resubmit itself.
+  - *Several models.* `--model` takes several names and submits one evaluation per model,
+    each `afterany` the one before, so the pairs of agent job and server job never overlap
+    (the account runs 2 jobs at once and submits 50). The job ids are printed;
+    `--dry-run` shows the plan of every link without calling `sbatch`.
+
+    ```bash
+    python cluster/submit.py evaluate --run mynewt-full --model nemotron   # one model
+    python cluster/submit.py evaluate --run mynewt-full --after <validate job> \
+        --model qwen38-nvfp4 nemotron qwen38                               # three, one after the other
+    ```
 - **jobs** run a frozen copy of the code (`<run>/jobs/source-<time>/`, with
   `source-manifest.json` hashes), so editing the checkout never changes a queued job.
 - **promotion** stays manual: `scripts/promote_instance.py --run-dir <run> <id>`. It refuses a
