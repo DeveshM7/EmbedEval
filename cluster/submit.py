@@ -5,6 +5,7 @@ Submit a prepared run to Slurm.
     python cluster/submit.py pipeline --run 2025-09            # triage + validation
     python cluster/submit.py pipeline --run 2025-09 --dry-run  # show the plan, submit nothing
     python cluster/submit.py evaluate --run R --model qwen38-nvfp4   # Contiki-NG: agents on R's VALID instances
+    python cluster/submit.py evaluate --run R --model A B C --queue  # one evaluation per model, in a chain
 
 Reads the run's manifest and status, works out what is still to do (so the
 same command resumes a run that was cut short), and chooses the node count:
@@ -23,9 +24,11 @@ Contiki-NG evaluate runs an agent (harness/run.py) on each VALID instance of
 the run and grades its patch (harness/evaluate_patches.py), on the x86 build
 partition. The model is the job's parameter (--model, a profile of
 triage/models.json); the limits are the config's evaluate section, the same
-for every model. Unless --server-job names a running model server, the model
-is served by a job of its own on the GPU partition (scripts/serve_triage_model.sh,
-with a clean environment), which starts only once the evaluate job runs (so it
+for every model. --model may name several: one evaluation (an agents job and
+its server) is submitted per model, each after the previous pair has ended,
+so only one pair runs at a time (the account runs two jobs). Unless --server-job
+names a running model server, the model is served by a job of its own on the
+GPU partition (scripts/serve_triage_model.sh, with a clean environment), which starts only once the evaluate job runs (so it
 never holds a job slot while the agents wait for one); the evaluate job waits
 caps.server_start for it, reaches it through an SSH tunnel, and cancels it
 when its workers are done.
@@ -164,12 +167,52 @@ def main() -> None:
                    "statements under the current rules, replacing those that fail")
     p.add_argument("--queue", action="store_true", help="submit even when both job slots are busy: "
                    "the job waits in the queue for one")
-    p.add_argument("--model", help="evaluate: the model, a profile of triage/models.json")
+    p.add_argument("--model", nargs="+", help="evaluate: the model, a profile of triage/models.json; "
+                   "several models are evaluated one after another")
     p.add_argument("--server-job", metavar="JOB", help="evaluate: a running model-server job "
                    "(scripts/serve_triage_model.sh, serving --model) to use instead of submitting one")
     p.add_argument("--idle", type=int, help="assume this many idle nodes (testing)")
     args = p.parse_args()
+    models = args.model or [None]
+    if len(set(models)) != len(models):
+        sys.exit("--model names a model twice")
+    if args.mode == "evaluate":
+        bad = [m for m in models if m not in local_models()]
+        if bad:      # hosted models are paid APIs: not from a cluster job
+            sys.exit(f"--model must be a profile of triage/models.json, not {', '.join(map(str, bad))}: "
+                     f"{', '.join(local_models())}")
+    if args.model and args.mode != "evaluate":
+        sys.exit("--model and --server-job go with evaluate")
+    if len(models) > 1 and args.server_job:
+        sys.exit("--server-job serves one model")
+    if len(models) == 1:
+        args.model = models[0]
+        submit(args)
+        return
+    # One evaluation per model, each after the previous pair (agents job and
+    # its server) so pairs never interleave. The first model's job is
+    # submitted as given; a model with nothing left to do is skipped.
+    done, after = [], args.after
+    for model in models:
+        one = argparse.Namespace(**{**vars(args), "model": model, "after": after})
+        try:
+            job = submit(one, chain=True, skip_empty=not args.after)
+        except SystemExit:
+            for m, j in done:
+                print(f"already submitted: {m}: evaluate job {j['job']}, model server job {j['server'] or '-'}")
+            raise
+        if job:
+            done.append((model, job))
+            after = f"{job['job']}:{job['server']}" if job["server"] else job["job"]
+    for model, job in done:
+        print(f"{model}: evaluate job {job['job']}, model server job {job['server'] or '-'}")
 
+
+def submit(args, chain: bool = False, skip_empty: bool = False) -> dict | None:
+    """Submit one job for `args`; returns its job ids ({"job", "server"}; names
+    in angle brackets under --dry-run), or None when nothing was submitted.
+    chain: one of several evaluations: no forecast (sbatch is not called under
+    --dry-run), and `skip_empty` skips it when its model has nothing left."""
     cfg = cluster_config.load_or_exit(args.config)
     run = Path(args.run) if "/" in args.run else Path(cfg["derived"]["runs"]) / args.run
     if not (run / "manifest.json").exists():
@@ -183,9 +226,6 @@ def main() -> None:
         sys.exit("Contiki-NG requires separate triage, observe, validate or statement jobs")
     if args.mode == "evaluate" and project != "contiki-ng":
         sys.exit("evaluate jobs are Contiki-NG's")
-    if args.mode == "evaluate" and args.model not in local_models():
-        # hosted models are paid APIs: not from a cluster job
-        sys.exit(f"--model must be a profile of triage/models.json: {', '.join(local_models())}")
     if (args.model or args.server_job) and args.mode != "evaluate":
         sys.exit("--model and --server-job go with evaluate")
     if project == "contiki-ng" and args.mode in ("observe", "validate", "evaluate") and not cfg["slurm"]["build_partition"]:
@@ -201,8 +241,10 @@ def main() -> None:
     # would share nodes/node<N>/. (Within a job, the queue balances the work.)
     # A job left COMPLETING has no workers (a dead node can hold it there for
     # hours), so it does not count.
+    label = (status.eval_label(args.model, cfg["evaluate"]["step_limit"], cfg["evaluate"]["time_limit"])
+             if args.mode == "evaluate" else None)
     job_name = (f"embedeval-{run.name}" if project == "zephyr" else
-                f"embedeval-contiki-{run.name}-{args.mode}")
+                f"embedeval-contiki-{run.name}-{args.mode}" + (f"-{label}" if label else ""))
     if project == "zephyr":
         q = subprocess.run(["squeue", "-h", "--me", "-n", job_name, "-o", "%i %T"],
                            capture_output=True, text=True)
@@ -211,8 +253,9 @@ def main() -> None:
         q = subprocess.run(["squeue", "-h", "--me", "-o", "%i %T %.200j"],
                            capture_output=True, text=True)
         live = [l for l in q.stdout.splitlines()
-                if l.split()[-1] in {f"embedeval-contiki-{run.name}-{m}"
-                                     for m in ("triage", "observe", "validate", "statement", "evaluate")}
+                if (l.split()[-1] in {f"embedeval-contiki-{run.name}-{m}"
+                                      for m in ("triage", "observe", "validate", "statement", "evaluate")}
+                    or l.split()[-1].startswith(f"embedeval-contiki-{run.name}-evaluate-"))
                 and " COMPLETING " not in f" {l} "]
         running = [l for l in q.stdout.splitlines() if len(l.split()) >= 2 and l.split()[1] in ("RUNNING", "CONFIGURING")]
         if len(running) >= 2 and not (args.after or args.queue):   # a chained job waits for its predecessor
@@ -229,17 +272,15 @@ def main() -> None:
         sys.exit("--recheck applies to statement jobs")
     cfg["statement_recheck"] = args.recheck
     statement_left = status.statement_todo(run, args.recheck) if project == "contiki-ng" else []
-    label = (status.eval_label(args.model, cfg["evaluate"]["step_limit"], cfg["evaluate"]["time_limit"])
-             if args.mode == "evaluate" else None)
     evaluate_left = status.evaluate_todo(run, label) if args.mode == "evaluate" else []
     counts = {"triage": len(triage_left), "observe": len(observe_left),
               "validate": len(validate_left), "statement": len(statement_left),
               "evaluate": len(evaluate_left)}
     if (not triage_left and not validate_left) if args.mode == "pipeline" else not counts[args.mode]:
-        if not args.after:
-            print(f"nothing left to {args.mode} in {run.name}. "
+        if not args.after or skip_empty:
+            print(f"nothing left to {args.mode}{f' for {label}' if label else ''} in {run.name}. "
                   f"Report: python cluster/report.py --run {run.name}")
-            return
+            return None
         # Chained behind the job that creates this work: size it by the run.
         counts[args.mode] = sum(1 for e in status.manifest(run)["prs"] if e["stage"] in ("to triage", "to validate"))
         print(f"  --after {args.after}: no {args.mode} work yet; sized for the run's "
@@ -307,12 +348,13 @@ def main() -> None:
     print(f"  job script: {script}")
     if source_manifest:
         print(f"  source: {source_root} (sha256 {source_manifest['sha256']})")
-    forecast = subprocess.run(["sbatch", "--test-only", str(script)], capture_output=True, text=True)
-    lines = (forecast.stderr or forecast.stdout).strip().splitlines()
-    print(f"  forecast: {lines[-1] if lines else '?'}")
+    if not chain:
+        forecast = subprocess.run(["sbatch", "--test-only", str(script)], capture_output=True, text=True)
+        lines = (forecast.stderr or forecast.stdout).strip().splitlines()
+        print(f"  forecast: {lines[-1] if lines else '?'}")
     if args.dry_run:
-        print("  --dry-run: not submitted")
-        return
+        print("  --dry-run: not submitted" + (f"; would start after {args.after}" if args.after else ""))
+        return {"job": f"<{label} job>", "server": f"<{label} server>" if own_server else None}
     r = subprocess.run(["sbatch", "--parsable", *(["--hold"] if own_server else []),
                         *([f"--dependency={','.join(deps)}"] if deps else []), str(script)],
                        capture_output=True, text=True)
@@ -321,7 +363,7 @@ def main() -> None:
     job = r.stdout.strip().split(";")[0]
     if own_server:
         r = subprocess.run(["sbatch", "--parsable", "-p", s["partition"],
-                            "-J", f"embedeval-contiki-{run.name}-server", f"--gres={s['gres']}",
+                            "-J", f"embedeval-contiki-{run.name}-server-{label}", f"--gres={s['gres']}",
                             f"--mem={s['mem']}", f"--cpus-per-task={s['cpus_per_node']}",
                             "-t", s["time_limit"], "--chdir", str(source_root),
                             f"--dependency=after:{job}",       # once the evaluate job runs
@@ -344,11 +386,12 @@ def main() -> None:
                              "source": str(source_root) if source_manifest else None,
                              "source_sha256": source_manifest["sha256"] if source_manifest else None,
                              "after": args.after,
-                             **({"model": args.model, "server": cfg.get("evaluate_server_job"),
+                             **({"model": args.model, "label": label, "server": cfg.get("evaluate_server_job"),
                                  "evaluate": len(evaluate_left)} if args.mode == "evaluate" else {}),
                              "triage": len(triage_left),
                              "validate": len(validate_left)}) + "\n")
     print(f"  submitted: job {job}; log {jobs}/job-{job}.out")
+    return {"job": job, "server": cfg.get("evaluate_server_job") if own_server else None}
 
 
 if __name__ == "__main__":

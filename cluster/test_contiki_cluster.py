@@ -1,6 +1,7 @@
 """Local checks for project isolation and Contiki's split Slurm phases."""
 
 import json
+import re
 import contextlib
 import io
 import sys
@@ -479,6 +480,93 @@ class EvaluateTest(unittest.TestCase):
             self.assertIn("#SBATCH -p cpu", script)
             frozen = json.loads(next(run.glob("jobs/config-*.json")).read_text())
             self.assertEqual((frozen["evaluate_model"], frozen["evaluate_server_job"]), ("qwen38-nvfp4", "901"))
+
+    def submit_models(self, cfg_file, models, extra=(), squeue="", done=()):
+        """submit.py evaluate --model *models against a fake scheduler: the
+        scheduler calls made, and what was printed."""
+        calls, ids = [], iter(str(n) for n in range(900, 999))
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            out = (next(ids) + ";cluster\n" if cmd[0] == "sbatch" and "--parsable" in cmd
+                   else squeue if cmd[0] == "squeue" else "")
+            return SimpleNamespace(returncode=0, stdout=out, stderr="")
+        shown = io.StringIO()
+        with (patch.object(sys, "argv", ["submit.py", "evaluate", "--run", "reval", "--config", str(cfg_file),
+                                         "--model", *models, "--idle", "1", *extra]),
+              patch.dict(submit.os.environ, {"HOME": "/home/u", "USER": "u"}),
+              patch.object(submit.subprocess, "run", side_effect=fake),
+              contextlib.redirect_stdout(shown)):
+            submit.main()
+        return calls, shown.getvalue()
+
+    def test_several_models_are_chained_so_that_pairs_never_interleave(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            # two jobs running and one of this run's evaluations live: a lone job
+            # would be refused, a chained one waits for its predecessor
+            squeue = ("10 RUNNING embedeval-contiki-reval-evaluate-old-100steps-60min\n"
+                      "11 RUNNING embedeval-contiki-reval-server-old-100steps-60min\n")
+            calls, out = self.submit_models(cfg_file, ["qwen38", "qwen38-nvfp4", "nemotron"],
+                                            ["--after", "11"], squeue)
+            sbatch = [c for c in calls if c[0] == "sbatch" and "--parsable" in c]
+            agents, servers = sbatch[0::2], sbatch[1::2]
+            self.assertEqual(len(sbatch), 6)
+            deps = [next(a for a in c if a.startswith("--dependency=")) for c in agents]
+            self.assertEqual(deps, ["--dependency=afterany:11",
+                                    "--dependency=afterany:900:901",    # agents job and server of the first
+                                    "--dependency=afterany:902:903"])
+            self.assertEqual([c[-1] for c in servers], ["qwen38", "qwen38-nvfp4", "nemotron"])
+            self.assertEqual([next(a for a in c if a.startswith("--dependency=")) for c in servers],
+                             ["--dependency=after:900", "--dependency=after:902", "--dependency=after:904"])
+            names = [re.search(r"#SBATCH -J (\S+)", Path(c[-1]).read_text()).group(1) for c in agents]
+            self.assertEqual(names, [f"embedeval-contiki-reval-evaluate-{m}-100steps-60min"
+                                     for m in ("qwen38", "qwen38-nvfp4", "nemotron")])
+            self.assertEqual([c[c.index("-J") + 1] for c in servers],
+                             [f"embedeval-contiki-reval-server-{m}-100steps-60min"
+                              for m in ("qwen38", "qwen38-nvfp4", "nemotron")])
+            self.assertEqual([c[0:2] for c in calls if c[0] == "scontrol"], [["scontrol", "release"]] * 3)
+            for line in ("qwen38: evaluate job 900, model server job 901",
+                         "qwen38-nvfp4: evaluate job 902, model server job 903",
+                         "nemotron: evaluate job 904, model server job 905"):
+                self.assertIn(line, out)
+
+    def test_a_chain_is_not_refused_for_busy_slots_when_queued_but_a_lone_job_is(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            busy = "10 RUNNING other\n11 RUNNING other\n"
+            with self.assertRaises(SystemExit):
+                self.submit_models(cfg_file, ["qwen38", "nemotron"], squeue=busy)
+            calls, _ = self.submit_models(cfg_file, ["qwen38", "nemotron"], ["--queue"], busy)
+            self.assertEqual(sum(c[0] == "sbatch" and "--parsable" in c for c in calls), 4)
+
+    def test_a_model_with_nothing_left_is_skipped_and_the_chain_goes_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            status.write_stage(run, 1, "evaluate:qwen38-100steps-60min",
+                               {"state": "done", "grade": "pass", "timed_out": False, "server_queued": 0.0})
+            calls, out = self.submit_models(cfg_file, ["qwen38", "nemotron", "qwen38-nvfp4"])
+            agents = [c for c in calls if c[0] == "sbatch" and "--parsable" in c][0::2]
+            self.assertIn("nothing left to evaluate for qwen38-100steps-60min", out)
+            self.assertEqual([next((a for a in c if a.startswith("--dependency=")), None) for c in agents],
+                             [None, "--dependency=afterany:900:901"])
+
+    def test_dry_run_plans_the_whole_chain_without_calling_sbatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            calls, out = self.submit_models(cfg_file, ["qwen38", "qwen38-nvfp4", "nemotron"], ["--dry-run"])
+            self.assertFalse([c for c in calls if c[0] in ("sbatch", "scontrol", "scancel")])
+            self.assertEqual(out.count("--dry-run: not submitted"), 3)
+            self.assertIn("would start after <qwen38-100steps-60min job>:<qwen38-100steps-60min server>", out)
+            self.assertEqual(len(list(run.glob("jobs/evaluate-*.sbatch"))), 3)
+            self.assertFalse((run / "jobs" / "submitted.jsonl").exists())
+
+    def test_a_model_twice_or_a_hosted_one_in_a_chain_submits_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            for models in (["qwen38", "qwen38"], ["qwen38", "gpt-5.4"]):
+                with self.assertRaises(SystemExit):
+                    self.submit_models(cfg_file, models)
+            self.assertEqual(list(run.glob("jobs/*")), [])
 
     def test_hosted_models_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

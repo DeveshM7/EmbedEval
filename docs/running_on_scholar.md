@@ -761,6 +761,23 @@ What differs from Zephyr:
   (`evaluate:<model>`, outputs under `<run>/outputs/contiki-ng/`) count for the
   label of the limits recorded with them. `report.py` counts time-outs apart
   from failed patches. `--queue` submits even when both job slots are busy.
+  Several models are queued in one command, one evaluation (agents job and its
+  server) per model, each submitted to start after the previous pair has ended
+  (`afterany:<agents job>:<server job>`), so with the account's two job slots
+  pairs never interleave and each job is named after its label:
+
+  ```
+  python cluster/submit.py evaluate --run R --model qwen38 qwen38-nvfp4 nemotron --queue
+  python cluster/submit.py evaluate --run R --model qwen38 nemotron --dry-run   # the plan, nothing submitted
+  ```
+
+  The job ids are printed. A model with nothing left to evaluate is skipped
+  and the chain goes on; `--after JOB` puts the whole chain behind a job, and
+  `--queue` lets the first pair wait when both slots are busy. A job that
+  reaches its limit is not continued by itself: the same command, run again,
+  submits only what is still to do (results already in status are kept, and a
+  chain re-submitted after a failure skips the finished models). Submit at most
+  25 models at once (50 submitted jobs).
   The server must hold `evaluate.per_node` requests of the full
   `model.max_model_len` at once: the worker reads vLLM's "Maximum concurrency"
   from the server's log and runs no more agents than that (none below 1).
