@@ -295,7 +295,8 @@ class Prompt(unittest.TestCase):
 
     def test_the_writer_prompt_does_not_suggest_naming_tests(self):
         self.assertNotIn("{f2p}", ns.WRITE_PROMPT)
-        self.assertNotIn("test programs", ns.WRITE_PROMPT)
+        self.assertIn("Describe the kernel's behavior, not the test.", ns.WRITE_PROMPT)
+        self.assertIn("Do not mention ostest", ns.WRITE_PROMPT)
 
 
 class PatchCapture(unittest.TestCase):

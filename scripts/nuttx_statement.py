@@ -45,10 +45,17 @@ repositories at their base commits (with the apps test change below applied);
 it must find the defect in the kernel and fix it. The upstream fix and the PR
 texts below are for you alone, so you describe the bug correctly.
 
-Write it as an issue report would: what a caller observes (a crash, an
-assertion, a hang, a wrong result, a missing interface the test needs), the
-conditions that trigger it, and the required behavior. You may name the
-interfaces and configuration options the test change uses.
+Write it as an issue report against the kernel would: what a caller of the
+kernel observes (a crash, an assertion, a hang, a wrong result, a missing
+interface), the conditions that trigger it, and the required behavior. You may
+name the kernel interfaces and configuration options the test change uses.
+
+Describe the kernel's behavior, not the test. Do not mention ostest, the test
+change, test programs, test files, test functions or tasks, or lines the test
+prints, and do not say that a test fails or must pass: an application calling
+the same interfaces would see the same problem, so describe it as that
+application would. When the test needs an interface the kernel lacks, say which
+interface is missing and how it must behave.
 
 Never say how the code goes wrong inside -- which check is missing, which
 lock, counter or field is wrong, where in the code the defect is -- or what
