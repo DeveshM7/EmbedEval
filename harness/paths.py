@@ -50,10 +50,13 @@ MODEL_DIRS: dict[str, str] = {
     "openai/gpt-5.4": "gpt-5.4",
     "together_ai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": "Qwen-3-coder",
     "together_ai/deepseek-ai/DeepSeek-V3": "DeepSeek-V3",
-    # Local open-weights model served by scripts/serve_triage_model.sh (vLLM,
-    # OpenAI-compatible); see LOCAL_MODELS in harness/run.py.
-    "openai/qwen38-nvfp4": "qwen38-nvfp4",
 }
+# Local open-weights models: every profile of triage/models.json, served by
+# scripts/serve_triage_model.sh (vLLM, OpenAI-compatible) as openai/<profile>;
+# see LOCAL_MODELS in harness/run.py. Adding a model is adding its profile.
+LOCAL_PROFILES = [name for name in json.loads((REPO_ROOT / "triage" / "models.json").read_text())
+                  if not name.startswith("_")]
+MODEL_DIRS.update({f"openai/{name}": name for name in LOCAL_PROFILES})
 
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.
 MODEL_ALIASES: dict[str, str] = {short: full for full, short in MODEL_DIRS.items()}

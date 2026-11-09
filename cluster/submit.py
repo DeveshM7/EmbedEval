@@ -23,6 +23,7 @@ Mynewt runs submit one phase per job instead, each on the nodes it needs:
     python cluster/submit.py triage   --run R             # GPU partition, the model
     python cluster/submit.py validate --run R --after J   # slurm.build_partition (x86)
     python cluster/submit.py evaluate --run R --after J   # an agent on each VALID instance
+    python cluster/submit.py evaluate --run R --model M   # M: a triage/models.json profile
 
 --after J starts the job once job J has ended (a chain needs no slot until
 then). evaluate with a local model (evaluate.model in triage/models.json)
@@ -57,6 +58,8 @@ VALIDATE_MIN = 30
 sys.path.insert(0, str(CLUSTER))
 import config as cluster_config  # noqa: E402
 import status  # noqa: E402
+sys.path.insert(0, str(REPO / "harness"))
+import paths as harness_paths  # noqa: E402
 
 
 def minutes(hhmmss: str) -> int:
@@ -138,6 +141,13 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     if mode == "pipeline":
         sys.exit("Mynewt runs submit each phase as its own job: triage, then validate "
                  "(and evaluate), each with --after the one before")
+    if mode == "evaluate":
+        if args.model:
+            cfg["evaluate"]["model"] = args.model
+        try:
+            harness_paths.resolve_model(cfg["evaluate"]["model"])
+        except harness_paths.UnknownModelError as e:
+            sys.exit(str(e))
     model_phase = mode == "triage"
     partition = s["partition"] if model_phase else s["build_partition"]
     if not partition:
@@ -150,8 +160,8 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     if live and not args.after:
         sys.exit(f"run {run.name} already has a {mode} job ({'; '.join(live)}); wait for it, "
                  "scancel it, or chain this one with --after")
-    todo = {"triage": status.triage_todo, "validate": status.validate_todo,
-            "evaluate": status.evaluate_todo}[mode](run)
+    todo = (status.evaluate_todo(run, status.eval_label(cfg["evaluate"])) if mode == "evaluate" else
+            {"triage": status.triage_todo, "validate": status.validate_todo}[mode](run))
     if mode == "validate" and status.triage_todo(run) and not args.after:
         sys.exit(f"triage is not complete ({len(status.triage_todo(run))} PRs left): submit "
                  "validate --after the triage job")
@@ -174,7 +184,7 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     frozen_src = freeze_source(REPO, source)
     deps = [f"afterany:{args.after}"] if args.after else []
     if mode == "evaluate":
-        local = cfg["evaluate"]["model"] in json.loads((REPO / "triage" / "models.json").read_text())
+        local = cfg["evaluate"]["model"] in harness_paths.LOCAL_PROFILES
         server = args.server_job
         if local and not server and not args.dry_run:
             r = subprocess.run(["sbatch", "--parsable", "-p", s["partition"], "-J", f"{name}-server",
@@ -223,6 +233,7 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
         fh.write(json.dumps({"job": job, "script": script.name, "submitted": stamp, "mode": mode,
                              "nodes": f"{lowest}-{wanted}", "after": args.after,
                              "server": cfg.get("evaluate_server_job"), "todo": len(todo),
+                             "model": cfg["evaluate"]["model"] if mode == "evaluate" else None,
                              "source_sha256": frozen_src["sha256"]}) + "\n")
     print(f"  submitted: job {job}; log {jobs}/job-{job}.out")
 
@@ -236,6 +247,8 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="write the job script, do not submit")
     p.add_argument("--idle", type=int, help="assume this many idle nodes (testing)")
     p.add_argument("--after", metavar="JOB", help="Mynewt: start once this job has ended")
+    p.add_argument("--model", help="Mynewt evaluate: the model (a triage/models.json profile, or "
+                   "a hosted model harness/paths.py knows); default evaluate.model")
     p.add_argument("--server-job", metavar="JOB", help="Mynewt evaluate: a running model-server "
                    "job (scripts/serve_triage_model.sh) to use instead of submitting one")
     args = p.parse_args()

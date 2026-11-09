@@ -130,7 +130,7 @@ PROVIDER_KEYS = {
 # sampling settings come from the same profile triage uses (triage/models.json).
 # EMBEDEVAL_LOCAL_API_BASE overrides the address; the server listens on
 # 127.0.0.1, so the harness must run on the server's node.
-LOCAL_MODELS = {"openai/qwen38-nvfp4": "qwen38-nvfp4"}
+LOCAL_MODELS = {f"openai/{name}": name for name in paths.LOCAL_PROFILES}
 REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
 
 

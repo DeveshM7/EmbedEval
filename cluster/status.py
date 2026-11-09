@@ -13,8 +13,10 @@ reject, with "kind", "confidence" and "failure_mode"; validation adds
 (prepare.py --instances: a revalidation) has stage "to validate" and no
 triage at all.
 
-The evaluate phase (Mynewt) adds "evaluate": {"state": "done", "grade":
-"pass" | "fail" | ..., "model", "steps", "error"}, or "failed" with a note.
+The evaluate phase (Mynewt) adds "evaluate:<label>" (eval_label: model and
+limits), {"state": "done", "grade": "pass" | "fail" | ..., "model", "limits",
+"steps", "error"}, or "failed" with a note. Jobs before labels wrote the
+stage "evaluate".
 
 A stage appears only once it has finished, one way or another:
 
@@ -119,19 +121,49 @@ def validate_todo(run: Path) -> list[int]:
     return [pr for pr in accepted(run) if validate_needed(run, pr)]
 
 
-def evaluate_needed(run: Path, pr: int) -> bool:
-    """No agent outcome yet, or one cut short (a cap, no time left, the
-    model server): the next evaluate job runs it again."""
-    e = read(run, pr).get("evaluate")
-    return not e or (e["state"] == "failed" and any(
+def eval_label(ev_cfg: dict) -> str:
+    """One evaluation: a model under its limits (config "evaluate"), e.g.
+    qwen38-nvfp4-50steps-40min. Each label has its own status stage
+    ("evaluate:<label>") and outputs (<run>/outputs/<label>/), so models and
+    limits are compared on the same instances without overwriting each other."""
+    return f"{ev_cfg['model']}-{ev_cfg['step_limit']}steps-{ev_cfg['time_limit']:g}min"
+
+
+def evaluation(st: dict, label: str) -> dict:
+    """A PR's outcome for `label`; also the unlabeled "evaluate" stage of the
+    first evaluate jobs, when its model and limits are this label's. (That
+    stage records its limits; one without them belongs to no label.)"""
+    ev = st.get(f"evaluate:{label}")
+    old = st.get("evaluate")
+    if ev is None and old and old.get("limits"):
+        lim = old["limits"]
+        if eval_label({"model": old.get("model"), "step_limit": lim["steps"],
+                       "time_limit": lim["minutes"]}) == label:
+            return old
+    return ev or {}
+
+
+def harness_fault(ev: dict) -> bool:
+    """A grade the harness, not the agent, caused: git apply calling the
+    git-generated diff corrupt (patch capture before the byte-exact capture
+    read the diff as text, and a lone carriage return broke it)."""
+    return ev.get("state") == "done" and "corrupt patch" in (ev.get("error") or "")
+
+
+def evaluate_needed(run: Path, pr: int, label: str) -> bool:
+    """No outcome for evaluation `label` yet, or one cut short for a reason
+    that is not the agent's (a cap, no time left, the model server, a
+    harness_fault): the next evaluate job runs it again."""
+    e = evaluation(read(run, pr), label)
+    return not e or harness_fault(e) or (e["state"] == "failed" and any(
         x in e.get("note", "") for x in ("cap", "no time left", "server")))
 
 
-def evaluate_todo(run: Path) -> list[int]:
-    """VALID instances with no agent outcome yet (Mynewt evaluate phase)."""
+def evaluate_todo(run: Path, label: str) -> list[int]:
+    """VALID instances still to evaluate under `label` (Mynewt evaluate phase)."""
     return [e["pr"] for e in manifest(run)["prs"]
             if (read(run, e["pr"]).get("validate") or {}).get("outcome") == "VALID"
-            and evaluate_needed(run, e["pr"])]
+            and evaluate_needed(run, e["pr"], label)]
 
 
 def entry(run: Path, pr: int) -> dict:

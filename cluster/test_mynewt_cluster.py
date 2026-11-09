@@ -25,6 +25,14 @@ import status  # noqa: E402
 import submit  # noqa: E402
 
 
+LABEL = "qwen38-nvfp4-50steps-40min"
+
+
+def valid_run(tmp: Path) -> Path:
+    return write_run(tmp / "r", [{"pr": 1, "stage": "to validate", "instance": "mynewt__mynewt-1"}],
+                     {1: {"validate": {"state": "done", "outcome": "VALID", "instance": "mynewt__mynewt-1"}}})
+
+
 def write_run(run: Path, prs: list[dict], states: dict | None = None) -> Path:
     run.mkdir(parents=True, exist_ok=True)
     (run / "manifest.json").write_text(json.dumps({
@@ -66,11 +74,49 @@ class StatusTest(unittest.TestCase):
             self.assertEqual(status.validate_todo(run), [1, 2])
             status.write_stage(run, 1, "validate", {"state": "done", "outcome": "VALID", "instance": "mynewt__mynewt-1"})
             status.write_stage(run, 2, "validate", {"state": "done", "outcome": "INVALID: x"})
-            self.assertEqual(status.evaluate_todo(run), [1])
-            status.write_stage(run, 1, "evaluate", {"state": "failed", "note": "build hit the cap"})
-            self.assertEqual(status.evaluate_todo(run), [1])
-            status.write_stage(run, 1, "evaluate", {"state": "done", "grade": "fail"})
-            self.assertEqual(status.evaluate_todo(run), [])
+            self.assertEqual(status.evaluate_todo(run, LABEL), [1])
+            status.write_stage(run, 1, f"evaluate:{LABEL}", {"state": "failed", "note": "build hit the cap"})
+            self.assertEqual(status.evaluate_todo(run, LABEL), [1])
+            status.write_stage(run, 1, f"evaluate:{LABEL}", {"state": "done", "grade": "fail"})
+            self.assertEqual(status.evaluate_todo(run, LABEL), [])
+
+    def test_evaluations_are_kept_apart_by_model_and_limits(self):
+        cfg = {"model": "qwen38-nvfp4", "step_limit": 50, "time_limit": 40}
+        self.assertEqual(status.eval_label(cfg), LABEL)
+        self.assertEqual(status.eval_label({**cfg, "model": "nemotron", "time_limit": 80.5}),
+                         "nemotron-50steps-80.5min")
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            status.write_stage(run, 1, f"evaluate:{LABEL}", {"state": "done", "grade": "pass"})
+            # a second model, or the same one under other limits, has not been run
+            self.assertEqual(status.evaluate_todo(run, LABEL), [])
+            self.assertEqual(status.evaluate_todo(run, "nemotron-50steps-40min"), [1])
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4-50steps-80min"), [1])
+
+    def test_unlabeled_results_count_for_their_own_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            status.write_stage(run, 1, "evaluate", {"state": "done", "grade": "pass", "model": "qwen38-nvfp4",
+                                                    "limits": {"steps": 50, "minutes": 40}})
+            self.assertEqual(status.evaluate_todo(run, LABEL), [])
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4-50steps-80min"), [1])
+            self.assertEqual(status.evaluate_todo(run, "nemotron-50steps-40min"), [1])
+            # one that recorded no limits belongs to no label
+            status.write_stage(run, 1, "evaluate", {"state": "done", "grade": "pass", "model": "qwen38-nvfp4"})
+            self.assertEqual(status.evaluate_todo(run, LABEL), [1])
+
+    def test_cut_short_evaluations_run_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            for info in ({"state": "failed", "note": "model server gone during the run"},
+                         {"state": "failed", "note": "build hit the cap"},
+                         {"state": "failed", "note": "no time left"},
+                         {"state": "done", "grade": "fail", "error": "git apply failed: error: corrupt patch at line 9"}):
+                status.write_stage(run, 1, f"evaluate:{LABEL}", info)
+                self.assertEqual(status.evaluate_todo(run, LABEL), [1], info)
+            status.write_stage(run, 1, f"evaluate:{LABEL}", {"state": "done", "grade": "fail",
+                                                            "error": "git apply failed: patch does not apply"})
+            self.assertEqual(status.evaluate_todo(run, LABEL), [])
 
     def test_runs_of_other_projects_do_not_hold_prs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,12 +138,17 @@ class ReportTest(unittest.TestCase):
             run = write_run(Path(tmp) / "r", [{"pr": 1, "stage": "to validate", "instance": "mynewt__mynewt-1"}],
                             {1: {"validate": {"state": "done", "outcome": "VALID", "instance": "mynewt__mynewt-1",
                                               "failure_mode": "runtime"},
-                                 "evaluate": {"state": "done", "grade": "pass"}}})
+                                 f"evaluate:{LABEL}": {"state": "done", "grade": "pass"},
+                                 "evaluate:nemotron-50steps-40min": {"state": "done", "grade": "fail"},
+                                 # an unlabeled one is counted for its own limits
+                                 "evaluate": {"state": "done", "grade": "fail", "model": "qwen38-nvfp4",
+                                              "limits": {"steps": 50, "minutes": 80}}}})
             rep = report.build(run)
             self.assertEqual(rep["project"], "mynewt")
-            self.assertEqual(rep["agents"], {"pass": 1})
+            self.assertEqual(rep["agents"], {LABEL: {"pass": 1}, "nemotron-50steps-40min": {"fail": 1},
+                                             "qwen38-nvfp4-50steps-80min": {"fail": 1}})
             self.assertEqual(rep["rows"][0]["pair"], "mynewt__mynewt-1 runtime")
-            self.assertIn("Agent grades", report.markdown(rep))
+            self.assertIn(f"Agent grades, {LABEL}:** pass 1", report.markdown(rep))
 
     def test_the_ledger_keeps_projects_apart(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -224,8 +275,37 @@ class EvaluateTest(unittest.TestCase):
                     patch.object(node_worker, "kill_group"), patch.object(node_worker, "sweep"), \
                     patch.object(node_worker.report, "to_ledger"):
                 node_worker.evaluate(cfg, run, {"EMBEDEVAL_WORK": str(run / "work")}, 120)
-            self.assertEqual(status.read(run, 1)["evaluate"]["note"], "model server gone during the run")
-            self.assertEqual(status.evaluate_todo(run), [1])
+            label = "m-1steps-1min"
+            self.assertEqual(status.read(run, 1)[f"evaluate:{label}"]["note"], "model server gone during the run")
+            self.assertEqual(status.evaluate_todo(run, label), [1])
+            self.assertEqual(status.evaluate_todo(run, "n-1steps-1min"), [1])
+
+    def test_an_evaluation_keeps_its_outputs_and_status_to_its_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            cfg = {"evaluate": {"model": "nemotron", "step_limit": 30, "time_limit": 25, "per_node": 1},
+                   "caps": {"build": 1, "server_start": 1}}
+            label = "nemotron-30steps-25min"
+            seen = []
+
+            def step(cmd, logfile, minutes, env):
+                seen.append((Path(cmd[1]).name, env.get("EMBEDEVAL_OUTPUTS_DIR")))
+                if cmd[1].endswith("evaluate_patches.py"):
+                    out = Path(cmd[cmd.index("--output") + 1])
+                    out.write_text(json.dumps({"results": [{"grade": "pass"}]}))
+                return 0
+            with patch.object(node_worker, "LOGS", run / "logs", create=True), \
+                    patch.object(node_worker, "ME", "t-node0", create=True), \
+                    patch.object(node_worker, "step", side_effect=step), \
+                    patch.object(node_worker, "sweep"), patch.object(node_worker.report, "to_ledger"):
+                node_worker.evaluate(cfg, run, {"EMBEDEVAL_WORK": str(run / "work")}, 120)
+            outputs = str(run / "outputs" / label)
+            self.assertIn(("run.py", outputs), seen)
+            self.assertTrue((run / "outputs" / label / "grades" / "mynewt__mynewt-1.json").exists())
+            ev = status.read(run, 1)[f"evaluate:{label}"]
+            self.assertEqual((ev["state"], ev["grade"], ev["limits"]), ("done", "pass", {"steps": 30, "minutes": 25}))
+            self.assertNotIn("evaluate", status.read(run, 1))
+            self.assertEqual(status.evaluate_todo(run, label), [])
 
 
 class SubmitTest(unittest.TestCase):
@@ -244,7 +324,7 @@ class SubmitTest(unittest.TestCase):
             cfg["slurm"].update(build_partition="cpu", partition="spark-interactive")
             q = SimpleNamespace(stdout="", returncode=0)
             for mode, part in (("validate", "cpu"),):
-                args = SimpleNamespace(mode=mode, after=None, dry_run=True, idle=2, server_job=None)
+                args = SimpleNamespace(mode=mode, after=None, dry_run=True, idle=2, server_job=None, model=None)
                 with patch.object(submit.subprocess, "run", return_value=q), \
                         contextlib.redirect_stdout(io.StringIO()):
                     submit.submit_phase(args, cfg, run)
@@ -254,6 +334,23 @@ class SubmitTest(unittest.TestCase):
                 self.assertIn("--phase validate", script)
             with self.assertRaises(SystemExit):
                 submit.submit_phase(SimpleNamespace(mode="pipeline", after=None), cfg, run)
+
+    def test_evaluate_takes_any_profile_of_models_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            cfg = config.load()
+            cfg["slurm"].update(build_partition="cpu", partition="spark-interactive")
+            q = SimpleNamespace(stdout="", returncode=0)
+            args = SimpleNamespace(mode="evaluate", after=None, dry_run=True, idle=2, server_job=None,
+                                   model="nemotron")
+            with patch.object(submit.subprocess, "run", return_value=q), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                submit.submit_phase(args, cfg, run)
+            frozen = json.loads(next((run / "jobs").glob("config-*.json")).read_text())
+            self.assertEqual(frozen["evaluate"]["model"], "nemotron")
+            args.model = "no-such-model"
+            with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+                submit.submit_phase(args, cfg, run)
 
     def test_the_model_server_job_gets_a_clean_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -266,7 +363,7 @@ class SubmitTest(unittest.TestCase):
                 calls.append(cmd)
                 out = "77;scholar\n" if cmd[0] == "sbatch" else ""
                 return SimpleNamespace(stdout=out, stderr="", returncode=0)
-            args = SimpleNamespace(mode="evaluate", after="5", dry_run=False, idle=2, server_job=None)
+            args = SimpleNamespace(mode="evaluate", after="5", dry_run=False, idle=2, server_job=None, model=None)
             with patch.object(submit.subprocess, "run", side_effect=fake), \
                     patch.dict(submit.os.environ, {"PATH": "/apps/cent7/anaconda/bin:/usr/bin"}), \
                     contextlib.redirect_stdout(io.StringIO()):

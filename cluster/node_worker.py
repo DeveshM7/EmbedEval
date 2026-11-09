@@ -573,8 +573,9 @@ def mynewt_validate(run: Path, pr: int, lg: Path, left, venv: dict):
 # image. A local model is reached through an SSH tunnel to the node of the
 # model-server job (one submit.py started, which the job script ends once the
 # workers are done, or a running one named with --server-job, which is left
-# alone). Outputs are the run's: <run>/outputs/mynewt/<model>/<PR>/ (patch,
-# trajectory) and <run>/outputs/grades/<iid>.json.
+# alone). Outputs are the evaluation's own (status.eval_label: model and
+# limits): <run>/outputs/<label>/mynewt/<model>/<PR>/ (patch, trajectory) and
+# <run>/outputs/<label>/grades/<iid>.json; its status stage is evaluate:<label>.
 
 
 def model_tunnel(job: str, minutes: float, port: int = 8000):
@@ -621,8 +622,9 @@ def server_alive(base: str, tunnel) -> bool:
 
 
 def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
-    todo = status.evaluate_todo(run)
-    log(f"evaluate: {len(todo)} instances left in the run")
+    label = status.eval_label(cfg["evaluate"])
+    todo = status.evaluate_todo(run, label)
+    log(f"evaluate {label}: {len(todo)} instances left in the run")
     if not todo:
         return
     ev, caps = cfg["evaluate"], cfg["caps"]
@@ -639,8 +641,11 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         venv["EMBEDEVAL_LOCAL_API_BASE"] = base
         log(f"model server of job {server} answers at {base}")
     sweep(Path(env["EMBEDEVAL_WORK"]))
-    grades = run / "outputs" / "grades"
+    outputs = run / "outputs" / label                  # this evaluation's own outputs
+    venv["EMBEDEVAL_OUTPUTS_DIR"] = str(outputs)
+    grades = outputs / "grades"
     grades.mkdir(parents=True, exist_ok=True)
+    limits = {"steps": ev["step_limit"], "minutes": ev["time_limit"]}
 
     lost = threading.Event()        # the model server is gone: take no more instances
 
@@ -653,11 +658,11 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         left = lambda: (deadline - time.time()) / 60
         if left() < ev["time_limit"] + 20 or _stopping.is_set():
             return                                         # stays to do
-        info = {"model": ev["model"], "instance": iid, "node": N}
+        info = {"model": ev["model"], "instance": iid, "limits": limits, "node": N}
 
         def done(state: str, **more) -> None:
             info.update(state=state, minutes=round((time.time() - start) / 60, 1), **more)
-            if record(run, pr, "evaluate", info):
+            if record(run, pr, f"evaluate:{label}", info):
                 log(f"evaluate {pr}: {info.get('grade') or info.get('note')}")
         step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
         try:
@@ -685,7 +690,7 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
                 return done("failed", note=f"no grade (rc={rc}); see the log")
             g = json.loads(out.read_text())["results"][0]
             steps = None
-            r = run / "outputs" / "mynewt"
+            r = outputs / "mynewt"
             for f in r.glob(f"*/{iid.split('-', 1)[1]}/trajectory.json"):
                 try:
                     steps = json.loads(f.read_text())["info"]["model_stats"]["api_calls"]
@@ -696,7 +701,7 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         finally:
             step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
 
-    q = claims.Queue(run, "evaluate", ME, lambda pr: status.evaluate_needed(run, pr))
+    q = claims.Queue(run, "evaluate", ME, lambda pr: status.evaluate_needed(run, pr, label))
     try:
         drain(q, todo, one, ev["per_node"], deadline - 5 * 60, stop=lost.is_set)
         if lost.is_set():

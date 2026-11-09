@@ -60,6 +60,24 @@ ORDER = ["in ledger", "in another run", "fetch failed", "hard filter", "enrich f
          "INVALID", "VALID"]
 
 
+def evaluations(st: dict) -> dict:
+    """A PR's agent outcome per evaluation label (status.eval_label); the
+    unlabeled stage of the first evaluate jobs is labeled from its limits
+    ("unlabeled" if it recorded none)."""
+    out = {}
+    for key, ev in sorted(st.items()):        # "evaluate" first: a labeled stage overrides it
+        if key == "evaluate":
+            lim = ev.get("limits")
+            label = status.eval_label({"model": ev.get("model"), "step_limit": lim["steps"],
+                                       "time_limit": lim["minutes"]}) if lim else "unlabeled"
+        elif key.startswith("evaluate:"):
+            label = key.split(":", 1)[1]
+        else:
+            continue
+        out[label] = "harness fault" if status.harness_fault(ev) else ev.get("grade") or ev["state"]
+    return out
+
+
 def build(run: Path) -> dict:
     m = status.manifest(run)
     rows = []
@@ -72,9 +90,10 @@ def build(run: Path) -> dict:
                      "validate_min": v.get("minutes"),
                      "pair": (st.get("triage") or {}).get("pair")
                      or " ".join(x for x in (v.get("instance"), v.get("failure_mode")) if x) or None}
-                    | ({"agent": st["evaluate"].get("grade") or st["evaluate"]["state"]} if st.get("evaluate") else {}))
+                    | ({"agent": evaluations(st)} if evaluations(st) else {}))
     counts = Counter(r["outcome"] for r in rows)
-    agents = Counter(r["agent"] for r in rows if "agent" in r)
+    agents = {label: dict(Counter(r["agent"][label] for r in rows if label in r.get("agent", {})))
+              for label in sorted({k for r in rows for k in r.get("agent", {})})}
     return {"run": m["name"], "project": m.get("project", "zephyr"),
             "generated": datetime.now().isoformat(timespec="seconds"),
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
@@ -105,8 +124,8 @@ def markdown(rep: dict) -> str:
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
-            *([f"**Agent grades:** " + ", ".join(f"{k} {v}" for k, v in rep["agents"].items()), ""]
-              if rep.get("agents") else []),
+            *[f"**Agent grades, {label}:** " + ", ".join(f"{k} {v}" for k, v in counts.items()) + "\n"
+              for label, counts in rep.get("agents", {}).items()],
             "| PR | outcome | detail | " + ("instance, oracle" if rep.get("project") == "mynewt" else "pair")
             + " | triage min | validation min |",
             "|---|---|---|---|---|---|"]
@@ -138,7 +157,8 @@ def main() -> None:
         print(f"  {v:>5}  {k}")
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
     if rep.get("agents"):
-        print(f"  agent grades: {rep['agents']}")
+        for label, counts in rep["agents"].items():
+            print(f"  agent grades, {label}: {counts}")
     print(f"  -> {run / 'report.md'}")
     n, book = to_ledger(run)      # normally already there: workers record as PRs settle
     print(f"  ledger: {n} new settled outcomes -> {book}")
