@@ -422,6 +422,10 @@ class RevalidationTest(unittest.TestCase):
             self.assertEqual(status.read(run, 5)['validate']['outcome'], 'VALID')
 
 
+def label_of(cfg, model):
+    return status.eval_label(model, cfg["evaluate"]["step_limit"], cfg["evaluate"]["time_limit"])
+
+
 class EvaluateTest(unittest.TestCase):
     """submit.py evaluate --model M and its worker, against a fake scheduler."""
 
@@ -488,8 +492,11 @@ class EvaluateTest(unittest.TestCase):
         """Run the worker's evaluate phase with a fake server: `capacity`
         full-length requests held, `waiting` the queue samples during a run."""
         calls = []
+        self.outputs_dirs = []
         def fake_step(cmd, *args):
             calls.append(cmd)
+            if "harness/run.py" in cmd[1]:
+                self.outputs_dirs.append(args[-1].get("EMBEDEVAL_OUTPUTS_DIR"))
             if "evaluate_patches.py" in cmd[1]:
                 out = Path(cmd[cmd.index("--output") + 1])
                 out.write_text(json.dumps({"results": [{"grade": "fail", "error": "tests failed"}]}))
@@ -527,13 +534,20 @@ class EvaluateTest(unittest.TestCase):
             self.assertEqual(agent[agent.index("--instance") + 1], "contiki-ng__contiki-ng-1")
             self.assertEqual(agent[agent.index("--model") + 1], "qwen38-nvfp4")
             self.assertFalse(any("contiki-ng__contiki-ng-2" in " ".join(c) for c in calls))
-            e = status.read(run, 1)["evaluate:qwen38-nvfp4"]
+            label = label_of(cfg, "qwen38-nvfp4")
+            self.assertEqual(label, "qwen38-nvfp4-100steps-60min")
+            e = status.read(run, 1)[f"evaluate:{label}"]
             self.assertEqual((e["state"], e["grade"], e["timed_out"], e["steps"]), ("done", "fail", True, 40))
             self.assertEqual(e["limits"], {"step_limit": cfg["evaluate"]["step_limit"],
                                            "time_limit": cfg["evaluate"]["time_limit"]})
-            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4"), [])
-            self.assertEqual(status.evaluate_todo(run, "nemotron"), [1])
+            self.assertEqual(status.evaluate_todo(run, label), [])
+            self.assertEqual(status.evaluate_todo(run, label_of(cfg, "nemotron")), [1])
             self.assertEqual(e["server_queued"], 0.0)
+            # outputs and grades are the label's own
+            grade = next(c for c in calls if "evaluate_patches.py" in c[1])
+            self.assertEqual(grade[grade.index("--output") + 1],
+                             str(run / "outputs" / label / "grades" / "contiki-ng__contiki-ng-1.json"))
+            self.assertEqual(self.outputs_dirs, [str(run / "outputs" / label)])
 
     def test_agents_are_limited_to_what_the_server_holds(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -550,13 +564,14 @@ class EvaluateTest(unittest.TestCase):
             cfg_file, run = self.run_dir(tmp)
             cfg = {**config.load(cfg_file), "evaluate_model": "qwen38-nvfp4", "evaluate_server_job": "900"}
             calls, _ = self.evaluate(run, cfg, waiting=[0, 2, 1, 0])
-            e = status.read(run, 1)["evaluate:qwen38-nvfp4"]
+            label = label_of(cfg, "qwen38-nvfp4")
+            e = status.read(run, 1)[f"evaluate:{label}"]
             self.assertEqual((e["state"], e["retry"], e["server_queued"]), ("failed", True, 0.5))
-            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4"), [1])
+            self.assertEqual(status.evaluate_todo(run, label), [1])
             self.assertEqual(sum("harness/run.py" in c[1] for c in calls), 1)   # not again on this server
             # the next job runs it; a run that ends in time is the model's result however the server did
             self.evaluate(run, cfg, waiting=[3], exit_status="Submitted", job="next")
-            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4"), [])
+            self.assertEqual(status.evaluate_todo(run, label), [])
 
     def test_a_time_out_from_before_the_queue_was_watched_is_run_again(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -565,6 +580,49 @@ class EvaluateTest(unittest.TestCase):
             self.assertEqual(status.evaluate_todo(run, "m"), [1])
             status.write_stage(run, 1, "evaluate:m", {"state": "done", "grade": "fail", "timed_out": False})
             self.assertEqual(status.evaluate_todo(run, "m"), [])
+
+    def test_one_model_under_two_limits_keeps_two_evaluations_apart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            cfg = {**config.load(cfg_file), "evaluate_model": "qwen38-nvfp4", "evaluate_server_job": "900"}
+            self.evaluate(run, cfg, waiting=[0], exit_status="Submitted")
+            short = {**cfg, "evaluate": {**cfg["evaluate"], "step_limit": 30, "time_limit": 20}}
+            self.assertEqual(status.evaluate_todo(run, label_of(short, "qwen38-nvfp4")), [1])  # not hidden
+            self.evaluate(run, short, waiting=[0], exit_status="LimitsExceeded")
+            st = status.read(run, 1)
+            self.assertEqual(sorted(k for k in st if k.startswith("evaluate:")),
+                             ["evaluate:qwen38-nvfp4-100steps-60min", "evaluate:qwen38-nvfp4-30steps-20min"])
+            self.assertEqual(self.outputs_dirs, [str(run / "outputs" / "qwen38-nvfp4-30steps-20min")])
+            self.assertEqual(status.evaluate_todo(run, label_of(cfg, "qwen38-nvfp4")), [])  # not overwritten
+            self.assertEqual(status.evaluate_todo(run, label_of(short, "qwen38-nvfp4")), [])
+            tally = report.build(run)["evaluations"]
+            self.assertEqual(sorted(tally), ["qwen38-nvfp4-100steps-60min", "qwen38-nvfp4-30steps-20min"])
+            self.assertEqual(tally["qwen38-nvfp4-30steps-20min"].get("fail: step limit"), 1)
+            self.assertEqual(tally["qwen38-nvfp4-100steps-60min"].get("fail"), 1)
+
+    def test_a_result_under_the_per_model_key_counts_for_the_label_of_its_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file, run = self.run_dir(tmp)
+            cfg = config.load(cfg_file)
+            old = {"model": "qwen38-nvfp4", "state": "done", "grade": "pass", "timed_out": False,
+                   "server_queued": 0.0, "limits": {"step_limit": 100, "time_limit": 60}}
+            status.write_stage(run, 1, "evaluate:qwen38-nvfp4", old)
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4-100steps-60min"), [])
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4-50steps-30min"), [1])   # other limits
+            self.assertEqual(report.build(run)["evaluations"],
+                             {"qwen38-nvfp4-100steps-60min": {"instances": 1, "pass": 1}})
+            # cut short by the infrastructure: still run again, under the label
+            status.write_stage(run, 1, "evaluate:qwen38-nvfp4",
+                               {**old, "state": "failed", "retry": True})
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4-100steps-60min"), [1])
+            # and the new result is the label's own; the old key stays as it was
+            self.evaluate(run, {**cfg, "evaluate_model": "qwen38-nvfp4", "evaluate_server_job": "900"},
+                          waiting=[0], exit_status="Submitted")
+            st = status.read(run, 1)
+            self.assertEqual(st["evaluate:qwen38-nvfp4"]["state"], "failed")
+            self.assertEqual(status.evaluations(st)["qwen38-nvfp4-100steps-60min"]["state"], "done")
+            self.assertEqual(report.build(run)["evaluations"],
+                             {"qwen38-nvfp4-100steps-60min": {"instances": 1, "fail": 1}})
 
     def test_server_capacity_and_queue_are_read_from_vllm(self):
         with tempfile.TemporaryDirectory() as tmp:

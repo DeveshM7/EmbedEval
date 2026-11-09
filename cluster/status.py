@@ -14,11 +14,12 @@ A stage appears only once it has finished, one way or another:
     validate.state  done            outcome "VALID", or "INVALID: <reason>"
                     skipped         not started (disk guard, ...; see note)
                     failed          generate or build failed, or the cap hit
-    evaluate:<model>.state
+    evaluate:<label>.state
                     done            the agent ran and its patch was graded
                                     (grade, steps, timed_out)
                     failed          not graded (build failed, no grade); with
                                     "retry": the model server went away
+                    <label> is <model>-<steps>steps-<min>min (eval_label)
 
 Only one worker handles a PR, and a stage is written once, all at once
 (written to a temporary file and renamed), so a file is never half-written,
@@ -177,21 +178,47 @@ def valid(run: Path) -> list[int]:
             if (read(run, e["pr"]).get("validate") or {}).get("outcome") == "VALID"]
 
 
-def evaluate_key(model: str) -> str:
-    """The status stage of one model's evaluation: evaluate:<model>."""
-    return f"evaluate:{model}"
+def eval_label(model: str, step_limit: int, time_limit: float) -> str:
+    """One evaluation: a model under its limits (config "evaluate"), e.g.
+    qwen38-nvfp4-100steps-60min. Each label has its own status stage
+    (evaluate:<label>) and outputs (<run>/outputs/<label>/), so one model can
+    be evaluated under two limits on the same instances without one hiding
+    the other."""
+    return f"{model}-{step_limit}steps-{time_limit:g}min"
 
 
-def evaluate_needed(run: Path, pr: int, model: str) -> bool:
-    """No outcome for this model yet, or one cut short by the infrastructure
+def evaluate_key(label: str) -> str:
+    """The status stage of one evaluation: evaluate:<label>."""
+    return f"evaluate:{label}"
+
+
+def evaluations(st: dict) -> dict:
+    """A PR's evaluate results by label. A result recorded under the earlier
+    per-model key (evaluate:<model>) belongs to the label of the limits
+    recorded with it; a labeled stage overrides it. A result with no limits
+    recorded keeps its key's name as its label."""
+    earlier, out = {}, {}
+    for key, ev in st.items():
+        if not key.startswith("evaluate:"):
+            continue
+        name, lim = key.split(":", 1)[1], ev.get("limits")
+        if name == ev.get("model") and lim:
+            earlier[eval_label(name, lim["step_limit"], lim["time_limit"])] = ev
+        else:
+            out[name] = ev
+    return earlier | out
+
+
+def evaluate_needed(run: Path, pr: int, label: str) -> bool:
+    """No outcome for this evaluation yet, or one cut short by the infrastructure
     (the model server went away, or queued the agent's requests until its
     time ran out): a finished agent run is never redone. A time-out recorded
     before the server's queue was watched (no `server_queued`) is redone."""
-    e = read(run, pr).get(evaluate_key(model))
+    e = evaluations(read(run, pr)).get(label)
     return (not e or (e["state"] == "failed" and e.get("retry", False))
             or (e["state"] == "done" and e.get("timed_out", False) and "server_queued" not in e))
 
 
-def evaluate_todo(run: Path, model: str) -> list[int]:
-    """VALID instances of the run the model has not been evaluated on."""
-    return [pr for pr in valid(run) if evaluate_needed(run, pr, model)]
+def evaluate_todo(run: Path, label: str) -> list[int]:
+    """VALID instances of the run this evaluation has not been done on."""
+    return [pr for pr in valid(run) if evaluate_needed(run, pr, label)]

@@ -753,9 +753,14 @@ What differs from Zephyr:
   only once the evaluate job runs, so an idle server never holds one of the
   two job slots; the evaluate job waits `caps.server_start` for it, tunnels to
   it and cancels it at the end. `evaluate.python` is an x86
-  Python with mini-swe-agent. Results: status `evaluate:<model>`,
-  `<run>/outputs/grades/<model>/`; `report.py` counts time-outs apart from
-  failed patches. `--queue` submits even when both job slots are busy.
+  Python with mini-swe-agent. An evaluation is a model under its limits and
+  is labeled `<model>-<steps>steps-<min>min` (e.g. `qwen38-nvfp4-100steps-60min`):
+  status `evaluate:<label>`, outputs and grades under `<run>/outputs/<label>/`,
+  one tally per label in the report. The same model under other limits is a
+  new evaluation on the same run; results recorded before labels
+  (`evaluate:<model>`, outputs under `<run>/outputs/contiki-ng/`) count for the
+  label of the limits recorded with them. `report.py` counts time-outs apart
+  from failed patches. `--queue` submits even when both job slots are busy.
   The server must hold `evaluate.per_node` requests of the full
   `model.max_model_len` at once: the worker reads vLLM's "Maximum concurrency"
   from the server's log and runs no more agents than that (none below 1).

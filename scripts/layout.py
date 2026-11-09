@@ -96,7 +96,10 @@ def generated() -> Path:
 
 
 def outputs() -> Path:
-    return _here("outputs", "outputs")
+    """EMBEDEVAL_OUTPUTS_DIR, else the run's or the repository's outputs/
+    (cluster/node_worker.py's evaluate phase keeps each evaluation apart)."""
+    value = os.environ.get("EMBEDEVAL_OUTPUTS_DIR")
+    return Path(value) if value else _here("outputs", "outputs")
 
 
 def lookup_overlay() -> Path | None:

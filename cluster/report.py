@@ -117,23 +117,22 @@ def build(run: Path) -> dict:
                      "triage_min": (st.get("triage") or {}).get("minutes"),
                      "validate_min": (st.get("validate") or {}).get("minutes"),
                      "pair": (st.get("triage") or {}).get("pair")})
-    # agent evaluations, per model: a time-out is reported apart from a failed patch
+    # agent evaluations, per label (model and limits): a time-out is reported apart from a failed patch
     evaluations: dict[str, Counter] = {}
     for e in m["prs"]:
-        for k, v in status.read(run, e["pr"]).items():
-            if k.startswith("evaluate:"):
-                c = evaluations.setdefault(k.split(":", 1)[1], Counter())
-                c["instances"] += 1
-                if v["state"] != "done":
-                    c["not graded"] += 1
-                elif v.get("grade") == "pass":
-                    c["pass"] += 1
-                elif v.get("timed_out"):
-                    c["fail: time-out"] += 1
-                elif v.get("step_limit_hit"):
-                    c["fail: step limit"] += 1
-                else:
-                    c["fail"] += 1
+        for label, v in status.evaluations(status.read(run, e["pr"])).items():
+            c = evaluations.setdefault(label, Counter())
+            c["instances"] += 1
+            if v["state"] != "done":
+                c["not graded"] += 1
+            elif v.get("grade") == "pass":
+                c["pass"] += 1
+            elif v.get("timed_out"):
+                c["fail: time-out"] += 1
+            elif v.get("step_limit_hit"):
+                c["fail: step limit"] += 1
+            else:
+                c["fail"] += 1
     counts = Counter(r["outcome"] for r in rows)
     observations = Counter(r["observe"] for r in rows if r["observe"])
     return {"run": m["name"], "generated": datetime.now().isoformat(timespec="seconds"),
@@ -168,8 +167,8 @@ def markdown(rep: dict) -> str:
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
     if rep["observations"]:
         out += ["", "Observation: " + ", ".join(f"{v} {k}" for k, v in rep["observations"].items())]
-    for model, c in (rep.get("evaluations") or {}).items():
-        out += ["", f"Agent {model}: " + ", ".join(f"{v} {k}" for k, v in c.items())]
+    for label, c in (rep.get("evaluations") or {}).items():
+        out += ["", f"Agent {label}: " + ", ".join(f"{v} {k}" for k, v in c.items())]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
             "| PR | outcome | detail | pair | triage min | validation min |",

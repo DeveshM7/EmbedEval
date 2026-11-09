@@ -229,7 +229,9 @@ def main() -> None:
         sys.exit("--recheck applies to statement jobs")
     cfg["statement_recheck"] = args.recheck
     statement_left = status.statement_todo(run, args.recheck) if project == "contiki-ng" else []
-    evaluate_left = status.evaluate_todo(run, args.model) if args.mode == "evaluate" else []
+    label = (status.eval_label(args.model, cfg["evaluate"]["step_limit"], cfg["evaluate"]["time_limit"])
+             if args.mode == "evaluate" else None)
+    evaluate_left = status.evaluate_todo(run, label) if args.mode == "evaluate" else []
     counts = {"triage": len(triage_left), "observe": len(observe_left),
               "validate": len(validate_left), "statement": len(statement_left),
               "evaluate": len(evaluate_left)}

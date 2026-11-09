@@ -619,9 +619,10 @@ def other_board(run: Path, pr: int, verdict: Path, tried: list[str]) -> Path | N
 # (harness/run.py: no network, the problem statement and the repository
 # only), grade the patch in a fresh container (harness/evaluate_patches.py),
 # remove the image. The model is the job's (submit.py evaluate --model); it
-# is reached through an SSH tunnel to the node of its server job. Outputs:
-# <run>/outputs/contiki-ng/<model>/<PR>/ (patch, trajectory) and
-# <run>/outputs/grades/<model>/<instance>.json.
+# is reached through an SSH tunnel to the node of its server job. An
+# evaluation is a model under the config's limits, its label
+# (status.eval_label). Outputs, under <run>/outputs/<label>/:
+# contiki-ng/<model>/<PR>/ (patch, trajectory) and grades/<instance>.json.
 
 
 def model_tunnel(job: str, minutes: float, port: int = 8000):
@@ -693,11 +694,12 @@ def watch_queue(base: str, stop: threading.Event, samples: list, every: float = 
             samples.append(sum(float(w) for w in waiting))
 
 
-def agent_record(run: Path, model: str, iid: str) -> dict:
-    """What the trajectory says of an agent run: exit status, model calls."""
+def agent_record(outputs: Path, model: str, iid: str) -> dict:
+    """What the trajectory says of an agent run (under `outputs`, the
+    evaluation's folder): exit status, model calls."""
     sys.path.insert(0, str(REPO / "harness"))
     import paths
-    f = Path(run) / "outputs" / "contiki-ng" / paths.model_dir(model) / iid.rsplit("-", 1)[1] / "trajectory.json"
+    f = Path(outputs) / "contiki-ng" / paths.model_dir(model) / iid.rsplit("-", 1)[1] / "trajectory.json"
     try:
         info = json.loads(f.read_text())["info"]
         return {"exit_status": info.get("exit_status"), "steps": info["model_stats"]["api_calls"]}
@@ -707,8 +709,9 @@ def agent_record(run: Path, model: str, iid: str) -> dict:
 
 def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     model, ev, caps = cfg["evaluate_model"], cfg["evaluate"], cfg["caps"]
-    todo = status.evaluate_todo(run, model)
-    log(f"evaluate {model}: {len(todo)} instances left in the run")
+    label = status.eval_label(model, ev["step_limit"], ev["time_limit"])
+    todo = status.evaluate_todo(run, label)
+    log(f"evaluate {label}: {len(todo)} instances left in the run")
     if not todo:
         return
     t0 = time.time()
@@ -719,6 +722,8 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         log(f"no model server: {base}. Taking no instances")
         return
     venv["EMBEDEVAL_LOCAL_API_BASE"] = base
+    outputs = run / "outputs" / label                   # this evaluation's own outputs
+    venv["EMBEDEVAL_OUTPUTS_DIR"] = str(outputs)
     log(f"model server of job {cfg['evaluate_server_job']} answers at {base}")
     # one agent per full-length request the server holds: more would wait on
     # each other, and the time limit would measure the server, not the model
@@ -731,9 +736,9 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         kill_group(tunnel.pid)
         return
     sweep(Path(env["EMBEDEVAL_WORK"]))
-    grades = run / "outputs" / "grades" / model
+    grades = outputs / "grades"
     grades.mkdir(parents=True, exist_ok=True)
-    key = status.evaluate_key(model)
+    key = status.evaluate_key(label)
     lost = threading.Event()        # the model server is gone: take no more instances
     later: set[int] = set()         # given back for the next job, not again on this server
     # an instance is started only with time for its build, the agent and the grading
@@ -773,7 +778,7 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
                 watched.set()
             if rc == 143:
                 return
-            agent = {**agent_record(run, model, iid), "agent_minutes": round((time.time() - agent_start) / 60, 1),
+            agent = {**agent_record(outputs, model, iid), "agent_minutes": round((time.time() - agent_start) / 60, 1),
                      # share of the run's samples in which the server had requests waiting
                      "server_queued": round(sum(w > 0 for w in waiting) / len(waiting), 2) if waiting else None}
             if not server_alive(base, tunnel):
@@ -799,7 +804,7 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         finally:
             step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
 
-    q = claims.Queue(run, key, ME, lambda pr: pr not in later and status.evaluate_needed(run, pr, model))
+    q = claims.Queue(run, key, ME, lambda pr: pr not in later and status.evaluate_needed(run, pr, label))
     try:
         drain(q, todo, one, lanes, deadline - 5 * 60, stop=lambda: lost.is_set() or not enough())
         if lost.is_set():
