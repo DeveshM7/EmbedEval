@@ -45,10 +45,10 @@ repositories at their base commits (with the apps test change below applied);
 it must find the defect in the kernel and fix it. The upstream fix and the PR
 texts below are for you alone, so you describe the bug correctly.
 
-Write it as an issue report would: what a test or a caller observes (a crash,
-an assertion, a hang, a wrong result, a missing interface the test needs), the
+Write it as an issue report would: what a caller observes (a crash, an
+assertion, a hang, a wrong result, a missing interface the test needs), the
 conditions that trigger it, and the required behavior. You may name the
-interfaces, test programs and configuration options the test change uses.
+interfaces and configuration options the test change uses.
 
 Never say how the code goes wrong inside -- which check is missing, which
 lock, counter or field is wrong, where in the code the defect is -- or what
@@ -69,7 +69,6 @@ The production fix (the agent does not see it):
 {fix}
 
 Observed before the fix: {before}
-Tests that must pass after the fix: {f2p}
 
 Reply with the JSON object only:
 {{"problem_statement": "..."}}"""
@@ -207,8 +206,7 @@ def statement_one(folder: Path, profile: str, options: dict, parse, context: dic
         prompt = WRITE_PROMPT.format(
             kernel_title=context.get("kernel_title") or "", kernel_body=(context.get("kernel_body") or "")[:TEXT_CAP],
             apps_title=context.get("apps_title") or "", apps_body=(context.get("apps_body") or "")[:TEXT_CAP],
-            test_patch=test_patch[:DIFF_CAP], fix=fix[:DIFF_CAP], before=before_state(receipt),
-            f2p=json.dumps(meta.get("fail_to_pass") or []))
+            test_patch=test_patch[:DIFF_CAP], fix=fix[:DIFF_CAP], before=before_state(receipt))
         content, issues, written = prompt, ["no reply"], None
         for _ in range(MAX_ATTEMPTS):
             v = parse(_ask(options, content, trace, "writes"))

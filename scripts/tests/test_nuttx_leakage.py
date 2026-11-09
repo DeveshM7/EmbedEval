@@ -293,6 +293,10 @@ class Prompt(unittest.TestCase):
         for name in meta["fail_to_pass"] + meta["pass_to_pass"]:
             self.assertNotIn(name, task)
 
+    def test_the_writer_prompt_does_not_suggest_naming_tests(self):
+        self.assertNotIn("{f2p}", ns.WRITE_PROMPT)
+        self.assertNotIn("test programs", ns.WRITE_PROMPT)
+
 
 class PatchCapture(unittest.TestCase):
     """The agent's patch reaches the grader byte for byte."""
