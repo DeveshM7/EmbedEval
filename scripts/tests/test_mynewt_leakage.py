@@ -212,7 +212,13 @@ class PromptTest(unittest.TestCase):
         task = run.build_task(self.META)
         self.assertNotIn("secret_fix_file", task)
         self.assertNotIn("Relevant Source File", task)
-        self.assertIn("s/a", task)
+
+    def test_the_task_is_the_problem_statement_without_test_names(self):
+        import run
+        task = run.build_task(self.META)
+        self.assertIn("\n\nP\n", task)
+        for name in self.META["fail_to_pass"] + self.META["pass_to_pass"]:
+            self.assertNotIn(name, task)
 
     def test_the_instances_own_warnings_reach_the_agent(self):
         import run

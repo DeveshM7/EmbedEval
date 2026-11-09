@@ -245,7 +245,7 @@ together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 The 63 promoted instances (`apptainer/instances/mynewt/`) build and run on Linux
 x86_64 (historical native builds need multilib). An agent run gets exactly the
 task: mynewt-core at the base commit with the PR's tests committed (history:
-that one commit, fetched `--depth 1`), the problem statement and the test names.
+that one commit, fetched `--depth 1`) and the problem statement.
 It does not get the files the fix changed (SWE-bench's "oracle" setting), a
 network (every container command runs in its own network namespace:
 `scripts/mynewt_network.py`), the fix's history, or the newt sources (they hold
