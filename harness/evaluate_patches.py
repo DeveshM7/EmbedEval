@@ -143,7 +143,10 @@ def evaluate_mynewt(instance_id: str, model_name: str, meta: dict, timeout: int)
     if not patch_path.exists():
         result.update(grade="missing", error="no patch file (run not found)")
         return result
-    patch = patch_path.read_text()
+    # bytes all the way to git apply: universal newlines would turn a lone \r
+    # into a line break; the checks below read a decoded copy
+    patch_bytes = patch_path.read_bytes()
+    patch = patch_bytes.decode("utf-8", errors="replace")
     if not patch.strip():
         result.update(patch_empty=True, error="empty patch — agent made no changes")
         return result
@@ -163,7 +166,7 @@ def evaluate_mynewt(instance_id: str, model_name: str, meta: dict, timeout: int)
     start = time.time()
     run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "agent.patch").write_text(patch)
+    (run_dir / "agent.patch").write_bytes(patch_bytes)
     sandbox = None
     try:
         sandbox = au.unpack_sandbox(image)

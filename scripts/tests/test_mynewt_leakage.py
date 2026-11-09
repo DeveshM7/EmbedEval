@@ -226,6 +226,35 @@ class PromptTest(unittest.TestCase):
         self.assertIn("protected test support", instance)
 
 
+class PatchCaptureTest(unittest.TestCase):
+    """The agent's patch reaches the grader byte for byte."""
+
+    def test_carriage_returns_survive(self):
+        import run
+        with tempfile.TemporaryDirectory() as tmp:
+            tb = Path(tmp) / "testbed"
+            tb.mkdir()
+            git(tb, "init", "-q")
+            (tb / "a.c").write_text("int a;\n")
+            git(tb, "add", "-A")
+            git(tb, "commit", "-qm", "base")
+            (tb / "a.c").write_text("int a = 1;\n")
+            (tb / "console.log").write_bytes(b"line\r\n  total 0\r\rmore\n")
+
+            class Env:      # runs the command as ApptainerEnvironment does: text, stderr merged
+                def execute(self, action):
+                    r = subprocess.run(["bash", "-c", action["command"].replace("/testbed", str(tb))],
+                                       text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    return {"output": "WARNING: a container notice\n" + r.stdout, "returncode": r.returncode}
+
+            patch, touched = run.capture_patch(Env(), {"project": "mynewt"})
+            self.assertIn("\r\rmore", patch)
+            self.assertNotIn("WARNING", patch)
+            check = subprocess.run(["git", "-C", str(tb), "apply", "--check", "-R", "--cached", "-"],
+                                   input=patch.encode(), capture_output=True)
+            self.assertEqual(check.returncode, 0, check.stderr)
+
+
 class RecipeTest(unittest.TestCase):
     def test_the_instance_recipe_drops_post_base_patches(self):
         text = (REPO / "templates" / "mynewt" / "apptainer" / "instance.def.tmpl").read_text()
