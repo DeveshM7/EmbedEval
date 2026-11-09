@@ -153,6 +153,14 @@ before state five times, each in a fresh overlay. `promote_instance.py`
 refuses a NuttX instance without a clean leak record, a 5-run determinism
 record, and a statement that passed the current check.
 
+When only the problem statement was rewritten, `validate_instance.py
+--statement-only <instance>` recomputes the statement fields of its
+`validation.json` (`statement_ok`, `statement_fix_identifiers`,
+`statement_sha256`, and `statement_refreshed_at`) without building or running
+anything, so the record passes the promotion gate again. It refuses unless the
+record is valid, the recipe is unchanged and the leak check was clean; it needs
+`EMBEDEVAL_NUTTX_CLONE` to point at a kernel clone, as a full validation does.
+
 ## Running on Scholar
 
 Triage and validation at scale run as the cluster pipeline with

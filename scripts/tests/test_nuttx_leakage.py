@@ -383,6 +383,77 @@ class PromoteGate(unittest.TestCase):
                 self.assertIn(why, self.gate(r, m))
 
 
+class StatementRefresh(unittest.TestCase):
+    """validate_instance --statement-only: only the statement fields change."""
+
+    def setUp(self):
+        import copy
+        import validate_instance
+        self.vi = validate_instance
+        self.tmp = tempfile.TemporaryDirectory()
+        self.up = Upstream(Path(self.tmp.name))
+        self.folder = Path(self.tmp.name) / "instance"
+        self.folder.mkdir()
+        for name in au.NUTTX_RECIPE_FILES:
+            (self.folder / name).write_text(self.up.test_patch if name == "test_patch.diff" else name)
+        self.meta = {**self.up.meta, "problem_statement": "lib() returns too much."}
+        self.old = {"valid": True, "validated_at": "2026-11-01T00:00:00",
+                    "recipe_sha256": au.recipe_fingerprint(self.folder, au.nuttx_recipe_files(self.folder)),
+                    "leak_check": {"ok": True, "findings": [], "network": "isolated", "commits": 2,
+                                   "statement_ok": True, "statement_fix_identifiers": [],
+                                   "statement_sha256": "stale"},
+                    "determinism": {"runs": 5, "ok": True}}
+        self.record = self.folder / "validation.json"
+        self.record.write_text(json.dumps(self.old))
+        self.copy = copy
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def refresh(self) -> bool:
+        from unittest import mock
+        vi = self.vi
+        with mock.patch.object(vi.instances, "load_metadata", return_value=self.meta), \
+                mock.patch.object(vi.instances, "instance_dir", return_value=self.folder), \
+                mock.patch.object(vi, "nuttx_fix_patches", return_value=[("primary", self.up.patch)]), \
+                mock.patch.object(vi, "kernel_clone", return_value=self.up.kernel):
+            return vi.refresh_nuttx_statement("nuttx__x")
+
+    def test_refresh_matches_the_statement_and_changes_nothing_else(self):
+        import promote_instance
+        self.assertTrue(self.refresh())
+        new = json.loads(self.record.read_text())
+        self.assertIn("T", new["leak_check"].pop("statement_refreshed_at"))
+        self.assertEqual(new["leak_check"].pop("statement_sha256"), self.vi.statement_sha256(self.meta))
+        self.old["leak_check"].pop("statement_sha256")
+        self.assertEqual(new, self.old)                     # incl. validated_at, ok, findings
+        gate_meta = {**self.meta, "statement_check": {"version": ns.STATEMENT_CHECK, "result": "written"}}
+        self.assertIsNone(promote_instance.nuttx_gate(json.loads(self.record.read_text()), gate_meta))
+
+    def test_statement_naming_fix_identifier(self):
+        self.meta["problem_statement"] = "lib() ignores g_lib_limit_for_fix."
+        self.assertFalse(self.refresh())
+        leak = json.loads(self.record.read_text())["leak_check"]
+        self.assertFalse(leak["statement_ok"])
+        self.assertEqual(leak["statement_fix_identifiers"], ["g_lib_limit_for_fix"])
+        self.assertTrue(leak["ok"])                         # the image's verdict is unchanged
+
+    def test_refusals_change_nothing(self):
+        cases = {"invalid": lambda r: r.update(valid=False),
+                 "recipe changed": lambda r: r.update(recipe_sha256="other"),
+                 "leak found": lambda r: r["leak_check"].update(ok=False),
+                 "network": lambda r: r["leak_check"].update(network="reachable")}
+        for why, change in cases.items():
+            report = self.copy.deepcopy(self.old)
+            change(report)
+            text = json.dumps(report)
+            self.record.write_text(text)
+            self.assertFalse(self.refresh(), why)
+            self.assertEqual(self.record.read_text(), text, why)
+        self.record.unlink()
+        self.assertFalse(self.refresh(), "no record")
+
+
 class CompileAttestation(unittest.TestCase):
     """A build-failure before state is attested from the fix alone."""
 

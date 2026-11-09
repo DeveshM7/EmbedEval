@@ -478,6 +478,45 @@ def nuttx_leak_check(image: Path, meta: dict, fixes: list[tuple[str, str]], clon
     return leak
 
 
+def refresh_nuttx_statement(instance_id: str) -> bool:
+    """Recompute the statement fields of a valid NuttX record (statement_ok,
+    statement_fix_identifiers, statement_sha256) without building or running
+    anything: the statement is not in the image. leak_check["ok"] and
+    findings do not depend on it (nuttx_leakcheck.scan), so they stay as
+    recorded. True if the statement is now clean."""
+    meta = instances.load_metadata(instance_id)
+    folder = instances.instance_dir(instance_id)
+    path = folder / "validation.json"
+    if not path.exists():
+        print(f"  REFUSED: {instance_id} has no validation.json")
+        return False
+    report = json.loads(path.read_text())
+    leak = report.get("leak_check") or {}
+    why = ("the record is not valid" if not report.get("valid")
+           else "the recipe changed since it was validated" if report.get("recipe_sha256")
+           != au.recipe_fingerprint(folder, au.nuttx_recipe_files(folder))
+           else "the leak check is not clean with the network isolated"
+           if not leak.get("ok") or leak.get("network") != "isolated" else None)
+    if why:
+        print(f"  REFUSED: {instance_id}: {why}; validate it again")
+        return False
+    test_patch = (folder / "test_patch.diff").read_text()
+    base_patch = (folder / "base_patch.diff").read_text() if (folder / "base_patch.diff").exists() else ""
+    with tempfile.TemporaryDirectory() as tmp:
+        run_dir = Path(tmp)
+        gold = nuttx_fix_patches(meta, run_dir)
+        commits = nuttx_fix_commits(meta)
+        facts = nuttx_leakcheck.fix_facts(kernel_clone(run_dir), meta,
+                                          [(l, commits[l], p) for l, p in gold], test_patch, base_patch)
+    named = facts["statement_fix_identifiers"]
+    leak.update(statement_ok=not named, statement_fix_identifiers=named,
+                statement_sha256=statement_sha256(meta),
+                statement_refreshed_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    path.write_text(json.dumps(report, indent=2) + "\n")
+    print(f"  {instance_id}: statement " + ("clean" if not named else f"names what only the fix introduces: {named}"))
+    return not named
+
+
 def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
                              verbose: bool, determinism: int = 1) -> bool:
     """A NuttX instance in its Apptainer image (metadata "runtime":
@@ -888,6 +927,12 @@ def main() -> None:
     p.add_argument("--determinism", type=int, default=1, metavar="N",
                    help="NuttX Apptainer: judge the before state N times, each in a fresh "
                         "overlay; all must agree (promotion needs 5)")
+    p.add_argument("--statement-only", action="store_true",
+                   help="NuttX: after only the problem statement changed, recompute the "
+                        "statement fields of a valid validation.json (no build, no container); "
+                        "needs EMBEDEVAL_NUTTX_CLONE (a kernel clone holding the base and fix "
+                        "commits; without it the kernel is cloned) and, for follow-up fix PRs, "
+                        "the same network as a full validation")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="stream build and test output instead of capturing it")
     args = p.parse_args()
@@ -904,10 +949,20 @@ def main() -> None:
     if args.patch and len(targets) != 1:
         p.error("--patch applies to exactly one instance")
 
+    if args.statement_only:
+        if args.patch:
+            p.error("--statement-only does not take --patch")
+        other = [t for t in targets if instances.load_metadata(t)["project"] != "nuttx"]
+        if other:
+            p.error(f"--statement-only is for NuttX instances only, not: {', '.join(other)}")
+
     start = time.time()
-    results = {t: validate(t, Path(args.patch) if args.patch else None, args.timeout,
-                           args.verbose, args.determinism)
-               for t in targets}
+    if args.statement_only:
+        results = {t: refresh_nuttx_statement(t) for t in targets}
+    else:
+        results = {t: validate(t, Path(args.patch) if args.patch else None, args.timeout,
+                               args.verbose, args.determinism)
+                   for t in targets}
 
     print(f"\n{'=' * 70}\nSUMMARY  ({(time.time() - start) / 60:.1f} min)\n{'=' * 70}")
     for t, ok in results.items():
