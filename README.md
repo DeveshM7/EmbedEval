@@ -240,6 +240,33 @@ together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 
 ---
 
+## Contiki-NG
+
+The promoted instances (`apptainer/instances/contiki-ng/`) build and run on
+Linux x86_64 with Apptainer. An agent run gets the problem statement and the
+repository at the base commit with the PR's tests; not the fix, its history,
+the fail-to-pass lists, or a network (every agent, validation and grading
+command runs with `--net --network none`). Validation checks that on each image
+before any test runs (`scripts/contiki_ng_leakcheck.py`) and requires five
+identical runs of the unfixed code.
+
+```bash
+python scripts/build_instances.py --instance contiki-ng__contiki-ng-3246
+python scripts/validate_instance.py contiki-ng__contiki-ng-3246
+python harness/run.py --instance contiki-ng__contiki-ng-3246 --model <model> -v
+python harness/evaluate_patches.py --instance contiki-ng__contiki-ng-3246 --model <model>
+```
+
+`<model>` is a hosted model or a profile of `triage/models.json` served at
+`EMBEDEVAL_LOCAL_API_BASE`. On Scholar, triage, validation and evaluating
+several open-weight models on one run go through `cluster/`
+(`python cluster/submit.py evaluate --run R --model A B C --queue`):
+[docs/running_on_scholar.md, section 12](docs/running_on_scholar.md#12-contiki-ng-runs).
+The [Contiki-NG triage document](docs/contiki_ng_triage.md) is the triage
+model's instructions.
+
+---
+
 ## Layout
 
 ```
