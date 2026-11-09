@@ -50,10 +50,10 @@ MODEL_DIRS: dict[str, str] = {
     "openai/gpt-5.4": "gpt-5.4",
     "together_ai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": "Qwen-3-coder",
     "together_ai/deepseek-ai/DeepSeek-V3": "DeepSeek-V3",
-    # Local open-weights model served by scripts/serve_triage_model.sh (vLLM,
-    # OpenAI-compatible); see LOCAL_MODELS in harness/run.py.
-    "openai/qwen38-nvfp4": "qwen38-nvfp4",
 }
+# Local open-weights models (scripts/serve_triage_model.sh, vLLM,
+# OpenAI-compatible; see LOCAL_MODELS in harness/run.py) are added below from
+# the profiles of triage/models.json: none is named here.
 
 
 
