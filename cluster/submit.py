@@ -39,6 +39,7 @@ checkout never changes a job that is queued or running.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -139,8 +140,9 @@ def freeze_source(source: Path, destination: Path) -> dict:
     return manifest
 
 
-def submit_phase(args, cfg: dict, run: Path) -> None:
-    """One Mynewt phase as its own job (see the module docstring)."""
+def submit_phase(args, cfg: dict, run: Path) -> str | None:
+    """One Mynewt phase as its own job (see the module docstring); returns
+    its job id (None: nothing to submit; a dry run: the job's name in <>)."""
     s, par, mode = cfg["slurm"], cfg["parallel"], args.mode
     if mode == "pipeline":
         sys.exit("Mynewt runs submit each phase as its own job: triage, then validate "
@@ -159,6 +161,10 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     if minutes(s["time_limit"]) > 240:
         sys.exit("Scholar jobs may not exceed four hours")
     name = f"embedeval-{run.name}-{mode}"
+    if mode == "evaluate":
+        # one job name per evaluation, so the guard below sees only that
+        # evaluation's own job, not another model's
+        name += "-" + status.eval_label(cfg["evaluate"])
     q = subprocess.run(["squeue", "-h", "--me", "-n", name, "-o", "%i %T"], capture_output=True, text=True)
     live = [l for l in q.stdout.splitlines() if l.strip() and not l.endswith("COMPLETING")]
     if live and not args.after:
@@ -173,7 +179,7 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     if not n:
         if not args.after:
             print(f"nothing left to {mode} in {run.name}. Report: python cluster/report.py --run {run.name}")
-            return
+            return None
         n = sum(1 for e in status.manifest(run)["prs"] if e["stage"] in ("to triage", "to validate"))
         print(f"  --after {args.after}: no {mode} work yet; sized for the run's {n} PRs")
     per = {"triage": par["triage_per_node"], "validate": par["validate_per_node"],
@@ -214,9 +220,14 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     print(f"  nodes: {lowest}-{wanted} on {partition} ({idle} idle; max {s['nodes_max']})"
           + (f"\n  note: {note}" if note else ""))
     print(f"  job script: {script}\n  source: {source} (sha256 {frozen_src['sha256'][:16]})")
+    if deps:
+        print(f"  dependency: {','.join(deps)}")
+    if own_server:
+        print(f"  model server: {wanted} node(s) of {s['partition']} for {cfg['evaluate']['model']}, "
+              "submitted with this job")
     if args.dry_run:
         print("  --dry-run: not submitted")
-        return
+        return f"<{name}>"          # what a later job of a chain would follow
     # With its own server, the evaluate job is submitted held, so the server
     # job can name it; it is released once its config names the server.
     r = subprocess.run(["sbatch", "--parsable", *(["--hold"] if own_server else []),
@@ -259,6 +270,36 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
                              "model": cfg["evaluate"]["model"] if mode == "evaluate" else None,
                              "source_sha256": frozen_src["sha256"]}) + "\n")
     print(f"  submitted: job {job}; log {jobs}/job-{job}.out")
+    return job
+
+
+def submit_evaluations(args, cfg: dict, run: Path) -> None:
+    """One evaluate job (with its model servers) per model of --model, each
+    after the one before: the account runs two jobs at once and an x86
+    evaluation is a pair (agents and servers) that must run together, so
+    pairs never interleave. Models not known are refused before anything is
+    submitted."""
+    models = args.model or [cfg["evaluate"]["model"]]
+    if len(set(models)) < len(models):
+        sys.exit(f"--model names a model twice: {' '.join(models)}")
+    for m in models:
+        try:
+            harness_paths.resolve_model(m)
+        except harness_paths.UnknownModelError as e:
+            sys.exit(str(e))
+    previous, chain = args.after, []
+    for m in models:
+        label = status.eval_label({**cfg["evaluate"], "model": m})
+        if not args.after and not status.evaluate_todo(run, label):
+            print(f"nothing left to evaluate as {label} in {run.name}. "
+                  f"Report: python cluster/report.py --run {run.name}")
+            continue                  # (the work of one label never depends on the jobs before it)
+        job = submit_phase(argparse.Namespace(**{**vars(args), "model": m, "after": previous}),
+                           copy.deepcopy(cfg), run)
+        chain.append((m, job))
+        previous = job
+    if chain:
+        print("evaluations, in order: " + " -> ".join(f"{m} (job {j})" for m, j in chain))
 
 
 def main() -> None:
@@ -270,8 +311,10 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="write the job script, do not submit")
     p.add_argument("--idle", type=int, help="assume this many idle nodes (testing)")
     p.add_argument("--after", metavar="JOB", help="Mynewt: start once this job has ended")
-    p.add_argument("--model", help="Mynewt evaluate: the model (a triage/models.json profile, or "
-                   "a hosted model harness/paths.py knows); default evaluate.model")
+    p.add_argument("--model", nargs="+", metavar="MODEL",
+                   help="Mynewt evaluate: the models (triage/models.json profiles, or hosted "
+                   "models harness/paths.py knows), one evaluation each, one after the other; "
+                   "default evaluate.model")
     p.add_argument("--server-job", metavar="JOB", help="Mynewt evaluate: a running model-server "
                    "job (scripts/serve_triage_model.sh) to use instead of submitting one")
     args = p.parse_args()
@@ -281,7 +324,9 @@ def main() -> None:
     if not (run / "manifest.json").exists():
         sys.exit(f"{run} is not a prepared run (no manifest.json); run cluster/prepare.py first")
     if status.project(run) == "mynewt":
-        return submit_phase(args, cfg, run)
+        if args.model and args.mode != "evaluate":
+            sys.exit("--model is for evaluate jobs")
+        return submit_evaluations(args, cfg, run) if args.mode == "evaluate" else submit_phase(args, cfg, run)
     if args.mode != "pipeline":
         sys.exit("Zephyr runs use pipeline mode")
 

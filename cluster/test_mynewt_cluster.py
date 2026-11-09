@@ -6,6 +6,7 @@
 import contextlib
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -425,6 +426,78 @@ class SubmitTest(unittest.TestCase):
             self.assertNotIn("scancel", next((run / "jobs").glob("evaluate-*.sbatch")).read_text())
             calls = self.submit_evaluate(run, cfg, model="claude-opus-4-6")
             self.assertEqual(len([c for c in calls if c[0] == "sbatch"]), 1)
+
+
+class ChainTest(unittest.TestCase):
+    """Several models queued at once: one evaluation each, after the one before."""
+    MODELS = ["qwen38-nvfp4", "nemotron", "qwen38"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = valid_run(Path(self.tmp.name))
+        self.cfg = config.load()
+        self.cfg["slurm"].update(build_partition="cpu", partition="spark-interactive")
+
+    def submit(self, dry_run, models=None, after=None, queue=""):
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            n = sum(1 for c in calls if c[0] == "sbatch")
+            return SimpleNamespace(stdout=f"{100 + n};scholar\n" if cmd[0] == "sbatch" else queue,
+                                   stderr="", returncode=0)
+        args = SimpleNamespace(mode="evaluate", after=after, dry_run=dry_run, idle=2, server_job=None,
+                               model=models or self.MODELS)
+        out = io.StringIO()
+        with patch.object(submit.subprocess, "run", side_effect=fake), \
+                patch.dict(submit.os.environ, {"PATH": "/usr/bin"}), contextlib.redirect_stdout(out):
+            submit.submit_evaluations(args, self.cfg, self.run)
+        return calls, out.getvalue()
+
+    def test_a_dry_run_plans_the_whole_chain_without_sbatch(self):
+        calls, out = self.submit(True)
+        self.assertEqual([c[0] for c in calls if c[0] in ("sbatch", "scontrol", "scancel")], [])
+        scripts = sorted((self.run / "jobs").glob("evaluate-*.sbatch"))
+        self.assertEqual(len(scripts), 3)
+        names = [re.search(r"#SBATCH -J (\S+)", p.read_text())[1] for p in scripts]
+        self.assertEqual(sorted(names), sorted(f"embedeval-r-evaluate-{m}-50steps-40min" for m in self.MODELS))
+        self.assertEqual(len(set(names)), 3)           # so the one-job guard never meets another model's job
+        first, second, third = (f"embedeval-r-evaluate-{m}-50steps-40min" for m in self.MODELS)
+        self.assertIn(f"dependency: afterany:<{first}>", out)
+        self.assertIn(f"dependency: afterany:<{second}>", out)
+        self.assertNotIn("afterany:<" + third, out)
+        self.assertIn(f"evaluations, in order: {self.MODELS[0]} (job <{first}>) -> {self.MODELS[1]}", out)
+
+    def test_each_evaluation_is_chained_after_the_one_before(self):
+        calls, out = self.submit(False, after="5")
+        sbatch = [c for c in calls if c[0] == "sbatch"]
+        # per model: the held evaluate job (ids 101, 103, 105), then its server job (102, 104, 106)
+        evaluate_jobs = [c for c in sbatch if "--hold" in c]
+        servers = [c for c in sbatch if any(a.startswith("--export") for a in c)]
+        self.assertEqual([next(a for a in c if a.startswith("--dependency")) for c in evaluate_jobs],
+                         ["--dependency=afterany:5", "--dependency=afterany:101", "--dependency=afterany:103"])
+        self.assertEqual([next(a for a in c if a.startswith("--dependency")) for c in servers],
+                         ["--dependency=afterany:5", "--dependency=afterany:101", "--dependency=afterany:103"])
+        self.assertIn(["scontrol", "update", "JobId=103", "Dependency=afterany:101,after:104"], calls)
+        self.assertIn("evaluations, in order: qwen38-nvfp4 (job 101) -> nemotron (job 103) -> qwen38 (job 105)", out)
+        self.assertEqual(len(list((self.run / "jobs").glob("server-of-*"))), 3)
+
+    def test_a_model_already_evaluated_is_left_out_and_unknown_ones_refuse_everything(self):
+        status.write_stage(self.run, 1, "evaluate:nemotron-50steps-40min", {"state": "done", "grade": "pass"})
+        calls, out = self.submit(False)
+        self.assertIn("nothing left to evaluate as nemotron-50steps-40min", out)
+        evaluate_jobs = [c for c in calls if c[0] == "sbatch" and "--hold" in c]
+        self.assertEqual([next(a for a in c if a.startswith("--dependency")) for c in evaluate_jobs[1:]],
+                         ["--dependency=afterany:101"])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run = valid_run(Path(tmp))
+            before = []
+            with self.assertRaises(SystemExit):
+                self.submit(False, models=["nemotron", "no-such-model"])
+            self.assertEqual(list((self.run / "jobs").glob("*")), before)
+            with self.assertRaises(SystemExit):
+                self.submit(False, models=["nemotron", "nemotron"])
 
 
 if __name__ == "__main__":
