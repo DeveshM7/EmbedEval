@@ -135,8 +135,8 @@ test change applied, and the problem statement. Nothing else:
   repository (`instance.def` fetches each base by SHA at depth 1);
 - no network: every container command -- agent, validation, grading -- runs
   with `apptainer exec --net --network none` (loopback only);
-- no oracle hints: the task lists the failing tests, never the files the fix
-  changes;
+- no oracle hints: the task names neither the failing tests nor the files the
+  fix changes;
 - a problem statement written or rechecked by the served model
   (`scripts/nuttx_statement.py`) that names nothing of the fix the tests do
   not use.

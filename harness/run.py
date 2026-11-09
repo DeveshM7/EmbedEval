@@ -219,26 +219,23 @@ def _build_and_test(meta: dict) -> str:
 
 
 def build_task(meta: dict) -> str:
-    """The first user message: the problem plus its test context.
+    """The first user message: the problem statement.
 
-    Nothing derived from the fix: the files the upstream fix changed
-    (files_changed_by_fix) are not shown -- that is SWE-bench's "oracle"
-    retrieval setting, which tells the agent where the answer is."""
-    def bullets(items):
-        return "\n".join(f"  - {i}" for i in items) or "  (none)"
-
+    Nothing derived from the fix or the grading, for every project: not the
+    files the upstream fix changed (files_changed_by_fix; SWE-bench's
+    "oracle" retrieval setting, which tells the agent where the answer is),
+    nor the fail_to_pass / pass_to_pass lists. The tests themselves are in
+    the repository, and `run_tests` runs them."""
+    if not (meta.get("problem_statement") or "").strip():
+        sys.exit(f"ERROR: {meta['instance_id']} has no problem statement; write one first")
     return f"""\
 ## Bug Description
 
 {meta["problem_statement"]}
 
-## Failing Tests (must pass after your fix)
+## Tests
 
-{bullets(meta.get("fail_to_pass", []))}
-
-## Tests That Must Continue Passing
-
-{bullets(meta.get("pass_to_pass", []))}
+`run_tests` builds and runs the tests your fix is graded on.
 """
 
 

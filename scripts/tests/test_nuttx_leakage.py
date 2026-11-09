@@ -284,6 +284,15 @@ class Prompt(unittest.TestCase):
         for f in meta["files_changed_by_fix"]:
             self.assertNotIn(f, task)
 
+    def test_the_task_is_the_problem_statement_without_test_names(self):
+        import run
+        meta = {"instance_id": "nuttx__nuttx-1", "problem_statement": "P",
+                "fail_to_pass": ["memmem_test"], "pass_to_pass": ["other_test"]}
+        task = run.build_task(meta)
+        self.assertIn("\n\nP\n", task)
+        for name in meta["fail_to_pass"] + meta["pass_to_pass"]:
+            self.assertNotIn(name, task)
+
 
 class PatchCapture(unittest.TestCase):
     """The agent's patch reaches the grader byte for byte."""
