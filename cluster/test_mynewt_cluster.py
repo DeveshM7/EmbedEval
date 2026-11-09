@@ -352,32 +352,79 @@ class SubmitTest(unittest.TestCase):
             with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
                 submit.submit_phase(args, cfg, run)
 
+    def submit_evaluate(self, run, cfg, **given):
+        """submit_phase for an evaluate job with sbatch and scontrol faked:
+        the commands it ran."""
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            out = f"{75 + sum(1 for c in calls if c[0] == 'sbatch')};scholar\n" if cmd[0] == "sbatch" else ""
+            return SimpleNamespace(stdout=out, stderr="", returncode=0)
+        args = SimpleNamespace(mode="evaluate", after="5", dry_run=False, idle=2, server_job=None, model=None)
+        args.__dict__.update(given)
+        with patch.object(submit.subprocess, "run", side_effect=fake), \
+                patch.dict(submit.os.environ, {"PATH": "/apps/cent7/anaconda/bin:/usr/bin"}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            submit.submit_phase(args, cfg, run)
+        return calls
+
     def test_the_model_server_job_gets_a_clean_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
-            run = write_run(Path(tmp) / "r", [{"pr": 1, "stage": "to validate", "instance": "mynewt__mynewt-1"}])
+            run = valid_run(Path(tmp))
             cfg = config.load()
             cfg["slurm"].update(build_partition="cpu", partition="spark-interactive")
-            calls = []
-
-            def fake(cmd, **kw):
-                calls.append(cmd)
-                out = "77;scholar\n" if cmd[0] == "sbatch" else ""
-                return SimpleNamespace(stdout=out, stderr="", returncode=0)
-            args = SimpleNamespace(mode="evaluate", after="5", dry_run=False, idle=2, server_job=None, model=None)
-            with patch.object(submit.subprocess, "run", side_effect=fake), \
-                    patch.dict(submit.os.environ, {"PATH": "/apps/cent7/anaconda/bin:/usr/bin"}), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                submit.submit_phase(args, cfg, run)
-            server = next(c for c in calls if c[0] == "sbatch" and any("-server" in a for a in c))
+            calls = self.submit_evaluate(run, cfg)
+            server = next(c for c in calls if c[0] == "sbatch" and any(a.startswith("--export") for a in c))
             export = next(a for a in server if a.startswith("--export="))
             self.assertNotIn("anaconda", export)
             self.assertIn("PATH=/usr/local/bin:/usr/bin", export)
             self.assertIn("EMBEDEVAL_MODELS=", export)
             self.assertIn("EMBEDEVAL_VLLM_CACHE=" + str(run / "jobs" / "vllm-cache-"), export)
-            # the job ends the server it started once its workers are done
+            self.assertIn("EMBEDEVAL_SCRATCH=" + str(run / "jobs" / "server-scr-"), export)
+
+    def test_an_evaluate_job_gets_one_model_server_per_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prs = [{"pr": i, "stage": "to validate", "instance": f"mynewt__mynewt-{i}"} for i in range(1, 8)]
+            run = write_run(Path(tmp) / "r", prs, {i: {"validate": {"state": "done", "outcome": "VALID"}}
+                                                    for i in range(1, 8)})
+            cfg = config.load()
+            cfg["slurm"].update(build_partition="cpu", partition="spark-interactive", nodes_min=1)
+            cfg["evaluate"]["per_node"] = 3                    # 7 instances: 3 nodes
+            calls = self.submit_evaluate(run, cfg)
+            sbatch = [c for c in calls if c[0] == "sbatch"]
+            evaluate_job, server_job = sbatch
+            # the evaluate job is held until it names the server, on exactly the nodes of its servers
+            self.assertIn("--hold", evaluate_job)
             script = next((run / "jobs").glob("evaluate-*.sbatch")).read_text()
-            self.assertIn("scancel 77\n", script)
-            self.assertLess(script.index("srun"), script.index("scancel 77"))
+            self.assertIn("#SBATCH -N 3\n", script)
+            server_script = next((run / "jobs").glob("server-*.sbatch")).read_text()
+            self.assertIn("#SBATCH -N 3\n", server_script)
+            self.assertIn("#SBATCH --gres=", server_script)
+            self.assertIn("freeing the slot", server_script)       # it does not hold a slot it cannot use
+            self.assertIn("squeue -h -j 76", server_script)        # it ends with its evaluate job
+            self.assertIn("--dependency=afterany:5", server_job)
+            self.assertIn(["scontrol", "update", "JobId=76", "Dependency=afterany:5,after:77"], calls)
+            self.assertIn(["scontrol", "release", "76"], calls)
+            frozen = json.loads(next((run / "jobs").glob("config-*.json")).read_text())
+            self.assertEqual(frozen["evaluate_server_job"], "77")
+            # the job ends its servers once its workers are done
+            self.assertIn(f"scancel $(cat {run}/jobs/server-of-$SLURM_JOB_ID", script)
+            self.assertLess(script.index("srun"), script.index("scancel"))
+            self.assertEqual((run / "jobs" / "server-of-76").read_text().strip(), "77")
+
+    def test_a_server_job_given_or_a_hosted_model_starts_no_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            cfg = config.load()
+            cfg["slurm"].update(build_partition="cpu", partition="spark-interactive")
+            calls = self.submit_evaluate(run, cfg, server_job="9")
+            self.assertEqual(len([c for c in calls if c[0] == "sbatch"]), 1)
+            self.assertNotIn("--hold", calls[-1])
+            self.assertIn("--dependency=afterany:5,after:9", calls[-1])
+            self.assertNotIn("scancel", next((run / "jobs").glob("evaluate-*.sbatch")).read_text())
+            calls = self.submit_evaluate(run, cfg, model="claude-opus-4-6")
+            self.assertEqual(len([c for c in calls if c[0] == "sbatch"]), 1)
 
 
 if __name__ == "__main__":
