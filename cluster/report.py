@@ -64,11 +64,14 @@ ORDER = ["in ledger", "hard filter", "enrich failed", "dry run error", "dry run:
 
 def evaluation(ev: dict | None) -> str | None:
     """An agent outcome in a word: pass, fail, timeout (the time limit, not
-    the patch), steps (the step limit), or the failure note."""
+    the patch), steps (the step limit), cut short (by the end of the job, to
+    do again), unfinished (cut short every time: no result), or the failure note."""
     if not ev:
         return None
     if ev["state"] != "done":
         return f"not run: {ev.get('note', '')}"
+    if ev.get("cut_short"):
+        return "cut short" if status.cut_short(ev) else "unfinished"
     if ev.get("grade") == "pass":
         return "pass"
     return "timeout" if ev.get("timed_out") else "steps" if ev.get("step_limit_hit") else "fail"
@@ -128,7 +131,7 @@ def markdown(rep: dict) -> str:
         out += ["", "**Statements:** " + ", ".join(f"{k} {v}" for k, v in rep["statements"].items())]
     for label, counts in rep.get("evaluations", {}).items():
         out += ["", f"**Agents, {label}:** " + ", ".join(f"{k} {v}" for k, v in counts.items())
-                + " (timeout: the time limit, steps: the step limit)"]
+                + " (timeout: the time limit, steps: the step limit, unfinished: cut off by the end of the job every time)"]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
             "| PR | outcome | detail | pair | triage min | validation min |"

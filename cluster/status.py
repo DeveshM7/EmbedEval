@@ -15,6 +15,8 @@ separate jobs (submit.py statement / validate / evaluate):
     evaluate.state  done            "grade" pass / fail / ..., "exit_status", "timed_out",
                                     "model", "steps", "limits"
                     failed          not the agent's outcome (build, server, cap): done again
+                    done, "cut_short"  the run was cut off by the end of the job (no time
+                                    limit): "cuts" counts them; done again until CUT_SHORT_MAX
 
 A stage appears only once it has finished, one way or another:
 
@@ -39,6 +41,7 @@ import os
 from pathlib import Path
 
 TRIAGE_FINAL = {"done", "cap", "server failed", "failed"}
+CUT_SHORT_MAX = 2     # times an agent run may be cut off by the end of the job before it is final
 
 
 def path(run: Path, pr: int) -> Path:
@@ -97,10 +100,11 @@ def statement_todo(run: Path) -> list[int]:
 
 def eval_label(ev_cfg: dict) -> str:
     """One evaluation: a model under its limits (config "evaluate"), e.g.
-    qwen38-nvfp4-50steps-40min. Each label has its own status stage
+    qwen38-nvfp4-50steps-40min (qwen38-nvfp4-50steps with no time limit, 0). Each label has its own status stage
     ("evaluate:<label>") and outputs (<run>/outputs/<label>/), so models and
     limits are compared on the same instances without overwriting each other."""
-    return f"{ev_cfg['model']}-{ev_cfg['step_limit']}steps-{ev_cfg['time_limit']:g}min"
+    minutes = f"-{ev_cfg['time_limit']:g}min" if ev_cfg["time_limit"] else ""
+    return f"{ev_cfg['model']}-{ev_cfg['step_limit']}steps{minutes}"
 
 
 def evaluation(st: dict, label: str) -> dict:
@@ -123,16 +127,22 @@ def harness_fault(ev: dict) -> bool:
     return ev.get("state") == "done" and "corrupt patch" in (ev.get("error") or "")
 
 
+def cut_short(ev: dict) -> bool:
+    """A run the end of the job cut off (no time limit), not the agent's
+    outcome: it is run again until it has been cut off CUT_SHORT_MAX times."""
+    return ev.get("state") == "done" and bool(ev.get("cut_short")) and ev.get("cuts", 0) < CUT_SHORT_MAX
+
+
 def evaluate_todo(run: Path, label: str) -> list[int]:
     """VALID instances with no outcome for evaluation `label` yet; one that
     failed for a reason not the agent's (build, model server, cap,
-    harness_fault) is run again."""
+    harness_fault, cut_short) is run again."""
     out = []
     for e in manifest(run)["prs"]:
         st = read(run, e["pr"])
         ev = evaluation(st, label)
         if e.get("instance") and (st.get("validate") or {}).get("outcome") == "VALID" and \
-                (ev.get("state") != "done" or harness_fault(ev)):
+                (ev.get("state") != "done" or harness_fault(ev) or cut_short(ev)):
             out.append(e["pr"])
     return out
 

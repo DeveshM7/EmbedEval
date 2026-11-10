@@ -20,6 +20,7 @@ REPO = CLUSTER.parent
 sys.path[:0] = [str(CLUSTER), str(REPO / "scripts")]
 
 import node_worker  # noqa: E402
+import report  # noqa: E402
 import status  # noqa: E402
 
 INSTANCES = REPO / "apptainer" / "instances" / "nuttx"
@@ -255,6 +256,7 @@ class Worker(unittest.TestCase):
         cfg["derived"] = {"vllm_cache": str(self.s.root / "vc")}
         cfg["nuttx"]["data"] = str(self.s.root / "data")
         (self.s.root / "data").mkdir()
+        cfg["evaluate"]["time_limit"] = 40
         label = "qwen38-nvfp4-50steps-40min"
         out = self.run / "outputs" / label / "nuttx" / "qwen38-nvfp4" / "11889-a2327"
 
@@ -303,6 +305,7 @@ class Worker(unittest.TestCase):
         cfg["derived"] = {"vllm_cache": str(self.s.root / "vc")}
         cfg["nuttx"]["data"] = str(self.s.root / "data")
         (self.s.root / "data").mkdir()
+        cfg["evaluate"]["time_limit"] = 40
         with mock.patch.object(node_worker, "MACHINE", "aarch64"), \
                 mock.patch.object(node_worker, "step", return_value=0), \
                 mock.patch.object(node_worker, "start_server", return_value=mock.Mock(pid=1)), \
@@ -313,6 +316,76 @@ class Worker(unittest.TestCase):
         label = "qwen38-nvfp4-50steps-40min"
         self.assertEqual(status.read(self.run, 2327)[f"evaluate:{label}"]["state"], "failed")
         self.assertEqual(status.evaluate_todo(self.run, label), [2327])
+
+
+    def run_evaluate(self, minutes, left=170, agent_rc=0):
+        """evaluate() on instance 2327 with evaluate.time_limit `minutes` and `left`
+        minutes of the job (validate_phase = left + 3) left; returns the commands run."""
+        status.write_stage(self.run, 2327, "validate", {"state": "done", "outcome": "VALID"})
+        cfg = json.loads((self.run / "manifest.json").read_text())["config"]
+        cfg["derived"] = {"vllm_cache": str(self.s.root / "vc")}
+        cfg["nuttx"]["data"] = str(self.s.root / "data")
+        (self.s.root / "data").mkdir(exist_ok=True)
+        cfg["evaluate"]["time_limit"] = minutes
+        cfg["caps"]["validate_phase"] = left + 3
+        calls = []
+
+        def fake_step(cmd, logfile, mins, env, cwd=REPO):
+            calls.append((cmd, mins))
+            if "harness/run.py" in cmd:
+                return agent_rc
+            if "harness/evaluate_patches.py" in cmd:
+                Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(
+                    {"results": [{"grade": "fail", "error": "tests failed"}]}))
+            return 0
+
+        with mock.patch.object(node_worker, "MACHINE", "aarch64"), \
+                mock.patch.object(node_worker, "step", fake_step), \
+                mock.patch.object(node_worker, "start_server", return_value=mock.Mock(pid=1)), \
+                mock.patch.object(node_worker, "server_ready", return_value=True), \
+                mock.patch.object(node_worker, "server_alive", return_value=True), \
+                mock.patch.object(node_worker, "kill_group"):
+            node_worker.evaluate(cfg, self.run, {}, self.s.root / "node")
+        return calls
+
+    def test_label_with_and_without_time_limit(self):
+        ev = {"model": "m", "step_limit": 50, "time_limit": 0}
+        self.assertEqual(status.eval_label(ev), "m-50steps")
+        self.assertEqual(status.eval_label({**ev, "time_limit": 40}), "m-50steps-40min")
+
+    def test_old_positive_limit_result_keeps_its_label(self):
+        status.write_stage(self.run, 2327, "validate", {"state": "done", "outcome": "VALID"})
+        status.write_stage(self.run, 2327, "evaluate", {"state": "done", "grade": "fail", "model": "m",
+                                                        "limits": {"steps": 50, "minutes": 80}})
+        self.assertEqual(status.evaluate_todo(self.run, "m-50steps-80min"), [])
+        self.assertEqual(status.evaluate_todo(self.run, "m-50steps"), [2327])
+
+    def test_no_limit_cap_is_the_time_left(self):
+        calls = self.run_evaluate(0, left=170)
+        cmd, cap = next(c for c in calls if "harness/run.py" in c[0])
+        self.assertEqual(cmd[cmd.index("--time-limit") + 1], "0")
+        self.assertAlmostEqual(cap, 170 - 30, delta=1)       # less the grading margin, not 20
+        self.assertEqual(status.read(self.run, 2327)["evaluate:qwen38-nvfp4-50steps"]["grade"], "fail")
+
+    def test_positive_limit_cap_unchanged(self):
+        cmd, cap = next(c for c in self.run_evaluate(40) if "harness/run.py" in c[0])
+        self.assertEqual((cmd[cmd.index("--time-limit") + 1], cap), ("40", 60))
+
+    def test_no_new_run_with_less_than_min_minutes_left(self):
+        self.assertFalse([c for c in self.run_evaluate(0, left=80) if "harness/run.py" in c[0]])
+        self.assertEqual(status.evaluate_todo(self.run, "qwen38-nvfp4-50steps"), [2327])
+
+    def test_cut_short_runs_again_then_is_final(self):
+        label = "qwen38-nvfp4-50steps"
+        calls = self.run_evaluate(0, agent_rc=124)
+        self.assertFalse([c for c in calls if "harness/evaluate_patches.py" in c[0]])   # never graded
+        ev = status.read(self.run, 2327)[f"evaluate:{label}"]
+        self.assertEqual((ev["cut_short"], ev["cuts"], report.evaluation(ev)), (True, 1, "cut short"))
+        self.assertEqual(status.evaluate_todo(self.run, label), [2327])
+        self.run_evaluate(0, agent_rc=124)
+        ev = status.read(self.run, 2327)[f"evaluate:{label}"]
+        self.assertEqual((ev["cuts"], report.evaluation(ev)), (2, "unfinished"))
+        self.assertEqual(status.evaluate_todo(self.run, label), [])
 
 
 if __name__ == "__main__":

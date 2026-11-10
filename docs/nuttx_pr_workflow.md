@@ -194,22 +194,28 @@ python scripts/promote_instance.py --run-dir <runs>/R nuttx__nuttx-<k>-a<a> ...
 ```
 
 `--model` is any profile of `triage/models.json` (or a hosted model
-`harness/paths.py` knows); every model gets `evaluate.step_limit` and
-`evaluate.time_limit`, recorded with each result. A GPU node serves the model
+`harness/paths.py` knows); every model gets `evaluate.step_limit` (50) and
+`evaluate.time_limit` (0: no per-instance time limit), recorded with each
+result. These are the same limits as the Zephyr and RIOT baseline. A GPU node serves the model
 itself to its own agents; an x86 evaluate job submits a model-server job of
 as many GPU nodes as it has nodes (one server each, so every server has as
 many agents as on a GPU node: `--max-num-seqs 4`, two agents), each x86
 node reaches its own over SSH, and the evaluate job cancels the server job
 when its workers are done (the account
 runs two jobs at once, so the ARM64 evaluate job queues meanwhile). Each evaluation is labeled by
-model and limits (`qwen38-nvfp4-50steps-80min`): its status is
+model and limits (`qwen38-nvfp4-50steps`, or `qwen38-nvfp4-50steps-80min`
+under a time limit of 80 minutes): its status is
 `evaluate:<label>` and its trajectories, patches and grades are under
 `<run>/outputs/<label>/`, so models and limits are compared on the same
 instances without overwriting each other. The report counts agent outcomes
-per label as pass, fail, timeout (the time limit, not the patch) and steps
-(the step limit). Size the time limit from the measured time per step: with
-qwen38-nvfp4 on a Spark node, two agents per node, a step took 80-100 s, so
-50 steps need about 80 minutes.
+per label as pass, fail, timeout (a time limit, not the patch), steps
+(the step limit) and unfinished. With no time limit a run is bounded only by
+the end of its job: no new run starts with less than `evaluate.min_minutes_left`
+(90) of the job left, and a run the job's end cuts off is not graded and is run
+again by the next job; one cut off twice is unfinished (it did not finish
+within a full job). With qwen38-nvfp4 on a Spark node, two agents per node, a
+step took 80-100 s, so 50 steps need about 80 minutes; size `caps.validate_phase`
+(the evaluate job's length) so a run has that much of it left.
 
 The triage tools read full bare clones of both repositories, linked where the
 scripts look for them:

@@ -932,7 +932,10 @@ def evaluate(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
     a network. The model is evaluate.model: served by this node itself, or,
     with evaluate_server_job (x86 nodes, no GPU), by that job's node through an
     SSH tunnel. Limits are evaluate.step_limit and evaluate.time_limit for
-    every model, recorded with each result."""
+    every model, recorded with each result. With time_limit 0 a run is bounded
+    only by the end of the job: it is capped at the time left (less the grading
+    margin), no run starts with less than evaluate.min_minutes_left, and one
+    cut off is recorded cut_short, not graded, and run again."""
     label = status.eval_label(cfg["evaluate"])
     mine = assigned_work(run, "evaluate", label)
     log(f"evaluate: {len(mine)} instances {mine}")
@@ -967,7 +970,10 @@ def evaluate(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
         if lost.is_set() or _stopping.is_set():
             return
         iid, start = status.entry(run, pr)["instance"], time.time()
-        if (deadline - time.time()) / 60 < ev["time_limit"] + 2 * caps["build"] + 30:
+        if ev["time_limit"]:
+            if (deadline - time.time()) / 60 < ev["time_limit"] + 2 * caps["build"] + 30:
+                return                                     # stays to do
+        elif (deadline - time.time()) / 60 < ev["min_minutes_left"]:
             return                                         # stays to do
         lg = LOGS / f"evaluate-{pr}.log"
         info = {"model": ev["model"], "instance": iid, "limits": limits, "node": N}
@@ -984,14 +990,21 @@ def evaluate(cfg: dict, run: Path, env: dict, node_dir: Path) -> None:
                 return
             if rc:
                 return done("failed", note="build failed" if rc != 124 else "build hit the cap")
+            # no time limit: the agent may use what is left of the job, less grading
+            cap = ev["time_limit"] + 20 if ev["time_limit"] else (deadline - time.time()) / 60 - 30
             rc = step([PY, "harness/run.py", "--instance", iid, "--model", ev["model"],
                        "--step-limit", str(ev["step_limit"]), "--time-limit", str(ev["time_limit"])],
-                      lg, ev["time_limit"] + 20, venv)
+                      lg, cap, venv)
             if rc == 143:
                 return
             if not server_alive(base):
                 lost.set()       # the agent lost its model: not its outcome, so it runs again
                 return done("failed", note="model server gone during the run")
+            if rc == 124 and not ev["time_limit"]:
+                # the job's end, not the agent: never graded from a partial patch
+                cuts = status.evaluation(status.read(run, pr), label).get("cuts", 0) + 1
+                return done("done", cut_short=True, cuts=cuts,
+                            error="agent run cut off by the end of the job")
             out_dir = outputs / "nuttx" / ev["model"] / iid.split("nuttx__nuttx-", 1)[1]
             result = json.loads((out_dir / "result.json").read_text()) if (out_dir / "result.json").exists() else {}
             grade_file = outputs / "grades" / f"{iid}.json"
