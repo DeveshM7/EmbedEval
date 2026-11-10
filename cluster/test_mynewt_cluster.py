@@ -119,6 +119,27 @@ class StatusTest(unittest.TestCase):
                                                             "error": "git apply failed: patch does not apply"})
             self.assertEqual(status.evaluate_todo(run, LABEL), [])
 
+    def test_no_time_limit_has_no_minutes_in_the_label_and_old_results_keep_theirs(self):
+        cfg = {"model": "qwen38-nvfp4", "step_limit": 50, "time_limit": 0}
+        self.assertEqual(status.eval_label(cfg), "qwen38-nvfp4-50steps")
+        self.assertEqual(status.eval_label({**cfg, "time_limit": 40}), LABEL)
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            status.write_stage(run, 1, f"evaluate:{LABEL}", {"state": "done", "grade": "pass"})
+            self.assertEqual(status.evaluate_todo(run, LABEL), [])
+            self.assertEqual(status.evaluate_todo(run, "qwen38-nvfp4-50steps"), [1])
+
+    def test_a_run_cut_off_by_its_job_is_run_again_until_two_cuts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            label = "m-50steps"
+            status.write_stage(run, 1, f"evaluate:{label}",
+                               {"state": "failed", "note": status.CUT_NOTE, "cuts": 1})
+            self.assertEqual(status.evaluate_todo(run, label), [1])
+            status.write_stage(run, 1, f"evaluate:{label}", {"state": "failed", "unfinished": True,
+                                                            "note": status.UNFINISHED_NOTE, "cuts": 2})
+            self.assertEqual(status.evaluate_todo(run, label), [])
+
     def test_runs_of_other_projects_do_not_hold_prs(self):
         with tempfile.TemporaryDirectory() as tmp:
             write_run(Path(tmp) / "a", [{"pr": 7, "stage": "to validate", "instance": "mynewt__mynewt-7"}])
@@ -150,6 +171,19 @@ class ReportTest(unittest.TestCase):
                                              "qwen38-nvfp4-50steps-80min": {"fail": 1}})
             self.assertEqual(rep["rows"][0]["pair"], "mynewt__mynewt-1 runtime")
             self.assertIn(f"Agent grades, {LABEL}:** pass 1", report.markdown(rep))
+
+    def test_the_report_tallies_steps_and_unfinished_apart_from_pass_and_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            valid = {"state": "done", "outcome": "VALID", "instance": "mynewt__mynewt-1"}
+            run = write_run(Path(tmp) / "r", [{"pr": p, "stage": "to validate", "instance": f"mynewt__mynewt-{p}"}
+                                              for p in (1, 2, 3)],
+                            {1: {"validate": valid, "evaluate:m-50steps": {"state": "done", "grade": "fail",
+                                                                           "step_limit_hit": True}},
+                             2: {"validate": valid, "evaluate:m-50steps": {"state": "done", "grade": "fail"}},
+                             3: {"validate": valid, "evaluate:m-50steps": {"state": "failed", "unfinished": True,
+                                                                           "note": status.UNFINISHED_NOTE}}})
+            self.assertEqual(report.build(run)["agents"],
+                             {"m-50steps": {"steps": 1, "fail": 1, "unfinished": 1}})
 
     def test_the_ledger_keeps_projects_apart(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -280,6 +314,54 @@ class EvaluateTest(unittest.TestCase):
             self.assertEqual(status.read(run, 1)[f"evaluate:{label}"]["note"], "model server gone during the run")
             self.assertEqual(status.evaluate_todo(run, label), [1])
             self.assertEqual(status.evaluate_todo(run, "n-1steps-1min"), [1])
+
+    def evaluate_without_limit(self, run, rc_of_run, minutes=300, extra=None):
+        """node_worker.evaluate with time_limit 0; rc_of_run is run.py's exit code.
+        Returns the (cap, --time-limit) of the run.py step, or None if it did not run."""
+        cfg = {"evaluate": {"model": "m", "step_limit": 50, "time_limit": 0, "per_node": 1, **(extra or {})},
+               "caps": {"build": 1, "server_start": 1}}
+        seen = []
+
+        def step(cmd, logfile, mins, env):
+            if cmd[1].endswith("run.py"):
+                seen.append((mins, cmd[cmd.index("--time-limit") + 1]))
+                return rc_of_run
+            return 1 if cmd[1].endswith("evaluate_patches.py") else 0
+        with patch.object(node_worker, "LOGS", run / "logs", create=True), \
+                patch.object(node_worker, "ME", "t-node0", create=True), \
+                patch.object(node_worker, "step", side_effect=step), \
+                patch.object(node_worker, "sweep"), patch.object(node_worker.report, "to_ledger"), \
+                patch.object(node_worker, "drain",       # each instance once, as at a job's end
+                             side_effect=lambda q, todo, one, *a, **k: [one(pr) for pr in todo]):
+            node_worker.evaluate(cfg, run, {"EMBEDEVAL_WORK": str(run / "work")}, minutes)
+        return seen[0] if seen else None
+
+    def test_without_a_time_limit_the_job_bounds_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            cap, arg = self.evaluate_without_limit(run, 1, minutes=300)
+            self.assertEqual(arg, "0")
+            self.assertTrue(250 < cap < 300, cap)        # what is left of the job, not 15 minutes
+
+    def test_no_run_starts_with_less_than_min_minutes_left(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            self.assertIsNone(self.evaluate_without_limit(run, 1, minutes=80))
+            self.assertEqual(status.evaluate_todo(run, "m-50steps"), [1])
+            self.assertIsNone(self.evaluate_without_limit(run, 1, minutes=150, extra={"min_minutes_left": 200}))
+            self.assertIsNotNone(self.evaluate_without_limit(run, 1, minutes=150, extra={"min_minutes_left": 100}))
+
+    def test_a_run_the_job_cuts_off_is_not_graded_and_is_final_after_two_cuts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = valid_run(Path(tmp))
+            self.evaluate_without_limit(run, 124)
+            ev = status.read(run, 1)["evaluate:m-50steps"]
+            self.assertEqual((ev["state"], ev["note"], ev["cuts"], "grade" in ev), ("failed", status.CUT_NOTE, 1, False))
+            self.assertEqual(status.evaluate_todo(run, "m-50steps"), [1])
+            self.evaluate_without_limit(run, 124)
+            ev = status.read(run, 1)["evaluate:m-50steps"]
+            self.assertEqual((ev["note"], ev["cuts"], ev["unfinished"]), (status.UNFINISHED_NOTE, 2, True))
+            self.assertEqual(status.evaluate_todo(run, "m-50steps"), [])
 
     def test_an_evaluation_keeps_its_outputs_and_status_to_its_label(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -461,9 +543,9 @@ class ChainTest(unittest.TestCase):
         scripts = sorted((self.run / "jobs").glob("evaluate-*.sbatch"))
         self.assertEqual(len(scripts), 3)
         names = [re.search(r"#SBATCH -J (\S+)", p.read_text())[1] for p in scripts]
-        self.assertEqual(sorted(names), sorted(f"embedeval-r-evaluate-{m}-50steps-40min" for m in self.MODELS))
+        self.assertEqual(sorted(names), sorted(f"embedeval-r-evaluate-{m}-50steps" for m in self.MODELS))
         self.assertEqual(len(set(names)), 3)           # so the one-job guard never meets another model's job
-        first, second, third = (f"embedeval-r-evaluate-{m}-50steps-40min" for m in self.MODELS)
+        first, second, third = (f"embedeval-r-evaluate-{m}-50steps" for m in self.MODELS)
         self.assertIn(f"dependency: afterany:<{first}>", out)
         self.assertIn(f"dependency: afterany:<{second}>", out)
         self.assertNotIn("afterany:<" + third, out)
@@ -484,9 +566,9 @@ class ChainTest(unittest.TestCase):
         self.assertEqual(len(list((self.run / "jobs").glob("server-of-*"))), 3)
 
     def test_a_model_already_evaluated_is_left_out_and_unknown_ones_refuse_everything(self):
-        status.write_stage(self.run, 1, "evaluate:nemotron-50steps-40min", {"state": "done", "grade": "pass"})
+        status.write_stage(self.run, 1, "evaluate:nemotron-50steps", {"state": "done", "grade": "pass"})
         calls, out = self.submit(False)
-        self.assertIn("nothing left to evaluate as nemotron-50steps-40min", out)
+        self.assertIn("nothing left to evaluate as nemotron-50steps", out)
         evaluate_jobs = [c for c in calls if c[0] == "sbatch" and "--hold" in c]
         self.assertEqual([next(a for a in c if a.startswith("--dependency")) for c in evaluate_jobs[1:]],
                          ["--dependency=afterany:101"])

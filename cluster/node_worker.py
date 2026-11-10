@@ -656,7 +656,11 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
         iid = status.read(run, pr)["validate"]["instance"]
         lg, start = LOGS / f"evaluate-{pr}.log", time.time()
         left = lambda: (deadline - time.time()) / 60
-        if left() < ev["time_limit"] + 20 or _stopping.is_set():
+        # time_limit 0: no limit per instance, so only the job's end bounds a run;
+        # min_minutes_left is the least of the job a run is started with
+        minutes_limit = ev.get("time_limit") or 0
+        need = minutes_limit + 20 if minutes_limit else ev.get("min_minutes_left", 90)
+        if left() < need or _stopping.is_set():
             return                                         # stays to do
         info = {"model": ev["model"], "instance": iid, "limits": limits, "node": N}
 
@@ -672,15 +676,23 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
                 return
             if rc:
                 return done("failed", note="build failed" if rc != 124 else "build hit the cap")
+            # with no limit the run may use what is left of the job, less 5 min to grade
+            cap = minutes_limit + 15 if minutes_limit else left() - 5
             rc = step([PY, "harness/run.py", "--instance", iid, "--model", ev["model"],
-                       "--step-limit", str(ev["step_limit"]), "--time-limit", str(ev["time_limit"])],
-                      lg, ev["time_limit"] + 15, venv)
+                       "--step-limit", str(ev["step_limit"]), "--time-limit", str(minutes_limit)],
+                      lg, cap, venv)
             if rc == 143:
                 return
             if tunnel is not None and not server_alive(venv["EMBEDEVAL_LOCAL_API_BASE"], tunnel):
                 # the agent lost its model: not the agent's outcome, so it is run again
                 lost.set()
                 return done("failed", note="model server gone during the run")
+            if rc == 124 and not minutes_limit:
+                # the job's end, not the agent: not graded, run again by the next job
+                cuts = status.evaluation(status.read(run, pr), label).get("cuts", 0) + 1
+                if cuts >= status.MAX_CUTS:
+                    return done("failed", note=status.UNFINISHED_NOTE, cuts=cuts, unfinished=True)
+                return done("failed", note=status.CUT_NOTE, cuts=cuts)
             out = grades / f"{iid}.json"
             rc = step([PY, "harness/evaluate_patches.py", "--instance", iid, "--model", ev["model"],
                        "--output", str(out)], lg, 30, venv)
@@ -689,15 +701,17 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
             if not out.exists():
                 return done("failed", note=f"no grade (rc={rc}); see the log")
             g = json.loads(out.read_text())["results"][0]
-            steps = None
+            steps, exit_status = None, None
             r = outputs / "mynewt"
             for f in r.glob(f"*/{iid.split('-', 1)[1]}/trajectory.json"):
                 try:
-                    steps = json.loads(f.read_text())["info"]["model_stats"]["api_calls"]
+                    info_ = json.loads(f.read_text())["info"]
+                    steps, exit_status = info_["model_stats"]["api_calls"], info_.get("exit_status")
                 except (OSError, ValueError, KeyError):
                     pass
             done("done", grade=g.get("grade"), error=g.get("error"), steps=steps,
-                 tampering=g.get("tampering", False))
+                 tampering=g.get("tampering", False), exit_status=exit_status,
+                 step_limit_hit=exit_status == "LimitsExceeded")
         finally:
             step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
 

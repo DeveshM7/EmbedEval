@@ -123,10 +123,20 @@ def validate_todo(run: Path) -> list[int]:
 
 def eval_label(ev_cfg: dict) -> str:
     """One evaluation: a model under its limits (config "evaluate"), e.g.
-    qwen38-nvfp4-50steps-40min. Each label has its own status stage
+    qwen38-nvfp4-50steps-40min, or qwen38-nvfp4-50steps with no per-instance
+    time limit (evaluate.time_limit 0). Each label has its own status stage
     ("evaluate:<label>") and outputs (<run>/outputs/<label>/), so models and
     limits are compared on the same instances without overwriting each other."""
-    return f"{ev_cfg['model']}-{ev_cfg['step_limit']}steps-{ev_cfg['time_limit']:g}min"
+    minutes = ev_cfg.get("time_limit") or 0
+    return f"{ev_cfg['model']}-{ev_cfg['step_limit']}steps" + (f"-{minutes:g}min" if minutes else "")
+
+
+# An agent run with no time limit that the end of its job cut off is the
+# infrastructure's, not the agent's: it is run again (the note says "no time
+# left", see evaluate_needed). After MAX_CUTS cuts it is final.
+MAX_CUTS = 2
+CUT_NOTE = "cut off by the end of the job (no time left)"
+UNFINISHED_NOTE = "did not finish within a full job"
 
 
 def evaluation(st: dict, label: str) -> dict:

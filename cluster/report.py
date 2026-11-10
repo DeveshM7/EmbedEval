@@ -74,7 +74,10 @@ def evaluations(st: dict) -> dict:
             label = key.split(":", 1)[1]
         else:
             continue
-        out[label] = "harness fault" if status.harness_fault(ev) else ev.get("grade") or ev["state"]
+        out[label] = ("harness fault" if status.harness_fault(ev)
+                      else "unfinished" if ev.get("unfinished")      # not a pass or a fail
+                      else "steps" if ev.get("grade") == "fail" and ev.get("step_limit_hit")
+                      else ev.get("grade") or ev["state"])
     return out
 
 
