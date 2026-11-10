@@ -260,7 +260,9 @@ python harness/evaluate_patches.py --instance contiki-ng__contiki-ng-3246 --mode
 `<model>` is a hosted model or a profile of `triage/models.json` served at
 `EMBEDEVAL_LOCAL_API_BASE`. On Scholar, triage, validation and evaluating
 several open-weight models on one run go through `cluster/`
-(`python cluster/submit.py evaluate --run R --model A B C --queue`):
+(`python cluster/submit.py evaluate --run R --model A B C --queue`; by
+default 50 steps and no time limit per instance, the same limits as the Zephyr
+and RIOT baseline):
 [docs/running_on_scholar.md, section 12](docs/running_on_scholar.md#12-contiki-ng-runs).
 The [Contiki-NG triage document](docs/contiki_ng_triage.md) is the triage
 model's instructions.

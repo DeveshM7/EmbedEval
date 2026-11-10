@@ -436,7 +436,8 @@ class EvaluateTest(unittest.TestCase):
         cfg_file.write_text(f"scratch_root: {tmp}\nproject: contiki-ng\n"
                             "slurm:\n  build_partition: cpu\n  partition: spark-interactive\n"
                             "  build_python: /x86/python\n"
-                            "evaluate:\n  python: /x86/agent-venv/python\n")
+                            "evaluate:\n  python: /x86/agent-venv/python\n"
+                            "  step_limit: 100\n  time_limit: 60\n")
         cfg = config.load(cfg_file)
         run = Path(cfg["derived"]["runs"]) / "reval"
         run.mkdir(parents=True)
@@ -576,15 +577,17 @@ class EvaluateTest(unittest.TestCase):
                   self.assertRaises(SystemExit)):
                 submit.main()
 
-    def evaluate(self, run, cfg, capacity=4.0, waiting=(), exit_status="TimeExceeded", job="test"):
+    def evaluate(self, run, cfg, capacity=4.0, waiting=(), exit_status="TimeExceeded", job="test", agent_rc=0, minutes=240):
         """Run the worker's evaluate phase with a fake server: `capacity`
         full-length requests held, `waiting` the queue samples during a run."""
         calls = []
-        self.outputs_dirs = []
+        self.outputs_dirs, self.agent_caps = [], []
         def fake_step(cmd, *args):
             calls.append(cmd)
             if "harness/run.py" in cmd[1]:
                 self.outputs_dirs.append(args[-1].get("EMBEDEVAL_OUTPUTS_DIR"))
+                self.agent_caps.append(args[-2])
+                return agent_rc
             if "evaluate_patches.py" in cmd[1]:
                 out = Path(cmd[cmd.index("--output") + 1])
                 out.write_text(json.dumps({"results": [{"grade": "fail", "error": "tests failed"}]}))
@@ -610,7 +613,7 @@ class EvaluateTest(unittest.TestCase):
               patch.object(node_worker, "drain", side_effect=spy_drain),
               patch.object(node_worker, "agent_record", return_value={"exit_status": exit_status, "steps": 40}),
               patch.object(node_worker.report, "to_ledger")):
-            node_worker.evaluate(cfg, run, {"EMBEDEVAL_WORK": str(run / "work")}, 240)
+            node_worker.evaluate(cfg, run, {"EMBEDEVAL_WORK": str(run / "work")}, minutes)
         return calls, lanes
 
     def test_worker_grades_only_valid_instances_and_keys_by_model(self):
@@ -711,6 +714,63 @@ class EvaluateTest(unittest.TestCase):
             self.assertEqual(status.evaluations(st)["qwen38-nvfp4-100steps-60min"]["state"], "done")
             self.assertEqual(report.build(run)["evaluations"],
                              {"qwen38-nvfp4-100steps-60min": {"instances": 1, "fail": 1}})
+
+    def no_limit(self, tmp):
+        cfg_file, run = self.run_dir(tmp)
+        cfg = {**config.load(cfg_file), "evaluate_model": "qwen38-nvfp4", "evaluate_server_job": "900"}
+        cfg["evaluate"] = {**cfg["evaluate"], "step_limit": 50, "time_limit": 0}
+        return cfg, run, label_of(cfg, "qwen38-nvfp4")
+
+    def test_the_label_names_a_time_limit_only_when_there_is_one(self):
+        self.assertEqual(status.eval_label("m", 50, 0), "m-50steps")
+        self.assertEqual(status.eval_label("m", 100, 60), "m-100steps-60min")
+        cfg = config.load(None)["evaluate"]
+        self.assertEqual((cfg["step_limit"], cfg["time_limit"], cfg["min_minutes_left"]), (50, 0, 90))
+
+    def test_a_result_under_a_positive_limit_keeps_its_old_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, run = self.run_dir(tmp)
+            old = {"model": "m", "state": "done", "grade": "pass", "timed_out": False, "server_queued": 0.0,
+                   "limits": {"step_limit": 100, "time_limit": 60}}
+            status.write_stage(run, 1, "evaluate:m", old)
+            self.assertEqual(status.evaluate_todo(run, "m-100steps-60min"), [])
+            self.assertEqual(status.evaluate_todo(run, "m-50steps"), [1])
+
+    def test_with_no_limit_the_run_lasts_until_the_job_ends(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, run, label = self.no_limit(tmp)
+            calls, _ = self.evaluate(run, cfg, exit_status="Submitted")
+            agent = next(c for c in calls if "harness/run.py" in c[1])
+            self.assertEqual(agent[agent.index("--time-limit") + 1], "0")
+            self.assertEqual(agent[agent.index("--step-limit") + 1], "50")
+            # 240 min job: 3 min and 25 min of grading are kept back
+            self.assertAlmostEqual(self.agent_caps[0], 240 - 3 - 25, delta=1)
+            self.assertEqual(status.read(run, 1)[f"evaluate:{label}"]["state"], "done")
+
+    def test_no_run_starts_with_less_than_min_minutes_left(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, run, label = self.no_limit(tmp)
+            calls, _ = self.evaluate(run, cfg, minutes=90)       # 87 min usable, 90 needed
+            self.assertFalse(any("harness/run.py" in c[1] for c in calls))
+            self.assertEqual(status.evaluate_todo(run, label), [1])
+            calls, _ = self.evaluate(run, cfg, minutes=94, exit_status="Submitted")
+            self.assertTrue(any("harness/run.py" in c[1] for c in calls))
+
+    def test_a_run_cut_off_by_the_job_is_not_graded_and_is_given_up_after_two_cuts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, run, label = self.no_limit(tmp)
+            calls, _ = self.evaluate(run, cfg, agent_rc=124)
+            self.assertFalse(any("evaluate_patches.py" in c[1] for c in calls))
+            e = status.read(run, 1)[f"evaluate:{label}"]
+            self.assertEqual((e["state"], e["retry"], e["cut_short"], e["unfinished"]), ("failed", True, 1, False))
+            self.assertEqual(status.evaluate_todo(run, label), [1])
+            self.evaluate(run, cfg, agent_rc=124, job="next")
+            e = status.read(run, 1)[f"evaluate:{label}"]
+            self.assertEqual((e["retry"], e["cut_short"], e["unfinished"]), (False, 2, True))
+            self.assertIn("full job", e["note"])
+            self.assertEqual(status.evaluate_todo(run, label), [])
+            self.assertEqual(report.build(run)["evaluations"][label],
+                             {"instances": 1, "unfinished: not within a full job": 1})
 
     def test_server_capacity_and_queue_are_read_from_vllm(self):
         with tempfile.TemporaryDirectory() as tmp:

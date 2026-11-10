@@ -742,7 +742,9 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     lost = threading.Event()        # the model server is gone: take no more instances
     later: set[int] = set()         # given back for the next job, not again on this server
     # an instance is started only with time for its build, the agent and the grading
-    enough = lambda: (deadline - time.time()) / 60 >= ev["time_limit"] + caps["build"] + 25
+    enough = lambda: (deadline - time.time()) / 60 >= (
+        ev["time_limit"] + caps["build"] + 25 if ev["time_limit"]
+        else max(ev["min_minutes_left"], caps["build"] + 25))
 
     def one(pr: int) -> None:
         if lost.is_set() or not server_alive(base, tunnel):
@@ -771,9 +773,11 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
             watcher = threading.Thread(target=watch_queue, args=(base, watched, waiting), daemon=True)
             watcher.start()
             try:
+                # no time limit: the run lasts until the job's deadline, less the grading's 25 min
+                cap = ev["time_limit"] + 15 if ev["time_limit"] else (deadline - time.time()) / 60 - 25
                 rc = step([PY, "harness/run.py", "--instance", iid, "--model", model,
                            "--step-limit", str(ev["step_limit"]), "--time-limit", str(ev["time_limit"])],
-                          lg, ev["time_limit"] + 15, venv)
+                          lg, cap, venv)
             finally:
                 watched.set()
             if rc == 143:
@@ -785,6 +789,15 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
                 # the agent lost its model: not the agent's outcome, so it is run again
                 lost.set()
                 return done("failed", retry=True, note="model server gone during the run", **agent)
+            if rc == 124 and not ev["time_limit"]:
+                # cut off by the job's end, not the agent's doing: never graded from its
+                # partial patch; run again by the next job, until it has been cut off too often
+                cut = status.cut_short_count(run, pr, label) + 1
+                final = cut >= status.CUT_SHORT_FINAL
+                later.add(pr)
+                return done("failed", retry=not final, cut_short=cut, unfinished=final,
+                            note=("did not finish within a full job: cut off by the job's end "
+                                  f"{cut} times" if final else "cut off by the end of the job"), **agent)
             out = grades / f"{iid}.json"
             rc = step([PY, "harness/evaluate_patches.py", "--instance", iid, "--model", model,
                        "--output", str(out)], lg, 45, venv)
@@ -796,6 +809,7 @@ def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
             timed_out = agent["exit_status"] == "TimeExceeded"
             if timed_out and agent["server_queued"]:
                 # its requests waited for the server: the limit measured the server
+                # (with no time limit there is no agent time-out, so this never applies)
                 later.add(pr)
                 return done("failed", retry=True, note="timed out while the model server queued requests",
                             grade=g.get("grade"), error=g.get("error"), timed_out=True, **agent)

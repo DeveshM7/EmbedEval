@@ -180,11 +180,20 @@ def valid(run: Path) -> list[int]:
 
 def eval_label(model: str, step_limit: int, time_limit: float) -> str:
     """One evaluation: a model under its limits (config "evaluate"), e.g.
-    qwen38-nvfp4-100steps-60min. Each label has its own status stage
+    qwen38-nvfp4-100steps-60min, or qwen38-nvfp4-50steps with no time limit
+    (time_limit 0). Each label has its own status stage
     (evaluate:<label>) and outputs (<run>/outputs/<label>/), so one model can
     be evaluated under two limits on the same instances without one hiding
     the other."""
-    return f"{model}-{step_limit}steps-{time_limit:g}min"
+    return f"{model}-{step_limit}steps" + (f"-{time_limit:g}min" if time_limit else "")
+
+
+CUT_SHORT_FINAL = 2     # runs cut off by the end of a job, after which the instance is given up
+
+
+def cut_short_count(run: Path, pr: int, label: str) -> int:
+    """How many times this evaluation's agent run was cut off by the end of its job."""
+    return (evaluations(read(run, pr)).get(label) or {}).get("cut_short", 0)
 
 
 def evaluate_key(label: str) -> str:
@@ -211,8 +220,8 @@ def evaluations(st: dict) -> dict:
 
 def evaluate_needed(run: Path, pr: int, label: str) -> bool:
     """No outcome for this evaluation yet, or one cut short by the infrastructure
-    (the model server went away, or queued the agent's requests until its
-    time ran out): a finished agent run is never redone. A time-out recorded
+    (the model server went away, queued the agent's requests until its
+    time ran out, or the job ended during the run): a finished agent run is never redone. A time-out recorded
     before the server's queue was watched (no `server_queued`) is redone."""
     e = evaluations(read(run, pr)).get(label)
     return (not e or (e["state"] == "failed" and e.get("retry", False))

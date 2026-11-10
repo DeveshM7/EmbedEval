@@ -123,7 +123,9 @@ def build(run: Path) -> dict:
         for label, v in status.evaluations(status.read(run, e["pr"])).items():
             c = evaluations.setdefault(label, Counter())
             c["instances"] += 1
-            if v["state"] != "done":
+            if v.get("unfinished"):
+                c["unfinished: not within a full job"] += 1
+            elif v["state"] != "done":
                 c["not graded"] += 1
             elif v.get("grade") == "pass":
                 c["pass"] += 1

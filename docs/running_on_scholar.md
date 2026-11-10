@@ -747,14 +747,17 @@ What differs from Zephyr:
 - **Evaluation**: `submit.py evaluate --model PROFILE` (a profile of
   `triage/models.json`; hosted models are refused) runs an agent on every
   VALID instance of the run on the CPU partition, with the config's
-  `evaluate.step_limit` and `evaluate.time_limit` for every model, and grades
+  `evaluate.step_limit` and `evaluate.time_limit` for every model (by default
+  50 steps and no time limit: the same limits as the Zephyr and RIOT
+  baseline), and grades
   each patch in a fresh container. It submits the model's server on the GPU
   partition with a clean environment (or uses `--server-job`), which starts
   only once the evaluate job runs, so an idle server never holds one of the
   two job slots; the evaluate job waits `caps.server_start` for it, tunnels to
   it and cancels it at the end. `evaluate.python` is an x86
   Python with mini-swe-agent. An evaluation is a model under its limits and
-  is labeled `<model>-<steps>steps-<min>min` (e.g. `qwen38-nvfp4-100steps-60min`):
+  is labeled `<model>-<steps>steps` with no time limit (e.g. `qwen38-nvfp4-50steps`)
+  and `<model>-<steps>steps-<min>min` with one (`qwen38-nvfp4-100steps-60min`):
   status `evaluate:<label>`, outputs and grades under `<run>/outputs/<label>/`,
   one tally per label in the report. The same model under other limits is a
   new evaluation on the same run; results recorded before labels
@@ -787,7 +790,12 @@ What differs from Zephyr:
   runs, the worker samples the server's waiting requests (`/metrics`) into
   `server_queued`; a time-out during which requests waited is the server's,
   not the model's, and is run again by the next evaluate job (as is a
-  time-out recorded before `server_queued` existed).
+  time-out recorded before `server_queued` existed). With `time_limit: 0` an
+  agent run is bounded only by its job: it is capped at the job's deadline
+  less the grading's 25 minutes, and no run starts with less than
+  `evaluate.min_minutes_left` (90) of the job left. A run cut off by the job's
+  end is never graded from its partial patch; the next job runs it again, and
+  after two cuts it is reported apart as `unfinished: not within a full job`.
 - **promotion** stays manual, after review: `scripts/promote_instance.py
   --source <run>/instances` (triage and revalidation runs) or `--source
   <run>/finalized` (observation runs), into `apptainer/instances/contiki-ng/`.
