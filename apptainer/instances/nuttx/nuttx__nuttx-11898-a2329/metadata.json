@@ -36,7 +36,7 @@
     "sim_config": "sim:nsh",
     "test_app": "ostest",
     "fail_type": "runtime_assert",
-    "problem_statement": "The updated testing/ostest cancel_test reveals a defect in the kernel's pthread_join behavior. In cancel_test, the code calls pthread_join() on a thread that has been detached/canceled and expects the call to fail because the target thread is not a joinable thread. According to the POSIX pthread_join() contract, a detached or otherwise non-joinable thread should cause pthread_join() to return EINVAL. On the base kernel, however, pthread_join() returns ESRCH (status 3), so the test prints \"cancel_test: ERROR pthread_join failed but with wrong status=3\" and ostest fails. The required behavior is that pthread_join() returns EINVAL for a detached/canceled/non-joinable thread in this scenario, rather than ESRCH, and that the updated cancel_test passes.",
+    "problem_statement": "pthread_join() returns ESRCH instead of EINVAL for a detached thread that has terminated\n\nWhen an application detaches a POSIX thread and that thread subsequently terminates, especially after being canceled with pthread_cancel(), a later call to pthread_join() on that thread can fail with ESRCH rather than EINVAL.\n\nSteps to reproduce:\n1. Create a thread with pthread_create().\n2. Detach the thread with pthread_detach().\n3. Terminate the detached thread, for example by canceling it with pthread_cancel().\n4. After the thread has terminated, call pthread_join() on the same thread.\n\nObserved behavior:\npthread_join() returns -ESRCH (errno 3), indicating that the target thread is not found.\n\nExpected behavior:\nPer POSIX, pthread_join() must return EINVAL when the target thread does not refer to a joinable thread. A detached thread is not joinable, so joining a detached thread after it has terminated, canceled, or otherwise exited must fail with EINVAL, not ESRCH. ESRCH should only be returned when the thread cannot be found in a way that is unrelated to its detached state.",
     "fail_to_pass": [
         "cancel_test"
     ],
@@ -58,14 +58,19 @@
             "check_issues": [
                 "`problem_statement` gives the fix away: \"on the old kernel the join returns ESRCH instead because the join information is destroyed at termination time\". Describe only the observable symptom, its trigger and the required behavior, not what the code checks or must do internally"
             ]
+        },
+        {
+            "problem_statement": "The updated testing/ostest cancel_test reveals a defect in the kernel's pthread_join behavior. In cancel_test, the code calls pthread_join() on a thread that has been detached/canceled and expects the call to fail because the target thread is not a joinable thread. According to the POSIX pthread_join() contract, a detached or otherwise non-joinable thread should cause pthread_join() to return EINVAL. On the base kernel, however, pthread_join() returns ESRCH (status 3), so the test prints \"cancel_test: ERROR pthread_join failed but with wrong status=3\" and ostest fails. The required behavior is that pthread_join() returns EINVAL for a detached/canceled/non-joinable thread in this scenario, rather than ESRCH, and that the updated cancel_test passes.",
+            "check_issues": null,
+            "reason": "rewritten 2026-11-09 with the writer prompt that describes kernel behavior, not the test"
         }
     ],
     "statement_check": {
         "version": 1,
         "result": "written",
         "model": "qwen38-nvfp4",
-        "trace": "/scratch/scholar/zhan5136/embedeval/runs/nuttx-reval-1108/statements/nuttx__nuttx-11898-a2329.statement.json",
-        "prompt_sha256": "d34df9470af8c60d"
+        "trace": "/scratch/scholar/zhan5136/embedeval-stmt-pilot/runs/nuttx-stmt-rewrite-1109/statements/nuttx__nuttx-11898-a2329.statement.json",
+        "prompt_sha256": "bb2ae5743591f552"
     },
     "host_arch": "aarch64"
 }

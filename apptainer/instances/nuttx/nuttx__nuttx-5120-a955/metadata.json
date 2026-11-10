@@ -45,7 +45,7 @@
     "sim_config": "sim:nsh",
     "test_app": "ostest",
     "fail_type": "runtime_assert",
-    "problem_statement": "In apps/testing/ostest, the sighand_test case fails when a signal handler performs a successful semaphore wait. The test initializes sem1 and sem2 to 0 and starts waiter_main. waiter_main blocks in sem_wait(&sem1). While that task is blocked, a signal is delivered and the installed handler runs; the handler calls sem_wait(&sem2). A second task, poster_main, then calls sem_post(&sem2), so the handler's sem_wait(&sem2) succeeds. After the handler returns, the waiter task resumes from its original sem_wait(&sem1). With the current behavior, that original sem_wait(&sem1) returns success, so the test prints 'waiter_main: ERROR awakened with no error!' and run_tests reports failure, even though the signal handler ran and the handler's sem_wait(&sem2) succeeded. The expected behavior is that a successful sem_wait(&sem2) performed inside the signal handler must not make the interrupted sem_wait(&sem1) appear to have succeeded. When the waiter is resumed after the signal handler completes, the original sem_wait(&sem1) must return a non-zero status indicating that it was interrupted by the signal, rather than returning 0. The test should observe both the waiter and poster threads exiting, the signal handler having run, and no 'ERROR awakened with no error!' output.",
+    "problem_statement": "On a configuration with counting semaphores and POSIX signal support, a signal delivered to a task blocked in sem_wait() can be incorrectly reported as a successful semaphore acquisition after a signal handler has itself completed a successful sem_wait().\n\nAn application can trigger the problem by initializing two counting semaphores to zero with sem_init(), installing a signal handler that calls sem_wait() on one semaphore, and then having a task block in sem_wait() on the other semaphore. Another task, for example started with task_create(), posts the semaphore used by the signal handler. When the signal is delivered to the blocked task, the signal handler runs, its sem_wait() succeeds, and then the handler returns. After the handler completes, the original sem_wait() returns 0, as if it had acquired the first semaphore, even though that first semaphore was never posted and the original wait was interrupted by signal delivery.\n\nThe expected behavior is that a signal interrupting a blocking sem_wait() causes the interrupted sem_wait() to report failure after the signal handler completes. A successful sem_wait() executed inside the signal handler may produce a success result for that handler call, but that result must not cause the original interrupted sem_wait() to appear as if it had successfully acquired its semaphore. After the signal handler returns, the application must observe that the original sem_wait() failed due to interruption, not that it succeeded.",
     "fail_to_pass": [
         "sighand_test"
     ],
@@ -66,13 +66,18 @@
             "check_issues": [
                 "`problem_statement` names code of the fix that the tests do not use (EINTR); describe what a test or caller observes instead"
             ]
+        },
+        {
+            "problem_statement": "In apps/testing/ostest, the sighand_test case fails when a signal handler performs a successful semaphore wait. The test initializes sem1 and sem2 to 0 and starts waiter_main. waiter_main blocks in sem_wait(&sem1). While that task is blocked, a signal is delivered and the installed handler runs; the handler calls sem_wait(&sem2). A second task, poster_main, then calls sem_post(&sem2), so the handler's sem_wait(&sem2) succeeds. After the handler returns, the waiter task resumes from its original sem_wait(&sem1). With the current behavior, that original sem_wait(&sem1) returns success, so the test prints 'waiter_main: ERROR awakened with no error!' and run_tests reports failure, even though the signal handler ran and the handler's sem_wait(&sem2) succeeded. The expected behavior is that a successful sem_wait(&sem2) performed inside the signal handler must not make the interrupted sem_wait(&sem1) appear to have succeeded. When the waiter is resumed after the signal handler completes, the original sem_wait(&sem1) must return a non-zero status indicating that it was interrupted by the signal, rather than returning 0. The test should observe both the waiter and poster threads exiting, the signal handler having run, and no 'ERROR awakened with no error!' output.",
+            "check_issues": null,
+            "reason": "rewritten 2026-11-09 with the writer prompt that describes kernel behavior, not the test"
         }
     ],
     "statement_check": {
         "version": 1,
         "result": "written",
         "model": "qwen38-nvfp4",
-        "trace": "/scratch/scholar/zhan5136/embedeval/runs/nuttx-reval-1108/statements/nuttx__nuttx-5120-a955.statement.json",
-        "prompt_sha256": "d34df9470af8c60d"
+        "trace": "/scratch/scholar/zhan5136/embedeval-stmt-pilot/runs/nuttx-stmt-rewrite-1109/statements/nuttx__nuttx-5120-a955.statement.json",
+        "prompt_sha256": "bb2ae5743591f552"
     }
 }

@@ -22,7 +22,7 @@
     "sim_config": "sim:nsh",
     "test_app": "ostest",
     "fail_type": "runtime_assert",
-    "problem_statement": "The ostest suite fails on the updated setjmp test. The apps test change adds a helper named jump_with_retval and makes setjmp_test call it twice: once with return value 123 and once with return value 0. The helper establishes a jmp_buf with setjmp, expects the initial setjmp return value to be 0, then calls longjmp with the supplied return value. After the jump, it verifies that setjmp returned the supplied value, with the special POSIX requirement that a longjmp return value of 0 is treated as 1.\n\nBefore the kernel/runtime fix, the test fails. The observed failure is that ostest exits with a non-zero status and the run log shows failures such as: ostest failed: ostest_main: Exiting with status 256, run_tests: no 'user_main: Exiting', run_tests: no 'ostest_main: Exiting with status 0', and run_tests: result=1. The setjmp_test case is the one that must pass after the fix.\n\nThe triggering condition is calling longjmp with a second argument of 0. The current behavior on affected target builds is that the corresponding setjmp call returns 0 instead of the required non-zero value. The expected behavior is that setjmp returns 0 only for the initial, non-jumped return path; when control is restored by longjmp, setjmp must return the value passed to longjmp, except that a passed value of 0 must be replaced by 1. The fix should allow setjmp_test to pass while preserving normal behavior for non-zero longjmp return values.",
+    "problem_statement": "An application calling the kernel's setjmp/longjmp interface can observe incorrect control flow when longjmp is invoked with a return value of 0. POSIX semantics require that when longjmp(buf, 0) is used, the setjmp call associated with buf must return 1, not 0. With the affected kernel implementation, longjmp(buf, 0) returns to setjmp with 0, so the caller continues in the branch taken when setjmp first returned 0 instead of resuming in the jumped-to path. This makes a caller believe that no jump occurred, can re-enter the pre-jump path, and can cause an assertion failure, a loop, or another wrong result. The condition is triggered by any sequence where a program saves a jmp_buf with setjmp and later performs longjmp(buf, 0); nonzero return values are not necessarily affected. The required behavior is that longjmp called with second argument 0 must cause the corresponding setjmp to return 1, while other return values are returned unchanged.",
     "fail_to_pass": [
         "setjmp_test"
     ],
@@ -44,13 +44,18 @@
             "check_issues": [
                 "`problem_statement` gives the fix away: \"on the unpatched kernel the assembler longjmp returns the argument unchanged\". Describe only the observable symptom, its trigger and the required behavior, not what the code checks or must do internally"
             ]
+        },
+        {
+            "problem_statement": "The ostest suite fails on the updated setjmp test. The apps test change adds a helper named jump_with_retval and makes setjmp_test call it twice: once with return value 123 and once with return value 0. The helper establishes a jmp_buf with setjmp, expects the initial setjmp return value to be 0, then calls longjmp with the supplied return value. After the jump, it verifies that setjmp returned the supplied value, with the special POSIX requirement that a longjmp return value of 0 is treated as 1.\n\nBefore the kernel/runtime fix, the test fails. The observed failure is that ostest exits with a non-zero status and the run log shows failures such as: ostest failed: ostest_main: Exiting with status 256, run_tests: no 'user_main: Exiting', run_tests: no 'ostest_main: Exiting with status 0', and run_tests: result=1. The setjmp_test case is the one that must pass after the fix.\n\nThe triggering condition is calling longjmp with a second argument of 0. The current behavior on affected target builds is that the corresponding setjmp call returns 0 instead of the required non-zero value. The expected behavior is that setjmp returns 0 only for the initial, non-jumped return path; when control is restored by longjmp, setjmp must return the value passed to longjmp, except that a passed value of 0 must be replaced by 1. The fix should allow setjmp_test to pass while preserving normal behavior for non-zero longjmp return values.",
+            "check_issues": null,
+            "reason": "rewritten 2026-11-09 with the writer prompt that describes kernel behavior, not the test"
         }
     ],
     "statement_check": {
         "version": 1,
         "result": "written",
         "model": "qwen38-nvfp4",
-        "trace": "/scratch/scholar/zhan5136/embedeval/runs/nuttx-reval-1108/statements/nuttx__nuttx-14152-a2704.statement.json",
-        "prompt_sha256": "d34df9470af8c60d"
+        "trace": "/scratch/scholar/zhan5136/embedeval-stmt-pilot/runs/nuttx-stmt-rewrite-1109/statements/nuttx__nuttx-14152-a2704.statement.json",
+        "prompt_sha256": "bb2ae5743591f552"
     }
 }
