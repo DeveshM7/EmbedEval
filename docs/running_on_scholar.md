@@ -709,17 +709,26 @@ python cluster/report.py --run mynewt-reval
   oracle can depend on which file a parallel build stops at; a runtime one on timing).
 - **evaluate** (`submit.py evaluate`) runs `harness/run.py` and `harness/evaluate_patches.py`
   on each VALID instance (`evaluate:` in the config: model, steps, minutes, agents per
-  node; `--model` takes a profile of `triage/models.json` in place of `evaluate.model`).
+  node; the default is 50 steps and no per-instance time limit, `time_limit: 0`, the same
+  limits as the Zephyr and RIOT baseline; `--model` takes a profile of `triage/models.json` in place of `evaluate.model`).
   The agent sees the repository at the base commit with the PR's tests and the problem
   statement: not the fix's files, not the history, not the network. Its patch crosses to the
   grader byte for byte.
-  - *Labels.* Each evaluation is labeled by model and limits, `<model>-<steps>steps-<min>min`
-    (`qwen38-nvfp4-50steps-40min`): its status stage is `evaluate:<label>`, its trajectories,
+  - *Labels.* Each evaluation is labeled by model and limits: `<model>-<steps>steps`
+    (`qwen38-nvfp4-50steps`) with no time limit, `<model>-<steps>steps-<min>min`
+    (`qwen38-nvfp4-50steps-40min`) with one: its status stage is `evaluate:<label>`, its trajectories,
     patches and grades are under `<run>/outputs/<label>/`, and the report has one tally per
     label. A second model, or the same one under other limits, runs on the same instances
     without being seen as done and without overwriting anything. Results of the first,
     unlabeled evaluate jobs count for the label of the limits they recorded (those that
     recorded none are run again).
+  - *No time limit.* A run is then bounded only by the end of its job: it gets what is
+    left of the job less 5 minutes for grading, and no run starts with less than
+    `evaluate.min_minutes_left` (90) left. A run the job's end cuts off is not graded and not
+    the agent's failure: it is run again by the next job. After 2 cuts it is final, reported
+    as `unfinished` (it did not finish within a full job), apart from pass and fail. The
+    report also tallies `steps` (failures at the step limit; the agent's exit status
+    `LimitsExceeded` is read from its trajectory, which the cost limit also sets).
   - *Model servers.* With a local model the job submits a model-server job on `partition`
     (`scripts/serve_triage_model.sh`): as many GPU nodes as the evaluate job has nodes, one
     server each, and each evaluate node tunnels (SSH) to the server of its own index, so

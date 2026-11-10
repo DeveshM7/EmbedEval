@@ -264,7 +264,9 @@ On Scholar, campaigns, revalidations and agent evaluations run through
 partition, each agent node with a model server of its own on Spark):
 [docs/running_on_scholar.md, section 11](docs/running_on_scholar.md#11-mynewt-runs).
 Each evaluation is labeled by model and limits and keeps its own status and
-outputs; several models queue in one call, one after the other:
+outputs. By default an agent gets 50 steps and no wall-time limit per instance
+(`evaluate.time_limit: 0`), the same limits as the Zephyr and RIOT baseline.
+Several models queue in one call, one after the other:
 
 ```bash
 python cluster/submit.py evaluate --run <run> --model qwen38-nvfp4 nemotron qwen38
