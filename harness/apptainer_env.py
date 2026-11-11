@@ -14,6 +14,8 @@ directory, so:
     - nothing outlives a command: --containall gives each its own PID
       namespace, so a timed-out command takes its QEMU with it. (Under Docker
       the orphaned QEMU kept qemu.pid locked and broke every later run.)
+    - there is no network (--network none): the agent cannot fetch the PR,
+      a later commit or a package; the instances build and test offline.
 
 mini-swe-agent ships a SingularityEnvironment, but it unpacks the whole image
 into a sandbox directory in /tmp for every run -- several GB per run, into a
@@ -73,7 +75,7 @@ class ApptainerEnvironment:
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         command = action.get("command", "")
-        cmd = au.exec_args(self.image, overlay=self.overlay, layer=self.layer)
+        cmd = au.exec_args(self.image, overlay=self.overlay, layer=self.layer, network=False)
         cmd[2:2] = ["--pwd", cwd or self.cwd]
         cmd += ["bash", "-c", command]
         try:

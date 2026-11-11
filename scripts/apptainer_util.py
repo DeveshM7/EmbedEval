@@ -269,11 +269,17 @@ def ensure_base_images(py: str, sdk: str, sdk_archive: str, logdir: Path) -> Pat
 
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
               overlay: Path | None = None, env: dict | None = None,
-              home: Path | None = None, layer: Path | None = None) -> list[str]:
+              home: Path | None = None, layer: Path | None = None,
+              network: bool = True) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
     gives a fresh home and /tmp, --cleanenv drops the host environment (the
-    cluster's LD_LIBRARY_PATH breaks the SDK's QEMU; its Python confuses CMake)."""
+    cluster's LD_LIBRARY_PATH breaks the SDK's QEMU; its Python confuses CMake).
+    network=False gives the container no network at all (--network none, which
+    needs no privileges): evaluation runs it this way, so an agent cannot fetch
+    the fix (the PR page, a later commit); builds need the network and keep it."""
     cmd = ["apptainer", "exec", "--containall", "--cleanenv"]
+    if not network:
+        cmd += ["--net", "--network", "none"]
     if home:        # the fresh home is a small tmpfs; Apptainer refuses --env HOME=
         cmd += ["--home", f"{home}:/home/build"]
     if layer:       # read-only, below the writable overlay

@@ -57,8 +57,10 @@ _EXTRA_WARNINGS = {
     "zephyr": (
         "`run_tests` exit codes on this instance: 0 = all tests passed, "
         "1 = a test, the build or the configuration failed, 2 = the test "
-        "runner did not start, 3 = nothing ran. A run takes one to a few "
-        "minutes; tests under QEMU include the emulator's boot."
+        "runner did not start, 3 = nothing ran. It passes only when every test "
+        "case in the scenario passes, not just the ones listed in the task: "
+        "that is what grading checks. A run takes one to several minutes; "
+        "tests under QEMU include the emulator's boot."
     ),
 }
 
@@ -71,8 +73,7 @@ _RIOT_LAYER = (
 )
 _RIOT_LAYER_WARNINGS = (
     "`run_tests` exit codes on this instance: 0 = all expected tests passed, 1 = a test "
-    "or a build failed, 3 = nothing ran. Rust packages cannot be downloaded here: only "
-    "those already present can be used."
+    "or a build failed, 3 = nothing ran."
 )
 
 PROJECTS: dict[str, dict] = {
@@ -94,6 +95,8 @@ PROJECTS: dict[str, dict] = {
         # times out ends its container and every process in it, so QEMU cannot
         # be left running (it was under docker exec).
         "command_timeout": 900,
+        # The image has a ctags index at /testbed/tags; the prompt points to it.
+        "ctags": True,
     },
     "nuttx": {
         "label": "NuttX RTOS",

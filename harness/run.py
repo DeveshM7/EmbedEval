@@ -11,6 +11,13 @@ an Apptainer environment instead of Docker, e.g. with the local Qwen server:
     EMBEDEVAL_INSTANCES_DIR=generated python harness/run.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
 
+Each run goes to its own folder, <eval dir>/<model>/<project>/<PR>/ (see
+harness/paths.py): patch.diff, trajectory.json, run.json (how the run ended),
+and grade.json, written as soon as the run ends. As on SWE-bench, only a run
+the agent submitted is tested; any other ending is a fail. A pair with a
+grade.json is skipped, so the same command picks up where a stopped job left
+off. An infrastructure error is retried once (harness/run.py, run_and_grade).
+
 Replaces run_instance.py, run_nuttx_instance.py, run_riot_instance.py and
 run_all.py, which were ~50% duplicated and disagreed on prompt format, .env
 handling and the API-key check.
@@ -23,6 +30,7 @@ import json
 import os
 import re
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -58,40 +66,41 @@ then call the tool.
 
 CRITICAL RULES:
 - Never reply with text alone -- every response must call the `bash` tool.
-- NEVER use heredoc syntax (<<'EOF' or <<'PY'). It breaks inside docker exec.
-  Use python3 -c "..." with a one-liner instead.
 - After a successful build you MUST still run `run_tests` before submitting.
   A passing build does NOT mean tests pass.
 """
 
 INSTANCE_TEMPLATE = """\
-Please solve this issue:
+Please solve this task:
 
 {{{{task}}}}
 
 ## Important Rules
 
 1. Every response must contain exactly one `bash` tool call.
-2. Do NOT modify any files under {protected}.
+2. Do NOT modify any files under {protected}: changes there are discarded
+   before your work is graded.
 3. Environment variable and directory changes are NOT persistent between
    commands -- every action runs in a new subshell. Use absolute paths or
    prefix commands with `cd /testbed &&`.
+4. There is no network access. Nothing can be downloaded (no pip install,
+   git fetch, package downloads); everything the build needs is already here.
+5. The git history holds only the starting point of this task. Use
+   `git status` and `git diff` to see your own changes.
+6. Your work is graded only if you submit it (step 4 below).
 
 ## Running Tests
 
 Use the `run_tests` command to build and run the tests. It handles all setup and
-teardown, waits for results, and exits as soon as pass/fail is known.
-Exit codes: 0 = all tests passed, 1 = tests failed, 2 = timed out.
-
-If `run_tests` times out (exit code 2) with no test results, your change has
-introduced a hang or an infinite loop. Do NOT submit -- investigate further.
+teardown, waits for results, and exits as soon as pass/fail is known. A test
+that hangs is stopped and reported as failed.
 {extra_warnings}
 Mandatory workflow:
-1. Explore the code and understand the bug
-2. Edit the source file(s) to fix it
+1. Explore the code and understand the task
+2. Edit the source file(s) to make the change
 3. Build and test: `{build_and_test}`
    - If the build fails: fix the error and repeat
-   - If run_tests shows tests FAILING: fix the bug and go back to step 3
+   - If run_tests shows tests FAILING: fix your change and go back to step 3
    - If run_tests shows all target tests PASSING: go to step 4
 4. Submit by calling the `bash` tool with exactly this command:
 
@@ -101,8 +110,7 @@ Mandatory workflow:
 
 Other useful commands:
 - Find code:   grep -rn "name" --include="*.c" --include="*.h" /testbed
-- ctags index: grep "function_name" /testbed/tags
-
+{tags_line}
 <system_information>
 {{{{system}}}} {{{{release}}}} {{{{machine}}}}
 </system_information>
@@ -176,10 +184,15 @@ def build_prompts(meta: dict) -> tuple[str, str]:
     system = SYSTEM_TEMPLATE.format(
         label=cfg["label"], orientation=cfg["orientation"]
     )
+    # Only images built with a ctags index have /testbed/tags (Zephyr's twister
+    # pipeline); RIOT's do not.
+    tags = ('- ctags index: grep "function_name" /testbed/tags\n'
+            if cfg.get("ctags") else "")
     instance = INSTANCE_TEMPLATE.format(
         protected=protected,
         extra_warnings=f"\n{warn}\n" if warn else "",
         build_and_test=_build_and_test(meta),
+        tags_line=tags,
     )
     return system, instance
 
@@ -197,27 +210,29 @@ def _build_and_test(meta: dict) -> str:
 
 
 def build_task(meta: dict) -> str:
-    """The first user message: the problem plus its test context."""
-    def bullets(items):
-        return "\n".join(f"  - {i}" for i in items) or "  (none)"
+    """The first user message: the problem plus its test context.
 
-    return f"""\
-## Bug Description
+    Not the files the PR's fix changed: SWE-bench does not give them, and
+    knowing where to change the code is part of the task."""
+    def bullets(items):
+        return "\n".join(f"  - {i}" for i in items)
+
+    task = f"""\
+## Task
 
 {meta["problem_statement"]}
 
-## Failing Tests (must pass after your fix)
+## Failing Tests (must pass after your change)
 
-{bullets(meta.get("fail_to_pass", []))}
-
+{bullets(meta.get("fail_to_pass", [])) or "  (none)"}
+"""
+    if meta.get("pass_to_pass"):
+        task += f"""
 ## Tests That Must Continue Passing
 
-{bullets(meta.get("pass_to_pass", []))}
-
-## Relevant Source File(s)
-
-{bullets(meta.get("files_changed_by_fix", []))}
+{bullets(meta["pass_to_pass"])}
 """
+    return task
 
 
 # --------------------------------------------------------------------------
@@ -332,16 +347,39 @@ def capture_patch(env, meta: dict, start: str = "HEAD") -> tuple[str, list[str]]
     return patch, [t for t in touched.splitlines() if t.strip()]
 
 
-# The run in progress, for the SIGTERM handler: {"save": callable, "env": env}.
+# The run in progress, for the SIGTERM handler:
+# {"save": callable, "env": env, "record": callable writing run.json}.
 _CURRENT: dict = {}
+
+# An infrastructure error (our side, not the model's) is retried once: two
+# attempts in all, counted across jobs through run.json. After that the run is
+# recorded as "not_run", not as a fail.
+MAX_ATTEMPTS = 2
+
+# How a run may end that is the model's doing, not ours: graded as a fail.
+# Submitted is the only ending that is tested (evaluate_patches.grade_run).
+MODEL_ENDINGS = {"Submitted", "LimitsExceeded", "TimeExceeded", "RepeatedFormatError",
+                 "ContextWindowExceededError"}
+
+
+def _context_overflow(e: Exception) -> bool:
+    """The conversation outgrew the model's context: the model's doing, a fail,
+    as on SWE-bench. LiteLLM usually raises ContextWindowExceededError; a bare
+    400 from vLLM that says so counts too."""
+    if type(e).__name__ == "ContextWindowExceededError":
+        return True
+    text = str(e).lower()
+    return type(e).__name__ == "BadRequestError" and (
+        "maximum context length" in text or "context window" in text)
 
 
 def _stop_on_sigterm(signum, frame):
-    """`timeout`, scancel and Slurm stop a run with SIGTERM, then SIGKILL a
-    little later. Save what the agent did and remove the overlay right here,
-    then exit. Raising an exception instead is not enough: SIGTERM usually
-    lands while the agent waits for the model, and the model client's retry
-    wrapper catches the exception and retries the call."""
+    """`timeout`, scancel and Slurm (a job at its time limit) stop a run with
+    SIGTERM, then SIGKILL a little later. Save what the agent did, record the
+    run as stopped -- an infrastructure error, so a later job retries it -- and
+    remove the overlay right here, then exit. Raising an exception instead is
+    not enough: SIGTERM usually lands while the agent waits for the model, and
+    the model client's retry wrapper catches the exception and retries the call."""
     print(f"\n  stopped by signal {signum}: saving the patch", flush=True)
     try:
         if _CURRENT.get("save"):
@@ -350,6 +388,11 @@ def _stop_on_sigterm(signum, frame):
     except BaseException as e:
         print(f"  could not save the patch: {type(e).__name__}: {e}", flush=True)
     try:
+        if _CURRENT.get("record"):
+            _CURRENT["record"](f"stopped by signal {signum}")
+    except BaseException as e:
+        print(f"  could not write run.json: {type(e).__name__}: {e}", flush=True)
+    try:
         if _CURRENT.get("env") is not None:
             _CURRENT["env"].cleanup()
     except BaseException:
@@ -357,7 +400,15 @@ def _stop_on_sigterm(signum, frame):
     os._exit(128 + signum)
 
 
-def run_one(instance_id: str, model_name: str, args) -> dict:
+def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
+    """One attempt at one (instance, model) run. Writes patch.diff,
+    trajectory.json and run.json to the run's folder and returns run.json.
+
+    run.json says how the run ended. `exit_status` is the agent's ending
+    (Submitted, LimitsExceeded, TimeExceeded, RepeatedFormatError,
+    ContextWindowExceededError): the model's doing, graded. `infra_error` is set
+    instead when our side failed -- the container or the model server, or the
+    job stopping the run -- and the run is retried, not graded."""
     from minisweagent.agents.default import DefaultAgent
     from minisweagent.models import get_model
 
@@ -373,29 +424,45 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
     print(f"  model    : {full_model}")
     print(f"  image    : {meta.get('docker_image') or meta.get('apptainer_image')}")
     print(f"  output   : {paths.show(out_dir)}")
+    print(f"  attempt  : {attempt} of {MAX_ATTEMPTS}")
 
-    result = {
+    record = {
         "instance_id": instance_id,
         "model": full_model,
-        "status": "error",
+        "attempt": attempt,
+        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "node": socket.gethostname(),
+        "limits": {"steps": args.step_limit, "minutes": args.time_limit,
+                   "command_seconds": projects.config_for(meta).get("command_timeout", 900)},
         "exit_status": None,
         "steps": None,
-        "cost": None,
+        "elapsed_seconds": 0.0,
+        "hit_time_cap": False,
+        "hit_step_limit": False,
+        "infra_error": None,
+        "error": None,
         "patch_empty": True,
         "protected_touched": [],
-        "elapsed_seconds": 0.0,
-        "error": None,
     }
     start = time.time()
-    env, captured, base = None, False, "HEAD"
+    env, agent, captured, base = None, None, False, "HEAD"
 
     def save_patch() -> None:
         patch, touched = capture_patch(env, meta, base)
         paths.patch_path(instance_id, full_model).write_text(patch)
-        result["patch_empty"] = not patch.strip()
-        result["protected_touched"] = touched
+        record["patch_empty"] = not patch.strip()
+        record["protected_touched"] = touched
+
+    def write_record(infra_error: str | None = None) -> None:
+        if infra_error:
+            record["infra_error"] = infra_error
+        record["elapsed_seconds"] = round(time.time() - start, 1)
+        if agent is not None:
+            record["steps"] = agent.n_calls
+        paths.write_json(paths.run_record_path(instance_id, full_model), record)
 
     try:
+        _CURRENT.update(record=write_record)
         env = make_environment(meta)
         base = start_commit(env)
         _CURRENT.update(save=save_patch, env=env)
@@ -414,46 +481,82 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
             output_path=paths.trajectory_path(instance_id, full_model),
         )
         run_info = agent.run(task)
-        result["exit_status"] = run_info.get("exit_status")
-
+        record["exit_status"] = run_info.get("exit_status")
         save_patch()
         captured = True
-        touched = result["protected_touched"]
-        result["status"] = "success"
-        if touched:
-            print(f"  WARNING: agent modified protected paths: {', '.join(touched)}")
-        if result["patch_empty"]:
-            print("  WARNING: agent made no changes (empty diff)")
     except KeyboardInterrupt:
         raise
     except Exception as e:
-        result["error"] = f"{type(e).__name__}: {e}"
-        print(f"  ERROR: {result['error']}")
+        record["error"] = f"{type(e).__name__}: {e}"
+        if _context_overflow(e):
+            record["exit_status"] = "ContextWindowExceededError"
+        else:
+            record["infra_error"] = record["error"][:500]
+        print(f"  ERROR: {record['error'][:300]}")
     finally:
         _CURRENT.clear()
         if env is not None and not captured:
-            # Stopped early by an error:
-            # keep whatever the agent had done, so it can still be graded.
+            # Stopped early: keep whatever the agent had done, for reading.
             try:
                 save_patch()
-                result["patch_captured"] = "after interruption"
             except BaseException as e:
                 print(f"  could not save the patch: {type(e).__name__}: {e}")
-        result["elapsed_seconds"] = round(time.time() - start, 1)
-        traj = paths.trajectory_path(instance_id, full_model)
-        if traj.exists():
-            try:
-                stats = json.loads(traj.read_text())["info"]["model_stats"]
-                result["steps"] = stats.get("api_calls")
-                result["cost"] = round(stats.get("instance_cost", 0), 4)
-            except Exception:
-                pass
         if env is not None:
             try:
                 env.cleanup()
             except Exception:
                 pass
-    return result
+    if record["exit_status"] is not None and record["exit_status"] not in MODEL_ENDINGS:
+        # An ending this list does not know (mini-swe-agent's own exception
+        # names, say): ours to look at, not the model's fail.
+        record["infra_error"] = record["infra_error"] or f"unexpected ending {record['exit_status']}"
+    record["hit_time_cap"] = record["exit_status"] == "TimeExceeded"
+    record["hit_step_limit"] = (record["exit_status"] == "LimitsExceeded"
+                                and agent is not None and agent.n_calls >= args.step_limit)
+    write_record()
+    if record["protected_touched"]:
+        print(f"  WARNING: agent modified protected paths: {', '.join(record['protected_touched'])}")
+    if record["patch_empty"] and not record["infra_error"]:
+        print("  WARNING: agent made no changes (empty diff)")
+    print(f"  ended    : {record['infra_error'] and 'INFRA: ' + record['infra_error'][:200] or record['exit_status']}"
+          f" after {record['steps']} steps, {record['elapsed_seconds']:.0f} s")
+    return record
+
+
+def run_and_grade(instance_id: str, model_name: str, args) -> dict:
+    """Run one (instance, model) pair to the end and grade it; return grade.json.
+
+    A pair with a grade.json is finished and skipped (--force runs it again).
+    A run that ended in an infrastructure error is tried again, up to
+    MAX_ATTEMPTS attempts in all, also across jobs: the count is kept in run.json.
+    After that the pair is recorded as "not_run"."""
+    import evaluate_patches
+
+    full_model = paths.resolve_model(model_name)
+    grade_file = paths.grade_path(instance_id, full_model)
+    rec_file = paths.run_record_path(instance_id, full_model)
+    if grade_file.exists() and not args.force:
+        print("  already graded: skipped")
+        return json.loads(grade_file.read_text())
+    prev = json.loads(rec_file.read_text()) if rec_file.exists() and not args.force else None
+    if prev and not prev.get("infra_error"):
+        print("  run finished earlier, not graded yet: grading")
+        return evaluate_patches.grade_run(instance_id, full_model)
+    attempt = prev["attempt"] if prev else 0
+    record = prev
+    while attempt < MAX_ATTEMPTS:
+        attempt += 1
+        record = run_one(instance_id, full_model, args, attempt)
+        if not record["infra_error"]:
+            print("  grading ...")
+            return evaluate_patches.grade_run(instance_id, full_model)
+    grade = {"instance_id": instance_id, "model": full_model,
+             "graded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+             "grade": "not_run", "tests_run": False,
+             "error": f"infrastructure error in {attempt} attempts: {record['infra_error']}"}
+    paths.write_json(grade_file, grade)
+    print(f"  NOT RUN: {grade['error'][:300]}")
+    return grade
 
 
 # --------------------------------------------------------------------------
@@ -478,18 +581,24 @@ def select_instances(args) -> list[str]:
 
 def main() -> None:
     signal.signal(signal.SIGTERM, _stop_on_sigterm)
-    p = argparse.ArgumentParser(description="Run an agent on EmbedEval instances.")
+    p = argparse.ArgumentParser(description="Run an agent on EmbedEval instances and grade each run.")
     sel = p.add_mutually_exclusive_group(required=True)
     sel.add_argument("--instance", nargs="+", help="one or more instance ids")
     sel.add_argument("--repo", choices=paths.PROJECTS, help="every instance for one project")
     sel.add_argument("--all", action="store_true", help="every instance, all projects")
     p.add_argument("--model", nargs="+", required=True,
                    help="one or more models (full LiteLLM name or shorthand)")
-    p.add_argument("--step-limit", type=int, default=50)
-    p.add_argument("--cost-limit", type=float, default=3.0)
-    p.add_argument("--time-limit", type=float, default=0,
+    # The limits: 250 steps as in mini-swe-agent's SWE-bench config, a 1-hour cap
+    # per run (a job lasts 4 hours here), 900 s per command (projects.py). The
+    # agent is not told them, as on SWE-bench.
+    p.add_argument("--step-limit", type=int, default=250)
+    p.add_argument("--cost-limit", type=float, default=3.0,
+                   help="dollars per run, for hosted models (local models cost nothing)")
+    p.add_argument("--time-limit", type=float, default=60,
                    help="minutes of wall-clock time per run, checked before each model "
-                        "call; the patch is captured as usual (default 0: no limit)")
+                        "call (default 60; 0: no limit)")
+    p.add_argument("--force", action="store_true",
+                   help="run again pairs that already have a run or a grade")
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="print the planned runs and exit without starting containers")
@@ -504,12 +613,14 @@ def main() -> None:
     print(f"Instances : {len(instances)}")
     print(f"Models    : {', '.join(models)}")
     print(f"Total runs: {len(instances) * len(models)}")
-    print(f"Limits    : {args.step_limit} steps, ${args.cost_limit}\n")
+    print(f"Limits    : {args.step_limit} steps, {args.time_limit:g} min per run")
+    print(f"Output    : {paths.OUTPUTS_DIR}\n")
 
     if args.dry_run:
         for m in models:
             for i in instances:
-                print(f"  {m:46s} {i:24s} -> {paths.show(paths.run_dir(i, m))}")
+                done = " (graded)" if paths.grade_path(i, m).exists() else ""
+                print(f"  {m:46s} {i:24s} -> {paths.show(paths.run_dir(i, m))}{done}")
         return
 
     for m in models:
@@ -522,21 +633,17 @@ def main() -> None:
         for instance_id in instances:
             n += 1
             print(f"\n{'=' * 70}\n[{n}/{total}] {instance_id}  x  {model_name}\n{'=' * 70}")
-            results.append(run_one(instance_id, model_name, args))
+            results.append(run_and_grade(instance_id, model_name, args))
 
     print(f"\n{'=' * 70}\nSUMMARY\n{'=' * 70}")
-    for r in results:
-        flag = "ok  " if r["status"] == "success" and not r["patch_empty"] else "WARN"
-        print(
-            f"  [{flag}] {r['model']:34s} {r['instance_id']:24s} "
-            f"{str(r['exit_status'] or r['error'] or ''):22.22s} "
-            f"steps={str(r['steps']):>4s} ${str(r['cost']):>7s} {r['elapsed_seconds']:>7.1f}s"
-        )
-    ok = sum(1 for r in results if r["status"] == "success" and not r["patch_empty"])
-    print(f"\n  {ok}/{len(results)} runs produced a non-empty patch")
-    tampered = [r for r in results if r["protected_touched"]]
-    if tampered:
-        print(f"  {len(tampered)} run(s) modified protected paths -- see warnings above")
+    for g in results:
+        icon = {"pass": "PASS", "not_run": "----"}.get(g["grade"], "FAIL")
+        err = f"  ({g['error'][:80]})" if g.get("error") else ""
+        print(f"  [{icon}] {g['model']:34s} {g['instance_id']:24s}{err}")
+    graded = [g for g in results if g["grade"] != "not_run"]
+    passed = sum(1 for g in graded if g["grade"] == "pass")
+    print(f"\n  {passed}/{len(graded)} pass"
+          + (f"   ({len(results) - len(graded)} not run)" if len(graded) < len(results) else ""))
 
 
 if __name__ == "__main__":
