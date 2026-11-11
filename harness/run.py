@@ -256,13 +256,23 @@ def make_environment(meta: dict):
         commit_tests = ("cd /testbed && git add -A -- tests/ && git -c user.name=EmbedEval "
                         "-c user.email=embedeval@localhost commit -q -m "
                         "'The PR test changes, without its fix'")
+        # No history beyond the starting point, or the agent could read the fix
+        # in later commits: checked before the tests commit above adds one. A
+        # failure stops the run as an infrastructure error, never a silent leak.
+        one_commit = ('cd /testbed && n=$(git rev-list --all | wc -l) && [ "$n" = 1 ] '
+                      '|| { echo "git history has $n commits, expected 1"; exit 1; }')
         import registry   # the validated image: pulled from the registry if published
         image, layer = apptainer_util.instance_container(
             meta, registry.image_for(meta["instance_id"]))
+        if meta.get("pipeline") == "twister":
+            # Zephyr's image holds the whole Zephyr history; its git layer hides
+            # it behind a one-commit .git (scripts/zephyr_gitlayer.py).
+            import zephyr_gitlayer
+            layer = zephyr_gitlayer.pull(meta["instance_id"])
         return ApptainerEnvironment(image=image, layer=layer,
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
-                                    setup_commands=[commit_tests])
+                                    setup_commands=[one_commit, commit_tests])
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
