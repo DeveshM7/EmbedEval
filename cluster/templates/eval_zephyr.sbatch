@@ -52,7 +52,8 @@ echo "[$(date +%T)] results in $EVAL/zephyr, logs in $EVAL_LOGS"
 timeout -s TERM -k 1m $(( END + 120 - $(date +%s) )) \
     srun --export=ALL --kill-on-bad-exit=0 --cpu-bind=none --gres=gpu:1 \
     bash "$EVAL_LOGS/eval_zephyr_node.sh" "$MODEL" "$END"
-echo "[$(date +%T)] job $ATTEMPT ended (exit $?)"
+rc=$?
+echo "[$(date +%T)] job $ATTEMPT ended (exit $rc)"
 
 LEFT=$(.venv/bin/python -c "
 import sys; sys.path.insert(0, 'harness'); import paths

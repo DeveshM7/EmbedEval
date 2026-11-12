@@ -85,7 +85,12 @@ SERVERS=$!
 timeout -s TERM -k 1m $(( END + 120 - $(date +%s) )) \
     srun --het-group=1 --export=ALL --kill-on-bad-exit=0 --cpu-bind=none \
     bash "$EVAL_LOGS/eval_riot_agents.sh" "$MODEL" "$END" "$N0"
-echo "[$(date +%T)] agents ended (exit $?)"
+rc=$?
+echo "[$(date +%T)] agents ended (exit $rc)"
+# If the agents' step did not even start (no worker logs), a new job would fail the same way.
+if [ "$rc" != 0 ] && ! ls "$EVAL_LOGS"/cpu*-s*-w*.log >/dev/null 2>&1 && [ ! -f "$EVAL_LOGS/checks-failed" ]; then
+    echo "the agents' step failed (exit $rc) before any worker started" > "$EVAL_LOGS/checks-failed"
+fi
 kill -TERM $SERVERS 2>/dev/null; wait $SERVERS 2>/dev/null
 echo "[$(date +%T)] job $ATTEMPT ended"
 
