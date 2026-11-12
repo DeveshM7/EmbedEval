@@ -15,7 +15,8 @@
 #                     builds and QEMU need the rest of its 120 GB)
 #   EVAL_MAX_MODEL_LEN  context (262144)
 #   EVAL_INSTANCES    file of instance ids (default: every Zephyr instance)
-#   EVAL_KEEP_IMAGES  1: keep instance images after grading (default: remove)
+#   EVAL_KEEP_IMAGES  1: keep instance images and git layers after grading
+#                     (default: remove)
 #   EVAL_LOGS         folder for this node's logs
 set -u
 MODEL=${1:?usage: eval_zephyr_node.sh <model> <stop-at>}

@@ -20,8 +20,8 @@ run cut off by the job's end only counts as an infrastructure error, retried
 by the next job.
 
 --instances FILE limits the work to the instance ids listed in it (a trial).
---delete-images removes each instance image once its PR is graded, so the
-images of a whole project need not fit on scratch at once.
+--delete-images removes each instance image, and its git layer, once its PR
+is graded, so the images of a whole project need not fit on scratch at once.
 """
 
 from __future__ import annotations
@@ -98,9 +98,13 @@ def main() -> None:
             queue.release(pr, done=graded(pr))
         if a.delete_images and graded(pr):
             import apptainer_util as au   # on the path through harness/paths -> scripts/
-            image = au.instance_image(iid)
-            if image.exists():
-                au.remove(image)
+            images = [au.instance_image(iid)]     # RIOT: the instance's layer; its era image is shared
+            if a.project == "zephyr":
+                import zephyr_gitlayer
+                images.append(zephyr_gitlayer.layer_path(iid))
+            for image in images:
+                if image.exists():
+                    au.remove(image)
     log(f"stopping: {done} PRs this run")
 
 
