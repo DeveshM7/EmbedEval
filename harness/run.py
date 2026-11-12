@@ -37,6 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import hidden_tests
 import paths
 import projects
 
@@ -179,6 +180,11 @@ def check_api_key(model_name: str) -> None:
 
 def build_prompts(meta: dict) -> tuple[str, str]:
     cfg = projects.config_for(meta)
+    hide = hidden_tests.ENABLED
+    if hide:      # harness/hidden_tests.py: the PR's tests are not given
+        project = hidden_tests.project_of(meta)
+        cfg = {**cfg, "orientation": hidden_tests.ORIENTATION[project],
+               "extra_warnings": hidden_tests.WARNINGS[project]}
     protected = " or ".join(f"`{p}`" for p in cfg["protected_paths"])
     warn = cfg["extra_warnings"]
     system = SYSTEM_TEMPLATE.format(
@@ -194,7 +200,41 @@ def build_prompts(meta: dict) -> tuple[str, str]:
         build_and_test=_build_and_test(meta),
         tags_line=tags,
     )
+    if hide:
+        system = _swap(system, _SYSTEM_RULE, hidden_tests.SYSTEM_RULE)
+        instance = _swap(instance, _PROTECTED_RULE.format(protected=protected),
+                         hidden_tests.PROTECTED_RULE.format(protected=protected))
+        instance = _swap(instance, _RUNNING_TESTS, hidden_tests.RUNNING_TESTS[project])
+        instance = _swap(instance, _WORKFLOW_STEP3.format(build_and_test=_build_and_test(meta)),
+                         hidden_tests.WORKFLOW)
     return system, instance
+
+
+# The parts of the prompt that assume the PR's tests are there; replaced when
+# they are hidden.
+_SYSTEM_RULE = """\
+- After a successful build you MUST still run `run_tests` before submitting.
+  A passing build does NOT mean tests pass.
+"""
+_PROTECTED_RULE = """\
+Do NOT modify any files under {protected}: changes there are discarded
+   before your work is graded."""
+_RUNNING_TESTS = """\
+Use the `run_tests` command to build and run the tests. It handles all setup and
+teardown, waits for results, and exits as soon as pass/fail is known. A test
+that hangs is stopped and reported as failed."""
+_WORKFLOW_STEP3 = """\
+3. Build and test: `{build_and_test}`
+   - If the build fails: fix the error and repeat
+   - If run_tests shows tests FAILING: fix your change and go back to step 3
+   - If run_tests shows all target tests PASSING: go to step 4
+"""
+
+
+def _swap(text: str, old: str, new: str) -> str:
+    if text.count(old) != 1:
+        raise RuntimeError(f"prompt: expected one copy of {old[:60]!r}")
+    return text.replace(old, new)
 
 
 def _build_and_test(meta: dict) -> str:
@@ -217,6 +257,8 @@ def build_task(meta: dict) -> str:
     def bullets(items):
         return "\n".join(f"  - {i}" for i in items)
 
+    if hidden_tests.ENABLED:      # the problem statement only, as in SWE-bench
+        return f"## Task\n\n{meta['problem_statement']}\n"
     task = f"""\
 ## Task
 
@@ -272,7 +314,8 @@ def make_environment(meta: dict):
         return ApptainerEnvironment(image=image, layer=layer,
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
-                                    setup_commands=[one_commit, commit_tests])
+                                    setup_commands=[one_commit, hidden_tests.setup_command(meta)]
+                                    if hidden_tests.ENABLED else [one_commit, commit_tests])
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
@@ -453,6 +496,7 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         "error": None,
         "patch_empty": True,
         "protected_touched": [],
+        "tests_hidden": hidden_tests.ENABLED,
     }
     start = time.time()
     env, agent, captured, base = None, None, False, "HEAD"
