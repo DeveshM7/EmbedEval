@@ -213,9 +213,11 @@ def pull(instance_id: str, timeout: int = 1800) -> Path:
         return out
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(f".{out.name}.pull-{os.getpid()}")
+    # --disable-cache: Apptainer would also keep a copy in ~/.apptainer/cache, in the
+    # 25 GB home quota (15 nodes pulling filled it in minutes); the file is kept here.
     env = {k: v for k, v in os.environ.items() if not k.startswith("APPTAINER_DOCKER_")}
     try:
-        r = subprocess.run(["apptainer", "pull", "--force", str(part), rec["ref"]], env=env,
+        r = subprocess.run(["apptainer", "pull", "--force", "--disable-cache", str(part), rec["ref"]], env=env,
                            capture_output=True, text=True, timeout=timeout)
         if r.returncode:
             raise RuntimeError(f"apptainer pull {rec['ref']} failed: "
