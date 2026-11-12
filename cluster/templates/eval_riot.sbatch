@@ -39,13 +39,15 @@
 # to cpu node k mod (cpu nodes). Settings, in --export (repeat them after ":"):
 # EVAL_MODEL, EVAL_AGENTS (4), EVAL_GPU_MEMORY (0.80: the Spark node runs only
 # the model), EVAL_MAX_MODEL_LEN, EVAL_INSTANCES (a file of ids, for a trial),
-# EVAL_KEEP_IMAGES, EVAL_MAX_JOBS (6).
+# EVAL_KEEP_IMAGES, EVAL_MAX_JOBS (6), EVAL_MARGIN (minutes before the end after
+# which no new PR is taken, 75), EMBEDEVAL_EVAL_DIR (results elsewhere, for a test).
+# A shorter job: -t on both components, also kept on resubmission.
 #
 # Before any agent starts, the cpu side sends each server one request, checks
 # that a request without the key is refused and that an agent container cannot
 # reach the server; if any check fails, the job stops with the reason. The
 # rest works as cluster/templates/eval_zephyr.sbatch: one shared PR queue, no
-# new PR in the last 75 minutes, and the job submits itself again while PRs
+# new PR in the last EVAL_MARGIN minutes, and the job submits itself again while PRs
 # are left. Submit from the repository.
 set -u
 cd "${SLURM_SUBMIT_DIR:?}"
@@ -62,7 +64,13 @@ export EVAL_SERVERS=$EVAL_LOGS/servers
 mkdir -p "$EVAL_SERVERS" && chmod 700 "$EVAL_SERVERS"
 ( umask 077; openssl rand -hex 32 > "$EVAL_SERVERS/key" )
 cp "$0" "$EVAL/logs/riot/eval_riot.sbatch" 2>/dev/null
-END=$(( $(date +%s) + 4 * 3600 - 300 ))     # 5 min before the limit
+# The node scripts run from this job's own copies: bash reads a script as it runs
+# it, so editing the repository's copy during a job would break the job.
+cp scripts/eval_riot_server.sh scripts/eval_riot_agents.sh "$EVAL_LOGS/"
+# Stop 5 min before the job's own end (its -t, 4 hours at most here).
+LIMIT=$(squeue -h -j "$SLURM_JOB_ID" -o %l | head -1)
+END=$(( $(date -d "$(squeue -h -j "$SLURM_JOB_ID" -o %e | head -1)" +%s) - 300 ))
+[ "$END" -gt "$(date +%s)" ] || END=$(( $(date +%s) + 4 * 3600 - 300 ))
 N0=${SLURM_JOB_NUM_NODES_HET_GROUP_0:-1} N1=${SLURM_JOB_NUM_NODES_HET_GROUP_1:-1}
 C1=${SLURM_CPUS_PER_TASK_HET_GROUP_1:-16}
 echo "[$(date +%T)] job $ATTEMPT for $MODEL: $N0 servers (${SLURM_JOB_NODELIST_HET_GROUP_0:-?}),"\
@@ -70,11 +78,13 @@ echo "[$(date +%T)] job $ATTEMPT for $MODEL: $N0 servers (${SLURM_JOB_NODELIST_H
 echo "[$(date +%T)] results in $EVAL/riot, logs in $EVAL_LOGS"
 
 srun --het-group=0 --export=ALL --kill-on-bad-exit=0 --cpu-bind=none --gres=gpu:1 \
-    bash scripts/eval_riot_server.sh "$MODEL" > "$EVAL_LOGS/servers.log" 2>&1 &
+    bash "$EVAL_LOGS/eval_riot_server.sh" "$MODEL" > "$EVAL_LOGS/servers.log" 2>&1 &
 SERVERS=$!
-timeout -s TERM -k 3m $(( END - $(date +%s) )) \
+# The workers stop themselves at END, saving the runs they are on (srun, if
+# signalled, kills its tasks outright); this timeout is only a backstop.
+timeout -s TERM -k 1m $(( END + 120 - $(date +%s) )) \
     srun --het-group=1 --export=ALL --kill-on-bad-exit=0 --cpu-bind=none \
-    bash scripts/eval_riot_agents.sh "$MODEL" "$END" "$N0"
+    bash "$EVAL_LOGS/eval_riot_agents.sh" "$MODEL" "$END" "$N0"
 echo "[$(date +%T)] agents ended (exit $?)"
 kill -TERM $SERVERS 2>/dev/null; wait $SERVERS 2>/dev/null
 echo "[$(date +%T)] job $ATTEMPT ended"
@@ -90,9 +100,9 @@ echo "[$(date +%T)] $LEFT PRs not graded yet"
 if [ -f "$EVAL_LOGS/checks-failed" ]; then
     echo "[$(date +%T)] not resubmitted: $(cat "$EVAL_LOGS/checks-failed")"
 elif [ "$LEFT" -gt 0 ] && [ "$ATTEMPT" -lt "${EVAL_MAX_JOBS:-6}" ]; then
-    keep=$(env | grep -E "^EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|INSTANCES|KEEP_IMAGES|MAX_JOBS)=" | paste -sd, -)
+    keep=$(env | grep -E "^(EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|INSTANCES|KEEP_IMAGES|MAX_JOBS|MARGIN)|EMBEDEVAL_EVAL_DIR)=" | paste -sd, -)
     exp=NONE,EVAL_MODEL="$MODEL",EVAL_ATTEMPT=$((ATTEMPT + 1))${keep:+,$keep}
     env $(env | grep -E "^(SLURM|SBATCH)_" | cut -d= -f1 | sed "s/^/-u /") sbatch \
-        -N "$N0" --export="$exp" -o "$EVAL/logs/riot/%x-%j.out" \
-        : -N "$N1" -c "$C1" --export="$exp" "$EVAL/logs/riot/eval_riot.sbatch"
+        -N "$N0" -t "$LIMIT" --export="$exp" -o "$EVAL/logs/riot/%x-%j.out" \
+        : -N "$N1" -c "$C1" -t "$LIMIT" --export="$exp" "$EVAL/logs/riot/eval_riot.sbatch"
 fi

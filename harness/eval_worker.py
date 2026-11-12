@@ -17,7 +17,8 @@ PR, and a PR held by a worker that has gone silent (its node died) is taken
 over. A worker takes no new PR once less than --margin minutes are left before
 --stop-at (the job's end): a run is capped at an hour and then graded, and a
 run cut off by the job's end only counts as an infrastructure error, retried
-by the next job.
+by the next job. At --stop-at the worker stops itself, saving and recording
+the run it is on.
 
 --instances FILE limits the work to the instance ids listed in it (a trial).
 --delete-images removes each instance image, and its git layer, once its PR
@@ -27,8 +28,10 @@ is graded, so the images of a whole project need not fit on scratch at once.
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -58,6 +61,15 @@ def main() -> None:
     a = p.parse_args()
 
     signal.signal(signal.SIGTERM, run._stop_on_sigterm)
+    # At --stop-at the worker stops itself: the SIGTERM handler saves the run's
+    # patch, records it as cut off (retried by the next job) and removes its
+    # overlay. The job must not do this by signalling srun, which kills the
+    # step's tasks with SIGKILL, so nothing would be saved (resume test,
+    # 2026-11-11). The job's own timeout comes later, only as a backstop.
+    stop = threading.Timer(max(0.0, a.stop_at - time.time()),
+                           lambda: os.kill(os.getpid(), signal.SIGTERM))
+    stop.daemon = True
+    stop.start()
     model = paths.resolve_model(a.model)
     ids = (Path(a.instances).read_text().split() if a.instances
            else paths.discover_instances(a.project))

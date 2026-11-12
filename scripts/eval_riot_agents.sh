@@ -12,13 +12,13 @@
 #   - each server answers a short chat request with the job's key;
 #   - a request without the key is refused (the server is on the cluster network);
 #   - from inside an agent container (--network none) the server cannot be reached.
-# Settings, from the environment: EVAL_AGENTS (4), EVAL_INSTANCES,
+# Settings, from the environment: EVAL_AGENTS (4), EVAL_MARGIN (75), EVAL_INSTANCES,
 # EVAL_KEEP_IMAGES, EVAL_LOGS, EVAL_SERVERS.
 set -u
 MODEL=${1:?usage: eval_riot_agents.sh <model> <stop-at> <servers>}
 STOP_AT=${2:?usage: eval_riot_agents.sh <model> <stop-at> <servers>}
 NSERVERS=${3:?usage: eval_riot_agents.sh <model> <stop-at> <servers>}
-cd "$(dirname "$0")/.."
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"     # the repository (this may be a job's copy)
 I=${SLURM_NODEID:-0} N=${SLURM_NNODES:-1}
 ME=${SLURM_JOB_ID:-local}-cpu$I
 LOGS=${EVAL_LOGS:?EVAL_LOGS not set}; S=${EVAL_SERVERS:?EVAL_SERVERS not set}
@@ -84,7 +84,7 @@ for k in $MINE; do
     for a in $(seq 1 "$AGENTS"); do
         EMBEDEVAL_LOCAL_API_BASE=$(cat "$S/node$k.url") EMBEDEVAL_LOCAL_API_KEY=$KEY \
             "$PY" harness/eval_worker.py --project riot --model "$MODEL" \
-            --name "$ME-s$k-w$a" --stop-at "$STOP_AT" "${EXTRA[@]}" \
+            --name "$ME-s$k-w$a" --stop-at "$STOP_AT" --margin "${EVAL_MARGIN:-75}" "${EXTRA[@]}" \
             > "$LOGS/cpu$I-s$k-w$a.log" 2>&1 &
         PIDS+=($!)
         sleep 10        # stagger the first pulls and container starts

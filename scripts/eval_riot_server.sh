@@ -12,7 +12,7 @@
 # (0.80), EVAL_MAX_MODEL_LEN (262144), EVAL_LOGS, EVAL_SERVERS.
 set -u
 MODEL=${1:?usage: eval_riot_server.sh <model>}
-cd "$(dirname "$0")/.."
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"     # the repository (this may be a job's copy)
 I=${SLURM_NODEID:-0}
 ME=${SLURM_JOB_ID:-local}-server$I
 LOGS=${EVAL_LOGS:?EVAL_LOGS not set}; S=${EVAL_SERVERS:?EVAL_SERVERS not set}

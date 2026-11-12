@@ -15,13 +15,14 @@
 #                     builds and QEMU need the rest of its 120 GB)
 #   EVAL_MAX_MODEL_LEN  context (262144)
 #   EVAL_INSTANCES    file of instance ids (default: every Zephyr instance)
+#   EVAL_MARGIN       minutes before the end after which no new PR is taken (75)
 #   EVAL_KEEP_IMAGES  1: keep instance images and git layers after grading
 #                     (default: remove)
 #   EVAL_LOGS         folder for this node's logs
 set -u
 MODEL=${1:?usage: eval_zephyr_node.sh <model> <stop-at>}
 STOP_AT=${2:?usage: eval_zephyr_node.sh <model> <stop-at>}
-cd "$(dirname "$0")/.."
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"     # the repository (this may be a job's copy)
 I=${SLURM_NODEID:-0}
 ME=${SLURM_JOB_ID:-local}-node$I
 LOGS=${EVAL_LOGS:?EVAL_LOGS not set}; mkdir -p "$LOGS"
@@ -61,7 +62,7 @@ EXTRA=()
 PIDS=()
 for k in $(seq 1 "$AGENTS"); do
     .venv/bin/python harness/eval_worker.py --project zephyr --model "$MODEL" \
-        --name "$ME-w$k" --stop-at "$STOP_AT" "${EXTRA[@]}" \
+        --name "$ME-w$k" --stop-at "$STOP_AT" --margin "${EVAL_MARGIN:-75}" "${EXTRA[@]}" \
         > "$LOGS/node$I-w$k.log" 2>&1 &
     PIDS+=($!)
     sleep 20        # stagger the first image pulls and container starts
