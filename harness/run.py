@@ -207,6 +207,10 @@ def build_prompts(meta: dict) -> tuple[str, str]:
         instance = _swap(instance, _RUNNING_TESTS, hidden_tests.RUNNING_TESTS[project])
         instance = _swap(instance, _WORKFLOW_STEP3.format(build_and_test=_build_and_test(meta)),
                          hidden_tests.WORKFLOW)
+        instance = _swap(instance, _SUBMIT_RULE, hidden_tests.SUBMIT_RULE)
+        instance = _swap(instance, "Mandatory workflow:",
+                         hidden_tests.TESTING_AND_SUBMITTING.format(
+                             hint=hidden_tests.TEST_HINT[project]) + "Mandatory workflow:")
     return system, instance
 
 
@@ -223,6 +227,7 @@ _RUNNING_TESTS = """\
 Use the `run_tests` command to build and run the tests. It handles all setup and
 teardown, waits for results, and exits as soon as pass/fail is known. A test
 that hangs is stopped and reported as failed."""
+_SUBMIT_RULE = "6. Your work is graded only if you submit it (step 4 below)."
 _WORKFLOW_STEP3 = """\
 3. Build and test: `{build_and_test}`
    - If the build fails: fix the error and repeat

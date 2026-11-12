@@ -105,7 +105,7 @@ echo "[$(date +%T)] $LEFT PRs not graded yet"
 if [ -f "$EVAL_LOGS/checks-failed" ]; then
     echo "[$(date +%T)] not resubmitted: $(cat "$EVAL_LOGS/checks-failed")"
 elif [ "$LEFT" -gt 0 ] && [ "$ATTEMPT" -lt "${EVAL_MAX_JOBS:-6}" ]; then
-    keep=$(env | grep -E "^(EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|INSTANCES|KEEP_IMAGES|MAX_JOBS|MARGIN)|EMBEDEVAL_EVAL_DIR)=" | paste -sd, -)
+    keep=$(env | grep -E "^(EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|INSTANCES|KEEP_IMAGES|MAX_JOBS|MARGIN|TIME_LIMIT)|EMBEDEVAL_EVAL_DIR)=" | paste -sd, -)
     exp=NONE,EVAL_MODEL="$MODEL",EVAL_ATTEMPT=$((ATTEMPT + 1))${keep:+,$keep}
     env $(env | grep -E "^(SLURM|SBATCH)_" | cut -d= -f1 | sed "s/^/-u /") sbatch \
         -N "$N0" -t "$LIMIT" --export="$exp" -o "$EVAL/logs/riot/%x-%j.out" \

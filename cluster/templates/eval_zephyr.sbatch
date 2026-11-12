@@ -63,7 +63,7 @@ ids = Path(f).read_text().split() if f else paths.discover_instances('zephyr')
 print(sum(not paths.grade_path(i, sys.argv[1]).exists() for i in ids))" "$MODEL" "${EVAL_INSTANCES:-}")
 echo "[$(date +%T)] $LEFT PRs not graded yet"
 if [ "$LEFT" -gt 0 ] && [ "$ATTEMPT" -lt "${EVAL_MAX_JOBS:-6}" ]; then
-    keep=$(env | grep -E "^(EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|INSTANCES|KEEP_IMAGES|MAX_JOBS|MARGIN)|EMBEDEVAL_EVAL_DIR)=" | paste -sd, -)
+    keep=$(env | grep -E "^(EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|INSTANCES|KEEP_IMAGES|MAX_JOBS|MARGIN|TIME_LIMIT)|EMBEDEVAL_EVAL_DIR)=" | paste -sd, -)
     env $(env | grep -E "^(SLURM|SBATCH)_" | cut -d= -f1 | sed "s/^/-u /") sbatch \
         -N "$SLURM_JOB_NUM_NODES" -p "$SLURM_JOB_PARTITION" -t "$LIMIT" \
         --export=NONE,EVAL_MODEL="$MODEL",EVAL_ATTEMPT=$((ATTEMPT + 1))${keep:+,$keep} \

@@ -16,6 +16,7 @@
 #   EVAL_MAX_MODEL_LEN  context (262144)
 #   EVAL_INSTANCES    file of instance ids (default: every Zephyr instance)
 #   EVAL_MARGIN       minutes before the end after which no new PR is taken (75)
+#   EVAL_TIME_LIMIT   minutes per run before it is stopped (60); keep EVAL_MARGIN above it
 #   EVAL_KEEP_IMAGES  1: keep instance images and git layers after grading
 #                     (default: remove)
 #   EVAL_LOGS         folder for this node's logs
@@ -62,7 +63,7 @@ EXTRA=()
 PIDS=()
 for k in $(seq 1 "$AGENTS"); do
     .venv/bin/python harness/eval_worker.py --project zephyr --model "$MODEL" \
-        --name "$ME-w$k" --stop-at "$STOP_AT" --margin "${EVAL_MARGIN:-75}" "${EXTRA[@]}" \
+        --name "$ME-w$k" --stop-at "$STOP_AT" --margin "${EVAL_MARGIN:-75}" --time-limit "${EVAL_TIME_LIMIT:-60}" "${EXTRA[@]}" \
         > "$LOGS/node$I-w$k.log" 2>&1 &
     PIDS+=($!)
     sleep 20        # stagger the first image pulls and container starts

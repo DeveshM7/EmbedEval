@@ -95,10 +95,40 @@ SYSTEM_RULE = (
 )
 
 PROTECTED_RULE = (
-    "The tests that grade your work are not given to you. You may add or change "
-    "tests under {protected} to check your work, but those changes are discarded "
-    "before grading."
+    "The tests that grade your work are hidden from you (see \"Testing and "
+    "submitting\" below). You may add or change tests under {protected} to check "
+    "your work, but those changes are discarded before grading."
 )
+
+SUBMIT_RULE = (
+    "6. Your work is graded only if you submit it (step 4 below). Time is limited: a\n"
+    "   run that is stopped before you submit is graded as a fail, so submit once your\n"
+    "   change is done and tested."
+)
+
+TESTING_AND_SUBMITTING = """\
+## Testing and submitting
+
+Your change is graded by hidden tests written for this task. They check the
+behaviour the task describes, including every case it lists, and the project's
+existing tests must keep passing.
+
+Existing tests passing does not show that new behaviour works. Write a test for
+each case the task describes, run it, and also run the existing tests of the code
+you changed. The quickest way is usually to add test cases to the nearest existing
+test suite rather than create a new one.{hint}
+
+Submit as soon as your change does everything the task asks, your tests for it
+pass, and the existing tests of the code you changed pass. Further checking will
+not improve your grade.
+
+"""
+
+TEST_HINT = {
+    "zephyr": ("\nEach `run_tests` call builds and boots the board, so run the smallest test "
+               "folders that cover your change."),
+    "riot": "",
+}
 
 RUNNING_TESTS = {
     "zephyr": (
@@ -150,9 +180,10 @@ WARNINGS = {
 }
 
 WORKFLOW = (
-    "3. Build and test: `cd /testbed && run_tests <test> ...` with the tests that\n"
-    "   exercise your change (existing ones, or ones you add)\n"
+    "3. Build and test (see \"Testing and submitting\"): `cd /testbed && run_tests <test> ...`\n"
     "   - If the build fails: fix the error and repeat\n"
-    "   - If tests FAIL: fix your change and go back to step 3\n"
-    "   - When your change builds and your tests pass: go to step 4\n"
+    "   - If a test FAILS: fix your change (or your test, if the test is wrong) and go\n"
+    "     back to step 3\n"
+    "   - When your change does everything the task asks, your tests for it pass and\n"
+    "     the existing tests of the code you changed pass: go to step 4 at once\n"
 )
