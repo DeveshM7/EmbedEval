@@ -40,7 +40,8 @@
 # EVAL_MODEL, EVAL_AGENTS (4), EVAL_GPU_MEMORY (0.80: the Spark node runs only
 # the model), EVAL_MAX_MODEL_LEN, EVAL_INSTANCES (a file of ids, for a trial),
 # EVAL_KEEP_IMAGES, EVAL_MAX_JOBS (6), EVAL_MARGIN (minutes before the end after
-# which no new PR is taken, 75), EMBEDEVAL_EVAL_DIR (results elsewhere, for a test).
+# which no new PR is taken, 135), EVAL_TIME_LIMIT (minutes per run, 120),
+# EMBEDEVAL_EVAL_DIR (results elsewhere, for a test).
 # A shorter job: -t on both components, also kept on resubmission.
 #
 # Before any agent starts, the cpu side sends each server one request, checks

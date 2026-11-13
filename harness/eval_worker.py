@@ -15,7 +15,7 @@ one queue (cluster/claims.py) in the model's eval folder:
 A PR is finished when its grade.json exists; a worker never takes a finished
 PR, and a PR held by a worker that has gone silent (its node died) is taken
 over. A worker takes no new PR once less than --margin minutes are left before
---stop-at (the job's end): a run is capped at an hour and then graded, and a
+--stop-at (the job's end): a run is capped at --time-limit (2 hours) and then graded, and a
 run cut off by the job's end only counts as an infrastructure error, retried
 by the next job. At --stop-at the worker stops itself, saving and recording
 the run it is on.
@@ -51,13 +51,15 @@ def main() -> None:
     p.add_argument("--name", required=True, help="<job>-node<N>-w<K>, unique per worker")
     p.add_argument("--stop-at", type=float, required=True,
                    help="epoch seconds: the job's end")
-    p.add_argument("--margin", type=float, default=75,
-                   help="minutes before --stop-at after which no new PR is taken (default 75)")
+    p.add_argument("--margin", type=float, default=135,
+                   help="minutes before --stop-at after which no new PR is taken "
+                        "(default 135: the time limit plus grading)")
     p.add_argument("--instances", help="file of instance ids to work on (default: all)")
     p.add_argument("--delete-images", action="store_true")
     p.add_argument("--step-limit", type=int, default=250)
     p.add_argument("--cost-limit", type=float, default=3.0)
-    p.add_argument("--time-limit", type=float, default=60)
+    p.add_argument("--time-limit", type=float, default=120,
+                   help="minutes per run (default 120)")
     a = p.parse_args()
 
     signal.signal(signal.SIGTERM, run._stop_on_sigterm)

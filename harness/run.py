@@ -653,9 +653,9 @@ def main() -> None:
     p.add_argument("--step-limit", type=int, default=250)
     p.add_argument("--cost-limit", type=float, default=3.0,
                    help="dollars per run, for hosted models (local models cost nothing)")
-    p.add_argument("--time-limit", type=float, default=60,
+    p.add_argument("--time-limit", type=float, default=120,
                    help="minutes of wall-clock time per run, checked before each model "
-                        "call (default 60; 0: no limit)")
+                        "call (default 120; 0: no limit)")
     p.add_argument("--force", action="store_true",
                    help="run again pairs that already have a run or a grade")
     p.add_argument("--verbose", "-v", action="store_true")
