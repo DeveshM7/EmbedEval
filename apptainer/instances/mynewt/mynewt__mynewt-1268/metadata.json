@@ -55,5 +55,88 @@
     "staging_provenance": {
         "catalog_evidence": "evidence/recovery-review-20261029/deep-new-modules-2-with-controls-v36/new-modules-v36/claude/1268/util__debounce__test",
         "recovery_receipt": "recovery.json"
-    }
+    },
+    "verification": {
+        "status": "fixed",
+        "verdict": "fixable",
+        "votes": [
+            "fixable",
+            "fixable",
+            "fixable"
+        ],
+        "reason": "The original one-sentence statement gives no API names, types, header path, error code, or concrete state-transition rules that the hidden tests exercise. All omissions can be repaired by specifying the public interface and observable behaviour without dictating implementation.",
+        "problems": [
+            {
+                "category": "A",
+                "detail": "The statement does not mention any of the API names the tests call: struct debouncer, debouncer_init, debouncer_adjust, debouncer_set, debouncer_state, debouncer_val, nor the header path debounce/debounce.h. Without these names the agent cannot write code the tests can link against."
+            },
+            {
+                "category": "A",
+                "detail": "The parameter types and return types for each function are not stated (e.g. debouncer_init takes uint16_t thresh_low, uint16_t thresh_high, uint16_t max and returns int; debouncer_adjust takes int32_t delta and returns int; debouncer_set takes uint16_t val and returns void; debouncer_state and debouncer_val take const struct debouncer * and return int/uint16_t respectively)."
+            },
+            {
+                "category": "D",
+                "detail": "The exact error code SYS_EINVAL that debouncer_init and debouncer_adjust must return on invalid input is not specified. The tests assert rc == SYS_EINVAL."
+            },
+            {
+                "category": "B",
+                "detail": "The initial state after debouncer_init (state = 0 / low, counter = 0) is not stated. The tests assert debouncer_state(&d) == 0 and debouncer_val(&d) == 0 after init."
+            },
+            {
+                "category": "B",
+                "detail": "The hysteresis / state-transition rules are only vaguely described ('change state only at the configured high and low thresholds') but the precise observable behaviour is not: when in low state the counter must reach >= thresh_high to enter high; when in high state the counter must drop <= thresh_low to enter low; at no other point does the state change. The test explicitly verifies that moving from 10 to 11 (low state, below thresh_high) does NOT trigger."
+            },
+            {
+                "category": "B",
+                "detail": "The behaviour of debouncer_set is not described: it sets the counter to the given value AND updates the state according to the current state and thresholds. The test calls debouncer_set(&d, 100) and expects state to become 1 (because 100 >= thresh_high)."
+            },
+            {
+                "category": "B",
+                "detail": "The saturation lower bound (counter clamps to 0) is not stated; only 'within its bounds' is mentioned. The tests implicitly rely on it through the adjust/decrease path."
+            }
+        ],
+        "missing_names": [
+            {
+                "name": "debounce/debounce.h",
+                "kind": "header"
+            },
+            {
+                "name": "debouncer_adjust",
+                "kind": "function"
+            },
+            {
+                "name": "debouncer_init",
+                "kind": "function"
+            },
+            {
+                "name": "debouncer_set",
+                "kind": "function"
+            },
+            {
+                "name": "max",
+                "kind": "field"
+            },
+            {
+                "name": "thresh_high",
+                "kind": "field"
+            },
+            {
+                "name": "thresh_low",
+                "kind": "field"
+            }
+        ],
+        "leak_check": {
+            "leak": "none",
+            "leak_detail": "",
+            "accurate": true,
+            "accuracy_detail": "",
+            "complete": 3,
+            "missing": "",
+            "decision": "accept",
+            "suggested_statement": null
+        },
+        "model": "qwen38-nvfp4",
+        "date": "2026-11-13"
+    },
+    "problem_statement_fixed": "The debouncer must reject invalid thresholds and deltas, saturate its counter within its bounds, and change state only at the configured high and low thresholds.\n\nProvide a util/debounce package that exposes the public header debounce/debounce.h. That header must define a struct debouncer type and the following public API:\n\n    int debouncer_init(struct debouncer *debouncer, uint16_t thresh_low, uint16_t thresh_high, uint16_t max);\n    int debouncer_adjust(struct debouncer *debouncer, int32_t delta);\n    void debouncer_set(struct debouncer *debouncer, uint16_t val);\n    int debouncer_state(const struct debouncer *debouncer);\n    uint16_t debouncer_val(const struct debouncer *debouncer);\n\ndebouncer_init must return 0 on success and SYS_EINVAL when thresh_low is greater than thresh_high or thresh_high is greater than max. On success, it must initialize the debouncer to the low state with a counter value of 0. debouncer_adjust must return 0 on success, change the counter by delta, and keep the counter within the range 0 through max. debouncer_set must set the counter to the supplied value and update the state using the same threshold rules. The debouncer starts in the low state. It enters the high state when the counter is greater than or equal to thresh_high while in the low state, and it returns to the low state when the counter is less than or equal to thresh_low while in the high state; while the counter is between the thresholds, the state must remain unchanged. debouncer_state must return 1 for the high state and 0 for the low state, and debouncer_val must return the current counter value."
 }
