@@ -60,5 +60,43 @@
     "version": 2,
     "result": "written",
     "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/full-341-v7/triage/3230.statement.trace.json"
-  }
+  },
+  "verification": {
+    "status": "fixed",
+    "verdict": "fixable",
+    "votes": [
+      "fixable",
+      "fixable",
+      "fixable"
+    ],
+    "reason": "The statement describes the intended decoder behavior but omits the exact public interface and a few observable results that the hidden tests rely on; these can be added without revealing implementation.",
+    "problems": [
+      {
+        "category": "A",
+        "detail": "The hidden unit tests call mqtt_decode_var_byte_int directly, but the statement only refers to the Variable Byte Integer decoder and does not give the exact function name, parameter types, or return contract."
+      },
+      {
+        "category": "D",
+        "detail": "The tests require exact public effects: failure returns 0, success returns the number of bytes consumed, and a non-positive available length sets *dest to 0; the statement did not state these exact return/result values."
+      },
+      {
+        "category": "B",
+        "detail": "The tests also check that a positive but too-short input length fails, which the original statement did not explicitly require."
+      }
+    ],
+    "missing_names": [],
+    "leak_check": {
+      "leak": "none",
+      "leak_detail": "",
+      "accurate": true,
+      "accuracy_detail": "",
+      "complete": 3,
+      "missing": "",
+      "decision": "accept",
+      "suggested_statement": null
+    },
+    "model": "qwen38-nvfp4",
+    "date": "2026-11-13"
+  },
+  "problem_statement_fixed": "The MQTT client's Variable Byte Integer decoder, used to read the lengths that frame the rest of a packet, misbehaves on inputs whose declared length is too small and on encodings that exceed what the protocol permits. When the decoder is given a non-positive number of available bytes (for example when a caller has parsed more of the packet than the length it was given covers), it reads bytes past the end of the received input instead of rejecting the value, advancing its parse position and producing a result. When a Variable Byte Integer is encoded using more than the four bytes that the MQTT specification allows, the decoder consumes a fifth byte before deciding the encoding is invalid, so the parse position is left past the bytes that belonged to the rejected integer and the next field is skipped. When the encoded value is larger than the 16-bit field it is stored into (for example a Remaining Length of 65538), the decoder accepts it and stores only the low-order bits, so a peer that announced a 65538-byte packet is observed to have sent a 2-byte one, and the rest of that packet is then parsed as further packets. Finally, when the Remaining Length of an incoming packet cannot be decoded, the connection is left open and parsing continues into arbitrary bytes rather than being closed. Required behavior: a non-positive available length must yield failure with no bytes read, the parse position unchanged, and the decoded value left at zero; a positive available length that ends before the Variable Byte Integer is complete must yield failure without reading past the available input; a five-byte encoding must be rejected without consuming that fifth byte (the parse position stopping at the fourth byte); an encoded value that does not fit the 16-bit destination must be rejected with the result left at zero, while the largest representable value (65535) must still decode successfully; and an undecodable Remaining Length must close the connection so the application can reconnect from a known state. The decoder returns the number of bytes consumed on success and zero on failure."
 }

@@ -68,5 +68,63 @@
     "version": 2,
     "result": "written",
     "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/full-341-v7/triage/3121.statement.trace.json"
-  }
+  },
+  "verification": {
+    "status": "fixed",
+    "verdict": "fixable",
+    "votes": [
+      "fixable",
+      "fixable",
+      "fixable"
+    ],
+    "reason": "The statement conveys the high-level zone isolation goal but omits the exact public API shape, stats field names, general-zone convenience behavior, config changes, and alignment macro that the hidden tests require; all of these can be specified without revealing the implementation.",
+    "problems": [
+      {
+        "category": "A",
+        "detail": "The hidden tests rely on the new public zone interface: heapmem_zone_t must be a pointer target, HEAPMEM_ZONE_DEFINE must define a heapmem_zone_t object, and heapmem_zone_alloc/free/realloc/stats must take a heapmem_zone_t * first argument."
+      },
+      {
+        "category": "A",
+        "detail": "The hidden tests use the renamed heapmem_stats_t fields heap_usage and max_heap_usage, plus the existing fields allocated, overhead, available, and chunks."
+      },
+      {
+        "category": "A",
+        "detail": "The hidden tests use HEAPMEM_ALIGNMENT from the public header instead of the previous heapmem_alignment() function."
+      },
+      {
+        "category": "B",
+        "detail": "The hidden tests require observable behaviors of the new zone API: heapmem_zone_realloc(zone, NULL, size) allocates, heapmem_zone_realloc(zone, ptr, 0) frees and returns NULL, and successful realloc preserves data."
+      },
+      {
+        "category": "B",
+        "detail": "The hidden tests require a general zone and general-zone convenience macros (heapmem_alloc, heapmem_free, and the stats macro) to work independently of named zones, and that a general-zone pointer cannot be freed through a different zone."
+      },
+      {
+        "category": "D",
+        "detail": "The hidden tests require exact public meanings/field names: heap_usage is current usage, max_heap_usage is a high-water mark that is not reset by frees, and chunks counts allocated chunks."
+      },
+      {
+        "category": "F",
+        "detail": "The hidden test configuration removes HEAPMEM_CONF_MAX_ZONES and HEAPMEM_CONF_REALLOC, so the statement must make clear that zone support and zone realloc do not depend on those options."
+      },
+      {
+        "category": "G",
+        "detail": "The tests require zones to be passed by pointer and HEAPMEM_ZONE_DEFINE to create a zone object, not a numeric zone id or registered handle."
+      }
+    ],
+    "missing_names": [],
+    "leak_check": {
+      "leak": "none",
+      "leak_detail": "",
+      "accurate": true,
+      "accuracy_detail": "",
+      "complete": 3,
+      "missing": "",
+      "decision": "accept",
+      "suggested_statement": null
+    },
+    "model": "qwen38-nvfp4",
+    "date": "2026-11-13"
+  },
+  "problem_statement_fixed": "The heap allocator offers named memory zones, each created with a reserved buffer of a fixed size (HEAPMEM_ZONE_DEFINE), and a caller allocates, frees, and reallocates memory through a zone via heapmem_zone_alloc(), heapmem_zone_free(), and heapmem_zone_realloc(), and queries a zone's usage with heapmem_zone_stats(). A caller expects each zone to manage its own reserved memory independently: an allocation in one zone must not consume capacity reserved for a different zone, an allocation larger than a zone's own reserved size must be rejected, freeing a pointer in a zone other than the one it was allocated from must be rejected, and a zone's usage statistics must reflect only that zone's state. The current implementation does not provide this: all zones draw from a single shared memory pool, so a large allocation in an otherwise-empty zone can fail when a different zone has fragmented its memory, allocations are not reliably bounded by a zone's own reserved size, and per-zone usage statistics do not reflect the state of the individual zone. The expected behavior is that each zone's reserved buffer is independent of the others, each allocation is bounded by the zone's own size, cross-zone frees fail, and a zone that has freed all its memory reports zero allocated memory and zero usage.\n\nThe public zone API must use a pointer to a zone, not an integer zone identifier. HEAPMEM_ZONE_DEFINE(name, bufsize) must define a zone object of type heapmem_zone_t and a static memory buffer of bufsize bytes for that zone; the zone is passed to the API by pointer. The zone functions must have the following observable signatures:\nvoid *heapmem_zone_alloc(heapmem_zone_t *zone, size_t size);\nbool heapmem_zone_free(heapmem_zone_t *zone, void *ptr);\nvoid *heapmem_zone_realloc(heapmem_zone_t *zone, void *ptr, size_t size);\nvoid heapmem_zone_stats(heapmem_zone_t *zone, heapmem_stats_t *stats)\n\nheapmem_zone_alloc must fail with NULL for a request larger than the zone's reserved buffer size. heapmem_zone_free must return true only when ptr was allocated from that same zone and is currently allocated, and false otherwise; in particular, a pointer from a different zone must not be freed through another zone. heapmem_zone_realloc must behave like heapmem_zone_alloc when ptr is NULL, must free ptr and return NULL when size is zero, and otherwise must return a pointer to an allocation of the requested size with the old contents preserved.\n\nWhen HEAPMEM_CONF_ARENA_SIZE is set, a general zone must be available and the existing general-zone convenience macros heapmem_alloc, heapmem_free, heapmem_realloc, heapmem_calloc, heapmem_stats, and heapmem_print_debug_info must operate on that general zone. A pointer allocated from the general zone must be freeable with heapmem_free, but not with heapmem_zone_free for a different zone. Zones and zone realloc must not require HEAPMEM_CONF_MAX_ZONES or HEAPMEM_CONF_REALLOC; those configuration options are not part of the zone interface.\n\nheapmem_stats_t must expose the fields allocated, overhead, available, heap_usage, max_heap_usage, and chunks. heap_usage is the current zone heap usage, max_heap_usage is the high-water mark of heap_usage and is not reset when allocations are freed, and chunks is the number of currently allocated chunks. A zone that has freed all of its allocations must report allocated == 0. The minimum alignment of allocated objects must be exposed as HEAPMEM_ALIGNMENT in the public heapmem header, and this value must be a power of two."
 }

@@ -63,5 +63,52 @@
     "version": 2,
     "result": "written",
     "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/full-341-v7/triage/3254.statement.trace.json"
-  }
+  },
+  "verification": {
+    "status": "fixed",
+    "verdict": "fixable",
+    "votes": [
+      "fixable",
+      "fixable",
+      "fixable"
+    ],
+    "reason": "The statement mostly describes the required rejection behavior, but it omits the public drop return value, the capacity semantics, the question-type restoration, and the 6to4 query-rewrite bound check that the hidden tests rely on. These can be added without dictating the implementation.",
+    "problems": [
+      {
+        "category": "A",
+        "detail": "The hidden tests compare the return value to the new macro IP64_DNS64_DROP, but the statement does not mention that name or its meaning."
+      },
+      {
+        "category": "B",
+        "detail": "The hidden tests require ip64_dns64_6to4() to stop and leave a truncated query unchanged, but the statement only describes inbound reply translation."
+      },
+      {
+        "category": "B",
+        "detail": "The modified DNS reply test checks that the translated reply restores the question type to AAAA, which the statement does not require."
+      },
+      {
+        "category": "G",
+        "detail": "The tests pass the fourth argument to ip64_dns64_4to6() as output capacity and rely on it returning the new length or IP64_DNS64_DROP; the statement does not specify this interface."
+      }
+    ],
+    "missing_names": [
+      {
+        "name": "IP64_DNS64_DROP",
+        "kind": "macro"
+      }
+    ],
+    "leak_check": {
+      "leak": "none",
+      "leak_detail": "",
+      "accurate": true,
+      "accuracy_detail": "",
+      "complete": 3,
+      "missing": "",
+      "decision": "accept",
+      "suggested_statement": null
+    },
+    "model": "qwen38-nvfp4",
+    "date": "2026-11-13"
+  },
+  "problem_statement_fixed": "When a NAT64 gateway is asked to translate an inbound DNS reply (an A answer rewritten to AAAA) into the outgoing IPv6 message, a single UDP packet received on the DNS port can drive the translation past the end of the buffer it is given, or produce a reply that is not a well-formed answer that can be sent. The observable failures are: (1) a reply whose answer record claims, in its length field, more data than the packet actually contains causes the translation to copy far past both the input and the output buffer instead of refusing the packet; (2) the same malformed reply, where the bad record is the second one, leaves a reply that has already been partially rewritten in the output and the caller would forward it instead of dropping it; (3) a reply whose question name is so long that it runs past the end of the packet (with no terminating zero-length label) is not stopped, so the walk reads past the message; and (4) a reply that does not fit in the room available for the outgoing message is not rejected, so the translation overruns that buffer. In each of these cases the correct behavior is that the translation drops the packet rather than overrunning a buffer or returning a length that would forward a half-rewritten reply. The translation of ordinary, well-formed replies (including ones with extra records, an EDNS OPT record in the additional section, or two answers where the first grows) must still succeed and place every record at its new offset without touching memory past the room it was given.\n\nThe public functions affected are ip64_dns64_4to6() and ip64_dns64_6to4(), declared in ip64/ip64-dns64.h. For ip64_dns64_4to6(), the last argument is the capacity of the output buffer, not the length of the translated message. On a successful translation it must return the length of the translated reply in bytes; on a reply it must drop, it must return IP64_DNS64_DROP, a macro declared in ip64/ip64-dns64.h. In every drop case it must not read or write past the input length or the output capacity, and it must not return a length that would forward a half-rewritten reply.\n\nA translated reply must carry the question type that was actually asked, DNS_TYPE_AAAA: the outbound query had its AAAA question rewritten to A, so the reply's question section must be rewritten back to AAAA.\n\nThe same bounds requirement applies to ip64_dns64_6to4(): if a query's question name runs past the end of the packet (for example, a label length that consumes the remaining bytes with no terminating zero-length label), the function must stop and must not read or write past the length given for the packet; for that malformed query the given buffer must be left unchanged."
 }
