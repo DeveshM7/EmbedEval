@@ -57,7 +57,10 @@ WORK = Path(os.environ.get("EMBEDEVAL_VERIFY_DIR",
                            f"/scratch/scholar/{os.environ.get('USER', 'user')}/embedeval/verify"))
 SHARED = Path(os.environ.get("EMBEDEVAL_SHARED",
                              f"/scratch/scholar/{os.environ.get('USER', 'user')}/embedeval/shared"))
-CLONES = {"zephyr": SHARED / "zephyr.git", "riot": SHARED / "riot" / "riot.git"}
+# Local clones the fix diffs come from (NuttX: the kernel, where its fixes are).
+CLONES = {"zephyr": SHARED / "zephyr.git", "riot": SHARED / "riot" / "riot.git",
+          "nuttx": SHARED / "nuttx.git"}
+GITHUB_PR_FILES_CAP = 3000   # GitHub lists at most this many files of a PR
 PROFILE = "qwen38-nvfp4"
 JUDGES = 3
 # Characters of each diff given to the model (about 3.5 characters per token): well
@@ -86,8 +89,41 @@ def git(project: str, *args: str) -> str:
 
 def fix_diff(meta: dict) -> str:
     project = meta["project"]
+    if project == "nuttx":
+        # The kernel PR (kernel_base_commit..kernel_merge_commit, limited to its files, as
+        # the NuttX branch's validate_instance.gold_patch does) and any follow-up kernel
+        # PRs it needs (extra_fix_prs). The tests are a change to the apps repository.
+        files = meta.get("files_changed_by_fix") or []
+        parts = [git(project, "diff", f"{meta['kernel_base_commit']}..{meta['kernel_merge_commit']}",
+                     "--", *(files if 0 < len(files) < GITHUB_PR_FILES_CAP else ["."]))]
+        for e in meta.get("extra_fix_prs") or []:
+            ef = e.get("files_changed") or []
+            parts.append(git(project, "diff", f"{e['base_commit']}..{e['head_commit']}", "--",
+                             *(ef if 0 < len(ef) < GITHUB_PR_FILES_CAP else ["."])))
+        return "\n".join(parts)
     return git(project, "diff", meta["base_commit"], meta["fix_commit"], "--", ".",
                ":(exclude)tests/")
+
+
+def project_facts(meta: dict) -> str:
+    """The facts about the instance's project given to the model with each task (the
+    instructions themselves are the same for every project)."""
+    project = meta["project"]
+    if project == "nuttx":
+        cfg = meta.get("config_overrides") or {}
+        return ("Project: Apache NuttX. Two repositories: the kernel and the applications (apps). "
+                "The fix changes the kernel; the hidden tests are a change to the apps repository "
+                f"(under apps/testing/), run through the test application {meta.get('test_app', '?')} "
+                f"on the {meta.get('sim_config', '?')} configuration."
+                + (f" The agent's build tree is already configured with {json.dumps(cfg)}, which "
+                   "the agent can see." if cfg else ""))
+    if project == "zephyr":
+        return ("Project: Zephyr RTOS. One repository; the hidden tests are under tests/, built and "
+                f"run with twister for {meta.get('platform', '?')}.")
+    if project == "riot":
+        return ("Project: RIOT OS. One repository; the hidden tests are under tests/, built and run "
+                "on RIOT's native board.")
+    return f"Project: {project}."
 
 
 def added(diff: str) -> list[tuple[str, str]]:
@@ -199,15 +235,17 @@ def shorten(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit] + f"\n[... {len(text) - limit} more characters not shown ...]\n", True
 
 
-def prepare(only: list[str] | None) -> None:
+def prepare(only: list[str] | None, source: Path) -> None:
+    """`source`: the folder holding the instance folders (default apptainer/instances; for
+    another project's branch, that branch's folder, e.g. in a git worktree)."""
     (WORK / "tasks").mkdir(parents=True, exist_ok=True)
-    ids = sorted(d.name for d in INSTANCES.iterdir()
+    ids = sorted(d.name for d in source.iterdir()
                  if (d / "metadata.json").exists() and d.name.split("__")[0] in CLONES)
     if only:
         ids = [i for i in ids if i in only]
     bad = []
     for n, iid in enumerate(ids, 1):
-        d = INSTANCES / iid
+        d = source / iid
         meta = json.loads((d / "metadata.json").read_text())
         tests = (d / "test_patch.diff").read_text(errors="replace")
         try:
@@ -217,7 +255,8 @@ def prepare(only: list[str] | None) -> None:
             continue
         t, t_cut = shorten(tests, TEST_CHARS)
         f, f_cut = shorten(fix, FIX_CHARS)
-        task = {"instance_id": iid, "project": meta["project"],
+        task = {"instance_id": iid, "project": meta["project"], "folder": str(d.resolve()),
+                "facts": project_facts(meta),
                 "statement": meta["problem_statement"], "tests": t, "fix": f,
                 "tests_shortened": t_cut, "fix_shortened": f_cut,
                 "missing_names": name_check(meta["problem_statement"], tests, fix)}
@@ -239,7 +278,8 @@ def prepare(only: list[str] | None) -> None:
 
 def judge_message(task: dict) -> str:
     names = "\n".join(f"- {m['name']} ({m['kind']})" for m in task["missing_names"]) or "(none found)"
-    return (f"# PROBLEM STATEMENT\n\n{task['statement']}\n\n"
+    return (f"# PROJECT\n\n{task.get('facts', '')}\n\n"
+            f"# PROBLEM STATEMENT\n\n{task['statement']}\n\n"
             f"# HIDDEN TESTS (diff){' (shortened)' if task['tests_shortened'] else ''}\n\n"
             f"```diff\n{task['tests']}\n```\n\n"
             f"# FIX (diff, without tests){' (shortened)' if task['fix_shortened'] else ''}\n\n"
@@ -248,7 +288,8 @@ def judge_message(task: dict) -> str:
 
 
 def leak_message(task: dict, new: str) -> str:
-    return (f"# ORIGINAL STATEMENT\n\n{task['statement']}\n\n# NEW STATEMENT\n\n{new}\n\n"
+    return (f"# PROJECT\n\n{task.get('facts', '')}\n\n"
+            f"# ORIGINAL STATEMENT\n\n{task['statement']}\n\n# NEW STATEMENT\n\n{new}\n\n"
             f"# HIDDEN TESTS (diff)\n\n```diff\n{task['tests']}\n```\n\n"
             f"# FIX (diff, without tests)\n\n```diff\n{task['fix']}\n```\n")
 
@@ -495,8 +536,14 @@ def report(final: dict) -> None:
     print(f"report: {WORK / 'report.md'}")
 
 
+def folder_of(iid: str) -> Path:
+    """The instance's folder: where `prepare` found it (recorded in its task file)."""
+    t = json.loads((WORK / "tasks" / f"{iid}.json").read_text())
+    return Path(t["folder"]) if t.get("folder") else INSTANCES / iid
+
+
 def r_orig(iid: str) -> str:
-    return json.loads((INSTANCES / iid / "metadata.json").read_text())["problem_statement"]
+    return json.loads((folder_of(iid) / "metadata.json").read_text())["problem_statement"]
 
 
 # -- step 4: apply -------------------------------------------------------------
@@ -520,7 +567,7 @@ def apply() -> None:
     stamp = time.strftime("%Y-%m-%d")
     n = Counter()
     for iid, r in final.items():
-        p = INSTANCES / iid / "metadata.json"
+        p = folder_of(iid) / "metadata.json"
         text = p.read_text()
         meta = json.loads(text)
         # keep the file's own layout, so the diff shows only what was added
@@ -548,6 +595,8 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("prepare")
     p.add_argument("--only", nargs="+")
+    p.add_argument("--source", type=Path, default=INSTANCES,
+                   help="folder of instance folders (default apptainer/instances)")
     p = sub.add_parser("review")
     p.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
     p.add_argument("--share", default="0/1", help="I/N: tasks with index %% N == I")
@@ -556,7 +605,7 @@ def main() -> None:
     sub.add_parser("apply")
     a = ap.parse_args()
     if a.cmd == "prepare":
-        prepare(a.only)
+        prepare(a.only, a.source)
     elif a.cmd == "review":
         review(a.api_base, a.share, a.parallel)
     elif a.cmd == "combine":
