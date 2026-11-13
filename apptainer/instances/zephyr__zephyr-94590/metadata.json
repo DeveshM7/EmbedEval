@@ -46,5 +46,140 @@
     ],
     "pr_url": "https://github.com/zephyrproject-rtos/zephyr/pull/94590",
     "change_type": "feature",
-    "generated": true
+    "generated": true,
+    "verification": {
+        "status": "fixed",
+        "verdict": "fixable",
+        "votes": [
+            "fixable",
+            "fixable",
+            "fixable"
+        ],
+        "reason": "The problem statement describes the class instance API and descriptor helpers at a conceptual level but omits the exact public names (structs, fields, macros, functions, headers) and the precise matching semantics that the hidden tests rely on. All gaps are repairable by specifying the public interface and required behaviour without dictating implementation.",
+        "problems": [
+            {
+                "category": "A",
+                "detail": "The tests use struct usbh_class_api (with fields init, completion_cb, probe, removed, suspended, resumed and their specific signatures), struct usbh_class_filter (with fields vid, pid, class, sub, proto, flags), struct usbh_class_data (with fields name, uhs_ctx, udev, iface, api, priv), and the macro USBH_DEFINE_CLASS(name, api, priv, filters) \u2014 none of which are named in the statement."
+            },
+            {
+                "category": "A",
+                "detail": "The tests use the flag macros USBH_CLASS_MATCH_VID_PID and USBH_CLASS_MATCH_CODE_TRIPLE which are never named in the statement."
+            },
+            {
+                "category": "A",
+                "detail": "The tests include headers usbh_class.h, usbh_class_api.h, and usbh_desc.h which are new files; the statement never names them."
+            },
+            {
+                "category": "A",
+                "detail": "The tests call usbh_class_is_matching, usbh_desc_get_next, usbh_desc_get_iface, usbh_desc_get_endpoint, usbh_desc_get_next_alt_setting, and usbh_desc_get_next_function by name; the statement describes the concepts but never gives the exact function names or signatures."
+            },
+            {
+                "category": "B",
+                "detail": "The test for usbh_class_is_matching checks specific matching semantics: NULL rules always match, empty rules (first entry flags==0) never match, each rule checks only the fields whose flags are set (VID_PID checks vid+pid, CODE_TRIPLE checks class+sub+proto), and rules are OR'd across the array. The statement says 'matches the device against the class's filter rules' but does not specify this flag-based, OR-of-rules matching logic."
+            }
+        ],
+        "missing_names": [
+            {
+                "name": "USBH_CLASS_MATCH_CODE_TRIPLE",
+                "kind": "macro"
+            },
+            {
+                "name": "USBH_CLASS_MATCH_VID_PID",
+                "kind": "macro"
+            },
+            {
+                "name": "c_data",
+                "kind": "field"
+            },
+            {
+                "name": "flags",
+                "kind": "field"
+            },
+            {
+                "name": "iad",
+                "kind": "field"
+            },
+            {
+                "name": "iface",
+                "kind": "field"
+            },
+            {
+                "name": "pid",
+                "kind": "field"
+            },
+            {
+                "name": "priv",
+                "kind": "field"
+            },
+            {
+                "name": "state",
+                "kind": "field"
+            },
+            {
+                "name": "usb_device",
+                "kind": "struct"
+            },
+            {
+                "name": "usbh_class.h",
+                "kind": "header"
+            },
+            {
+                "name": "usbh_class_api",
+                "kind": "struct"
+            },
+            {
+                "name": "usbh_class_api.h",
+                "kind": "header"
+            },
+            {
+                "name": "usbh_class_filter",
+                "kind": "struct"
+            },
+            {
+                "name": "usbh_class_is_matching",
+                "kind": "function"
+            },
+            {
+                "name": "usbh_desc.h",
+                "kind": "header"
+            },
+            {
+                "name": "usbh_desc_get_endpoint",
+                "kind": "function"
+            },
+            {
+                "name": "usbh_desc_get_iface",
+                "kind": "function"
+            },
+            {
+                "name": "usbh_desc_get_next",
+                "kind": "function"
+            },
+            {
+                "name": "usbh_desc_get_next_alt_setting",
+                "kind": "function"
+            },
+            {
+                "name": "usbh_desc_get_next_function",
+                "kind": "function"
+            },
+            {
+                "name": "vid",
+                "kind": "field"
+            }
+        ],
+        "leak_check": {
+            "leak": "none",
+            "leak_detail": "",
+            "accurate": true,
+            "accuracy_detail": "",
+            "complete": 3,
+            "missing": "",
+            "decision": "accept",
+            "suggested_statement": null
+        },
+        "model": "qwen38-nvfp4",
+        "date": "2026-11-13"
+    },
+    "problem_statement_fixed": "The USB host stack gains a class instance API. A class implementation must be able to register itself via the USBH_DEFINE_CLASS(name, api, priv, filter) macro, which takes a class name, a pointer to a struct usbh_class_api, a pointer to private data, and an array of struct usbh_class_filter filter rules (or NULL to match everything). When a filter array is non-NULL, it must be terminated by an entry with flags set to 0.\n\nWhen a USB device is connected, the host matches the device against each registered class's filter rules and calls the matching class's probe callback. The host also calls the class's init callback during host initialization (before any device is connected), the completion callback when a transfer to the class completes, the removal callback when a device is disconnected, and the suspend and resume callbacks on bus suspend and resume respectively.\n\nThe struct usbh_class_filter has fields: vid (uint16_t), pid (uint16_t), class (uint8_t), sub (uint8_t), proto (uint8_t), and flags (uint8_t). The flags field selects which fields to match: USBH_CLASS_MATCH_VID_PID to match on vendor and product ID, and USBH_CLASS_MATCH_CODE_TRIPLE to match on the class/subclass/protocol code triple.\n\nThe matching function bool usbh_class_is_matching(const struct usbh_class_filter *const filter_rules, const struct usbh_class_filter *const filtered_data) returns true if filter_rules is NULL (matching everything), or if any rule in the array matches. A rule matches if, for each flag set in that rule, the corresponding fields in filtered_data equal those in the rule; fields whose flag is not set are not checked. An empty filter array (only a {0} terminator) does not match.\n\nThe struct usbh_class_api has function pointer fields: init (int (*)(struct usbh_class_data *, struct usbh_context *)), completion_cb (int (*)(struct usbh_class_data *, struct uhc_transfer *)), probe (int (*)(struct usbh_class_data *, struct usb_device *, uint8_t)), removed (int (*)(struct usbh_class_data *)), suspended (int (*)(struct usbh_class_data *)), and resumed (int (*)(struct usbh_class_data *)).\n\nThe struct usbh_class_data has fields: name (const char *), uhs_ctx (struct usbh_context *), udev (struct usb_device *), iface (uint8_t), api (struct usbh_class_api *), and priv (void *).\n\nNew public headers are added to the USB host subsystem: usbh_class.h (containing the class registration, matching, and probe API), usbh_class_api.h (containing the callback dispatcher helpers), and usbh_desc.h (containing the descriptor helpers).\n\nThe descriptor helpers in usbh_desc.h include: const void *usbh_desc_get_next(const void *desc) to get the next descriptor in a configuration descriptor array, const void *usbh_desc_get_iface(const struct usb_device *udev, uint8_t iface) to find an interface descriptor by interface number, const void *usbh_desc_get_endpoint(const struct usb_device *udev, uint8_t ep) to find an endpoint descriptor by endpoint address, const void *usbh_desc_get_next_alt_setting(const void *desc) to get the next alternate setting of an interface, and const void *usbh_desc_get_next_function(const void *desc) to step from one USB function to the next (skipping interface associations and alternate settings). These functions validate and walk a configuration descriptor.\n\nBefore this capability the host had only a placeholder class data structure and did not initialize or probe any class on device connect or removal."
 }

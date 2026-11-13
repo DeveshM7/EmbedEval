@@ -34,5 +34,76 @@
     ],
     "pr_url": "https://github.com/zephyrproject-rtos/zephyr/pull/101949",
     "change_type": "feature",
-    "generated": true
+    "generated": true,
+    "verification": {
+        "status": "fixed",
+        "verdict": "fixable",
+        "votes": [
+            "fixable",
+            "fixable",
+            "fixable"
+        ],
+        "reason": "The statement describes the streaming API behaviour well but omits the exact public API names, the callback type signature, and the return semantics that the hidden tests depend on. These are all public interface details that can be added to the statement without revealing the implementation.",
+        "problems": [
+            {
+                "category": "A",
+                "detail": "The statement describes the streaming API in prose ('initialize an encoder or decoder, feed it input data... close the stream') but never gives the exact names the hidden tests use: struct cobs_encoder, struct cobs_decoder, cobs_encoder_init, cobs_encoder_write, cobs_encoder_close, cobs_decoder_init, cobs_decoder_write, cobs_decoder_close, and the callback type cobs_stream_cb."
+            },
+            {
+                "category": "A",
+                "detail": "The callback type signature int (*)(const uint8_t *buf, size_t len, void *user_data) is not stated. The tests define callbacks matching this signature and pass them to the init functions."
+            },
+            {
+                "category": "D",
+                "detail": "The return values of cobs_encoder_write and cobs_decoder_write (number of bytes consumed on success, negative errno on failure) are not specified. The tests assert zassert_equal(ret, 1) for single-byte writes and zassert_equal(ret, len) for bulk writes."
+            }
+        ],
+        "missing_names": [
+            {
+                "name": "cobs_decoder",
+                "kind": "struct"
+            },
+            {
+                "name": "cobs_decoder_close",
+                "kind": "function"
+            },
+            {
+                "name": "cobs_decoder_init",
+                "kind": "function"
+            },
+            {
+                "name": "cobs_decoder_write",
+                "kind": "function"
+            },
+            {
+                "name": "cobs_encoder",
+                "kind": "struct"
+            },
+            {
+                "name": "cobs_encoder_close",
+                "kind": "function"
+            },
+            {
+                "name": "cobs_encoder_init",
+                "kind": "function"
+            },
+            {
+                "name": "cobs_encoder_write",
+                "kind": "function"
+            }
+        ],
+        "leak_check": {
+            "leak": "none",
+            "leak_detail": "",
+            "accurate": true,
+            "accuracy_detail": "",
+            "complete": 2,
+            "missing": "The statement does not explicitly state that cobs_encoder_close resets the encoder state so the same encoder can produce successive frames without reinitialization, which the hidden frame test relies on.",
+            "decision": "accept",
+            "suggested_statement": null
+        },
+        "model": "qwen38-nvfp4",
+        "date": "2026-11-13"
+    },
+    "problem_statement_fixed": "The COBS (Consistent Overhead Byte Stuffing) utility must support incremental/streaming encoding and decoding in addition to the whole-buffer API. A caller should be able to initialize an encoder or decoder, feed it input data in arbitrary chunks (even one byte at a time), have encoded/decoded output delivered through a registered callback, and close the stream to flush any remaining data; encoder and decoder must also be chainable so encoded output streams directly into a decoder. With COBS_FLAG_TRAILING_DELIMITER set, a delimiter in the encoded stream must signal frame completion to the decoder's callback (invoked with a NULL buffer and zero length), and successive frames must be decodable through one decoder without reinitialization. Custom-delimiter COBS (via COBS_FLAG_CUSTOM_DELIMITER) must produce and accept the XOR-encoded form of the data, and round-tripping a value through the streaming encoder and decoder must recover the original bytes.\n\nThe streaming API must expose the following public interface in cobs.h:\n\n- typedef int (*cobs_stream_cb)(const uint8_t *buf, size_t len, void *user_data) \u2014 callback type for delivering encoded or decoded output chunks.\n- struct cobs_encoder \u2014 streaming encoder state, to be initialized by cobs_encoder_init.\n- struct cobs_decoder \u2014 streaming decoder state, to be initialized by cobs_decoder_init.\n- int cobs_encoder_init(struct cobs_encoder *enc, cobs_stream_cb cb, void *user_data, uint32_t flags) \u2014 initialize an encoder; returns 0 on success, negative errno on failure.\n- int cobs_encoder_write(struct cobs_encoder *enc, const uint8_t *buf, size_t len) \u2014 feed input data; returns the number of bytes consumed from buf on success, negative errno on failure.\n- int cobs_encoder_close(struct cobs_encoder *enc) \u2014 flush remaining data (and append a trailing delimiter if COBS_FLAG_TRAILING_DELIMITER was set); returns 0 on success, negative errno on failure.\n- int cobs_decoder_init(struct cobs_decoder *dec, cobs_stream_cb cb, void *user_data, uint32_t flags) \u2014 initialize a decoder; returns 0 on success, negative errno on failure.\n- int cobs_decoder_write(struct cobs_decoder *dec, const uint8_t *buf, size_t len) \u2014 feed encoded input data; returns the number of bytes consumed from buf on success, negative errno on failure.\n- int cobs_decoder_close(struct cobs_decoder *dec) \u2014 finalize decoding; returns 0 on success, -EINVAL if the stream was incomplete."
 }

@@ -386,16 +386,26 @@ def mechanical_issues(new: str, task: dict) -> tuple[list[str], list[str]]:
     types, modules...) that the tests never use and the original statement does not
     have: an internal of the fix, a hint at the implementation. Notes: 'how' or test
     wording, for the report only (words like "modify" also occur innocently)."""
-    defined = defined_names(task["fix"])
+    # Only names the fix defines in source files and nowhere public (headers, Kconfig,
+    # Makefiles): a public header's names are interface, a .c file's are implementation.
+    fix = task["fix"]
+    public = defined_names("\n".join(_files(fix, lambda f: not f.endswith(".c"))))
+    defined = set(defined_names("\n".join(_files(fix, lambda f: f.endswith(".c"))))) - set(public)
     test_words = set(IDENT.findall(task["tests"])) | test_uses(task["tests"])
     old = set(IDENT.findall(task["statement"]))
     leaks = sorted(w for w in set(IDENT.findall(new))
                    if w in defined and w not in test_words and w not in old and len(w) > 2)
-    blocking = [f"names the fix defines that the tests never use: {leaks}"] if leaks else []
+    blocking = [f"names the fix defines in source files that the tests never use: {leaks}"] if leaks else []
     how = sorted({m.group().lower() for m in HOW_NOT_WHAT.finditer(new)}
                  - {m.group().lower() for m in HOW_NOT_WHAT.finditer(task["statement"])})
     notes = [f"'how' or test wording: {how}"] if how else []
     return blocking, notes
+
+
+def _files(diff: str, keep) -> list[str]:
+    """The parts of a diff for the files `keep` accepts."""
+    parts = re.split(r"(?m)^(?=diff --git )", diff)
+    return [p for p in parts if p.startswith("diff --git ") and keep(p.split(" b/", 1)[-1].split("\n", 1)[0])]
 
 
 def combine() -> dict:
@@ -492,22 +502,43 @@ def r_orig(iid: str) -> str:
 # -- step 4: apply -------------------------------------------------------------
 
 def apply() -> None:
+    """Writes the verdicts into metadata.json. <work>/overrides.json, if present, maps an
+    instance id to a decision taken after the automatic checks (by the user or in a manual
+    check): {"status": "review: <why>"} holds a fix back (the original statement is kept),
+    {"status": "fixed", "new_statement": "...", "note": "..."} sets a corrected or written
+    statement, {"status": "fine"} or {"status": "unfair"} sets the verdict."""
     final = json.loads((WORK / "verdicts.json").read_text())
+    p = WORK / "overrides.json"
+    overrides = json.loads(p.read_text()) if p.exists() else {}
+    for iid, o in overrides.items():
+        r = final[iid]
+        r["auto_status"] = r["status"]
+        r["status"] = o["status"]
+        if "new_statement" in o:
+            r["new_statement"] = o["new_statement"]
+        r["override_note"] = o.get("note")
     stamp = time.strftime("%Y-%m-%d")
     n = Counter()
     for iid, r in final.items():
         p = INSTANCES / iid / "metadata.json"
-        meta = json.loads(p.read_text())
+        text = p.read_text()
+        meta = json.loads(text)
+        # keep the file's own layout, so the diff shows only what was added
+        m = re.search(r'^( +)"', text, re.M)
+        indent = len(m.group(1)) if m else 2
+        ascii_only = text.isascii()
         meta["verification"] = {
             "status": r["status"], "verdict": r["verdict"], "votes": r["votes"],
             "reason": r["reason"], "problems": r["problems"], "missing_names": r["missing_names"],
             "leak_check": (r["leak_check"] or {}).get("leak_check"), "model": PROFILE,
             "date": stamp}
+        if r.get("override_note") or r.get("auto_status"):
+            meta["verification"].update(auto_status=r.get("auto_status"), note=r.get("override_note"))
         if r["status"] == "fixed":
             meta["problem_statement_fixed"] = r["new_statement"]
         else:
             meta.pop("problem_statement_fixed", None)
-        p.write_text(json.dumps(meta, indent=2) + "\n")
+        p.write_text(json.dumps(meta, indent=indent, ensure_ascii=ascii_only) + "\n")
         n[r["status"].split(":")[0]] += 1
     print(f"applied to {len(final)} instances: {dict(n)}")
 

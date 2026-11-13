@@ -38,5 +38,76 @@
     ],
     "pr_url": "https://github.com/zephyrproject-rtos/zephyr/pull/108242",
     "change_type": "feature",
-    "generated": true
+    "generated": true,
+    "verification": {
+        "status": "fixed",
+        "verdict": "fixable",
+        "votes": [
+            "fixable",
+            "fixable",
+            "fixable"
+        ],
+        "reason": "The statement describes the thermal cap behaviour accurately but omits every concrete name the hidden tests depend on (two public functions, a header, two Kconfig options, a devicetree compatible string and its property names, and specific return values). All of these are public-interface items that can be added without revealing the implementation.",
+        "problems": [
+            {
+                "category": "A",
+                "detail": "The test calls cpu_freq_thermal_cap_sample() and cpu_freq_thermal_cap_apply(const struct pstate *) directly, but the statement never gives these function names or their signatures/return types."
+            },
+            {
+                "category": "A",
+                "detail": "The test #includes \"cpu_freq_thermal_cap.h\", but the statement never names this header file."
+            },
+            {
+                "category": "A",
+                "detail": "The test's prj.conf enables CONFIG_CPU_FREQ_THERMAL_CAP and CONFIG_CPU_FREQ_THERMAL_CAP_SENSOR_FAILURE_LIMIT, but the statement only says 'optional thermal cap layer' and 'fails repeatedly' without giving the Kconfig names."
+            },
+            {
+                "category": "A",
+                "detail": "The test's app.overlay (part of the hidden test) uses devicetree properties sensor, sensor-channel, polling-delay-ms, trip-active-polling-delay-ms, and trip child properties temperature-millicelsius, hysteresis-millicelsius, cap-pstate under compatible \"zephyr,cpu-freq-thermal-cap\". The statement describes the concept but gives none of these binding names, so the agent cannot produce a matching binding."
+            },
+            {
+                "category": "D",
+                "detail": "The test asserts cpu_freq_thermal_cap_sample() returns 0 on success and -EIO on sensor failure; cpu_freq_thermal_cap_apply(NULL) returns NULL. The statement does not specify these return values or the NULL-input behaviour."
+            }
+        ],
+        "missing_names": [
+            {
+                "name": "CONFIG_CPU_FREQ_THERMAL_CAP",
+                "kind": "Kconfig option"
+            },
+            {
+                "name": "CONFIG_CPU_FREQ_THERMAL_CAP_SENSOR_FAILURE_LIMIT",
+                "kind": "Kconfig option"
+            },
+            {
+                "name": "cpu_freq_thermal_cap.h",
+                "kind": "header"
+            },
+            {
+                "name": "cpu_freq_thermal_cap_apply",
+                "kind": "function"
+            },
+            {
+                "name": "cpu_freq_thermal_cap_sample",
+                "kind": "function"
+            },
+            {
+                "name": "main",
+                "kind": "function"
+            }
+        ],
+        "leak_check": {
+            "leak": "none",
+            "leak_detail": "",
+            "accurate": true,
+            "accuracy_detail": "",
+            "complete": 3,
+            "missing": "",
+            "decision": "accept",
+            "suggested_statement": null
+        },
+        "model": "qwen38-nvfp4",
+        "date": "2026-11-13"
+    },
+    "problem_statement_fixed": "The CPU frequency scaling subsystem has no mechanism to constrain the highest-performance P-state based on temperature. A load-based policy can keep requesting the highest-performance P-state even when the die temperature is too high, risking thermal runaway. The subsystem should support an optional thermal cap layer, enabled by Kconfig option CONFIG_CPU_FREQ_THERMAL_CAP, that, based on configurable temperature trip points (with hysteresis), limits the maximum allowed P-state.\n\nThe thermal cap is configured via a devicetree node with compatible \"zephyr,cpu-freq-thermal-cap\". The node has the following properties: sensor (phandle to a temperature sensor device), sensor-channel (string, one of \"die-temp\" or \"ambient-temp\"), polling-delay-ms (integer, polling interval in milliseconds when no trip is active), and trip-active-polling-delay-ms (integer, polling interval in milliseconds when one or more trips are active). Each child node of the thermal cap node represents a trip point and has: temperature-millicelsius (integer, the temperature threshold in millicelsius at which the trip activates), hysteresis-millicelsius (integer, the hysteresis in millicelsius; the trip releases when the temperature falls to temperature-millicelsius minus hysteresis-millicelsius), and cap-pstate (phandle to the highest-performance P-state allowed while the trip is active).\n\nWhen a temperature trip is active, the policy-selected P-state should be clamped to the cap P-state or lower (by index). Multiple active trips should apply the most restrictive cap. If the temperature sensor fails repeatedly \u2014 specifically, after a configurable number of consecutive sample failures set by Kconfig option CONFIG_CPU_FREQ_THERMAL_CAP_SENSOR_FAILURE_LIMIT (default 3) \u2014 a fail-safe P-state (the lowest-performance one, i.e. the P-state with the highest index in the performance-states table) should be applied. Recovery from sensor failure should recompute the cap from the next successful sample. The thermal cap should not raise a requested P-state that is already lower-performance than the cap.\n\nThe thermal cap exposes two public API functions declared in the header cpu_freq_thermal_cap.h:\n\n- int cpu_freq_thermal_cap_sample(void): samples the configured thermal sensor and updates the cached thermal cap. Returns 0 on success, or a negative errno on failure (for example -EIO when the sensor read fails). Repeated failures up to CONFIG_CPU_FREQ_THERMAL_CAP_SENSOR_FAILURE_LIMIT trigger the fail-safe P-state.\n- const struct pstate *cpu_freq_thermal_cap_apply(const struct pstate *state): applies the cached thermal cap to the requested P-state selected by the active policy. Returns the P-state to pass to the driver (clamped to the cap or lower by index), or NULL if the input is NULL."
 }

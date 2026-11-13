@@ -46,5 +46,60 @@
     ],
     "pr_url": "https://github.com/zephyrproject-rtos/zephyr/pull/74435",
     "change_type": "feature",
-    "generated": true
+    "generated": true,
+    "verification": {
+        "status": "fixed",
+        "verdict": "fixable",
+        "votes": [
+            "fixable",
+            "fixable",
+            "fixable"
+        ],
+        "reason": "The statement gives the high-level service but omits the exact public API, pool-size configuration, used-count behaviour, and Kconfig dependencies needed by the hidden test; all of these can be added as public requirements without dictating the implementation.",
+        "problems": [
+            {
+                "category": "A",
+                "detail": "The hidden test uses rtio_work_req_used_count_get(), but the statement does not name or specify this function."
+            },
+            {
+                "category": "A",
+                "detail": "The hidden test relies on the public interface for struct rtio_work_req, the rtio_work_submit_t callback type, and the exact signatures of rtio_work_req_alloc() and rtio_work_req_submit(), which the statement does not give exactly."
+            },
+            {
+                "category": "F",
+                "detail": "The hidden test relies on the work-item pool size being configurable with a default of 4, but the statement omits CONFIG_RTIO_WORKQ_POOL_ITEMS and its default."
+            },
+            {
+                "category": "B",
+                "detail": "The hidden test checks used-count behaviour: allocation increases it, invalid submit releases the item, valid submit keeps it used until handler completion, and used_count_get() reports currently allocated items; this behaviour is not specified."
+            },
+            {
+                "category": "F",
+                "detail": "The hidden test uses rtio_cqe_consume_block(), which requires the RTIO consume semaphore support to be enabled by CONFIG_RTIO_WORKQ, but the statement does not state this Kconfig dependency."
+            },
+            {
+                "category": "F",
+                "detail": "The hidden test builds the P4WQ-based service, which needs CONFIG_SCHED_DEADLINE selected by CONFIG_RTIO_WORKQ, but the statement does not state this dependency."
+            }
+        ],
+        "missing_names": [
+            {
+                "name": "rtio_work_req_used_count_get",
+                "kind": "function"
+            }
+        ],
+        "leak_check": {
+            "leak": "none",
+            "leak_detail": "",
+            "accurate": true,
+            "accuracy_detail": "",
+            "complete": 3,
+            "missing": "",
+            "decision": "accept",
+            "suggested_statement": null
+        },
+        "model": "qwen38-nvfp4",
+        "date": "2026-11-13"
+    },
+    "problem_statement_fixed": "The Sensor Async Read API (sensor_read_async_mempool) is documented as asynchronous and non-blocking, but the execution path is synchronous for most (if not all) in-tree driver implementations. The sensor driver submit callbacks block on the calling thread, making the API unsuitable for time-sensitive contexts. Examples of synchronous behavior in current drivers: ICM42688 RTIO driver: submit callback performs I2C/SPI transactions synchronously; AKM09918C async driver: blocks on bus read in submit path; BMA4XX sensor driver: synchronous channel fetch in submit; BME280 async driver: synchronous bus read in submit. The solution is to decouple the sensor read request from its execution by introducing an RTIO Work-queues service. This service uses a priority-aware work queue pool (P4WQ) with pre-allocated work items to process sensor requests asynchronously on dedicated threads. The work-queue service must expose a public API in include/zephyr/rtio/work.h. That header must declare a request type (struct rtio_work_req), a handler callback type (rtio_work_submit_t, a function taking struct rtio_iodev_sqe * and returning void), and the following functions: struct rtio_work_req *rtio_work_req_alloc(void); void rtio_work_req_submit(struct rtio_work_req *req, struct rtio_iodev_sqe *iodev_sqe, rtio_work_submit_t handler); uint32_t rtio_work_req_used_count_get(void). The service must maintain a pre-allocated pool of work items, with the pool size configurable through CONFIG_RTIO_WORKQ_POOL_ITEMS and a default of 4. rtio_work_req_alloc() returns a pointer to an unused work item, or NULL if the pool is exhausted; each successful allocation increases the value returned by rtio_work_req_used_count_get() by one. rtio_work_req_submit() hands the work item to the work-queue service without waiting for the handler to complete. If req is NULL, it does nothing. If req is non-NULL but iodev_sqe or handler is NULL, it releases the work item and the used count decreases. Otherwise it records iodev_sqe and handler, dispatches the handler through the work queue, and the work item remains counted as used until the handler has completed, after which it is released and the used count decreases. rtio_work_req_used_count_get() returns the number of work items currently allocated from the pool. Required changes: 1. Create the RTIO work-queue service: a new header (include/zephyr/rtio/work.h), Kconfig options (CONFIG_RTIO_WORKQ, CONFIG_RTIO_WORKQ_THREADS_POOL, CONFIG_RTIO_WORKQ_PRIO_MED, CONFIG_RTIO_WORKQ_POOL_ITEMS), and implementation (subsys/rtio/rtio_workq.c). CONFIG_RTIO_WORKQ must enable the RTIO consume semaphore support (CONFIG_RTIO_CONSUME_SEM) and the scheduling/deadline support needed by the P4WQ service (CONFIG_SCHED_DEADLINE). 2. Update the default RTIO sensor fallback (drivers/sensor/default_rtio_sensor.c) to use the work queue 3. Update individual sensor drivers (akm09918c, bma4xx, bme280, icm42688) to use rtio_work_req_alloc() and rtio_work_req_submit() in their submit callbacks 4. Add necessary Kconfig dependencies in driver and subsys Kconfig files 5. Update the sensor header (include/zephyr/drivers/sensor.h) for RTIO semaphore enablement See: https://github.com/zephyrproject-rtos/zephyr/issues/73676"
 }

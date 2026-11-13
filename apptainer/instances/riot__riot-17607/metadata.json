@@ -50,5 +50,48 @@
     "sys/ztimer/periph_rtt.c",
     "sys/ztimer/periph_timer.c"
   ],
-  "pr_url": "https://github.com/RIOT-OS/RIOT/pull/17607"
+  "pr_url": "https://github.com/RIOT-OS/RIOT/pull/17607",
+  "verification": {
+    "status": "fixed",
+    "verdict": "fixable",
+    "votes": [
+      "fixable",
+      "fixable",
+      "fixable"
+    ],
+    "reason": "The problem statement is detailed but omits the build module name 'ztimer_ondemand' required by the test Makefile, and does not state that wrapping/convert backends must provide start/stop operations that acquire/release the underlying clock \u2014 both of which the hidden tests require.",
+    "problems": [
+      {
+        "category": "A",
+        "detail": "The hidden test Makefile.include adds USEMODULE += ztimer_ondemand, but the problem statement never names this build module. The agent cannot know the exact module name to create."
+      },
+      {
+        "category": "B",
+        "detail": "The test test_ztimer_ondemand_timers_converted requires that wrapping/convert modules (e.g. ztimer_convert_frac) provide start/stop ops that propagate acquire/release to the underlying lower clock, so that the lower mock's running flag is set/cleared. The problem statement only describes the core acquire/release behavior and does not mention that convert and other wrapping backends must implement start/stop ops that forward to the lower clock."
+      }
+    ],
+    "missing_names": [
+      {
+        "name": "CONFIG_ZTIMER_USEC_ADJUST_CLOCK_START",
+        "kind": "macro"
+      },
+      {
+        "name": "ztimer_ondemand",
+        "kind": "build module"
+      }
+    ],
+    "leak_check": {
+      "leak": "none",
+      "leak_detail": "",
+      "accurate": true,
+      "accuracy_detail": "",
+      "complete": 3,
+      "missing": "",
+      "decision": "accept",
+      "suggested_statement": null
+    },
+    "model": "qwen38-nvfp4",
+    "date": "2026-11-13"
+  },
+  "problem_statement_fixed": "The ztimer system must support reference-counted usage of clocks so the underlying peripheral can be turned off when no user needs it. This feature is provided by a new build module named `ztimer_ondemand`. Two new API functions are required: `bool ztimer_acquire(ztimer_clock_t *clock)` and `bool ztimer_release(ztimer_clock_t *clock)`. The first acquisition of a clock with no users must start the underlying timer and return true; subsequent acquisitions return false. `ztimer_release()` decrements the user count; when it reaches zero it must cancel any pending timer and stop the underlying timer, returning true. If the clock has no start or stop operation registered, acquire and release still track the user count and return the correct booleans, but skip the start/stop call (cancel is still invoked on the final release to disarm any pending timer). Setting a timer on a clock that was previously stopped starts it and reduces the timer offset by the clock's `adjust_clock_start` field to compensate for the start delay. Removing the last timer releases the clock and stops it. When the last pending timer's callback fires in the handler, the clock is released. A clock whose max_value is less than UINT32_MAX must have its extension checkpoint armed on the first acquisition. The mock timer backend must expose a `running` flag that is set by its start operation and cleared by its stop operation, and must record the number of start and stop invocations in its call counters."
 }
