@@ -77,13 +77,13 @@ echo "[$(date +%T)] job $ATTEMPT for $MODEL: $N0 servers (${SLURM_JOB_NODELIST_H
      "$N1 cpu nodes x $C1 cores (${SLURM_JOB_NODELIST_HET_GROUP_1:-?})"
 echo "[$(date +%T)] results in $EVAL/riot, logs in $EVAL_LOGS"
 
-srun --het-group=0 --export=ALL --kill-on-bad-exit=0 --cpu-bind=none --gres=gpu:1 \
+srun --het-group=0 -N "$N0" -n "$N0" --ntasks-per-node=1 --export=ALL --kill-on-bad-exit=0 --cpu-bind=none --gres=gpu:1 \
     bash "$EVAL_LOGS/eval_riot_server.sh" "$MODEL" > "$EVAL_LOGS/servers.log" 2>&1 &
 SERVERS=$!
 # The workers stop themselves at END, saving the runs they are on (srun, if
 # signalled, kills its tasks outright); this timeout is only a backstop.
 timeout -s TERM -k 1m $(( END + 120 - $(date +%s) )) \
-    srun --het-group=1 --export=ALL --kill-on-bad-exit=0 --cpu-bind=none \
+    srun --het-group=1 -N "$N1" -n "$N1" --ntasks-per-node=1 --export=ALL --kill-on-bad-exit=0 --cpu-bind=none \
     bash "$EVAL_LOGS/eval_riot_agents.sh" "$MODEL" "$END" "$N0"
 rc=$?
 echo "[$(date +%T)] agents ended (exit $rc)"
