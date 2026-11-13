@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hidden_tests
 import paths
 import projects
+from patch_checks import protected_ranges_touched
 
 try:
     from dotenv import load_dotenv
@@ -139,7 +140,7 @@ PROVIDER_KEYS = {
 # EMBEDEVAL_LOCAL_API_BASE overrides the address, and EMBEDEVAL_LOCAL_API_KEY the key,
 # for a server on another node. By default the server listens on 127.0.0.1, so the
 # harness must run on its node.
-LOCAL_MODELS = {"openai/qwen38-nvfp4": "qwen38-nvfp4"}
+LOCAL_MODELS = {f"openai/{name}": name for name in paths.LOCAL_PROFILES}
 REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
 
 
@@ -180,13 +181,15 @@ def check_api_key(model_name: str) -> None:
 
 def build_prompts(meta: dict) -> tuple[str, str]:
     cfg = projects.config_for(meta)
-    hide = hidden_tests.ENABLED
+    hide = _hide_tests(meta)
     if hide:      # harness/hidden_tests.py: the PR's tests are not given
         project = hidden_tests.project_of(meta)
         cfg = {**cfg, "orientation": hidden_tests.ORIENTATION[project],
                "extra_warnings": hidden_tests.WARNINGS[project]}
-    protected = " or ".join(f"`{p}`" for p in cfg["protected_paths"])
-    warn = cfg["extra_warnings"]
+    # An instance's metadata may name its own protected paths, and add warnings
+    # of its own after the project's (Mynewt: test support in production files).
+    protected = " or ".join(f"`{p}`" for p in projects.setting(meta, "protected_paths"))
+    warn = "\n\n".join(w for w in (cfg["extra_warnings"], meta.get("extra_warnings")) if w)
     system = SYSTEM_TEMPLATE.format(
         label=cfg["label"], orientation=cfg["orientation"]
     )
@@ -234,6 +237,14 @@ _WORKFLOW_STEP3 = """\
    - If run_tests shows tests FAILING: fix your change and go back to step 3
    - If run_tests shows all target tests PASSING: go to step 4
 """
+
+
+def _hide_tests(meta: dict) -> bool:
+    """Whether this run hides the PR's tests (harness/hidden_tests.py): when it is
+    on, for the projects it supports (Zephyr, RIOT). A Mynewt run keeps the PR's
+    tests in place until hidden tests support it; its task message is still the
+    problem statement alone (build_task)."""
+    return hidden_tests.ENABLED and hidden_tests.project_of(meta) in hidden_tests.ORIENTATION
 
 
 def _swap(text: str, old: str, new: str) -> str:
@@ -308,6 +319,19 @@ def make_environment(meta: dict):
         # failure stops the run as an infrastructure error, never a silent leak.
         one_commit = ('cd /testbed && n=$(git rev-list --all | wc -l) && [ "$n" = 1 ] '
                       '|| { echo "git history has $n commits, expected 1"; exit 1; }')
+        if meta["project"] == "mynewt":
+            # Mynewt: the instance image as built here, unpacked to a writable
+            # sandbox (native builds are much faster there than in a .sif), in a
+            # network namespace of its own (scripts/mynewt_network.py). The PR's
+            # tests are committed in the image already, and hidden tests do not
+            # support Mynewt yet (_hide_tests), so the one-commit check is all.
+            apptainer_util.require_host_arch(meta)
+            return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
+                                        name=meta["instance_id"], cwd="/testbed",
+                                        timeout=projects.setting(meta, "command_timeout", 900),
+                                        setup_commands=[one_commit], sandbox=True,
+                                        network_fixture=meta.get("network_fixture"),
+                                        isolate_network=True)
         import registry   # the validated image: pulled from the registry if published
         image, layer = apptainer_util.instance_container(
             meta, registry.image_for(meta["instance_id"]))
@@ -320,7 +344,7 @@ def make_environment(meta: dict):
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
                                     setup_commands=[one_commit, hidden_tests.setup_command(meta)]
-                                    if hidden_tests.ENABLED else [one_commit, commit_tests])
+                                    if _hide_tests(meta) else [one_commit, commit_tests])
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
@@ -392,17 +416,34 @@ def capture_patch(env, meta: dict, start: str = "HEAD") -> tuple[str, list[str]]
     filtered to files_changed_by_fix and silently discarded anything else.
     Protected paths are excluded from the patch but reported, so test tampering
     is visible rather than quietly dropped.
+
+    The diff crosses the environment base64-encoded: command output is read
+    as text with universal newlines, which turns a lone carriage return (in a
+    console log the agent saved, say) into a line break and corrupts the
+    patch; nothing else in the output (a container warning) can mix in.
     """
-    protected = projects.config_for(meta)["protected_paths"]
+    protected = projects.setting(meta, "protected_paths")
     excludes = " ".join(f"':(exclude){p}'" for p in protected)
-    patch = env.execute({"command": f"cd /testbed && git add -A && "
-                                    f"git diff --cached --binary {start} -- . {excludes}"}
-                        ).get("output", "")
+    out = env.execute({"command": f"cd /testbed && git add -A && "
+                                  f"git diff --cached --binary {start} -- . {excludes} | base64 -w0 "
+                                  f"&& echo && echo EMBEDEVAL-PATCH-END"}).get("output", "")
+    patch = decode_patch(out)
     touched = env.execute(
         {"command": f"cd /testbed && git diff --cached --name-only {start} -- "
                     + " ".join(f"'{p}'" for p in protected)}
     ).get("output", "")
-    return patch, [t for t in touched.splitlines() if t.strip()]
+    return patch, sorted(set([t for t in touched.splitlines() if t.strip()] + protected_ranges_touched(patch, meta)))
+
+
+def decode_patch(output: str) -> str:
+    """The patch from capture_patch's command output: the base64 line just
+    before the end marker, decoded exactly."""
+    import base64
+    lines = output.splitlines()
+    if "EMBEDEVAL-PATCH-END" not in lines:
+        raise RuntimeError(f"could not capture the patch: {output[-300:]}")
+    encoded = lines[lines.index("EMBEDEVAL-PATCH-END") - 1].strip()
+    return base64.b64decode(encoded).decode("utf-8", errors="surrogateescape") if encoded else ""
 
 
 # The run in progress, for the SIGTERM handler:
@@ -501,14 +542,15 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         "error": None,
         "patch_empty": True,
         "protected_touched": [],
-        "tests_hidden": hidden_tests.ENABLED,
+        "tests_hidden": _hide_tests(meta),
     }
     start = time.time()
     env, agent, captured, base = None, None, False, "HEAD"
 
     def save_patch() -> None:
         patch, touched = capture_patch(env, meta, base)
-        paths.patch_path(instance_id, full_model).write_text(patch)
+        # Byte for byte, as captured (capture_patch).
+        paths.patch_path(instance_id, full_model).write_bytes(patch.encode("utf-8", errors="surrogateescape"))
         record["patch_empty"] = not patch.strip()
         record["protected_touched"] = touched
 

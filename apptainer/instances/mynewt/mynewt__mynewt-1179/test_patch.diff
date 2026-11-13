@@ -1,0 +1,109 @@
+diff --git a/sys/log/full/test/src/log_test.c b/sys/log/full/test/src/log_test.c
+index 58eda1fbc..70f374364 100644
+--- a/sys/log/full/test/src/log_test.c
++++ b/sys/log/full/test/src/log_test.c
+@@ -85,6 +85,7 @@ TEST_CASE_DECL(log_setup_fcb)
+ TEST_CASE_DECL(log_append_fcb)
+ TEST_CASE_DECL(log_walk_fcb)
+ TEST_CASE_DECL(log_flush_fcb)
++TEST_CASE_DECL(log_level);
+ 
+ TEST_SUITE(log_test_all)
+ {
+@@ -92,6 +93,7 @@ TEST_SUITE(log_test_all)
+     log_append_fcb();
+     log_walk_fcb();
+     log_flush_fcb();
++    log_level();
+ }
+ 
+ #if MYNEWT_VAL(SELFTEST)
+diff --git a/sys/log/full/test/src/testcases/log_level.c b/sys/log/full/test/src/testcases/log_level.c
+new file mode 100644
+index 000000000..9e927a7f8
+--- /dev/null
++++ b/sys/log/full/test/src/testcases/log_level.c
+@@ -0,0 +1,83 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test.h"
++
++static int
++log_last_walk(struct log *log, struct log_offset *log_offset,
++              void *dptr, uint16_t len)
++{
++    uint32_t *idx;
++
++    idx = log_offset->lo_arg;
++    *idx = log_offset->lo_index;
++
++    return 0;
++}
++
++static uint32_t
++log_last(struct log *log)
++{
++    struct log_offset lo;
++    uint32_t idx;
++
++    idx = 0;
++
++    lo.lo_arg = &idx;
++    log_walk(log, log_last_walk, &lo);
++
++    return idx;
++}
++
++TEST_CASE(log_level)
++{
++    uint32_t idx;
++    int rc;
++    int i;
++
++    /* Ensure all modules initialized to 0. */
++    for (i = 0; i < 256; i++) {
++        TEST_ASSERT(log_level_get(i) == 0);
++    }
++
++    /* Level too great. */
++    rc = log_level_set(100, 16);
++    TEST_ASSERT(rc == SYS_EINVAL);
++
++    /* Ensure all modules can be configured. */
++    for (i = 0; i < 256; i++) {
++        rc = log_level_set(i, i % 16);
++        TEST_ASSERT(rc == 0);
++    }
++    for (i = 0; i < 256; i++) {
++        TEST_ASSERT(log_level_get(i) == i % 16);
++    }
++
++    /* Ensure no log write when level is too low. */
++    rc = log_level_set(100, 4);
++    TEST_ASSERT(rc == 0);
++
++    idx = log_last(&my_log);
++    log_printf(&my_log, 100, 1, "hello");
++    TEST_ASSERT(log_last(&my_log) == idx);
++
++    /* Ensure log write when level is equal. */
++    log_printf(&my_log, 100, 4, "hello");
++    TEST_ASSERT(log_last(&my_log) > idx);
++}

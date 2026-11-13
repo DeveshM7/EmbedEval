@@ -33,11 +33,12 @@ APPTAINER_INSTANCES = REPO_ROOT / "apptainer" / "instances"
 _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
                   if _override else [layout.generated()] if layout.run_dir()
-                  else [APPTAINER_INSTANCES, REPO_ROOT / "docker" / "instances"])
+                  else [APPTAINER_INSTANCES, APPTAINER_INSTANCES / "mynewt",
+                        REPO_ROOT / "docker" / "instances"])
 
-PROJECTS = ("zephyr", "nuttx", "riot")
+PROJECTS = ("zephyr", "nuttx", "riot", "mynewt")
 
-_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
+_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+(?:-t\d+|-c[0-9a-f]{8})?)$")
 
 
 def split_instance(instance_id: str) -> tuple[str, str]:
@@ -45,7 +46,7 @@ def split_instance(instance_id: str) -> tuple[str, str]:
     m = _INSTANCE_RE.match(instance_id)
     if not m:
         raise ValueError(
-            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR>"
+            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR> with optional -t<test PR> or -c<fix SHA>"
         )
     return m.group("project"), m.group("pr")
 

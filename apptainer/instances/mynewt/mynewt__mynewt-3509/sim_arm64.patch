@@ -1,0 +1,63 @@
+diff --git a/kernel/os/src/arch/sim/os_arch_stack_frame.s b/kernel/os/src/arch/sim/os_arch_stack_frame.s
+index 5ef5aa302..b23c5e9cd 100644
+--- a/kernel/os/src/arch/sim/os_arch_stack_frame.s
++++ b/kernel/os/src/arch/sim/os_arch_stack_frame.s
+@@ -30,7 +30,8 @@
+ #error "unsupported platform"
+ #endif
+ 
+-#if __SIZEOF_POINTER__ == 8
++#if defined(__aarch64__)
++#elif __SIZEOF_POINTER__ == 8
+     .code64
+ #elif __SIZEOF_POINTER__ == 4
+     .code32
+@@ -38,7 +39,11 @@
+     #error "Void pointer should be either 4 or 8 bytes."
+ #endif
+     .text
++#if defined(__aarch64__)
++    .p2align 4
++#else
+     .p2align 4, 0x90    /* align on 16-byte boundary and fill with NOPs */
++#endif
+ 
+     .globl CNAME(os_arch_frame_init)
+     .globl _os_arch_frame_init
+@@ -46,7 +51,35 @@
+      * void os_arch_frame_init(struct stack_frame *sf)
+      */
+ CNAME(os_arch_frame_init):
+-#if __SIZEOF_POINTER__ == 8
++#if defined(__aarch64__)
++    stp     x29, x30, [sp, #-16]!   /* function prologue for backtrace */
++    mov     x29, sp
++    mov     x9, sp
++    str     x9, [x0]                /* sf->mainsp = sp */
++
++    /*
++     * Switch the stack so that the stack pointer saved in 'sf->sf_jb' points
++     * to the task stack, just below 'sf'.
++     */
++    and     x9, x0, #-16            /* align sp on 16-byte boundary */
++    mov     sp, x9
++    stp     x0, xzr, [sp, #-16]!    /* keep sf across sigsetjmp() */
++    add     x0, x0, #8              /* x0 = &sf->sf_jb */
++    mov     x1, #0
++    bl      CNAME(sigsetjmp)        /* sigsetjmp(sf->sf_jb, 0) */
++    ldp     x9, x10, [sp], #16      /* x9 = sf */
++    cbnz    w0, 1f
++    ldr     x9, [x9]
++    mov     sp, x9                  /* switch back to the main() stack */
++    ldp     x29, x30, [sp], #16
++    ret                             /* return to os_arch_task_stack_init() */
++1:
++    mov     w1, w0                  /* rc */
++    mov     x0, x9                  /* sf */
++    mov     x29, xzr
++    bl      CNAME(os_arch_task_start) /* os_arch_task_start(sf, rc) */
++    /* never returns */
++#elif __SIZEOF_POINTER__ == 8
+     pushq   %rbp                    /* function prologue for backtrace */
+     movq    %rsp,%rbp
+ 

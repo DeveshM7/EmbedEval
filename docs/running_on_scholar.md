@@ -652,3 +652,106 @@ they break if moved. Delete them instead.
 `scripts/` still work on their own, but without `--run-dir` they write next
 to the code (`candidates/`, `generated/`, `triage/runs/`) and into
 `$SCRATCH/embedeval-twister`, as they did before run folders existed.
+
+---
+
+## 11. Mynewt runs
+
+The same orchestration runs Apache Mynewt (`project: mynewt` in
+`cluster/config.yaml`, or `--project mynewt` on `prepare.py`; the run's
+manifest records it). Mynewt differs in where its phases run: the model needs a
+GPU (Spark, ARM), while the instances must build and run on x86 (trees before
+2024 build `-m32` native binaries). So each phase is its own job, chained with
+`--after`:
+
+```bash
+# settings: project, the clone, the x86 partition and a Python for each architecture
+cat >> cluster/config.yaml <<'YAML'
+project: mynewt
+paths:
+  mynewt_clone: /scratch/scholar/$USER/repos/mynewt-core.git   # bare, with refs/pull/*/head
+slurm:
+  partition: spark-interactive
+  build_partition: cpu
+  triage_python: /home/$USER/EmbedEval/.venv/bin/python        # ARM venv (Spark)
+  build_python: /home/$USER/EmbedEval/.venv-x86/bin/python     # x86 venv (cpu, login node)
+YAML
+
+# a campaign: every merged PR that changes a unit-test package (needs `gh`; on
+# the x86 login node an x86 gh first on PATH)
+python cluster/prepare.py --name mynewt-full --all             # or --pr N..., or --since/--until
+python cluster/submit.py triage   --run mynewt-full            # the local model on Spark
+python cluster/submit.py validate --run mynewt-full --after <triage job>
+python cluster/submit.py evaluate --run mynewt-full --after <validate job>   # optional: an agent on each VALID one (--model M ...)
+
+# a revalidation of instances that exist (no triage)
+python cluster/prepare.py --name mynewt-reval --instances apptainer/instances/mynewt
+python cluster/submit.py validate --run mynewt-reval
+python cluster/report.py --run mynewt-reval
+```
+
+- **prepare**: `scripts/mynewt_candidates.py` fetches every PR, keeps the merged non-revert
+  ones that change a `pkg.type: unittest` package or its test-support library, and enriches
+  them into `<run>/candidates/mynewt/enriched/`. No dry run. A PR whose enrichment has no
+  unit-test package is settled as `enrich: no runnable test`. `--instances DIR` copies each
+  instance's metadata and test patch into `<run>/sources/` and marks it `to validate`.
+- **triage** (`submit.py triage`) is `scripts/triage_mynewt_prs.py run --out <run>/triage`,
+  one PR per call; an accepting kind at high or medium confidence is an accept.
+- **validate** (`submit.py validate`, on `build_partition`) generates the recipe from the
+  verdict (a revalidation renders it from the instance's own metadata), builds it, and runs
+  `validate_instance.py --determinism 5`. The first worker builds the shared Mynewt image.
+  Every command runs without a network. Before any test, the leak check
+  (`scripts/mynewt_leakcheck.py`) inspects the unpacked image: only the base commit and the
+  recipe's own commits in `/testbed`, no fix commit and no fixed blob, no line only the fix
+  adds anywhere in the image, no other copy of mynewt-core (the newt sources carry one), no
+  route out, and a problem statement that names nothing only the fix introduces. A finding
+  is INVALID. The before state must also be judged the same in 5 runs (a compile
+  oracle can depend on which file a parallel build stops at; a runtime one on timing).
+- **evaluate** (`submit.py evaluate`) runs `harness/run.py` and `harness/evaluate_patches.py`
+  on each VALID instance (`evaluate:` in the config: model, steps, minutes, agents per
+  node; the default is 50 steps and no per-instance time limit, `time_limit: 0`, the same
+  limits as the Zephyr and RIOT baseline; `--model` takes a profile of `triage/models.json` in place of `evaluate.model`).
+  The agent sees the repository at the base commit with the PR's tests and the problem
+  statement: not the fix's files, not the history, not the network. Its patch crosses to the
+  grader byte for byte.
+  - *Labels.* Each evaluation is labeled by model and limits: `<model>-<steps>steps`
+    (`qwen38-nvfp4-50steps`) with no time limit, `<model>-<steps>steps-<min>min`
+    (`qwen38-nvfp4-50steps-40min`) with one: its status stage is `evaluate:<label>`, its trajectories,
+    patches and grades are under `<run>/outputs/<label>/`, and the report has one tally per
+    label. A second model, or the same one under other limits, runs on the same instances
+    without being seen as done and without overwriting anything. Results of the first,
+    unlabeled evaluate jobs count for the label of the limits they recorded (those that
+    recorded none are run again).
+  - *No time limit.* A run is then bounded only by the end of its job: it gets what is
+    left of the job less 5 minutes for grading, and no run starts with less than
+    `evaluate.min_minutes_left` (90) left. A run the job's end cuts off is not graded and not
+    the agent's failure: it is run again by the next job. After 2 cuts it is final, reported
+    as `unfinished` (it did not finish within a full job), apart from pass and fail. The
+    report also tallies `steps` (failures at the step limit; the agent's exit status
+    `LimitsExceeded` is read from its trajectory, which the cost limit also sets).
+  - *Model servers.* With a local model the job submits a model-server job on `partition`
+    (`scripts/serve_triage_model.sh`): as many GPU nodes as the evaluate job has nodes, one
+    server each, and each evaluate node tunnels (SSH) to the server of its own index, so
+    `per_node` agents share a server. The evaluate job is submitted held and released once
+    its server job exists; the server job ends when the evaluate job is gone, serves at most
+    30 minutes after the model answers while the evaluate job still has no slot (the account
+    runs two jobs at once), and is cancelled by the evaluate job when its workers are done.
+    `--server-job J` uses a running server instead and leaves it alone.
+  - *Resuming.* An instance cut short for a reason that is not the agent's (model server
+    gone, a build that hit its cap, no time left in the job, a patch `git apply` calls corrupt) has no outcome
+    for its label: submit the same command again and only those run. A job ends at
+    `slurm.time_limit` (at most 4 hours) and does not resubmit itself.
+  - *Several models.* `--model` takes several names and submits one evaluation per model,
+    each `afterany` the one before, so the pairs of agent job and server job never overlap
+    (the account runs 2 jobs at once and submits 50). The job ids are printed;
+    `--dry-run` shows the plan of every link without calling `sbatch`.
+
+    ```bash
+    python cluster/submit.py evaluate --run mynewt-full --model nemotron   # one model
+    python cluster/submit.py evaluate --run mynewt-full --after <validate job> \
+        --model qwen38-nvfp4 nemotron qwen38                               # three, one after the other
+    ```
+- **jobs** run a frozen copy of the code (`<run>/jobs/source-<time>/`, with
+  `source-manifest.json` hashes), so editing the checkout never changes a queued job.
+- **promotion** stays manual: `scripts/promote_instance.py --run-dir <run> <id>`. It refuses a
+  Mynewt instance without a clean leak check or a 5/5 before state.

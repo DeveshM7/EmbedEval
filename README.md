@@ -2,7 +2,7 @@
 
 A benchmark for evaluating LLM coding agents on **embedded RTOS bug fixes**.
 
-Each task is a real merged pull request from Zephyr, NuttX, or RIOT. The agent
+Each task is a real merged pull request from Zephyr, NuttX, RIOT, or Apache Mynewt. The agent
 gets the repository at the commit *before* the fix, plus the tests the PR added.
 It has to make those tests pass. Everything runs inside a container with a real
 cross-compiler toolchain, so a patch only counts if the firmware actually builds
@@ -17,7 +17,11 @@ and the tests actually run.
 - **NuttX and RIOT** instances are hand-built **Docker** images in
   `docker/instances/`.
 
-**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT.
+- **Mynewt** has 63 validated Apptainer instances under
+  `apptainer/instances/mynewt/`, built and run on Linux x86_64 with
+  `hw/bsp/native` and `compiler/sim`.
+
+**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT, plus 63 Apache Mynewt.
 
 ---
 
@@ -233,6 +237,50 @@ python scripts/twister_pipeline.py --pr <pr>... --verdicts <dir>       # generat
 Builds and runs need a node where Apptainer can build; on Scholar, inside a
 `spark-batch` job. How the stages, the model server and the cluster job fit
 together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
+
+---
+
+## Apache Mynewt
+
+The 63 promoted instances (`apptainer/instances/mynewt/`) build and run on Linux
+x86_64 (historical native builds need multilib). An agent run gets exactly the
+task: mynewt-core at the base commit with the PR's tests committed (history:
+that one commit, fetched `--depth 1`) and the problem statement.
+It does not get the files the fix changed (SWE-bench's "oracle" setting), a
+network (every container command runs in its own network namespace:
+`scripts/mynewt_network.py`), the fix's history, or the newt sources (they hold
+a later mynewt-core snapshot). Validation checks this on every image before any
+test runs (`scripts/mynewt_leakcheck.py`), and promotion requires a clean record.
+
+```bash
+python scripts/build_instances.py --instance mynewt__mynewt-3680
+python scripts/validate_instance.py mynewt__mynewt-3680 --determinism 5
+python harness/run.py --instance mynewt__mynewt-3680 --model <model> -v
+python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <model>
+```
+
+On Scholar, campaigns, revalidations and agent evaluations run through
+`cluster/` (triage on Spark, validation and agents on the x86 `cpu`
+partition, each agent node with a model server of its own on Spark):
+[docs/running_on_scholar.md, section 11](docs/running_on_scholar.md#11-mynewt-runs).
+Each evaluation is labeled by model and limits and keeps its own status and
+outputs. By default an agent gets 50 steps and no wall-time limit per instance
+(`evaluate.time_limit: 0`), the same limits as the Zephyr and RIOT baseline.
+Several models queue in one call, one after the other:
+
+```bash
+python cluster/submit.py evaluate --run <run> --model qwen38-nvfp4 nemotron qwen38
+```
+
+The [Mynewt triage document](docs/mynewt_triage.md) is the triage model's
+instructions. Validation records baseline diagnostics, then requires a failure
+attributable to the selected production change and a pass with that change
+applied; runtime, compile, configuration and dependency failures have separate
+evidence rules, and a generic build error or timeout is not a regression oracle.
+A compile oracle accounts for every error of the before-build: when the tests
+need several functions the fix adds (or turns on, behind a configuration macro
+the fix changes), the generator lists each one. `run_tests` builds with
+`newt test -j 1`, so a failing build reports the same errors in every run.
 
 ---
 

@@ -1,0 +1,857 @@
+diff --git a/sys/log/modlog/test/pkg.yml b/sys/log/modlog/test/pkg.yml
+new file mode 100644
+index 000000000..c45ab2ad7
+--- /dev/null
++++ b/sys/log/modlog/test/pkg.yml
+@@ -0,0 +1,31 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: sys/log/modlog/test
++pkg.type: unittest
++pkg.description: "Module-mapped log unit tests."
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.deps: 
++    - '@apache-mynewt-core/test/testutil'
++    - '@apache-mynewt-core/sys/log/modlog'
++
++pkg.deps.SELFTEST:
++    - '@apache-mynewt-core/sys/console/stub'
++    - '@apache-mynewt-core/sys/log/full'
+diff --git a/sys/log/modlog/test/src/modlog_test.c b/sys/log/modlog/test/src/modlog_test.c
+new file mode 100644
+index 000000000..d3b6a0bfb
+--- /dev/null
++++ b/sys/log/modlog/test/src/modlog_test.c
+@@ -0,0 +1,43 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/mynewt.h"
++#include "modlog_test.h"
++
++TEST_SUITE(modlog_test_suite_all)
++{
++    modlog_test_case_append();
++    modlog_test_case_basic();
++    modlog_test_case_printf();
++    modlog_test_case_prio();
++}
++
++#if MYNEWT_VAL(SELFTEST)
++
++int
++main(int argc, char **argv)
++{
++    sysinit();
++
++    modlog_test_suite_all();
++
++    return tu_any_failed;
++}
++
++#endif
+diff --git a/sys/log/modlog/test/src/modlog_test.h b/sys/log/modlog/test/src/modlog_test.h
+new file mode 100644
+index 000000000..4f6b2113b
+--- /dev/null
++++ b/sys/log/modlog/test/src/modlog_test.h
+@@ -0,0 +1,35 @@
++#ifndef H_MODLOG_TEST_
++#define H_MODLOG_TEST_
++
++#include "os/mynewt.h"
++#include "testutil/testutil.h"
++#include "log/log.h"
++#include "modlog/modlog.h"
++#include "modlog_test_util.h"
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++TEST_SUITE_DECL(modlog_test_suite_all);
++TEST_CASE_DECL(modlog_test_case_append);
++TEST_CASE_DECL(modlog_test_case_basic);
++TEST_CASE_DECL(modlog_test_case_printf);
++TEST_CASE_DECL(modlog_test_case_prio);
++
++#endif
+diff --git a/sys/log/modlog/test/src/modlog_test_util.c b/sys/log/modlog/test/src/modlog_test_util.c
+new file mode 100644
+index 000000000..be4522004
+--- /dev/null
++++ b/sys/log/modlog/test/src/modlog_test_util.c
+@@ -0,0 +1,128 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <string.h>
++#include "os/mynewt.h"
++#include "modlog_test.h"
++
++static int
++mltu_log_append(struct log *log, void *buf, int len)
++{
++    struct mltu_log_entry *entry;
++    struct log_entry_hdr *hdr;
++    struct mltu_log_arg *mla;
++    int body_len;
++
++    mla = log->l_arg;
++
++    body_len = len - sizeof *hdr;
++
++    TEST_ASSERT_FATAL(mla->num_entries < MLTU_LOG_ARG_MAX_ENTRIES);
++    TEST_ASSERT_FATAL(body_len <= MLTU_LOG_ENTRY_MAX_LEN);
++
++    entry = mla->entries + mla->num_entries++;
++
++    hdr = buf;
++    entry->hdr = *hdr;
++    entry->len = body_len;
++    memcpy(entry->body, hdr + 1, body_len);
++
++    return 0;
++}
++
++static int
++mltu_log_append_mbuf(struct log *log, struct os_mbuf *om)
++{
++    struct mltu_log_entry *entry;
++    struct mltu_log_arg *mla;
++    int body_len;
++    int rc;
++
++    mla = log->l_arg;
++
++    body_len = OS_MBUF_PKTLEN(om) - sizeof entry->hdr;
++
++    TEST_ASSERT_FATAL(mla->num_entries < MLTU_LOG_ARG_MAX_ENTRIES);
++    TEST_ASSERT_FATAL(body_len <= MLTU_LOG_ENTRY_MAX_LEN);
++
++    entry = mla->entries + mla->num_entries++;
++
++    rc = os_mbuf_copydata(om, 0, sizeof entry->hdr, &entry->hdr);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    entry->len = body_len;
++    rc = os_mbuf_copydata(om, sizeof entry->hdr, body_len, entry->body);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    return 0;
++}
++
++static const struct log_handler mltu_handler = {
++    .log_type = LOG_TYPE_MEMORY,
++    .log_append = mltu_log_append,
++    .log_append_mbuf = mltu_log_append_mbuf,
++};
++
++void
++mltu_register_log(struct log *lg, struct mltu_log_arg *arg, const char *name,
++                  uint8_t level)
++{
++    int rc;
++
++    rc = log_register((char *)name, lg, &mltu_handler, arg, level);
++    TEST_ASSERT_FATAL(rc == 0);
++}
++
++struct os_mbuf *
++mltu_alloc_buf(void)
++{
++    struct os_mbuf *om;
++    uint8_t *u8p;
++
++    om = os_msys_get_pkthdr(0, 0);
++    TEST_ASSERT_FATAL(om != NULL);
++
++    u8p = os_mbuf_extend(om, sizeof (struct log_entry_hdr));
++    TEST_ASSERT_FATAL(u8p != NULL);
++
++    return om;
++}
++
++void
++mltu_append(uint8_t module, uint8_t level, uint8_t etype, void *data,
++            int len, bool mbuf)
++{
++    uint8_t buf[1024];
++    struct os_mbuf *om;
++    int rc;
++
++    if (!mbuf) {
++        TEST_ASSERT_FATAL(len + sizeof (struct log_entry_hdr) <= sizeof buf);
++        memcpy(buf + sizeof (struct log_entry_hdr), data, len);
++
++        rc = modlog_append(module, level, etype, buf, len);
++    } else {
++        om = mltu_alloc_buf();
++        rc = os_mbuf_append(om, data, len);
++        TEST_ASSERT_FATAL(rc == 0);
++
++        rc = modlog_append_mbuf(module, level, etype, om);
++    }
++    TEST_ASSERT_FATAL(rc == 0);
++}
+diff --git a/sys/log/modlog/test/src/modlog_test_util.h b/sys/log/modlog/test/src/modlog_test_util.h
+new file mode 100644
+index 000000000..fba534f5c
+--- /dev/null
++++ b/sys/log/modlog/test/src/modlog_test_util.h
+@@ -0,0 +1,42 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef H_MODLOG_TEST_UTIL_
++#define H_MODLOG_TEST_UTIL_
++
++#define MLTU_LOG_ENTRY_MAX_LEN      256
++#define MLTU_LOG_ARG_MAX_ENTRIES    32
++
++struct mltu_log_entry {
++    struct log_entry_hdr hdr;
++    int len;
++    uint8_t body[MLTU_LOG_ENTRY_MAX_LEN];
++};
++
++struct mltu_log_arg {
++    struct mltu_log_entry entries[MLTU_LOG_ARG_MAX_ENTRIES];
++    int num_entries;
++};
++
++void mltu_register_log(struct log *lg, struct mltu_log_arg *arg,
++                       const char *name, uint8_t level);
++void mltu_append(uint8_t module, uint8_t level, uint8_t etype,
++                 void *data, int len, bool mbuf);
++
++#endif
+diff --git a/sys/log/modlog/test/src/testcases/modlog_test_case_append.c b/sys/log/modlog/test/src/testcases/modlog_test_case_append.c
+new file mode 100644
+index 000000000..c9f1f5d6a
+--- /dev/null
++++ b/sys/log/modlog/test/src/testcases/modlog_test_case_append.c
+@@ -0,0 +1,204 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "modlog_test.h"
++
++static void
++mltca_run(bool use_mbufs)
++{
++    struct mltu_log_arg mla1;
++    struct mltu_log_arg mla2;
++    struct mltu_log_arg mla3;
++    struct log log1;
++    struct log log2;
++    struct log log3;
++    uint8_t handle1;
++    uint8_t handle2;
++    uint8_t handle3;
++    uint8_t byte;
++    int rc;
++
++    sysinit();
++
++    /* Initialize three logs. */
++    memset(&mla1, 0, sizeof mla1);
++    mltu_register_log(&log1, &mla1, "log1", 0);
++
++    memset(&mla2, 0, sizeof mla2);
++    mltu_register_log(&log2, &mla2, "log2", 0);
++
++    memset(&mla3, 0, sizeof mla3);
++    mltu_register_log(&log3, &mla3, "log3", 0);
++
++    /* Map a different module to each log. */
++    rc = modlog_register(1, &log1, 1, &handle1);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(2, &log2, 2, &handle2);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(3, &log3, 3, &handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    /* Ensure unmapped module with no default causes no write. */
++    mltu_append(100, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++    TEST_ASSERT(mla1.num_entries == 0);
++    TEST_ASSERT(mla2.num_entries == 0);
++    TEST_ASSERT(mla3.num_entries == 0);
++
++    /* Write a different entry to each module */
++    byte = '1';
++    mltu_append(1, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++
++    byte = '2';
++    mltu_append(2, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++
++    byte = '3';
++    mltu_append(3, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++
++    TEST_ASSERT(mla1.num_entries == 1);
++    TEST_ASSERT(mla1.entries[0].len == 1);
++    TEST_ASSERT(mla1.entries[0].body[0] == '1');
++    TEST_ASSERT(mla1.entries[0].hdr.ue_module == 1);
++
++    TEST_ASSERT(mla2.num_entries == 1);
++    TEST_ASSERT(mla2.entries[0].len == 1);
++    TEST_ASSERT(mla2.entries[0].body[0] == '2');
++    TEST_ASSERT(mla2.entries[0].hdr.ue_module == 2);
++
++    TEST_ASSERT(mla3.num_entries == 1);
++    TEST_ASSERT(mla3.entries[0].len == 1);
++    TEST_ASSERT(mla3.entries[0].body[0] == '3');
++    TEST_ASSERT(mla3.entries[0].hdr.ue_module == 3);
++
++    /* Clear logs. */
++    mla1.num_entries = 0;
++    mla2.num_entries = 0;
++    mla3.num_entries = 0;
++
++    /* Point module 3 at log 2. */
++    rc = modlog_delete(handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++    rc = modlog_register(3, &log2, 3, &handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    /* Write to modules 2 and 3; verify log 2 written twice. */
++    mltu_append(2, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++    mltu_append(3, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++
++    TEST_ASSERT(mla1.num_entries == 0);
++    TEST_ASSERT(mla2.num_entries == 2);
++    TEST_ASSERT(mla3.num_entries == 0);
++
++    /* Clear logs. */
++    mla1.num_entries = 0;
++    mla2.num_entries = 0;
++    mla3.num_entries = 0;
++
++    /* Point module 1 at all three logs. */
++    rc = modlog_delete(handle2);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_delete(handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(1, &log2, 2, &handle2);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(1, &log3, 3, &handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    /* Write a single entry to module 1; ensure all logs written. */
++    mltu_append(1, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++    TEST_ASSERT(mla1.num_entries == 1);
++    TEST_ASSERT(mla2.num_entries == 1);
++    TEST_ASSERT(mla3.num_entries == 1);
++
++    /* Clear logs. */
++    mla1.num_entries = 0;
++    mla2.num_entries = 0;
++    mla3.num_entries = 0;
++
++    /* Make mapping1 a default entry. */
++    rc = modlog_delete(handle1);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(MODLOG_MODULE_DFLT, &log1, 1, &handle1);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    mltu_append(99, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++    mltu_append(123, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(mla1.num_entries == 2);
++    TEST_ASSERT(mla2.num_entries == 0);
++    TEST_ASSERT(mla3.num_entries == 0);
++
++    TEST_ASSERT(mla1.entries[0].hdr.ue_module == 99);
++    TEST_ASSERT(mla1.entries[1].hdr.ue_module == 123);
++
++    /* Clear logs. */
++    mla1.num_entries = 0;
++    mla2.num_entries = 0;
++    mla3.num_entries = 0;
++
++    /* Make all three descs default entries. */
++    rc = modlog_delete(handle2);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_delete(handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(MODLOG_MODULE_DFLT, &log2, 2, &handle2);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(MODLOG_MODULE_DFLT, &log3, 3, &handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    mltu_append(103, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++    mltu_append(144, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(mla1.num_entries == 2);
++    TEST_ASSERT(mla2.num_entries == 2);
++    TEST_ASSERT(mla3.num_entries == 2);
++
++    /* Clear logs. */
++    mla1.num_entries = 0;
++    mla2.num_entries = 0;
++    mla3.num_entries = 0;
++
++    /* Remove all default entries. */
++    rc = modlog_delete(handle1);
++    TEST_ASSERT_FATAL(rc == 0);
++    rc = modlog_delete(handle2);
++    TEST_ASSERT_FATAL(rc == 0);
++    rc = modlog_delete(handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    /* Ensure an append has no effect. */
++    mltu_append(234, 4, LOG_ETYPE_STRING, &byte, 1, use_mbufs);
++    TEST_ASSERT(mla1.num_entries == 0);
++    TEST_ASSERT(mla2.num_entries == 0);
++    TEST_ASSERT(mla3.num_entries == 0);
++}
++
++TEST_CASE(modlog_test_case_append)
++{
++    mltca_run(false);
++    mltca_run(true);
++}
+diff --git a/sys/log/modlog/test/src/testcases/modlog_test_case_basic.c b/sys/log/modlog/test/src/testcases/modlog_test_case_basic.c
+new file mode 100644
+index 000000000..fbaced75a
+--- /dev/null
++++ b/sys/log/modlog/test/src/testcases/modlog_test_case_basic.c
+@@ -0,0 +1,146 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "modlog_test.h"
++
++struct mltcb_foreach_arg {
++    struct modlog_desc descs[16];
++    int num_descs;
++};
++
++static int
++mltcb_foreach_fn(const struct modlog_desc *desc, void *arg)
++{
++    struct mltcb_foreach_arg *lfa;
++
++    lfa = arg;
++    TEST_ASSERT_FATAL(lfa->num_descs <
++                      sizeof lfa->descs / sizeof lfa->descs[0]);
++
++    lfa->descs[lfa->num_descs++] = *desc;
++    return 0;
++}
++
++static bool
++mltcb_desc_has_contents(const struct modlog_desc *desc, uint8_t module,
++                        const struct log *log, uint8_t min_level)
++{
++    return desc->log ==         log     &&
++           desc->module ==      module  &&
++           desc->min_level ==   min_level;
++}
++
++TEST_CASE(modlog_test_case_basic)
++{
++    struct mltcb_foreach_arg lfa;
++    struct log log1;
++    struct log log2;
++    struct log log3;
++    uint8_t handle1;
++    uint8_t handle2;
++    uint8_t handle3;
++    int rc;
++    int i;
++
++    sysinit();
++
++    /* NULL log. */
++    rc = modlog_register(1, NULL, LOG_LEVEL_DEBUG, NULL);
++    TEST_ASSERT(rc == SYS_EINVAL);
++
++    /* Ensure no mappings initially. */
++    for (i = 0; i < 256; i++) {
++        rc = modlog_get(i, NULL);
++        TEST_ASSERT(rc == SYS_ENOENT);
++    }
++
++    /* Insert three entries. */
++    rc = modlog_register(1, &log1, LOG_LEVEL_DEBUG, &handle1);
++    TEST_ASSERT(rc == 0);
++
++    rc = modlog_register(2, &log2, LOG_LEVEL_DEBUG, &handle2);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(handle2 != handle1);
++
++    rc = modlog_register(3, &log3, LOG_LEVEL_DEBUG, &handle3);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(handle3 != handle1);
++    TEST_ASSERT(handle3 != handle2);
++
++    /* Ensure foreach applies to all entries in the expected order. */
++    memset(&lfa, 0, sizeof lfa);
++    rc = modlog_foreach(mltcb_foreach_fn, &lfa);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(lfa.num_descs == 3);
++    TEST_ASSERT(mltcb_desc_has_contents(&lfa.descs[0], 1, &log1, LOG_LEVEL_DEBUG));
++    TEST_ASSERT(mltcb_desc_has_contents(&lfa.descs[1], 2, &log2, LOG_LEVEL_DEBUG));
++    TEST_ASSERT(mltcb_desc_has_contents(&lfa.descs[2], 3, &log3, LOG_LEVEL_DEBUG));
++
++    /* Delete the first entry. */
++    rc = modlog_delete(handle1);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    memset(&lfa, 0, sizeof lfa);
++    rc = modlog_foreach(mltcb_foreach_fn, &lfa);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(lfa.num_descs == 2);
++    TEST_ASSERT(mltcb_desc_has_contents(&lfa.descs[0], 2, &log2, LOG_LEVEL_DEBUG));
++    TEST_ASSERT(mltcb_desc_has_contents(&lfa.descs[1], 3, &log3, LOG_LEVEL_DEBUG));
++
++    /* Modify entry 3 to point to log1. */
++    rc = modlog_delete(handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++    rc = modlog_register(3, &log1, LOG_LEVEL_DEBUG, &handle3);
++    TEST_ASSERT(rc == 0);
++
++    memset(&lfa, 0, sizeof lfa);
++    rc = modlog_foreach(mltcb_foreach_fn, &lfa);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(lfa.num_descs == 2);
++    TEST_ASSERT(mltcb_desc_has_contents(&lfa.descs[0], 2, &log2, LOG_LEVEL_DEBUG));
++    TEST_ASSERT(mltcb_desc_has_contents(&lfa.descs[1], 3, &log1, LOG_LEVEL_DEBUG));
++
++    /* Delete entry 3. */
++    rc = modlog_delete(handle3);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    memset(&lfa, 0, sizeof lfa);
++    rc = modlog_foreach(mltcb_foreach_fn, &lfa);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(lfa.num_descs == 1);
++    TEST_ASSERT(mltcb_desc_has_contents(&lfa.descs[0], 2, &log2, LOG_LEVEL_DEBUG));
++
++    /* Delete last entry. */
++    rc = modlog_delete(handle2);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    memset(&lfa, 0, sizeof lfa);
++    rc = modlog_foreach(mltcb_foreach_fn, &lfa);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(lfa.num_descs == 0);
++
++    /* Repeatedly add and remove entries; verify no leaks. */
++    for (i = 0; i < 100; i++) {
++        rc = modlog_register(1, &log1, LOG_LEVEL_DEBUG, &handle1);
++        TEST_ASSERT(rc == 0);
++
++        rc = modlog_delete(handle1);
++        TEST_ASSERT(rc == 0);
++    }
++}
+diff --git a/sys/log/modlog/test/src/testcases/modlog_test_case_printf.c b/sys/log/modlog/test/src/testcases/modlog_test_case_printf.c
+new file mode 100644
+index 000000000..ce0394f73
+--- /dev/null
++++ b/sys/log/modlog/test/src/testcases/modlog_test_case_printf.c
+@@ -0,0 +1,54 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "modlog_test.h"
++
++TEST_CASE(modlog_test_case_printf)
++{
++    struct mltu_log_arg mla;
++    struct log log;
++    char buf[MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN) * 2];
++    int rc;
++    int i;
++
++    sysinit();
++
++    memset(&mla, 0, sizeof mla);
++    mltu_register_log(&log, &mla, "log", 0);
++
++    rc = modlog_register(1, &log, 1, NULL);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    modlog_printf(1, 1, "hello %d %s %c", 99, "abc", 'x');
++
++    TEST_ASSERT_FATAL(mla.num_entries == 1);
++    TEST_ASSERT(strcmp((char *)mla.entries[0].body, "hello 99 abc x") == 0);
++
++    /* Ensure oversized write gets truncated. */
++    for (i = 0; i < sizeof buf - 1; i++) {
++        buf[i] = '0' + i % 10;
++    }
++    buf[sizeof buf - 1] = '\0';
++
++    modlog_printf(1, 1, "%s", buf);
++    TEST_ASSERT_FATAL(mla.num_entries == 2);
++    TEST_ASSERT(mla.entries[1].len == MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN) - 1);
++    TEST_ASSERT(memcmp(mla.entries[1].body, buf,
++                       MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN) - 1) == 0);
++}
+diff --git a/sys/log/modlog/test/src/testcases/modlog_test_case_prio.c b/sys/log/modlog/test/src/testcases/modlog_test_case_prio.c
+new file mode 100644
+index 000000000..6629223b6
+--- /dev/null
++++ b/sys/log/modlog/test/src/testcases/modlog_test_case_prio.c
+@@ -0,0 +1,94 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "modlog_test.h"
++
++static void
++mltcp_run(bool use_mbufs)
++{
++    struct mltu_log_arg mla1;
++    struct mltu_log_arg mla2;
++    struct mltu_log_arg mla3;
++    struct log log1;
++    struct log log2;
++    struct log log3;
++    uint8_t buf[sizeof (struct log_entry_hdr) + 16];
++    int rc;
++
++    sysinit();
++
++    /* Initialize three logs. */
++    memset(&mla1, 0, sizeof mla1);
++    mltu_register_log(&log1, &mla1, "log1", 0);
++
++    memset(&mla2, 0, sizeof mla2);
++    mltu_register_log(&log2, &mla2, "log2", 0);
++
++    memset(&mla3, 0, sizeof mla3);
++    mltu_register_log(&log3, &mla3, "log3", 0);
++
++    /* Map a different module to each log. */
++    rc = modlog_register(1, &log1, 1, NULL);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(2, &log2, 2, NULL);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = modlog_register(3, &log3, 3, NULL);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    /* Ensure too-low priorities are discarded. */
++    mltu_append(1, 0, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++    mltu_append(2, 0, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++    mltu_append(3, 0, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++
++    TEST_ASSERT(mla1.num_entries == 0);
++    TEST_ASSERT(mla2.num_entries == 0);
++    TEST_ASSERT(mla3.num_entries == 0);
++
++    mltu_append(1, 1, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++    mltu_append(2, 1, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++    mltu_append(3, 1, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++
++    TEST_ASSERT(mla1.num_entries == 1);
++    TEST_ASSERT(mla2.num_entries == 0);
++    TEST_ASSERT(mla3.num_entries == 0);
++
++    mltu_append(1, 2, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++    mltu_append(2, 2, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++    mltu_append(3, 2, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++
++    TEST_ASSERT(mla1.num_entries == 2);
++    TEST_ASSERT(mla2.num_entries == 1);
++    TEST_ASSERT(mla3.num_entries == 0);
++
++    mltu_append(1, 3, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++    mltu_append(2, 3, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++    mltu_append(3, 3, LOG_ETYPE_STRING, buf, 1, use_mbufs);
++
++    TEST_ASSERT(mla1.num_entries == 3);
++    TEST_ASSERT(mla2.num_entries == 2);
++    TEST_ASSERT(mla3.num_entries == 1);
++}
++
++TEST_CASE(modlog_test_case_prio)
++{
++    mltcp_run(false);
++    mltcp_run(true);
++}
+diff --git a/sys/log/modlog/test/syscfg.yml b/sys/log/modlog/test/syscfg.yml
+new file mode 100644
+index 000000000..f2cc73a12
+--- /dev/null
++++ b/sys/log/modlog/test/syscfg.yml
+@@ -0,0 +1,20 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++syscfg.vals:
++    MODLOG_CONSOLE_DFLT: 0

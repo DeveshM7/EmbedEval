@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -37,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import paths
 import projects
+from patch_checks import protected_ranges_touched
 
 
 RUN_TESTS_ERRORS = {1: "tests failed (a test, the build or the configuration)",
@@ -64,7 +66,9 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     if not patch_path.exists():
         result.update(grade="missing", error="no patch file (run not found)")
         return result
-    if not patch_path.read_text().strip():
+    # Bytes: run.py writes the patch byte for byte, not necessarily valid UTF-8.
+    patch_bytes = patch_path.read_bytes()
+    if not patch_bytes.strip():
         result.update(patch_empty=True, error="empty patch — agent made no changes")
         return result
     import registry       # the validated image: pulled from the registry if published
@@ -79,7 +83,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
     overlay = run_dir / "overlay"
     overlay.mkdir(parents=True)
-    (run_dir / "agent.patch").write_text(patch_path.read_text())
+    (run_dir / "agent.patch").write_bytes(patch_bytes)
     base, layer = au.instance_container(meta, image)
     # No network, as in the agent's run: the tests build and run offline.
     container = au.exec_args(base, binds={run_dir: "/embedeval-run"}, overlay=overlay,
@@ -117,8 +121,135 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     return result
 
 
+def patch_files(patch: str) -> list[str]:
+    """Every path a unified diff touches (both sides, so renames count)."""
+    found = []
+    for line in patch.splitlines():
+        m = re.match(r"(?:diff --git a/(\S+) b/(\S+)|(?:---|\+\+\+) [ab]/(\S+))", line)
+        if m:
+            found += [g for g in dict.fromkeys(m.groups()) if g and g not in found]
+    return found
+
+
+def evaluate_mynewt(instance_id: str, model_name: str, meta: dict, timeout: int) -> dict:
+    """Grade a patch on a Mynewt instance, in its Apptainer image.
+
+    The image is unpacked to a node-local sandbox (a .sif is ~25x slower to
+    compile in on ARM64), the patch applied to /testbed, then `run_tests`
+    builds and runs the whole selftest package. Pass means exit 0 and a
+    structured result (/tmp/mynewt-result.json) whose passed set is exactly
+    fail_to_pass + pass_to_pass, with nothing missing or unexpected. A patch
+    that touches a protected test path is not run: it is reported as tampering.
+    """
+    sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
+    import apptainer_util as au
+    import validate_instance as vi
+
+    patch_path = paths.patch_path(instance_id, model_name)
+    result = {"instance_id": instance_id, "model": paths.resolve_model(model_name),
+              "patch_file": str(paths.show(patch_path)),
+              "patch_empty": False, "patch_applied": False, "build_ok": False,
+              "tests_passed": False, "tampering": False, "protected_touched": [],
+              "grade": "fail", "error": None, "elapsed_seconds": 0}
+    try:
+        au.require_host_arch(meta)
+    except RuntimeError as e:      # our side: this host cannot grade the instance
+        result.update(error=str(e), infra_error=f"host: {e}")
+        return result
+    if not patch_path.exists():
+        result.update(grade="missing", error="no patch file (run not found)")
+        return result
+    # bytes all the way to git apply: universal newlines would turn a lone \r
+    # into a line break; the checks below read a decoded copy
+    patch_bytes = patch_path.read_bytes()
+    patch = patch_bytes.decode("utf-8", errors="replace")
+    if not patch.strip():
+        result.update(patch_empty=True, error="empty patch — agent made no changes")
+        return result
+    protected = projects.setting(meta, "protected_paths")
+    touched = [f for f in patch_files(patch) if any(f.startswith(p) for p in protected)]
+    touched = sorted(set(touched + protected_ranges_touched(patch, meta)))
+    if touched:
+        result.update(tampering=True, protected_touched=touched,
+                      error="tampering: patch modifies protected test files: " + ", ".join(touched))
+        print(f"  FAIL — {result['error']}")
+        return result
+    image = au.instance_image(instance_id)
+    if not image.exists():
+        # Our side, not the patch's: the image could not be had.
+        result.update(error=f"instance image not built: {image}",
+                      infra_error=f"image: instance image not built: {image}")
+        return result
+
+    start = time.time()
+    run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "agent.patch").write_bytes(patch_bytes)
+    sandbox = None
+    try:
+        try:
+            sandbox = au.unpack_sandbox(image)
+        except RuntimeError as e:  # the container could not be set up
+            result.update(error=str(e), infra_error=f"container: {e}")
+            return result
+        from mynewt_network import isolated_command
+        container = au.sandbox_exec_args(sandbox, binds={run_dir: "/embedeval-run"})
+        def container_command(args):
+            return isolated_command(container + args, meta.get("network_fixture"))
+        print("  applying patch ...")
+        ap = subprocess.run(container_command(["git", "-C", "/testbed", "apply",
+                                         "/embedeval-run/agent.patch"]),
+                            capture_output=True, text=True, timeout=120)
+        if ap.returncode != 0:
+            text = (ap.stdout + ap.stderr).strip()
+            result["error"] = f"git apply failed: {text[:300]}"
+            # Apptainer, or the network namespace around it, did not start
+            if "FATAL:" in text or "unshare:" in text:
+                result["infra_error"] = f"container: {text[:300]}"
+            return result
+        result["patch_applied"] = True
+        print("  run_tests (newt test) ...")
+        full = ("cd /testbed && run_tests; rc=$?; echo ==MYNEWT-RESULT==; "
+                "cat /tmp/mynewt-result.json 2>/dev/null; exit $rc")
+        tp = subprocess.run(container_command(["bash", "-c", full]), capture_output=True, text=True,
+                            timeout=max(timeout, 600) + 300)
+        out = (tp.stdout or "") + (tp.stderr or "")
+        result["test_output_tail"] = out.split("==MYNEWT-RESULT==")[0][-2000:]
+        report = None
+        if "==MYNEWT-RESULT==" in out:
+            try:
+                report = json.loads(out.split("==MYNEWT-RESULT==", 1)[1])
+            except ValueError:
+                pass
+        if report is None:
+            result["error"] = f"no structured result (run_tests rc={tp.returncode})"
+            return result
+        result["build_ok"] = bool(report.get("build_ok"))
+        result["test_results"] = {k: report.get(k) for k in
+                                  ("passed", "failed", "missing", "unexpected", "error", "exit_code")}
+        ok, detail = vi.verify_structured_results(meta, report, "after")
+        if tp.returncode == 0 and ok:
+            result.update(tests_passed=True, grade="pass")
+            print("  PASS")
+        else:
+            result["error"] = (report.get("error") or detail
+                               or RUN_TESTS_ERRORS.get(tp.returncode, f"run_tests exited {tp.returncode}"))
+            print(f"  FAIL — {result['error']}")
+    except subprocess.TimeoutExpired:
+        result["error"] = "evaluation timed out"
+        print("  FAIL — overall timeout")
+    finally:
+        result["elapsed_seconds"] = round(time.time() - start, 1)
+        if sandbox:
+            au.remove_sandbox(sandbox)
+        au.remove(run_dir)
+    return result
+
+
 def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dict:
     meta = paths.load_metadata(instance_id)
+    if meta["project"] == "mynewt" and projects.setting(meta, "runtime") == "apptainer":
+        return evaluate_mynewt(instance_id, model_name, meta, timeout)
     if meta.get("pipeline") in ("twister", "riot-layer"):
         return evaluate_apptainer(instance_id, model_name, meta, timeout)
     if meta["project"] == "zephyr":
@@ -151,7 +282,7 @@ def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dic
         result["error"] = "no patch file (run not found)"
         return result
 
-    if not patch_path.read_text().strip():
+    if not patch_path.read_bytes().strip():
         result["patch_empty"] = True
         result["error"] = "empty patch — agent made no changes"
         return result

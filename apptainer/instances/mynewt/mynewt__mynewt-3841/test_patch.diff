@@ -1,0 +1,111 @@
+diff --git a/encoding/json/selftest/src/testcases/json_decode_errors.c b/encoding/json/selftest/src/testcases/json_decode_errors.c
+index 9652242f9..f5a0251ba 100644
+--- a/encoding/json/selftest/src/testcases/json_decode_errors.c
++++ b/encoding/json/selftest/src/testcases/json_decode_errors.c
+@@ -125,10 +125,14 @@ static const char json_no_brak[] =
+ static const char json_no_start[] =
+     "\"KeyBool\": true,\"KeyInt\": -1234,\"KeyUint\": 1353214,\"KeyString\": \"foobar\",\"KeyStringN\": \"foobarlong\",\"KeyIntArr\": [153,2532,-322]}";
+ 
++/* Value with escape sequences longer than any buffer */
++static char json_str_escapes[16 + 600 * 2 + 4];
++
+ /* now test the decode on a string */
+ TEST_CASE_SELF(test_json_decode_errors)
+ {
+     int rc;
++    int i;
+ 
+     rc = json_test_decode(json_ok1);
+     TEST_ASSERT(rc == 0);
+@@ -167,4 +171,12 @@ TEST_CASE_SELF(test_json_decode_errors)
+     TEST_ASSERT(rc != 0);
+     rc = json_test_decode(json_no_start);
+     TEST_ASSERT(rc != 0);
++
++    strcpy(json_str_escapes, "{\"KeyString\": \"");
++    for (i = 0; i < 600; i++) {
++        strcat(json_str_escapes, "\\b");
++    }
++    strcat(json_str_escapes, "\"}");
++    rc = json_test_decode(json_str_escapes);
++    TEST_ASSERT(rc == JSON_ERR_STRLONG);
+ }
+diff --git a/kernel/os/selftest/src/mbuf_test.c b/kernel/os/selftest/src/mbuf_test.c
+index 89cc3522f..5e4b2b798 100644
+--- a/kernel/os/selftest/src/mbuf_test.c
++++ b/kernel/os/selftest/src/mbuf_test.c
+@@ -94,6 +94,7 @@ TEST_CASE_DECL(os_mbuf_test_alloc)
+ TEST_CASE_DECL(os_mbuf_test_dup)
+ TEST_CASE_DECL(os_mbuf_test_dup_pool)
+ TEST_CASE_DECL(os_mbuf_test_append)
++TEST_CASE_DECL(os_mbuf_test_copydata)
+ TEST_CASE_DECL(os_mbuf_test_pullup)
+ TEST_CASE_DECL(os_mbuf_test_extend)
+ TEST_CASE_DECL(os_mbuf_test_adj)
+@@ -107,6 +108,7 @@ TEST_SUITE(os_mbuf_test_suite)
+     os_mbuf_test_dup();
+     os_mbuf_test_dup_pool();
+     os_mbuf_test_append();
++    os_mbuf_test_copydata();
+     os_mbuf_test_pullup();
+     os_mbuf_test_extend();
+     os_mbuf_test_adj();
+diff --git a/kernel/os/selftest/src/testcases/os_mbuf_test_copydata.c b/kernel/os/selftest/src/testcases/os_mbuf_test_copydata.c
+new file mode 100644
+index 000000000..ee8c874f3
+--- /dev/null
++++ b/kernel/os/selftest/src/testcases/os_mbuf_test_copydata.c
+@@ -0,0 +1,53 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "os_test_priv.h"
++
++TEST_CASE_SELF(os_mbuf_test_copydata)
++{
++    struct os_mbuf *om;
++    uint16_t off;
++    int rc;
++    uint8_t databuf[] = { 0xa, 0xb, 0xc, 0xd };
++    uint8_t cmpbuf[] = { 0xff, 0xff, 0xff, 0xff };
++
++    os_mbuf_test_setup();
++
++    om = os_mbuf_get(&os_mbuf_pool, 0);
++    TEST_ASSERT_FATAL(om != NULL, "Error allocating mbuf");
++
++    rc = os_mbuf_append(om, databuf, sizeof(databuf));
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = os_mbuf_copydata(om, 1, 2, cmpbuf);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(cmpbuf[0] == 0xb && cmpbuf[1] == 0xc && cmpbuf[2] == 0xff);
++
++    /* Negative offset or length are rejected */
++    memset(cmpbuf, 0xff, sizeof(cmpbuf));
++    rc = os_mbuf_copydata(om, -1, 2, cmpbuf);
++    TEST_ASSERT(rc != 0);
++    TEST_ASSERT(cmpbuf[0] == 0xff);
++    rc = os_mbuf_copydata(om, 0, -1, cmpbuf);
++    TEST_ASSERT(rc != 0);
++
++    TEST_ASSERT(os_mbuf_off(om, -1, &off) == NULL);
++    TEST_ASSERT(os_mbuf_off(om, 2, &off) == om && off == 2);
++
++    os_mbuf_free_chain(om);
++}

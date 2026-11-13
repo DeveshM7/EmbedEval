@@ -199,12 +199,79 @@ def instance_container(meta: dict, image: Path) -> tuple[Path, Path | None]:
     return image, None
 
 
+def host_tag() -> str:
+    """Return an architecture suffix for host-specific shared images."""
+    import platform
+    return "" if platform.machine() == "aarch64" else f"-{platform.machine()}"
+
+
+def require_host_arch(meta: dict) -> None:
+    """Reject an instance on a host architecture it cannot validate on."""
+    import platform
+    want = meta.get("host_arch")
+    if want and want != platform.machine():
+        raise RuntimeError(f"{meta.get('instance_id')} must run on {want} hosts "
+                           f"(this is {platform.machine()}): it validates there only")
+
+
+MYNEWT_TEMPLATES = REPO_ROOT / "templates" / "mynewt" / "apptainer"
+
+
+def mynewt_clone() -> Path | None:
+    """Local mynewt-core clone, if configured or available in candidates/."""
+    value = os.environ.get("EMBEDEVAL_MYNEWT_CLONE")
+    clone = Path(value) if value else REPO_ROOT / "candidates" / "mynewt.git"
+    return clone if clone.is_dir() else None
+
+
+def mynewt_base_image() -> Path:
+    """Return the shared Mynewt base image, fingerprinted by its recipe."""
+    import hashlib
+    h = hashlib.sha256((MYNEWT_TEMPLATES / "base.def").read_bytes())
+    return shared_path("images", f"mynewt-sim-{h.hexdigest()[:8]}{host_tag()}.sif")
+
+
+def ensure_mynewt_base_image(logdir: Path) -> Path:
+    """Build the shared Mynewt image if it does not exist yet."""
+    img = mynewt_base_image()
+    if not img.exists():
+        print(f"  building shared image {img.name} ...")
+        if not build(img, MYNEWT_TEMPLATES / "base.def", {}, logdir / f"build-{img.stem}.log"):
+            raise RuntimeError(f"could not build {img.name}")
+    return img
+
+
+def unpack_sandbox(image: Path, parent: Path | None = None) -> Path:
+    """Unpack an image to a writable sandbox for fast Mynewt builds."""
+    import tempfile
+    base = Path(tempfile.mkdtemp(prefix="embedeval-sbx-",
+                                 dir=parent or os.environ.get("EMBEDEVAL_SANDBOX_DIR") or None))
+    root = base / "root"
+    r = subprocess.run(["apptainer", "build", "--sandbox", str(root), str(image)],
+                       capture_output=True, text=True, env=build_env(base))
+    if r.returncode:
+        remove_sandbox(root)
+        raise RuntimeError(f"could not unpack {image.name}: {r.stderr.strip()[-300:]}")
+    (root / "embedeval-run").mkdir(exist_ok=True)
+    return root
+
+
+def remove_sandbox(root: Path) -> None:
+    """Remove a sandbox created by unpack_sandbox."""
+    base = Path(root).parent
+    if not base.name.startswith("embedeval-sbx-"):
+        raise ValueError(f"refusing to delete {base}: not a sandbox folder")
+    subprocess.run(["chmod", "-R", "u+rwX", str(base)], capture_output=True)
+    shutil.rmtree(base, ignore_errors=True)
+
+
 def instance_image(instance_id: str) -> Path:
     return path("images", "instances", f"{instance_id}.sif")
 
 
 def build(image: Path, definition: Path, build_args: dict, log: Path,
-          timeout_min: int = 60, attempts: int = 2) -> bool:
+          timeout_min: int = 60, attempts: int = 2,
+          binds: dict[Path, str] | None = None) -> bool:
     """apptainer build --fakeroot, with a time limit and a retry.
 
     The retry is for the network, not for broken recipes: an image build once
@@ -222,6 +289,8 @@ def build(image: Path, definition: Path, build_args: dict, log: Path,
     cmd = ["apptainer", "build", "--fakeroot", "--force"]
     for k, v in build_args.items():
         cmd += ["--build-arg", f"{k}={v}"]
+    for src, dst in (binds or {}).items():
+        cmd += ["--bind", f"{src}:{dst}:ro"]
     cmd += [str(partial), str(definition)]
     for attempt in range(1, attempts + 1):
         start = time.time()
@@ -293,15 +362,33 @@ def exec_args(image: Path, binds: dict[Path, str] | None = None,
     return cmd + [str(image)]
 
 
+def sandbox_exec_args(sandbox: Path, binds: dict[Path, str] | None = None,
+                      env: dict | None = None) -> list[str]:
+    """Build exec_args for a writable sandbox."""
+    cmd = ["apptainer", "exec", "--containall", "--cleanenv", "--writable"]
+    for src, dst in (binds or {}).items():
+        cmd += ["--bind", f"{src}:{dst}"]
+    for k, v in (env or {}).items():
+        cmd += ["--env", f"{k}={v}"]
+    return cmd + [str(sandbox)]
+
+
 # The files an instance image is built from. Their fingerprint is recorded in
 # validation.json, so a recipe changed after validation is never promoted.
 RECIPE_FILES = ("instance.def", "instance.json", "run_tests.py", "test_patch.diff")
+MYNEWT_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff", "bench.json")
 
 
-def recipe_fingerprint(instance_dir: Path) -> str:
+def mynewt_recipe_files(instance_dir: Path) -> tuple[str, ...]:
+    """Recipe files for a Mynewt instance, including optional compatibility patches."""
+    return MYNEWT_RECIPE_FILES + tuple(name for name in ("sim_arm64.patch", "simulator_compat.diff")
+                                      if (Path(instance_dir) / name).exists())
+
+
+def recipe_fingerprint(instance_dir: Path, files: tuple[str, ...] = RECIPE_FILES) -> str:
     import hashlib
     h = hashlib.sha256()
-    for name in RECIPE_FILES:
+    for name in files:
         h.update(name.encode() + b"\0" + (Path(instance_dir) / name).read_bytes() + b"\0")
     return h.hexdigest()
 

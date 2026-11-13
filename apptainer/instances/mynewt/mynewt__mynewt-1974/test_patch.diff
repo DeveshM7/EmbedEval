@@ -1,0 +1,1503 @@
+diff --git a/fs/fcb2/selftest/src/fcb_test.c b/fs/fcb2/selftest/src/fcb_test.c
+index a16e40cab..0a29f5514 100644
+--- a/fs/fcb2/selftest/src/fcb_test.c
++++ b/fs/fcb2/selftest/src/fcb_test.c
+@@ -141,6 +141,7 @@ TEST_CASE_DECL(fcb_test_rotate)
+ TEST_CASE_DECL(fcb_test_multiple_scratch)
+ TEST_CASE_DECL(fcb_test_last_of_n)
+ TEST_CASE_DECL(fcb_test_area_info)
++TEST_CASE_DECL(fcb_test_getprev)
+ 
+ TEST_SUITE(fcb_test_all)
+ {
+@@ -154,6 +155,7 @@ TEST_SUITE(fcb_test_all)
+     fcb_test_multiple_scratch();
+     fcb_test_last_of_n();
+     fcb_test_area_info();
++    fcb_test_getprev();
+ }
+ 
+ int
+diff --git a/fs/fcb2/selftest/src/testcases/fcb_test_getprev.c b/fs/fcb2/selftest/src/testcases/fcb_test_getprev.c
+new file mode 100644
+index 000000000..ec1a255b9
+--- /dev/null
++++ b/fs/fcb2/selftest/src/testcases/fcb_test_getprev.c
+@@ -0,0 +1,140 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE_SELF(fcb_test_getprev)
++{
++    struct fcb *fcb = &test_fcb;
++    struct fcb_entry loc;
++    struct fcb_entry prev;
++    int rc;
++    int i, j;
++
++    fcb_tc_pretest(3);
++
++    prev.fe_range = NULL;
++
++    /*
++     * Empty FCB returns error.
++     */
++    rc = fcb_getprev(fcb, &prev);
++    TEST_ASSERT_FATAL(rc == FCB_ERR_NOVAR);
++
++    /*
++     * Add one entry. getprev should find that guy, and then error.
++     */
++    rc = fcb_append(fcb, 8, &loc);
++    TEST_ASSERT(rc == 0);
++    rc = fcb_append_finish(&loc);
++    TEST_ASSERT(rc == 0);
++
++    prev.fe_range = NULL;
++    rc = fcb_getprev(fcb, &prev);
++    TEST_ASSERT_FATAL(rc == 0);
++    TEST_ASSERT(!memcmp(&loc, &prev, sizeof(loc)));
++
++    rc = fcb_getprev(fcb, &prev);
++    TEST_ASSERT(rc == FCB_ERR_NOVAR);
++
++    /*
++     * Add enough entries to go to 2 sectors, should find them all.
++     */
++    fcb_tc_pretest(3);
++    for (i = 0; ; i++) {
++        rc = fcb_append(fcb, i + 1, &loc);
++        TEST_ASSERT(rc == 0);
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++
++        if (loc.fe_sector == prev.fe_sector + 2) {
++            break;
++        }
++    }
++
++    prev.fe_range = NULL;
++    for (j = i; j >= 0; j--) {
++        rc = fcb_getprev(fcb, &prev);
++        TEST_ASSERT(rc == 0);
++        TEST_ASSERT(prev.fe_data_len == j + 1);
++    }
++    rc = fcb_getprev(fcb, &prev);
++    TEST_ASSERT(rc == FCB_ERR_NOVAR);
++
++    /*
++     * Clean the area. Fill 2 whole sectors with corrupt entries. And one
++     * good one. Should find the one good one, followed by error
++     */
++    fcb_tc_pretest(3);
++
++    for (i = 0; ; i++) {
++        rc = fcb_append(fcb, i + 1, &loc);
++        TEST_ASSERT(rc == 0);
++
++        if (loc.fe_sector == prev.fe_sector + 2) {
++            rc = fcb_append_finish(&loc);
++            TEST_ASSERT(rc == 0);
++            break;
++        }
++    }
++
++    prev.fe_range = NULL;
++    rc = fcb_getprev(fcb, &prev);
++    TEST_ASSERT_FATAL(rc == 0);
++    TEST_ASSERT(!memcmp(&loc, &prev, sizeof(loc)));
++
++    rc = fcb_getprev(fcb, &prev);
++    TEST_ASSERT(rc == FCB_ERR_NOVAR);
++
++    /*
++     * Create new. Rotate one sector, should be able to follow
++     * from end of range to start.
++     */
++
++    fcb_tc_pretest(3);
++
++    for (i = 0; ; i++) {
++        rc = fcb_append(fcb, i + 8, &loc);
++        if (rc == FCB_ERR_NOSPACE) {
++            break;
++        }
++        TEST_ASSERT(rc == 0);
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++    }
++
++    /*
++     * Full. Rotate, add one more, and then walk backwards.
++     */
++    fcb_rotate(fcb);
++
++    rc = fcb_append(fcb, i + 8, &loc);
++    TEST_ASSERT(rc == 0);
++    rc = fcb_append_finish(&loc);
++    TEST_ASSERT(rc == 0);
++
++    for (j = i; j >= 0; j--) {
++        rc = fcb_getprev(fcb, &prev);
++        if (rc == FCB_ERR_NOVAR) {
++            TEST_ASSERT(i > 0);
++            break;
++        }
++        TEST_ASSERT(rc == 0);
++        TEST_ASSERT(prev.fe_data_len == j + 8);
++    }
++}
+diff --git a/fs/fcb2/selftest/src/testcases/fcb_test_last_of_n.c b/fs/fcb2/selftest/src/testcases/fcb_test_last_of_n.c
+index 10ca3d79c..2a6c3cd95 100644
+--- a/fs/fcb2/selftest/src/testcases/fcb_test_last_of_n.c
++++ b/fs/fcb2/selftest/src/testcases/fcb_test_last_of_n.c
+@@ -35,7 +35,7 @@ TEST_CASE_SELF(fcb_test_last_of_n)
+ 
+     /* No fcbs available */
+     rc = fcb_offset_last_n(fcb, 1, &loc);
+-    assert (rc != 0);
++    TEST_ASSERT(rc != 0);
+ 
+     /*
+      * Add some fcbs.
+@@ -57,29 +57,29 @@ TEST_CASE_SELF(fcb_test_last_of_n)
+ 
+     /* last entry */
+     rc = fcb_offset_last_n(fcb, 1, &loc);
+-    assert (rc == 0);
+-    assert (areas[4].fe_sector == loc.fe_sector);
+-    assert (areas[4].fe_data_off == loc.fe_data_off);
+-    assert (areas[4].fe_data_len == loc.fe_data_len);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(areas[4].fe_sector == loc.fe_sector);
++    TEST_ASSERT(areas[4].fe_data_off == loc.fe_data_off);
++    TEST_ASSERT(areas[4].fe_data_len == loc.fe_data_len);
+ 
+     /* somewhere in the middle */
+     rc = fcb_offset_last_n(fcb, 3, &loc);
+-    assert (rc == 0);
+-    assert (areas[2].fe_sector == loc.fe_sector);
+-    assert (areas[2].fe_data_off == loc.fe_data_off);
+-    assert (areas[2].fe_data_len == loc.fe_data_len);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(areas[2].fe_sector == loc.fe_sector);
++    TEST_ASSERT(areas[2].fe_data_off == loc.fe_data_off);
++    TEST_ASSERT(areas[2].fe_data_len == loc.fe_data_len);
+ 
+     /* first entry */
+     rc = fcb_offset_last_n(fcb, 5, &loc);
+-    assert (rc == 0);
+-    assert (areas[0].fe_sector == loc.fe_sector);
+-    assert (areas[0].fe_data_off == loc.fe_data_off);
+-    assert (areas[0].fe_data_len == loc.fe_data_len);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(areas[0].fe_sector == loc.fe_sector);
++    TEST_ASSERT(areas[0].fe_data_off == loc.fe_data_off);
++    TEST_ASSERT(areas[0].fe_data_len == loc.fe_data_len);
+ 
+     /* after last valid entry, returns the first one like for 5 */
+     rc = fcb_offset_last_n(fcb, 6, &loc);
+-    assert (rc == 0);
+-    assert (areas[0].fe_sector == loc.fe_sector);
+-    assert (areas[0].fe_data_off == loc.fe_data_off);
+-    assert (areas[0].fe_data_len == loc.fe_data_len);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(areas[0].fe_sector == loc.fe_sector);
++    TEST_ASSERT(areas[0].fe_data_off == loc.fe_data_off);
++    TEST_ASSERT(areas[0].fe_data_len == loc.fe_data_len);
+ }
+diff --git a/sys/log/full/selftest/fcb2_align1/pkg.yml b/sys/log/full/selftest/fcb2_align1/pkg.yml
+new file mode 100644
+index 000000000..9600a412c
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_align1/pkg.yml
+@@ -0,0 +1,29 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: sys/log/full/selftest/fcb2_align1
++pkg.type: unittest
++pkg.description: "Log unit tests; FCB2 flash-alignment=1."
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.deps:
++    - "@apache-mynewt-core/sys/console/stub"
++    - "@apache-mynewt-core/sys/log/full"
++    - "@apache-mynewt-core/sys/log/full/selftest/util"
++    - "@apache-mynewt-core/test/testutil"
+diff --git a/sys/log/full/selftest/fcb2_align1/src/log_test_align1.c b/sys/log/full/selftest/fcb2_align1/src/log_test_align1.c
+new file mode 100644
+index 000000000..6fb73ffba
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_align1/src/log_test_align1.c
+@@ -0,0 +1,33 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/mynewt.h"
++#include "log_test_util/log_test_util.h"
++
++int
++main(int argc, char **argv)
++{
++    log_test_suite_cbmem_flat();
++    log_test_suite_cbmem_mbuf();
++    log_test_suite_fcb_flat();
++    log_test_suite_fcb_mbuf();
++    log_test_suite_misc();
++
++    return tu_any_failed;
++}
+diff --git a/sys/log/full/selftest/fcb2_align1/syscfg.yml b/sys/log/full/selftest/fcb2_align1/syscfg.yml
+new file mode 100644
+index 000000000..6dd29babd
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_align1/syscfg.yml
+@@ -0,0 +1,25 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++syscfg.vals:
++    LOG_FCB2: 1
++    LOG_VERSION: 3
++    MCU_FLASH_MIN_WRITE_SIZE: 1
++
++    # The mbuf append tests allocate lots of mbufs; ensure no exhaustion.
++    MSYS_1_BLOCK_COUNT: 1000
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/pkg.yml b/sys/log/full/selftest/fcb2_bookmarks/pkg.yml
+new file mode 100644
+index 000000000..7b9a2f08a
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/pkg.yml
+@@ -0,0 +1,30 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: sys/log/full/selftest/fcb2_bookmarks
++pkg.type: unittest
++pkg.description: "Log unit tests; bookmarks with FCB2."
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.deps:
++    - "@apache-mynewt-core/sys/console/stub"
++    - "@apache-mynewt-core/sys/log/full"
++    - "@apache-mynewt-core/sys/log/full/selftest/util"
++    - "@apache-mynewt-core/sys/stats/full"
++    - "@apache-mynewt-core/test/testutil"
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks.c b/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks.c
+new file mode 100644
+index 000000000..85b8391a4
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks.c
+@@ -0,0 +1,39 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/mynewt.h"
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_bookmarks.h"
++
++TEST_SUITE(log_test_suite_fcb_bookmarks)
++{
++    log_test_case_fcb_bookmarks_s0_l1_b0_p100();
++    log_test_case_fcb_bookmarks_s0_l1_b1_p100();
++    log_test_case_fcb_bookmarks_s10_l100_b1_p200();
++    log_test_case_fcb_bookmarks_s10_l100_b10_p2000();
++    log_test_case_fcb_bookmarks_s100_l500_b10_p2000();
++}
++
++int
++main(int argc, char **argv)
++{
++    log_test_suite_fcb_bookmarks();
++
++    return tu_any_failed;
++}
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks.h b/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks.h
+new file mode 100644
+index 000000000..e7d58f534
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks.h
+@@ -0,0 +1,44 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef H_LOG_TEST_FCB_BOOKMARKS_
++#define H_LOG_TEST_FCB_BOOKMARKS_
++
++#include "os/mynewt.h"
++#include "testutil/testutil.h"
++
++struct ltfbu_cfg {
++    int skip_mod;
++    int body_len;
++    int bmark_count;
++    int pop_count;
++};
++
++void ltfbu_populate_log(int count);
++void ltfbu_verify_log(uint32_t start_idx);
++void ltfbu_init(const struct ltfbu_cfg *cfg);
++void ltfbu_test_once(const struct ltfbu_cfg *cfg);
++
++TEST_CASE_DECL(log_test_case_fcb_bookmarks_s0_l1_b0_p100);
++TEST_CASE_DECL(log_test_case_fcb_bookmarks_s0_l1_b1_p100);
++TEST_CASE_DECL(log_test_case_fcb_bookmarks_s10_l100_b1_p200);
++TEST_CASE_DECL(log_test_case_fcb_bookmarks_s10_l100_b10_p2000);
++TEST_CASE_DECL(log_test_case_fcb_bookmarks_s100_l500_b10_p2000);
++
++#endif
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks_util.c b/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks_util.c
+new file mode 100644
+index 000000000..25d701871
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/src/log_test_fcb_bookmarks_util.c
+@@ -0,0 +1,257 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_bookmarks.h"
++
++#define LTFBU_MAX_ENTRY_IDXS    20480
++#define LTFBU_MAX_BODY_LEN      1024
++#define LTFBU_MAX_BMARKS        1024
++
++#define LTFBU_SECTOR_SIZE       (16 * 1024)
++
++struct ltfbu_slice {
++    const uint32_t *idxs;
++    int count;
++};
++
++static struct ltfbu_cfg ltfbu_cfg;
++
++static uint32_t ltfbu_entry_idxs[LTFBU_MAX_ENTRY_IDXS];
++static int ltfbu_num_entry_idxs;
++
++static struct fcb_log ltfbu_fcb_log;
++static struct log ltfbu_log;
++
++static struct log_fcb_bmark ltfbu_bmarks[LTFBU_MAX_BMARKS];
++
++static struct flash_sector_range ltfbu_fcb_range = {
++    .fsr_flash_area = {
++        .fa_off = 0 * LTFBU_SECTOR_SIZE,
++        .fa_size = 2 * LTFBU_SECTOR_SIZE
++    },
++    .fsr_sector_count = 2,
++    .fsr_sector_size = LTFBU_SECTOR_SIZE,
++    .fsr_align = MYNEWT_VAL(MCU_FLASH_MIN_WRITE_SIZE)
++};
++
++static int
++ltfbu_max_entries(void)
++{
++    int entry_space;
++    int entry_size;
++
++    /* "+ 2" for CRC. */
++    entry_size = LOG_BASE_ENTRY_HDR_SIZE + ltfbu_cfg.body_len +
++                 FCB_ENTRY_SIZE + 2;
++    entry_space = LTFBU_SECTOR_SIZE - 8;
++
++    return entry_space / entry_size;
++}
++
++static void
++ltfbu_expected_entry_range(int *first, int *count)
++{
++    int max_entries;
++    int rollovers;
++
++    max_entries = ltfbu_max_entries();
++    rollovers = ltfbu_num_entry_idxs / max_entries;
++
++    *first = rollovers * max_entries;
++    *count = ltfbu_num_entry_idxs % max_entries;
++}
++
++static struct ltfbu_slice
++ltfbu_expected_idxs(uint32_t start_idx)
++{
++    int first;
++    int count;
++
++    ltfbu_expected_entry_range(&first, &count);
++
++    while (ltfbu_entry_idxs[first] < start_idx) {
++        first++;
++        count--;
++    }
++
++    return (struct ltfbu_slice) {
++        .idxs = &ltfbu_entry_idxs[first],
++        .count = count,
++    };
++}
++
++static int
++ltfbu_skip_amount(void)
++{
++    if (ltfbu_cfg.skip_mod == 0) {
++        return 0;
++    } else {
++        return rand() % ltfbu_cfg.skip_mod;
++    }
++}
++
++static void
++ltfbu_skip(void)
++{
++    g_log_info.li_next_index += ltfbu_skip_amount();
++}
++
++static void
++ltfbu_write_entry(void)
++{
++    uint8_t body[LTFBU_MAX_BODY_LEN];
++    uint32_t idx;
++    int rc;
++
++    TEST_ASSERT_FATAL(ltfbu_num_entry_idxs < LTFBU_MAX_ENTRY_IDXS);
++
++    ltfbu_skip();
++    idx = g_log_info.li_next_index;
++
++    memset(body, idx, ltfbu_cfg.body_len);
++
++    rc = log_append_body(&ltfbu_log, 0, 255, LOG_ETYPE_BINARY, body,
++                         ltfbu_cfg.body_len);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    ltfbu_entry_idxs[ltfbu_num_entry_idxs++] = idx;
++}
++
++void
++ltfbu_populate_log(int count)
++{
++    int i;
++
++    for (i = 0; i < count; i++) {
++        ltfbu_write_entry();
++    }
++}
++
++struct ltfbu_walk_arg {
++    struct ltfbu_slice slice;
++    int cur;
++};
++
++static int
++ltfbu_verify_log_walk(struct log *log, struct log_offset *log_offset,
++                      const struct log_entry_hdr *hdr, void *dptr,
++                      uint16_t len)
++{
++    struct ltfbu_walk_arg *arg;
++
++    arg = log_offset->lo_arg;
++
++    TEST_ASSERT_FATAL(arg->cur < arg->slice.count);
++    TEST_ASSERT_FATAL(hdr->ue_index == arg->slice.idxs[arg->cur]);
++
++    arg->cur++;
++
++    return 0;
++}
++
++void
++ltfbu_verify_log(uint32_t start_idx)
++{
++    struct ltfbu_walk_arg arg;
++    struct ltfbu_slice slice;
++    struct log_offset log_offset;
++    int rc;
++
++    slice = ltfbu_expected_idxs(start_idx);
++    arg = (struct ltfbu_walk_arg) {
++        .slice = slice,
++        .cur = 0,
++    };
++
++    log_offset = (struct log_offset) {
++        .lo_arg = &arg,
++        .lo_index = start_idx,
++        .lo_ts = 0,
++        .lo_data_len = 0,
++    };
++
++    rc = log_walk_body(&ltfbu_log, ltfbu_verify_log_walk, &log_offset);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    TEST_ASSERT_FATAL(arg.cur == slice.count);
++}
++
++void
++ltfbu_init(const struct ltfbu_cfg *cfg)
++{
++    int rc;
++
++    /* Ensure tests are repeatable. */
++    srand(0);
++
++    ltfbu_cfg = *cfg;
++    ltfbu_num_entry_idxs = 0;
++
++    ltfbu_fcb_log = (struct fcb_log) {
++        .fl_fcb.f_scratch_cnt = 1,
++        .fl_fcb.f_range_cnt = 1,
++        .fl_fcb.f_sector_cnt = ltfbu_fcb_range.fsr_sector_count,
++        .fl_fcb.f_ranges = &ltfbu_fcb_range,
++        .fl_fcb.f_magic = 0x7EADBADF,
++        .fl_fcb.f_version = 0,
++    };
++
++    rc = flash_area_erase(&ltfbu_fcb_range.fsr_flash_area, 0,
++                     ltfbu_fcb_range.fsr_flash_area.fa_size);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = fcb_init(&ltfbu_fcb_log.fl_fcb);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    if (cfg->bmark_count > 0) {
++        log_fcb_init_bmarks(&ltfbu_fcb_log, ltfbu_bmarks, cfg->bmark_count);
++    }
++
++    log_register("log", &ltfbu_log, &log_fcb_handler, &ltfbu_fcb_log,
++                 LOG_SYSLEVEL);
++}
++
++void
++ltfbu_test_once(const struct ltfbu_cfg *cfg)
++{
++    uint32_t start_idx;
++    int i;
++
++    ltfbu_init(cfg);
++
++    /* Do this three times:
++     * 1. Write a bunch of entries to the log.
++     * 2. Walk the log, starting from various entry indices
++     * 3. Verify results of walk:
++     *     a. All expected entries are visited.
++     *     b. No extra entries are visited.
++     *
++     * This procedure is repeated three times to ensure that the FCB is rotated
++     * between walks.
++     */
++    for (i = 0; i < 3; i++) {
++        ltfbu_populate_log(cfg->pop_count);
++
++        start_idx = 0;
++        while (start_idx < ltfbu_entry_idxs[ltfbu_num_entry_idxs - 1]) {
++            ltfbu_verify_log(start_idx);
++            start_idx += ltfbu_skip_amount() + 1;
++        }
++    }
++}
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s0_l1_b0_p100.c b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s0_l1_b0_p100.c
+new file mode 100644
+index 000000000..d21126407
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s0_l1_b0_p100.c
+@@ -0,0 +1,32 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_bookmarks.h"
++
++TEST_CASE_SELF(log_test_case_fcb_bookmarks_s0_l1_b0_p100)
++{
++    struct ltfbu_cfg cfg = {
++        .skip_mod = 0,
++        .body_len = 10,
++        .bmark_count = 0,
++        .pop_count = 100,
++    };
++    ltfbu_test_once(&cfg);
++}
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s0_l1_b1_p100.c b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s0_l1_b1_p100.c
+new file mode 100644
+index 000000000..ee7718b47
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s0_l1_b1_p100.c
+@@ -0,0 +1,32 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_bookmarks.h"
++
++TEST_CASE_SELF(log_test_case_fcb_bookmarks_s0_l1_b1_p100)
++{
++    struct ltfbu_cfg cfg = {
++        .skip_mod = 0,
++        .body_len = 10,
++        .bmark_count = 1,
++        .pop_count = 100,
++    };
++    ltfbu_test_once(&cfg);
++}
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s100_l500_b10_p2000.c b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s100_l500_b10_p2000.c
+new file mode 100644
+index 000000000..e86964c5a
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s100_l500_b10_p2000.c
+@@ -0,0 +1,32 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_bookmarks.h"
++
++TEST_CASE_SELF(log_test_case_fcb_bookmarks_s100_l500_b10_p2000)
++{
++    struct ltfbu_cfg cfg = {
++        .skip_mod = 100,
++        .body_len = 500,
++        .bmark_count = 10,
++        .pop_count = 2000,
++    };
++    ltfbu_test_once(&cfg);
++}
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s10_l100_b10_p2000.c b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s10_l100_b10_p2000.c
+new file mode 100644
+index 000000000..ac48042e6
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s10_l100_b10_p2000.c
+@@ -0,0 +1,32 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_bookmarks.h"
++
++TEST_CASE_SELF(log_test_case_fcb_bookmarks_s10_l100_b10_p2000)
++{
++    struct ltfbu_cfg cfg = {
++        .skip_mod = 10,
++        .body_len = 100,
++        .bmark_count = 10,
++        .pop_count = 2000,
++    };
++    ltfbu_test_once(&cfg);
++}
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s10_l100_b1_p200.c b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s10_l100_b1_p200.c
+new file mode 100644
+index 000000000..ac81aef23
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/src/testcases/s10_l100_b1_p200.c
+@@ -0,0 +1,32 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_bookmarks.h"
++
++TEST_CASE_SELF(log_test_case_fcb_bookmarks_s10_l100_b1_p200)
++{
++    struct ltfbu_cfg cfg = {
++        .skip_mod = 10,
++        .body_len = 100,
++        .bmark_count = 1,
++        .pop_count = 200,
++    };
++    ltfbu_test_once(&cfg);
++}
+diff --git a/sys/log/full/selftest/fcb2_bookmarks/syscfg.yml b/sys/log/full/selftest/fcb2_bookmarks/syscfg.yml
+new file mode 100644
+index 000000000..fda1a781f
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_bookmarks/syscfg.yml
+@@ -0,0 +1,23 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++syscfg.vals:
++    LOG_VERSION: 3
++    LOG_FCB2: 1
++    LOG_FCB_BOOKMARKS: 1
++    LOG_STATS: 1
+diff --git a/sys/log/full/selftest/fcb2_watermarks/pkg.yml b/sys/log/full/selftest/fcb2_watermarks/pkg.yml
+new file mode 100644
+index 000000000..c9acd0ad1
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_watermarks/pkg.yml
+@@ -0,0 +1,29 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: sys/log/full/selftest/fcb2_watermarks
++pkg.type: unittest
++pkg.description: "Log unit tests; FCB2 watermarks."
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.deps:
++    - "@apache-mynewt-core/sys/console/stub"
++    - "@apache-mynewt-core/sys/log/full"
++    - "@apache-mynewt-core/sys/log/full/selftest/util"
++    - "@apache-mynewt-core/test/testutil"
+diff --git a/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks.c b/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks.c
+new file mode 100644
+index 000000000..03411e187
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks.c
+@@ -0,0 +1,37 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/mynewt.h"
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_watermarks.h"
++
++TEST_SUITE(log_test_suite_fcb_watermarks)
++{
++    log_test_case_fcb_watermarks_s0();
++    log_test_case_fcb_watermarks_s10();
++    log_test_case_fcb_watermarks_s100();
++}
++
++int
++main(int argc, char **argv)
++{
++    log_test_suite_fcb_watermarks();
++
++    return tu_any_failed;
++}
+diff --git a/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks.h b/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks.h
+new file mode 100644
+index 000000000..62b8471b3
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks.h
+@@ -0,0 +1,38 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef H_LOG_TEST_FCB2_WATERMARKS_
++#define H_LOG_TEST_FCB2_WATERMARKS_
++
++#include "os/mynewt.h"
++#include "testutil/testutil.h"
++
++struct ltfwu_cfg {
++    int skip_mod;
++    int body_len;
++    int pop_count;
++};
++
++void ltfwu_test_once(const struct ltfwu_cfg *cfg);
++
++TEST_CASE_DECL(log_test_case_fcb_watermarks_s0);
++TEST_CASE_DECL(log_test_case_fcb_watermarks_s10);
++TEST_CASE_DECL(log_test_case_fcb_watermarks_s100);
++
++#endif
+diff --git a/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks_util.c b/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks_util.c
+new file mode 100644
+index 000000000..4d74b0cde
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_watermarks/src/log_test_fcb_watermarks_util.c
+@@ -0,0 +1,199 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_watermarks.h"
++
++#define LTFWU_MAX_ENTRY_IDXS    20480
++#define LTFWU_MAX_BODY_LEN      1024
++
++#define LTFWU_SECTOR_SIZE       (2048)
++
++static struct ltfwu_cfg ltfwu_cfg;
++
++static struct fcb_log ltfwu_fcb_log;
++static struct log ltfwu_log;
++
++static struct flash_sector_range ltfwu_fcb_range = {
++    .fsr_flash_area = {
++        .fa_off = 0 * LTFWU_SECTOR_SIZE,
++        .fa_size = 8 * LTFWU_SECTOR_SIZE,
++    },
++    .fsr_sector_count = 8,
++    .fsr_sector_size = LTFWU_SECTOR_SIZE,
++    .fsr_align = MYNEWT_VAL(MCU_FLASH_MIN_WRITE_SIZE)
++};
++
++static int
++ltfwu_skip_amount(void)
++{
++    if (ltfwu_cfg.skip_mod == 0) {
++        return 0;
++    } else {
++        return rand() % ltfwu_cfg.skip_mod;
++    }
++}
++
++static void
++ltfwu_skip(void)
++{
++    g_log_info.li_next_index += ltfwu_skip_amount();
++}
++
++static void
++ltfwu_write_entry(void)
++{
++    uint8_t body[LTFWU_MAX_BODY_LEN];
++    uint32_t idx;
++    int rc;
++
++    ltfwu_skip();
++    idx = g_log_info.li_next_index;
++
++    memset(body, idx, ltfwu_cfg.body_len);
++
++    rc = log_append_body(&ltfwu_log, 0, 255, LOG_ETYPE_BINARY, body,
++                         ltfwu_cfg.body_len);
++    TEST_ASSERT_FATAL(rc == 0);
++}
++
++static void
++ltfwu_populate_log(int count)
++{
++    int i;
++
++    for (i = 0; i < count; i++) {
++        ltfwu_write_entry();
++    }
++}
++
++struct ltfwu_walk_arg {
++    int start_idx;
++    int amount_before;
++    int amount_total;
++};
++
++static int
++ltfwu_verify_log_walk(struct log *log, struct log_offset *log_offset,
++                      const struct log_entry_hdr *hdr, void *dptr,
++                      uint16_t len)
++{
++    struct ltfwu_walk_arg *arg;
++    struct log_storage_info info;
++    int rc;
++
++    arg = log_offset->lo_arg;
++    if (arg->start_idx == 0) {
++        arg->start_idx = hdr->ue_index;
++    }
++
++    rc = log_set_watermark(&ltfwu_log, hdr->ue_index);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = log_storage_info(&ltfwu_log, &info);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    TEST_ASSERT(info.size - info.used_unread >= arg->amount_before);
++    TEST_ASSERT(info.used_unread < arg->amount_total);
++    TEST_ASSERT(info.used_unread <= info.used);
++    TEST_ASSERT(info.size == arg->amount_total);
++
++    arg->amount_before += len;
++
++    return 0;
++}
++
++static void
++ltfwu_verify_log(void)
++{
++    struct log_offset log_offset;
++    struct log_storage_info info;
++    struct ltfwu_walk_arg arg;
++    int rc;
++
++    memset(&arg, 0, sizeof(arg));
++    log_offset = (struct log_offset) {
++        .lo_arg = &arg,
++        .lo_index = 0,
++        .lo_ts = 0,
++        .lo_data_len = 0,
++    };
++
++    rc = log_storage_info(&ltfwu_log, &info);
++    TEST_ASSERT_FATAL(rc == 0);
++    TEST_ASSERT(info.size > 0);
++    TEST_ASSERT(info.size == 8 * LTFWU_SECTOR_SIZE);
++    TEST_ASSERT(info.used > 0);
++    TEST_ASSERT(info.used < info.size);
++    arg.amount_total = info.size;
++
++    rc = log_walk_body(&ltfwu_log, ltfwu_verify_log_walk, &log_offset);
++    TEST_ASSERT_FATAL(rc == 0);
++}
++
++static void
++ltfwu_init(const struct ltfwu_cfg *cfg)
++{
++    int rc;
++
++    /* Ensure tests are repeatable. */
++    srand(0);
++
++    ltfwu_cfg = *cfg;
++
++    ltfwu_fcb_log = (struct fcb_log) {
++        .fl_fcb.f_scratch_cnt = 1,
++        .fl_fcb.f_range_cnt = 1,
++        .fl_fcb.f_sector_cnt = ltfwu_fcb_range.fsr_sector_count,
++        .fl_fcb.f_ranges = &ltfwu_fcb_range,
++        .fl_fcb.f_magic = 0xBEADBAFA,
++        .fl_fcb.f_version = 0,
++    };
++
++    rc = flash_area_erase(&ltfwu_fcb_range.fsr_flash_area, 0,
++                          ltfwu_fcb_range.fsr_flash_area.fa_size);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    rc = fcb_init(&ltfwu_fcb_log.fl_fcb);
++    TEST_ASSERT_FATAL(rc == 0);
++
++    log_register("log", &ltfwu_log, &log_fcb_handler, &ltfwu_fcb_log,
++                 LOG_SYSLEVEL);
++}
++
++void
++ltfwu_test_once(const struct ltfwu_cfg *cfg)
++{
++    int i;
++
++    ltfwu_init(cfg);
++
++    /* Do this three times:
++     * 1. Write a bunch of entries to the log.
++     * 2. Walk the log, watermark spot and check that storage report
++     *    gives sane looking values.
++     *
++     * This procedure is repeated three times to ensure that the FCB is rotated
++     * between walks.
++     */
++    for (i = 0; i < 3; i++) {
++        ltfwu_populate_log(cfg->pop_count);
++
++        ltfwu_verify_log();
++    }
++}
+diff --git a/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s0.c b/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s0.c
+new file mode 100644
+index 000000000..ca0d5dcf8
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s0.c
+@@ -0,0 +1,31 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_watermarks.h"
++
++TEST_CASE_SELF(log_test_case_fcb_watermarks_s0)
++{
++    struct ltfwu_cfg cfg = {
++        .skip_mod = 0,
++        .body_len = 10,
++        .pop_count = 100
++    };
++    ltfwu_test_once(&cfg);
++}
+diff --git a/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s10.c b/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s10.c
+new file mode 100644
+index 000000000..f2f1a8885
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s10.c
+@@ -0,0 +1,31 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_watermarks.h"
++
++TEST_CASE_SELF(log_test_case_fcb_watermarks_s10)
++{
++    struct ltfwu_cfg cfg = {
++        .skip_mod = 10,
++        .body_len = 100,
++        .pop_count = 2000,
++    };
++    ltfwu_test_once(&cfg);
++}
+diff --git a/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s100.c b/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s100.c
+new file mode 100644
+index 000000000..479785598
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_watermarks/src/testcases/test_s100.c
+@@ -0,0 +1,31 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++#include "log_test_fcb_watermarks.h"
++
++TEST_CASE_SELF(log_test_case_fcb_watermarks_s100)
++{
++    struct ltfwu_cfg cfg = {
++        .skip_mod = 100,
++        .body_len = 400,
++        .pop_count = 2000,
++    };
++    ltfwu_test_once(&cfg);
++}
+diff --git a/sys/log/full/selftest/fcb2_watermarks/syscfg.yml b/sys/log/full/selftest/fcb2_watermarks/syscfg.yml
+new file mode 100644
+index 000000000..90a22ee71
+--- /dev/null
++++ b/sys/log/full/selftest/fcb2_watermarks/syscfg.yml
+@@ -0,0 +1,25 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++syscfg.vals:
++    LOG_VERSION: 3
++    LOG_FCB2: 1
++    LOG_STORAGE_INFO: 1
++    LOG_STORAGE_WATERMARK: 1
++    MCU_FLASH_STYLE_ST: 0
++    MCU_FLASH_STYLE_NORDIC: 1
+diff --git a/sys/log/full/selftest/fcb_bookmarks/src/log_test_fcb_bookmarks_util.c b/sys/log/full/selftest/fcb_bookmarks/src/log_test_fcb_bookmarks_util.c
+index 25a8b3683..0ef66edf9 100644
+--- a/sys/log/full/selftest/fcb_bookmarks/src/log_test_fcb_bookmarks_util.c
++++ b/sys/log/full/selftest/fcb_bookmarks/src/log_test_fcb_bookmarks_util.c
+@@ -38,7 +38,7 @@ static int ltfbu_num_entry_idxs;
+ static struct fcb_log ltfbu_fcb_log;
+ static struct log ltfbu_log;
+ 
+-static struct fcb_log_bmark ltfbu_bmarks[LTFBU_MAX_BMARKS];
++static struct log_fcb_bmark ltfbu_bmarks[LTFBU_MAX_BMARKS];
+ 
+ static struct flash_area ltfbu_fcb_areas[] = {
+     [0] = {
+@@ -99,7 +99,7 @@ ltfbu_expected_idxs(uint32_t start_idx)
+         first++;
+         count--;
+     }
+-    
++
+     return (struct ltfbu_slice) {
+         .idxs = &ltfbu_entry_idxs[first],
+         .count = count,
+@@ -231,7 +231,7 @@ ltfbu_init(const struct ltfbu_cfg *cfg)
+     TEST_ASSERT_FATAL(rc == 0);
+ 
+     if (cfg->bmark_count > 0) {
+-        fcb_log_init_bmarks(&ltfbu_fcb_log, ltfbu_bmarks, cfg->bmark_count);
++        log_fcb_init_bmarks(&ltfbu_fcb_log, ltfbu_bmarks, cfg->bmark_count);
+     }
+ 
+     log_register("log", &ltfbu_log, &log_fcb_handler, &ltfbu_fcb_log,
+diff --git a/sys/log/full/selftest/util/src/log_test_util.c b/sys/log/full/selftest/util/src/log_test_util.c
+index fab5dd866..1682e0431 100644
+--- a/sys/log/full/selftest/util/src/log_test_util.c
++++ b/sys/log/full/selftest/util/src/log_test_util.c
+@@ -19,6 +19,7 @@
+ 
+ #include "log_test_util/log_test_util.h"
+ 
++#if MYNEWT_VAL(LOG_FCB)
+ static struct flash_area fcb_areas[] = {
+     [0] = {
+         .fa_off = 0x00000000,
+@@ -29,6 +30,18 @@ static struct flash_area fcb_areas[] = {
+         .fa_size = 16 * 1024
+     }
+ };
++#endif
++#if MYNEWT_VAL(LOG_FCB2)
++static struct flash_sector_range fcb_range = {
++    .fsr_flash_area = {
++        .fa_off = 0,
++        .fa_size = 32 * 1024
++    },
++    .fsr_sector_count = 2,
++    .fsr_sector_size = 16 * 1024,
++    .fsr_align = MYNEWT_VAL(MCU_FLASH_MIN_WRITE_SIZE)
++};
++#endif
+ 
+ static int ltu_str_idx = 0;
+ static int ltu_str_max_idx = 0;
+@@ -99,15 +112,25 @@ ltu_setup_fcb(struct fcb_log *fcb_log, struct log *log)
+ 
+     *fcb_log = (struct fcb_log) { 0 };
+ 
+-    fcb_log->fl_fcb.f_sectors = fcb_areas;
+-    fcb_log->fl_fcb.f_sector_cnt = sizeof(fcb_areas) / sizeof(fcb_areas[0]);
+     fcb_log->fl_fcb.f_magic = 0x7EADBADF;
+     fcb_log->fl_fcb.f_version = 0;
+-
++#if MYNEWT_VAL(LOG_FCB)
++    fcb_log->fl_fcb.f_sectors = fcb_areas;
++    fcb_log->fl_fcb.f_sector_cnt = sizeof(fcb_areas) / sizeof(fcb_areas[0]);
+     for (i = 0; i < fcb_log->fl_fcb.f_sector_cnt; i++) {
+         rc = flash_area_erase(&fcb_areas[i], 0, fcb_areas[i].fa_size);
+         TEST_ASSERT(rc == 0);
+     }
++#endif
++#if MYNEWT_VAL(LOG_FCB2)
++    (void)i;
++    fcb_log->fl_fcb.f_range_cnt = 1;
++    fcb_log->fl_fcb.f_sector_cnt = fcb_range.fsr_sector_count;
++    fcb_log->fl_fcb.f_ranges = &fcb_range;
++    rc = flash_area_erase(&fcb_range.fsr_flash_area, 0,
++                          fcb_range.fsr_flash_area.fa_size);
++#endif
++
+     rc = fcb_init(&fcb_log->fl_fcb);
+     TEST_ASSERT(rc == 0);
+ 

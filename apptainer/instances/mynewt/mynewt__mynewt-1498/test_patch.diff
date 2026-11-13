@@ -1,0 +1,1163 @@
+diff --git a/fs/fcb2/test/pkg.yml b/fs/fcb2/test/pkg.yml
+new file mode 100644
+index 000000000..1fb6dc11a
+--- /dev/null
++++ b/fs/fcb2/test/pkg.yml
+@@ -0,0 +1,30 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: fs/fcb2/test
++pkg.type: unittest
++pkg.description: "FCB unit tests."
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.deps: 
++    - "@apache-mynewt-core/test/testutil"
++    - "@apache-mynewt-core/fs/fcb2"
++
++pkg.deps.SELFTEST:
++    - "@apache-mynewt-core/sys/console/stub"
+diff --git a/fs/fcb2/test/src/fcb_test.c b/fs/fcb2/test/src/fcb_test.c
+new file mode 100644
+index 000000000..bdbdba5f5
+--- /dev/null
++++ b/fs/fcb2/test/src/fcb_test.c
+@@ -0,0 +1,205 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <stdio.h>
++#include <string.h>
++
++#include "os/mynewt.h"
++#include "testutil/testutil.h"
++
++#include "fcb/fcb.h"
++#include "fcb/../../src/fcb_priv.h"
++
++#include "fcb_test.h"
++
++#include "flash_map/flash_map.h"
++
++#if MYNEWT_VAL(SELFTEST)
++
++struct fcb test_fcb;
++
++#if MYNEWT_VAL(SELFTEST)
++struct flash_sector_range test_fcb_ranges[] = {
++    [0] = {
++        .fsr_flash_area = {
++            .fa_device_id = 0,
++            .fa_off = 0,
++            .fa_size = 0x10000, /* 64K */
++        },
++        .fsr_range_start = 0,
++        .fsr_first_sector = 0,
++        .fsr_sector_size = 0x4000, /* 16 K */
++        .fsr_sector_count = 4,
++        .fsr_align = 1,
++    },
++};
++
++void
++fcb_test_wipe(void)
++{
++    int i;
++    int rc;
++    struct flash_area *fap;
++
++    for (i = 0; i < sizeof(test_fcb_ranges) / sizeof(test_fcb_ranges[0]); i++) {
++        fap = &test_fcb_ranges[i].fsr_flash_area;
++        rc = flash_area_erase(fap, 0, fap->fa_size);
++        TEST_ASSERT(rc == 0);
++    }
++}
++#endif
++
++int
++fcb_test_empty_walk_cb(struct fcb_entry *loc, void *arg)
++{
++    TEST_ASSERT(0);
++    return 0;
++}
++
++uint8_t
++fcb_test_append_data(int msg_len, int off)
++{
++    return (msg_len ^ off);
++}
++
++int
++fcb_test_data_walk_cb(struct fcb_entry *loc, void *arg)
++{
++    uint16_t len;
++    uint8_t test_data[128];
++    int rc;
++    int i;
++    int *var_cnt = (int *)arg;
++
++    len = loc->fe_data_len;
++
++    TEST_ASSERT(len == *var_cnt);
++
++    rc = fcb_read(loc, 0, test_data, len);
++    TEST_ASSERT(rc == 0);
++
++    for (i = 0; i < len; i++) {
++        TEST_ASSERT(test_data[i] == fcb_test_append_data(len, i));
++    }
++    (*var_cnt)++;
++    return 0;
++}
++
++int
++fcb_test_cnt_elems_cb(struct fcb_entry *loc, void *arg)
++{
++    struct append_arg *aa = (struct append_arg *)arg;
++    int idx;
++
++    idx = loc->fe_sector;
++    aa->elem_cnts[idx]++;
++    return 0;
++}
++
++void
++fcb_tc_pretest(void* arg)
++{
++    struct fcb *fcb;
++    int rc = 0;
++
++    fcb_test_wipe();
++    fcb = &test_fcb;
++    memset(fcb, 0, sizeof(*fcb));
++    fcb->f_sector_cnt = (int)arg;
++    fcb->f_ranges = test_fcb_ranges; /* XXX */
++    fcb->f_range_cnt = 1;
++    test_fcb_ranges[0].fsr_sector_count = (int)arg;
++    test_fcb_ranges[0].fsr_flash_area.fa_size = test_fcb_ranges[0].fsr_sector_size * (int)arg;
++
++    rc = fcb_init(fcb);
++    if (rc != 0) {
++        printf("fcb_tc_pretest rc == %x, %d\n", rc, rc);
++        TEST_ASSERT(rc == 0);
++    }
++
++    return;
++}
++
++void
++fcb_ts_init(void *arg)
++{
++    return;
++}
++
++TEST_CASE_DECL(fcb_test_init)
++TEST_CASE_DECL(fcb_test_empty_walk)
++TEST_CASE_DECL(fcb_test_append)
++TEST_CASE_DECL(fcb_test_append_too_big)
++TEST_CASE_DECL(fcb_test_append_fill)
++TEST_CASE_DECL(fcb_test_reset)
++TEST_CASE_DECL(fcb_test_rotate)
++TEST_CASE_DECL(fcb_test_multiple_scratch)
++TEST_CASE_DECL(fcb_test_last_of_n)
++TEST_CASE_DECL(fcb_test_area_info)
++
++TEST_SUITE(fcb_test_all)
++{
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)2);
++
++    /* pretest not needed */
++    fcb_test_init();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)2);
++    fcb_test_empty_walk();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)2);
++    fcb_test_append();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)2);
++    fcb_test_append_too_big();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)2);
++    fcb_test_append_fill();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)2);
++    fcb_test_reset();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)2);
++    fcb_test_rotate();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)4);
++    fcb_test_multiple_scratch();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)4);
++    fcb_test_last_of_n();
++
++    tu_case_set_pre_cb(fcb_tc_pretest, (void*)2);
++    fcb_test_area_info();
++
++}
++
++#if MYNEWT_VAL(SELFTEST)
++int
++main(int argc, char **argv)
++{
++    sysinit();
++
++    tu_suite_set_init_cb(fcb_ts_init, NULL);
++    fcb_test_all();
++
++    return tu_any_failed;
++}
++#endif
++
++#endif /* MYNEWT_VAL(SELFTEST) */
+diff --git a/fs/fcb2/test/src/fcb_test.h b/fs/fcb2/test/src/fcb_test.h
+new file mode 100644
+index 000000000..b25d4b73a
+--- /dev/null
++++ b/fs/fcb2/test/src/fcb_test.h
+@@ -0,0 +1,52 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#ifndef _FCB_TEST_H
++#define _FCB_TEST_H
++
++#include <stdio.h>
++#include <string.h>
++
++#include "os/mynewt.h"
++#include "testutil/testutil.h"
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++#ifdef __cplusplus
++#extern "C" {
++#endif
++
++extern struct fcb test_fcb;
++
++extern struct flash_sector_range test_fcb_ranges[];
++
++struct append_arg {
++    int *elem_cnts;
++};
++
++void fcb_test_wipe(void);
++int fcb_test_empty_walk_cb(struct fcb_entry *loc, void *arg);
++uint8_t fcb_test_append_data(int msg_len, int off);
++int fcb_test_data_walk_cb(struct fcb_entry *loc, void *arg);
++int fcb_test_cnt_elems_cb(struct fcb_entry *loc, void *arg);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* _FCB_TEST_H */
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_append.c b/fs/fcb2/test/src/testcases/fcb_test_append.c
+new file mode 100644
+index 000000000..9b4e9b941
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_append.c
+@@ -0,0 +1,49 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_append)
++{
++    int rc;
++    struct fcb *fcb;
++    struct fcb_entry loc;
++    uint8_t test_data[128];
++    int i;
++    int j;
++    int var_cnt;
++
++    fcb = &test_fcb;
++
++    for (i = 1; i < sizeof(test_data); i++) {
++        for (j = 0; j < i; j++) {
++            test_data[j] = fcb_test_append_data(i, j);
++        }
++        rc = fcb_append(fcb, i, &loc);
++        TEST_ASSERT_FATAL(rc == 0);
++        rc = fcb_write(&loc, 0, test_data, i);
++        TEST_ASSERT(rc == 0);
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++    }
++
++    var_cnt = 1;
++    rc = fcb_walk(fcb, 0, fcb_test_data_walk_cb, &var_cnt);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(var_cnt == sizeof(test_data));
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_append_fill.c b/fs/fcb2/test/src/testcases/fcb_test_append_fill.c
+new file mode 100644
+index 000000000..f514e003f
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_append_fill.c
+@@ -0,0 +1,82 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_append_fill)
++{
++    struct fcb *fcb;
++    int rc;
++    int i;
++    struct fcb_entry loc;
++    uint8_t test_data[128];
++    int elem_cnts[2] = {0, 0};
++    int aa_together_cnts[2];
++    struct append_arg aa_together = {
++        .elem_cnts = aa_together_cnts
++    };
++    int aa_separate_cnts[2];
++    struct append_arg aa_separate = {
++        .elem_cnts = aa_separate_cnts
++    };
++
++    fcb = &test_fcb;
++
++    for (i = 0; i < sizeof(test_data); i++) {
++        test_data[i] = fcb_test_append_data(sizeof(test_data), i);
++    }
++
++    while (1) {
++        rc = fcb_append(fcb, sizeof(test_data), &loc);
++        if (rc == FCB_ERR_NOSPACE) {
++            break;
++        }
++        if (loc.fe_sector == 0) {
++            elem_cnts[0]++;
++        } else if (loc.fe_sector == 1) {
++            elem_cnts[1]++;
++        } else {
++            TEST_ASSERT(0);
++        }
++
++        rc = fcb_write(&loc, 0, test_data, sizeof(test_data));
++        TEST_ASSERT(rc == 0);
++
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++    }
++    TEST_ASSERT(elem_cnts[0] > 0);
++    TEST_ASSERT(elem_cnts[0] == elem_cnts[1]);
++
++    memset(&aa_together_cnts, 0, sizeof(aa_together_cnts));
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_cnt_elems_cb, &aa_together);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(aa_together.elem_cnts[0] == elem_cnts[0]);
++    TEST_ASSERT(aa_together.elem_cnts[1] == elem_cnts[1]);
++
++    memset(&aa_separate_cnts, 0, sizeof(aa_separate_cnts));
++    rc = fcb_walk(fcb, 0, fcb_test_cnt_elems_cb,
++      &aa_separate);
++    TEST_ASSERT(rc == 0);
++    rc = fcb_walk(fcb, 1, fcb_test_cnt_elems_cb,
++      &aa_separate);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(aa_separate.elem_cnts[0] == elem_cnts[0]);
++    TEST_ASSERT(aa_separate.elem_cnts[1] == elem_cnts[1]);
++
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_append_too_big.c b/fs/fcb2/test/src/testcases/fcb_test_append_too_big.c
+new file mode 100644
+index 000000000..990e6d1a5
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_append_too_big.c
+@@ -0,0 +1,58 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_append_too_big)
++{
++    struct fcb *fcb;
++    int rc;
++    int len;
++    struct fcb_entry elem_loc;
++
++    fcb = &test_fcb;
++
++    /*
++     * Max element which fits inside sector is
++     * sector size - (disk header + crc + 6 bytes of entry).
++     */
++    len = fcb->f_active.fe_range->fsr_sector_size;
++
++    rc = fcb_append(fcb, len, &elem_loc);
++    TEST_ASSERT(rc != 0);
++
++    len--;
++    rc = fcb_append(fcb, len, &elem_loc);
++    TEST_ASSERT(rc != 0);
++
++    len -= sizeof(struct fcb_disk_area);
++    rc = fcb_append(fcb, len, &elem_loc);
++    TEST_ASSERT(rc != 0);
++
++    len = fcb->f_active.fe_range->fsr_sector_size -
++      (sizeof(struct fcb_disk_area) + 2 + 6);
++    rc = fcb_append(fcb, len, &elem_loc);
++    TEST_ASSERT(rc == 0);
++
++    rc = fcb_append_finish(&elem_loc);
++    TEST_ASSERT(rc == 0);
++
++    rc = fcb_elem_info(&elem_loc);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(elem_loc.fe_data_len == len);
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_area_info.c b/fs/fcb2/test/src/testcases/fcb_test_area_info.c
+new file mode 100644
+index 000000000..d8dd223fc
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_area_info.c
+@@ -0,0 +1,108 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_area_info)
++{
++    struct fcb *fcb;
++    int rc;
++    int i;
++    struct fcb_entry loc;
++    uint8_t test_data[128];
++    int elem_cnts[2] = {0, 0};
++    int area_elems[2];
++    int area_bytes[2];
++
++    fcb = &test_fcb;
++
++    /* check that sector outside of range fails */
++    rc = fcb_area_info(fcb, fcb->f_sector_cnt, area_elems, area_bytes);
++    TEST_ASSERT(rc == FCB_ERR_ARGS);
++    rc = fcb_area_info(fcb, fcb->f_sector_cnt + 1, area_elems, area_bytes);
++    TEST_ASSERT(rc == FCB_ERR_ARGS);
++
++    /* output arguments are optional */
++    rc = fcb_area_info(fcb, 0, NULL, NULL);
++    TEST_ASSERT(rc == 0);
++
++    /*
++     * Should be empty, with elem count and byte count zero.
++     */
++    for (i = 0; i < 2; i++) {
++        rc = fcb_area_info(fcb, 0, &area_elems[i],
++                           &area_bytes[i]);
++        TEST_ASSERT(rc == 0);
++        TEST_ASSERT(area_elems[i] == 0);
++        TEST_ASSERT(area_bytes[i] == 0);
++    }
++
++    /*
++     * Fill up the areas, make sure that reporting is ok.
++     */
++    while (1) {
++        rc = fcb_append(fcb, sizeof(test_data), &loc);
++        if (rc == FCB_ERR_NOSPACE) {
++            break;
++        }
++        if (loc.fe_sector == 0) {
++            elem_cnts[0]++;
++        } else if (loc.fe_sector == 1) {
++            elem_cnts[1]++;
++        } else {
++            TEST_ASSERT(0);
++        }
++
++        rc = fcb_write(&loc, 0, test_data, sizeof(test_data));
++        TEST_ASSERT(rc == 0);
++
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++
++        for (i = 0; i < 2; i++) {
++            rc = fcb_area_info(fcb, i, &area_elems[i],
++                               &area_bytes[i]);
++            TEST_ASSERT(rc == 0);
++            TEST_ASSERT(area_elems[i] == elem_cnts[i]);
++            TEST_ASSERT(area_bytes[i] == elem_cnts[i] * sizeof(test_data));
++        }
++    }
++
++    /*
++     * Wipe out the oldest, should report zeroes for that area now.
++     */
++    rc = fcb_rotate(fcb);
++    TEST_ASSERT(rc == 0);
++
++    rc = fcb_area_info(fcb, 0, &area_elems[0], &area_bytes[0]);
++    TEST_ASSERT(rc == 0);
++    rc = fcb_area_info(fcb, 1, &area_elems[1], &area_bytes[1]);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(area_elems[0] == 0);
++    TEST_ASSERT(area_bytes[0] == 0);
++    TEST_ASSERT(area_elems[1] == elem_cnts[1]);
++    TEST_ASSERT(area_bytes[1] == elem_cnts[1] * sizeof(test_data));
++
++    /*
++     * Test oldest sector should be sector area 1.
++     */
++    rc = fcb_area_info(fcb, FCB_SECTOR_OLDEST, &area_elems[0], &area_bytes[0]);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(area_elems[0] == elem_cnts[1]);
++    TEST_ASSERT(area_bytes[0] == elem_cnts[1] * sizeof(test_data));
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_empty_walk.c b/fs/fcb2/test/src/testcases/fcb_test_empty_walk.c
+new file mode 100644
+index 000000000..dccf4bfbd
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_empty_walk.c
+@@ -0,0 +1,30 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_empty_walk)
++{
++    int rc;
++    struct fcb *fcb;
++
++    fcb = &test_fcb;
++
++    rc = fcb_walk(fcb, 0, fcb_test_empty_walk_cb, NULL);
++    TEST_ASSERT(rc == 0);
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_init.c b/fs/fcb2/test/src/testcases/fcb_test_init.c
+new file mode 100644
+index 000000000..1103ca59b
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_init.c
+@@ -0,0 +1,47 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_init)
++{
++    int rc;
++    struct fcb *fcb;
++
++    fcb = &test_fcb;
++    memset(fcb, 0, sizeof(*fcb));
++
++    rc = fcb_init(fcb);
++    TEST_ASSERT(rc == FCB_ERR_ARGS);
++
++    fcb->f_ranges = test_fcb_ranges;
++
++    rc = fcb_init(fcb);
++    TEST_ASSERT(rc == FCB_ERR_ARGS);
++
++    fcb->f_sector_cnt = 2;
++    fcb->f_magic = 0x12345678;
++    fcb->f_range_cnt = 1;
++    fcb->f_ranges[0].fsr_flash_area.fa_size = 2 * fcb->f_ranges[0].fsr_sector_size;
++    rc = fcb_init(fcb);
++    TEST_ASSERT(rc == FCB_ERR_MAGIC);
++
++    fcb->f_magic = 0;
++    rc = fcb_init(fcb);
++    TEST_ASSERT(rc == 0);
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_last_of_n.c b/fs/fcb2/test/src/testcases/fcb_test_last_of_n.c
+new file mode 100644
+index 000000000..cbe489d2c
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_last_of_n.c
+@@ -0,0 +1,83 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_last_of_n)
++{
++    const uint8_t ENTRIES = 5;
++    struct fcb *fcb;
++    int rc;
++    struct fcb_entry loc;
++    struct fcb_entry areas[ENTRIES];
++    uint8_t test_data[128];
++    uint8_t i;
++
++    fcb = &test_fcb;
++    fcb->f_scratch_cnt = 1;
++
++    /* No fcbs available */
++    rc = fcb_offset_last_n(fcb, 1, &loc);
++    assert (rc != 0);
++
++    /*
++     * Add some fcbs.
++     */
++    for (i = 0; i < ENTRIES; i++) {
++        rc = fcb_append(fcb, sizeof(test_data), &loc);
++        if (rc == FCB_ERR_NOSPACE) {
++            break;
++        }
++
++        rc = fcb_write(&loc, 0, test_data, sizeof(test_data));
++        TEST_ASSERT(rc == 0);
++
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++
++        areas[i] = loc;
++    }
++
++    /* last entry */
++    rc = fcb_offset_last_n(fcb, 1, &loc);
++    assert (rc == 0);
++    assert (areas[4].fe_sector == loc.fe_sector);
++    assert (areas[4].fe_data_off == loc.fe_data_off);
++    assert (areas[4].fe_data_len == loc.fe_data_len);
++
++    /* somewhere in the middle */
++    rc = fcb_offset_last_n(fcb, 3, &loc);
++    assert (rc == 0);
++    assert (areas[2].fe_sector == loc.fe_sector);
++    assert (areas[2].fe_data_off == loc.fe_data_off);
++    assert (areas[2].fe_data_len == loc.fe_data_len);
++
++    /* first entry */
++    rc = fcb_offset_last_n(fcb, 5, &loc);
++    assert (rc == 0);
++    assert (areas[0].fe_sector == loc.fe_sector);
++    assert (areas[0].fe_data_off == loc.fe_data_off);
++    assert (areas[0].fe_data_len == loc.fe_data_len);
++
++    /* after last valid entry, returns the first one like for 5 */
++    rc = fcb_offset_last_n(fcb, 6, &loc);
++    assert (rc == 0);
++    assert (areas[0].fe_sector == loc.fe_sector);
++    assert (areas[0].fe_data_off == loc.fe_data_off);
++    assert (areas[0].fe_data_len == loc.fe_data_len);
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_multiple_scratch.c b/fs/fcb2/test/src/testcases/fcb_test_multiple_scratch.c
+new file mode 100644
+index 000000000..6403dbe2a
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_multiple_scratch.c
+@@ -0,0 +1,101 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_multiple_scratch)
++{
++    struct fcb *fcb;
++    int rc;
++    struct fcb_entry loc;
++    uint8_t test_data[128];
++    int elem_cnts[4];
++    int idx;
++    int cnts[4];
++    struct append_arg aa_arg = {
++        .elem_cnts = cnts
++    };
++
++    fcb = &test_fcb;
++    fcb->f_scratch_cnt = 1;
++
++    /*
++     * Now fill up everything. We should be able to get 3 of the sectors
++     * full.
++     */
++    memset(elem_cnts, 0, sizeof(elem_cnts));
++    while (1) {
++        rc = fcb_append(fcb, sizeof(test_data), &loc);
++        if (rc == FCB_ERR_NOSPACE) {
++            break;
++        }
++        idx = loc.fe_sector;
++        elem_cnts[idx]++;
++
++        rc = fcb_write(&loc, 0, test_data, sizeof(test_data));
++        TEST_ASSERT(rc == 0);
++
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++    }
++
++    TEST_ASSERT(elem_cnts[0] > 0);
++    TEST_ASSERT(elem_cnts[0] == elem_cnts[1] && elem_cnts[0] == elem_cnts[2]);
++    TEST_ASSERT(elem_cnts[3] == 0);
++
++    /*
++     * Ask to use scratch block, then fill it up.
++     */
++    rc = fcb_append_to_scratch(fcb);
++    TEST_ASSERT(rc == 0);
++
++    while (1) {
++        rc = fcb_append(fcb, sizeof(test_data), &loc);
++        if (rc == FCB_ERR_NOSPACE) {
++            break;
++        }
++        idx = loc.fe_sector;
++        elem_cnts[idx]++;
++
++        rc = fcb_write(&loc, 0, test_data, sizeof(test_data));
++        TEST_ASSERT(rc == 0);
++
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++    }
++    TEST_ASSERT(elem_cnts[3] == elem_cnts[0]);
++
++    /*
++     * Rotate
++     */
++    rc = fcb_rotate(fcb);
++    TEST_ASSERT(rc == 0);
++
++    memset(&cnts, 0, sizeof(cnts));
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_cnt_elems_cb, &aa_arg);
++    TEST_ASSERT(rc == 0);
++
++    TEST_ASSERT(cnts[0] == 0);
++    TEST_ASSERT(cnts[1] > 0);
++    TEST_ASSERT(cnts[1] == cnts[2] && cnts[1] == cnts[3]);
++
++    rc = fcb_append_to_scratch(fcb);
++    TEST_ASSERT(rc == 0);
++    rc = fcb_append_to_scratch(fcb);
++    TEST_ASSERT(rc != 0);
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_reset.c b/fs/fcb2/test/src/testcases/fcb_test_reset.c
+new file mode 100644
+index 000000000..706245d48
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_reset.c
+@@ -0,0 +1,140 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_reset)
++{
++    struct fcb *fcb;
++    int rc;
++    int i;
++    struct fcb_entry loc;
++    uint8_t test_data[128];
++    int var_cnt;
++
++    fcb = &test_fcb;
++
++    var_cnt = 0;
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_data_walk_cb, &var_cnt);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(var_cnt == 0);
++
++    rc = fcb_append(fcb, 32, &loc);
++    TEST_ASSERT(rc == 0);
++
++    /*
++     * No ready ones yet. CRC should not match.
++     */
++    var_cnt = 0;
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_data_walk_cb, &var_cnt);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(var_cnt == 0);
++
++    for (i = 0; i < sizeof(test_data); i++) {
++        test_data[i] = fcb_test_append_data(32, i);
++    }
++    rc = fcb_write(&loc, 0, test_data, 32);
++    TEST_ASSERT(rc == 0);
++
++    rc = fcb_append_finish(&loc);
++    TEST_ASSERT(rc == 0);
++
++    /*
++     * one entry
++     */
++    var_cnt = 32;
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_data_walk_cb, &var_cnt);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(var_cnt == 33);
++
++    /*
++     * Pretend reset
++     */
++    memset(fcb, 0, sizeof(*fcb));
++    fcb->f_range_cnt = 1;
++    fcb->f_sector_cnt = 2;
++    fcb->f_ranges = test_fcb_ranges;
++
++    rc = fcb_init(fcb);
++    TEST_ASSERT(rc == 0);
++
++    var_cnt = 32;
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_data_walk_cb, &var_cnt);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(var_cnt == 33);
++
++    rc = fcb_append(fcb, 33, &loc);
++    TEST_ASSERT(rc == 0);
++
++    for (i = 0; i < sizeof(test_data); i++) {
++        test_data[i] = fcb_test_append_data(33, i);
++    }
++    rc = fcb_write(&loc, 0, test_data, 33);
++    TEST_ASSERT(rc == 0);
++
++    rc = fcb_append_finish(&loc);
++    TEST_ASSERT(rc == 0);
++
++    var_cnt = 32;
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_data_walk_cb, &var_cnt);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(var_cnt == 34);
++
++    /*
++     * Add partial one, make sure that we survive reset then.
++     */
++    rc = fcb_append(fcb, 34, &loc);
++    TEST_ASSERT(rc == 0);
++
++    memset(fcb, 0, sizeof(*fcb));
++    fcb->f_range_cnt = 1;
++    fcb->f_sector_cnt = 2;
++    fcb->f_ranges = test_fcb_ranges;
++
++    rc = fcb_init(fcb);
++    TEST_ASSERT(rc == 0);
++
++    /*
++     * Walk should skip that.
++     */
++    var_cnt = 32;
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_data_walk_cb, &var_cnt);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(var_cnt == 34);
++
++    /* Add a 3rd one, should go behind corrupt entry */
++    rc = fcb_append(fcb, 34, &loc);
++    TEST_ASSERT(rc == 0);
++
++    for (i = 0; i < sizeof(test_data); i++) {
++        test_data[i] = fcb_test_append_data(34, i);
++    }
++    rc = fcb_write(&loc, 0, test_data, 34);
++    TEST_ASSERT(rc == 0);
++
++    rc = fcb_append_finish(&loc);
++    TEST_ASSERT(rc == 0);
++
++    /*
++     * Walk should skip corrupt entry, but report the next one.
++     */
++    var_cnt = 32;
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_data_walk_cb, &var_cnt);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(var_cnt == 35);
++}
+diff --git a/fs/fcb2/test/src/testcases/fcb_test_rotate.c b/fs/fcb2/test/src/testcases/fcb_test_rotate.c
+new file mode 100644
+index 000000000..ac1b4c600
+--- /dev/null
++++ b/fs/fcb2/test/src/testcases/fcb_test_rotate.c
+@@ -0,0 +1,100 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include "fcb_test.h"
++
++TEST_CASE(fcb_test_rotate)
++{
++    struct fcb *fcb;
++    int rc;
++    int old_id;
++    struct fcb_entry loc;
++    uint8_t test_data[128];
++    int elem_cnts[2] = {0, 0};
++    int cnts[2];
++    struct append_arg aa_arg = {
++        .elem_cnts = cnts
++    };
++
++    fcb = &test_fcb;
++
++    old_id = fcb->f_active_id;
++    rc = fcb_rotate(fcb);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(fcb->f_active_id == old_id + 1);
++
++    /*
++     * Now fill up the
++     */
++    while (1) {
++        rc = fcb_append(fcb, sizeof(test_data), &loc);
++        if (rc == FCB_ERR_NOSPACE) {
++            break;
++        }
++        if (loc.fe_sector == 0) {
++            elem_cnts[0]++;
++        } else if (loc.fe_sector == 1) {
++            elem_cnts[1]++;
++        } else {
++            TEST_ASSERT(0);
++        }
++
++        rc = fcb_write(&loc, 0, test_data, sizeof(test_data));
++        TEST_ASSERT(rc == 0);
++
++        rc = fcb_append_finish(&loc);
++        TEST_ASSERT(rc == 0);
++    }
++    TEST_ASSERT(elem_cnts[0] > 0 && elem_cnts[0] == elem_cnts[1]);
++
++    old_id = fcb->f_active_id;
++    rc = fcb_rotate(fcb);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(fcb->f_active_id == old_id); /* no new area created */
++
++    memset(cnts, 0, sizeof(cnts));
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_cnt_elems_cb, &aa_arg);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(aa_arg.elem_cnts[0] == elem_cnts[0] ||
++      aa_arg.elem_cnts[1] == elem_cnts[1]);
++    TEST_ASSERT(aa_arg.elem_cnts[0] == 0 || aa_arg.elem_cnts[1] == 0);
++
++    /*
++     * One sector is full. The other one should have one entry in it.
++     */
++    rc = fcb_append(fcb, sizeof(test_data), &loc);
++    TEST_ASSERT(rc == 0);
++
++    rc = fcb_write(&loc, 0, test_data,
++      sizeof(test_data));
++    TEST_ASSERT(rc == 0);
++
++    rc = fcb_append_finish(&loc);
++    TEST_ASSERT(rc == 0);
++
++    old_id = fcb->f_active_id;
++    rc = fcb_rotate(fcb);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(fcb->f_active_id == old_id);
++
++    memset(cnts, 0, sizeof(cnts));
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, fcb_test_cnt_elems_cb, &aa_arg);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(aa_arg.elem_cnts[0] == 1 || aa_arg.elem_cnts[1] == 1);
++    TEST_ASSERT(aa_arg.elem_cnts[0] == 0 || aa_arg.elem_cnts[1] == 0);
++}

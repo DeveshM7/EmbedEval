@@ -34,6 +34,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import apptainer_util as au  # noqa: E402
+from mynewt_network import isolated_command  # noqa: E402
 
 from minisweagent.exceptions import Submitted  # noqa: E402
 from minisweagent.utils.serialize import recursive_merge  # noqa: E402
@@ -45,6 +46,8 @@ class ApptainerEnvironment:
     def __init__(self, *, image: str | Path, name: str, cwd: str = "/testbed",
                  layer: str | Path | None = None,
                  timeout: int = 900, setup_commands: list[str] | None = None,
+                 sandbox: bool = False, network_fixture: str | None = None,
+                 isolate_network: bool = False,
                  logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
@@ -52,12 +55,18 @@ class ApptainerEnvironment:
         if not self.image.exists():
             raise FileNotFoundError(f"instance image not built: {self.image}")
         self.cwd, self.timeout = cwd, timeout
+        # No network for the agent (scripts/mynewt_network.py): it cannot fetch
+        # the fix or read the PR. A network fixture is always isolated too.
+        self.network_fixture = network_fixture
+        self.isolate_network = isolate_network or network_fixture is not None
+        # Mynewt's native builds are much faster in a writable sandbox than in a .sif.
+        self.sandbox = au.unpack_sandbox(self.image) if sandbox else None
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = au.path("runs", f"agent-{name}-{stamp}", "x").parent
         self.overlay = self.run_dir / "overlay"
         self.overlay.mkdir(parents=True, exist_ok=True)
         self.config = {"image": str(self.image), "cwd": cwd, "timeout": timeout,
-                       "overlay": str(self.overlay)}
+                       "overlay": str(self.sandbox or self.overlay)}
         for c in setup_commands or []:
             r = self.execute({"command": c}, timeout=300)
             if r["returncode"] != 0:
@@ -76,9 +85,14 @@ class ApptainerEnvironment:
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         command = action.get("command", "")
-        cmd = au.exec_args(self.image, overlay=self.overlay, layer=self.layer, network=False)
+        # A sandbox (Mynewt) has no network either: isolate_network runs it in
+        # a namespace of its own (scripts/mynewt_network.py).
+        cmd = (au.sandbox_exec_args(self.sandbox) if self.sandbox
+               else au.exec_args(self.image, overlay=self.overlay, layer=self.layer, network=False))
         cmd[2:2] = ["--pwd", cwd or self.cwd]
         cmd += ["bash", "-c", command]
+        if self.isolate_network:
+            cmd = isolated_command(cmd, self.network_fixture)
         try:
             r = subprocess.run(cmd, text=True, encoding="utf-8", errors="replace",
                                timeout=timeout or self.timeout,
@@ -101,6 +115,9 @@ class ApptainerEnvironment:
                              "extra": {"exit_status": "Submitted", "submission": submission}})
 
     def cleanup(self) -> None:
-        """Remove the overlay -- the only state the run created."""
+        """Remove the overlay or sandbox -- the only state the run created."""
+        if getattr(self, "sandbox", None):
+            au.remove_sandbox(self.sandbox)
+            self.sandbox = None
         if getattr(self, "run_dir", None) and self.run_dir.exists():
             au.remove(self.run_dir)

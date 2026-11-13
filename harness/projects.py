@@ -45,6 +45,12 @@ _ORIENTATION = {
         "incrementally. Never run distclean or configure.sh -- reconfiguring "
         "discards the container's setup and breaks the test runner."
     ),
+    "mynewt": (
+        "The Apache Mynewt (mynewt-core) source is at /testbed; its tests are a "
+        "selftest package built with `newt` for the native simulator through a "
+        "newt project at /project. `run_tests` builds and runs every test case. "
+        "Fix library source, never the selftest package. Do not edit /project."
+    ),
     "riot": (
         "Builds use GNU Make. Tests are unit-test suites under tests/unittests that "
         "compile to a native host binary -- there is no emulator. `run_tests` already "
@@ -52,7 +58,7 @@ _ORIENTATION = {
     ),
 }
 
-# Zephyr only: twister's run_tests has its own exit codes.
+# Zephyr and Mynewt: their run_tests have exit codes of their own.
 _EXTRA_WARNINGS = {
     "zephyr": (
         "`run_tests` exit codes on this instance: 0 = all tests passed, "
@@ -61,6 +67,11 @@ _EXTRA_WARNINGS = {
         "case in the scenario passes, not just the ones listed in the task: "
         "that is what grading checks. A run takes one to several minutes; "
         "tests under QEMU include the emulator's boot."
+    ),
+    "mynewt": (
+        "`run_tests` exit codes on this instance: 0 = every test case passed, "
+        "1 = a test case failed, 2 = timed out, 3 = the build failed or the "
+        "results were incomplete."
     ),
 }
 
@@ -121,6 +132,20 @@ PROJECTS: dict[str, dict] = {
         # would mean hand-constructing a make invocation, which is RIOT's single
         # largest observed failure mode.
         "rebuild_command": "",
+    },
+    "mynewt": {
+        "label": "Apache Mynewt",
+        "orientation": _ORIENTATION["mynewt"],
+        # An instance's own warnings (metadata) follow these (harness/run.py).
+        "extra_warnings": _EXTRA_WARNINGS["mynewt"],
+        "protected_paths": ["fs/fcb2/selftest/", "kernel/os/selftest/", "encoding/json/selftest/"],
+        "needs_qemu_cleanup": False,
+        "clean_paths": [],
+        "docker_platform": "linux/amd64",
+        "runtime": "apptainer",
+        "build_command": "true",
+        "rebuild_command": "",
+        "run_command": "run_tests",
     },
 }
 

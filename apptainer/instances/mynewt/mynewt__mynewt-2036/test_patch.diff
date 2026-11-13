@@ -1,0 +1,277 @@
+diff --git a/sys/log/full/selftest/perlogidx/pkg.yml b/sys/log/full/selftest/perlogidx/pkg.yml
+new file mode 100644
+index 000000000..4e26fef31
+--- /dev/null
++++ b/sys/log/full/selftest/perlogidx/pkg.yml
+@@ -0,0 +1,29 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: sys/log/full/selftest/perlogidx
++pkg.type: unittest
++pkg.description: "Log unit tests; unique index per log."
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.deps: 
++    - "@apache-mynewt-core/sys/console/stub"
++    - "@apache-mynewt-core/sys/log/full"
++    - "@apache-mynewt-core/sys/log/full/selftest/util"
++    - "@apache-mynewt-core/test/testutil"
+diff --git a/sys/log/full/selftest/perlogidx/src/log_test_perlogidx.c b/sys/log/full/selftest/perlogidx/src/log_test_perlogidx.c
+new file mode 100644
+index 000000000..db477f35b
+--- /dev/null
++++ b/sys/log/full/selftest/perlogidx/src/log_test_perlogidx.c
+@@ -0,0 +1,31 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/mynewt.h"
++#include "log_test_util/log_test_util.h"
++
++int
++main(int argc, char **argv)
++{
++    log_test_suite_fcb_flat();
++    log_test_suite_fcb_mbuf();
++    log_test_suite_misc();
++
++    return tu_any_failed;
++}
+diff --git a/sys/log/full/selftest/perlogidx/syscfg.yml b/sys/log/full/selftest/perlogidx/syscfg.yml
+new file mode 100644
+index 000000000..d166a444a
+--- /dev/null
++++ b/sys/log/full/selftest/perlogidx/syscfg.yml
+@@ -0,0 +1,26 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++syscfg.vals:
++    LOG_FCB: 1
++    LOG_VERSION: 3
++    MCU_FLASH_MIN_WRITE_SIZE: 1
++    LOG_GLOBAL_IDX: 0
++
++    # The mbuf append tests allocate lots of mbufs; ensure no exhaustion.
++    MSYS_1_BLOCK_COUNT: 1000
+diff --git a/sys/log/full/selftest/util/include/log_test_util/log_test_util.h b/sys/log/full/selftest/util/include/log_test_util/log_test_util.h
+index c6c78f562..90b77e498 100644
+--- a/sys/log/full/selftest/util/include/log_test_util/log_test_util.h
++++ b/sys/log/full/selftest/util/include/log_test_util/log_test_util.h
+@@ -45,6 +45,8 @@ extern char *ltu_str_logs[];
+ struct os_mbuf *ltu_flat_to_fragged_mbuf(const void *flat, int len,
+                                          int frag_sz);
+ void ltu_setup_fcb(struct fcb_log *fcb_log, struct log *log);
++void ltu_setup_2fcbs(struct fcb_log *fcb_log1, struct log *log1,
++                     struct fcb_log *fcb_log2, struct log *log2);
+ void ltu_setup_cbmem(struct cbmem *cbmem, struct log *log);
+ void ltu_verify_contents(struct log *log);
+ 
+@@ -70,6 +72,8 @@ TEST_SUITE_DECL(log_test_suite_misc);
+ TEST_CASE_DECL(log_test_case_level);
+ TEST_CASE_DECL(log_test_case_append_cb);
+ 
++TEST_CASE_DECL(log_test_case_2logs);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/sys/log/full/selftest/util/src/log_test.c b/sys/log/full/selftest/util/src/log_test.c
+index 885abff9c..80939d7e0 100644
+--- a/sys/log/full/selftest/util/src/log_test.c
++++ b/sys/log/full/selftest/util/src/log_test.c
+@@ -50,4 +50,7 @@ TEST_SUITE(log_test_suite_misc)
+ {
+     log_test_case_level();
+     log_test_case_append_cb();
++#if MYNEWT_VAL(LOG_FCB)
++    log_test_case_2logs();
++#endif
+ }
+diff --git a/sys/log/full/selftest/util/src/log_test_util.c b/sys/log/full/selftest/util/src/log_test_util.c
+index bd4e30350..2447cbb61 100644
+--- a/sys/log/full/selftest/util/src/log_test_util.c
++++ b/sys/log/full/selftest/util/src/log_test_util.c
+@@ -138,6 +138,41 @@ ltu_setup_fcb(struct fcb_log *fcb_log, struct log *log)
+     log_register("log", log, &log_fcb_handler, fcb_log, LOG_SYSLEVEL);
+ }
+ 
++void
++ltu_setup_2fcbs(struct fcb_log *fcb_log1, struct log *log1,
++                struct fcb_log *fcb_log2, struct log *log2)
++{
++#if MYNEWT_VAL(LOG_FCB)
++    int rc;
++    int i;
++
++    for (i = 0; i < sizeof(fcb_areas) / sizeof(fcb_areas[0]); i++) {
++        rc = flash_area_erase(&fcb_areas[i], 0, fcb_areas[i].fa_size);
++        TEST_ASSERT(rc == 0);
++    }
++
++    memset(fcb_log1, 0, sizeof(struct fcb_log));
++    fcb_log1->fl_fcb.f_magic = 0x7EADBADF;
++    fcb_log1->fl_fcb.f_version = 0;
++    fcb_log1->fl_fcb.f_sectors = &fcb_areas[0];
++    fcb_log1->fl_fcb.f_sector_cnt = 1;
++    rc = fcb_init(&fcb_log1->fl_fcb);
++    TEST_ASSERT(rc == 0);
++    log_register("log1", log1, &log_fcb_handler, fcb_log1, LOG_SYSLEVEL);
++
++    memset(fcb_log2, 0, sizeof(struct fcb_log));
++    fcb_log2->fl_fcb.f_magic = 0x7EADBADF;
++    fcb_log2->fl_fcb.f_version = 0;
++    fcb_log2->fl_fcb.f_sectors = &fcb_areas[1];
++    fcb_log2->fl_fcb.f_sector_cnt = 1;
++    rc = fcb_init(&fcb_log2->fl_fcb);
++    TEST_ASSERT(rc == 0);
++    log_register("log2", log2, &log_fcb_handler, fcb_log2, LOG_SYSLEVEL);
++#else
++    TEST_ASSERT(0);
++#endif
++}
++
+ void
+ ltu_setup_cbmem(struct cbmem *cbmem, struct log *log)
+ {
+diff --git a/sys/log/full/selftest/util/src/testcases/log_test_case_2logs.c b/sys/log/full/selftest/util/src/testcases/log_test_case_2logs.c
+new file mode 100644
+index 000000000..7e5735541
+--- /dev/null
++++ b/sys/log/full/selftest/util/src/testcases/log_test_case_2logs.c
+@@ -0,0 +1,87 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "log_test_util/log_test_util.h"
++
++struct ltc2l_entry {
++    struct log *log;
++    uint32_t idx;
++};
++
++#define LTC2L_MAX_ENTRIES   16
++static struct ltc2l_entry ltc2l_entries[LTC2L_MAX_ENTRIES];
++static int ltc2l_num_entries;
++
++static void
++ltc2l_append_cb(struct log *log, uint32_t idx)
++{
++    struct ltc2l_entry *entry;
++
++    TEST_ASSERT_FATAL(ltc2l_num_entries < LTC2L_MAX_ENTRIES);
++
++    entry = &ltc2l_entries[ltc2l_num_entries++];
++    entry->log = log;
++    entry->idx = idx;
++}
++
++TEST_CASE_SELF(log_test_case_2logs)
++{
++    int rc;
++    struct fcb_log fcb_log1;
++    struct log log1;
++    struct fcb_log fcb_log2;
++    struct log log2;
++
++    ltu_setup_2fcbs(&fcb_log1, &log1, &fcb_log2, &log2);
++
++    log_set_append_cb(&log1, ltc2l_append_cb);
++    log_set_append_cb(&log2, ltc2l_append_cb);
++
++    rc = log_append_body(&log1, 0, 0, LOG_ETYPE_STRING, "0", 1);
++    TEST_ASSERT(rc == 0);
++    rc = log_append_body(&log1, 0, 0, LOG_ETYPE_STRING, "1", 1);
++    TEST_ASSERT(rc == 0);
++    rc = log_append_body(&log2, 0, 0, LOG_ETYPE_STRING, "2", 1);
++    TEST_ASSERT(rc == 0);
++    rc = log_append_body(&log2, 0, 0, LOG_ETYPE_STRING, "3", 1);
++    TEST_ASSERT(rc == 0);
++    rc = log_append_body(&log1, 0, 0, LOG_ETYPE_STRING, "4", 1);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(ltc2l_num_entries == 5);
++    TEST_ASSERT(ltc2l_entries[0].log == &log1);
++    TEST_ASSERT(ltc2l_entries[1].log == &log1);
++    TEST_ASSERT(ltc2l_entries[2].log == &log2);
++    TEST_ASSERT(ltc2l_entries[3].log == &log2);
++    TEST_ASSERT(ltc2l_entries[4].log == &log1);
++#if MYNEWT_VAL(LOG_GLOBAL_IDX)
++    /* global index space */
++    TEST_ASSERT(ltc2l_entries[0].idx == 0);
++    TEST_ASSERT(ltc2l_entries[1].idx == 1);
++    TEST_ASSERT(ltc2l_entries[2].idx == 2);
++    TEST_ASSERT(ltc2l_entries[3].idx == 3);
++    TEST_ASSERT(ltc2l_entries[4].idx == 4);
++#else
++    /* per-log index */
++    TEST_ASSERT(ltc2l_entries[0].idx == 0);
++    TEST_ASSERT(ltc2l_entries[1].idx == 1);
++    TEST_ASSERT(ltc2l_entries[2].idx == 0);
++    TEST_ASSERT(ltc2l_entries[3].idx == 1);
++    TEST_ASSERT(ltc2l_entries[4].idx == 2);
++#endif
++}

@@ -1,0 +1,258 @@
+diff --git a/sys/log/full/selftest/align1_imghash/pkg.yml b/sys/log/full/selftest/align1_imghash/pkg.yml
+new file mode 100644
+index 000000000..4c3bb7657
+--- /dev/null
++++ b/sys/log/full/selftest/align1_imghash/pkg.yml
+@@ -0,0 +1,31 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: sys/log/full/selftest/align1_imghash
++pkg.type: unittest
++pkg.description: "Log unit tests; flash-alignment=1."
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.deps: 
++    - "@apache-mynewt-core/sys/console/stub"
++    - "@apache-mynewt-core/sys/log/full"
++    - "@apache-mynewt-core/sys/log/full/selftest/util"
++    - "@apache-mynewt-core/test/testutil"
++    - "@apache-mynewt-core/mgmt/newtmgr"
++    - "@apache-mynewt-core/boot/stub"
+diff --git a/sys/log/full/selftest/align1_imghash/src/log_test_align1.c b/sys/log/full/selftest/align1_imghash/src/log_test_align1.c
+new file mode 100644
+index 000000000..6fb73ffba
+--- /dev/null
++++ b/sys/log/full/selftest/align1_imghash/src/log_test_align1.c
+@@ -0,0 +1,33 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/mynewt.h"
++#include "log_test_util/log_test_util.h"
++
++int
++main(int argc, char **argv)
++{
++    log_test_suite_cbmem_flat();
++    log_test_suite_cbmem_mbuf();
++    log_test_suite_fcb_flat();
++    log_test_suite_fcb_mbuf();
++    log_test_suite_misc();
++
++    return tu_any_failed;
++}
+diff --git a/sys/log/full/selftest/align1_imghash/syscfg.yml b/sys/log/full/selftest/align1_imghash/syscfg.yml
+new file mode 100644
+index 000000000..c31e707c5
+--- /dev/null
++++ b/sys/log/full/selftest/align1_imghash/syscfg.yml
+@@ -0,0 +1,28 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++syscfg.vals:
++    LOG_FCB: 1
++    LOG_VERSION: 3
++    MCU_FLASH_MIN_WRITE_SIZE: 1
++
++    # The mbuf append tests allocate lots of mbufs; ensure no exhaustion.
++    MSYS_1_BLOCK_COUNT: 1000
++    LOG_FLAGS_IMAGE_HASH: 1
++    IMGMGR_DUMMY_HDR: 1
++    
+diff --git a/sys/log/full/selftest/fcb_bookmarks/src/log_test_fcb_bookmarks_util.c b/sys/log/full/selftest/fcb_bookmarks/src/log_test_fcb_bookmarks_util.c
+index d7b528760..25a8b3683 100644
+--- a/sys/log/full/selftest/fcb_bookmarks/src/log_test_fcb_bookmarks_util.c
++++ b/sys/log/full/selftest/fcb_bookmarks/src/log_test_fcb_bookmarks_util.c
+@@ -67,7 +67,7 @@ ltfbu_max_entries(void)
+     crc_size = 1;
+ 
+     /* "+ 1" for CRC. */
+-    entry_size = sizeof (struct log_entry_hdr) + ltfbu_cfg.body_len +
++    entry_size = LOG_BASE_ENTRY_HDR_SIZE + ltfbu_cfg.body_len +
+                  len_size + crc_size;
+     entry_space = LTFBU_SECTOR_SIZE - 8;
+ 
+diff --git a/sys/log/full/selftest/util/src/log_test_util.c b/sys/log/full/selftest/util/src/log_test_util.c
+index dc0ebef9f..fab5dd866 100644
+--- a/sys/log/full/selftest/util/src/log_test_util.c
++++ b/sys/log/full/selftest/util/src/log_test_util.c
+@@ -130,18 +130,20 @@ ltu_walk_verify(struct log *log, struct log_offset *log_offset,
+     struct os_mbuf *om;
+     char data[128];
+     int dlen;
++    uint16_t hdr_len;
+ 
+     TEST_ASSERT(ltu_str_idx < ltu_str_max_idx);
+ 
+     /*** Verify contents using single read. */
+ 
+-    rc = log_read(log, dptr, &ueh, 0, sizeof(ueh));
+-    TEST_ASSERT(rc == sizeof(ueh));
++    rc = log_read(log, dptr, &ueh, 0, LOG_BASE_ENTRY_HDR_SIZE);
++    TEST_ASSERT(rc == LOG_BASE_ENTRY_HDR_SIZE);
+ 
+-    dlen = len - sizeof(ueh);
++    hdr_len = log_hdr_len(&ueh);
++    dlen = len - hdr_len;
+     TEST_ASSERT(dlen < sizeof(data));
+ 
+-    rc = log_read(log, dptr, data, sizeof(ueh), dlen);
++    rc = log_read(log, dptr, data, hdr_len, dlen);
+     TEST_ASSERT(rc == dlen);
+ 
+     data[rc] = '\0';
+@@ -165,7 +167,7 @@ ltu_walk_verify(struct log *log, struct log_offset *log_offset,
+     om = os_msys_get_pkthdr(0, 0);
+     TEST_ASSERT_FATAL(om != NULL);
+ 
+-    rc = log_read_mbuf(log, dptr, om, sizeof(ueh), dlen);
++    rc = log_read_mbuf(log, dptr, om, hdr_len, dlen);
+     TEST_ASSERT(rc == dlen);
+ 
+     TEST_ASSERT(strlen(ltu_str_logs[ltu_str_idx]) == dlen);
+diff --git a/sys/log/full/selftest/util/src/testcases/log_test_case_cbmem_append.c b/sys/log/full/selftest/util/src/testcases/log_test_case_cbmem_append.c
+index d69c80814..180f3774f 100644
+--- a/sys/log/full/selftest/util/src/testcases/log_test_case_cbmem_append.c
++++ b/sys/log/full/selftest/util/src/testcases/log_test_case_cbmem_append.c
+@@ -27,6 +27,7 @@ TEST_CASE_SELF(log_test_case_cbmem_append)
+     char *str;
+     int body_len;
+     int i;
++    int rc;
+ 
+     ltu_setup_cbmem(&cbmem, &log);
+ 
+@@ -37,8 +38,9 @@ TEST_CASE_SELF(log_test_case_cbmem_append)
+         }
+ 
+         body_len = strlen(str);
+-        memcpy(buf + LOG_ENTRY_HDR_SIZE, str, body_len);
+-        log_append_typed(&log, 0, 0, LOG_ETYPE_STRING, buf, body_len);
++        memcpy(buf + LOG_HDR_SIZE, str, body_len);
++        rc = log_append_typed(&log, 0, 0, LOG_ETYPE_STRING, buf, body_len);
++        TEST_ASSERT_FATAL(rc == 0);
+     }
+ 
+     ltu_verify_contents(&log);
+diff --git a/sys/log/full/selftest/util/src/testcases/log_test_case_cbmem_append_mbuf.c b/sys/log/full/selftest/util/src/testcases/log_test_case_cbmem_append_mbuf.c
+index 409586a44..3bf305549 100644
+--- a/sys/log/full/selftest/util/src/testcases/log_test_case_cbmem_append_mbuf.c
++++ b/sys/log/full/selftest/util/src/testcases/log_test_case_cbmem_append_mbuf.c
+@@ -40,7 +40,7 @@ TEST_CASE_SELF(log_test_case_cbmem_append_mbuf)
+         om = ltu_flat_to_fragged_mbuf(str, strlen(str), 2);
+ 
+         /* Prepend space for the entry header. */
+-        om = os_mbuf_prepend(om, LOG_ENTRY_HDR_SIZE);
++        om = os_mbuf_prepend(om, LOG_HDR_SIZE);
+         TEST_ASSERT(om != NULL);
+ 
+         rc = log_append_mbuf_typed(&log, 0, 0, LOG_ETYPE_STRING, om);
+diff --git a/sys/log/full/selftest/util/src/testcases/log_test_case_fcb_append.c b/sys/log/full/selftest/util/src/testcases/log_test_case_fcb_append.c
+index 3fae5ed59..808188ce1 100644
+--- a/sys/log/full/selftest/util/src/testcases/log_test_case_fcb_append.c
++++ b/sys/log/full/selftest/util/src/testcases/log_test_case_fcb_append.c
+@@ -37,7 +37,7 @@ TEST_CASE_SELF(log_test_case_fcb_append)
+         }
+ 
+         body_len = strlen(str);
+-        memcpy(buf + LOG_ENTRY_HDR_SIZE, str, body_len);
++        memcpy(buf + LOG_HDR_SIZE, str, body_len);
+         log_append_typed(&log, 0, 0, LOG_ETYPE_STRING, buf, body_len);
+     }
+ 
+diff --git a/sys/log/full/selftest/util/src/testcases/log_test_case_fcb_append_mbuf.c b/sys/log/full/selftest/util/src/testcases/log_test_case_fcb_append_mbuf.c
+index a94832a7a..e566c78bd 100644
+--- a/sys/log/full/selftest/util/src/testcases/log_test_case_fcb_append_mbuf.c
++++ b/sys/log/full/selftest/util/src/testcases/log_test_case_fcb_append_mbuf.c
+@@ -40,7 +40,7 @@ TEST_CASE_SELF(log_test_case_fcb_append_mbuf)
+         om = ltu_flat_to_fragged_mbuf(str, strlen(str), 2);
+ 
+         /* Prepend space for the entry header. */
+-        om = os_mbuf_prepend(om, LOG_ENTRY_HDR_SIZE);
++        om = os_mbuf_prepend(om, LOG_HDR_SIZE);
+         TEST_ASSERT(om != NULL);
+ 
+         rc = log_append_mbuf_typed(&log, 0, 0, LOG_ETYPE_STRING, om);
+diff --git a/sys/log/modlog/selftest/src/modlog_test_util.c b/sys/log/modlog/selftest/src/modlog_test_util.c
+index 21ae5cc29..c65a53e9a 100644
+--- a/sys/log/modlog/selftest/src/modlog_test_util.c
++++ b/sys/log/modlog/selftest/src/modlog_test_util.c
+@@ -43,22 +43,25 @@ mltu_log_append_body(struct log *log, const struct log_entry_hdr *hdr,
+ 
+ static int
+ mltu_log_append_mbuf_body(struct log *log, const struct log_entry_hdr *hdr,
+-                          const struct os_mbuf *om)
++                          struct os_mbuf *om)
+ {
+     struct mltu_log_entry *entry;
+     struct mltu_log_arg *mla;
++    uint16_t len;
+     int rc;
++    
+ 
+     mla = log->l_arg;
++    len = os_mbuf_len(om);
+ 
+     TEST_ASSERT_FATAL(mla->num_entries < MLTU_LOG_ARG_MAX_ENTRIES);
+-    TEST_ASSERT_FATAL(OS_MBUF_PKTLEN(om) <= MLTU_LOG_ENTRY_MAX_LEN);
++    TEST_ASSERT_FATAL(len <= MLTU_LOG_ENTRY_MAX_LEN);
+ 
+     entry = mla->entries + mla->num_entries++;
+     entry->hdr = *hdr;
+-    entry->len = OS_MBUF_PKTLEN(om);
++    entry->len = len;
+ 
+-    rc = os_mbuf_copydata(om, 0, OS_MBUF_PKTLEN(om), entry->body);
++    rc = os_mbuf_copydata(om, 0, len, entry->body);
+     TEST_ASSERT_FATAL(rc == 0);
+ 
+     return 0;

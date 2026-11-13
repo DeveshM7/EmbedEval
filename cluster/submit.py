@@ -17,13 +17,34 @@ It writes <run>/jobs/pipeline-<time>.sbatch from cluster/templates/, with a
 frozen copy of the settings beside it, and submits it with `-N min-wanted`:
 Slurm starts the job on as many idle nodes as it can, up to the wanted
 number. One job, a hard time limit, nothing resubmitted automatically.
+
+Mynewt runs submit one phase per job instead, each on the nodes it needs:
+
+    python cluster/submit.py triage   --run R             # GPU partition, the model
+    python cluster/submit.py validate --run R --after J   # slurm.build_partition (x86)
+    python cluster/submit.py evaluate --run R --after J   # an agent on each VALID instance
+    python cluster/submit.py evaluate --run R --model M   # M: a triage/models.json profile
+
+--after J starts the job once job J has ended (a chain needs no slot until
+then). evaluate with a local model (evaluate.model in triage/models.json)
+also submits the model's servers on the GPU partition (a job of as many nodes
+as the evaluate job has: one server per evaluate node, which reaches it over
+an SSH tunnel), unless --server-job names one already running. The servers
+end when the evaluate job is done, or 30 minutes after the model answers if
+that job still has no slot. Each Mynewt job runs a frozen copy of the code
+(<run>/jobs/source-<time>/, with its sha256 manifest), so editing the
+checkout never changes a job that is queued or running.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import math
+import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -37,9 +58,12 @@ REPO = CLUSTER.parent
 # report and for srun's kill grace.
 REPORT_MIN = 8
 VALIDATE_MIN = 30
+SERVER_GRACE_MIN = 30   # minutes an evaluate job's server waits for it, once ready
 sys.path.insert(0, str(CLUSTER))
 import config as cluster_config  # noqa: E402
 import status  # noqa: E402
+sys.path.insert(0, str(REPO / "harness"))
+import paths as harness_paths  # noqa: E402
 
 
 def minutes(hhmmss: str) -> int:
@@ -70,20 +94,241 @@ def plan_nodes(cfg: dict, work_nodes: int, idle: int) -> tuple[int, int, str]:
     return lowest, wanted, note
 
 
+# What a Mynewt job runs: the code, frozen per job (freeze_source).
+SOURCE_DIRS = ("cluster", "scripts", "harness", "templates", "docs")
+SOURCE_FILES = ("triage/models.json", "triage/mynewt_gold.json", "requirements.txt")
+SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "runs", "generated", "outputs"}
+
+
+def server_export(cfg: dict, run: Path, stamp: str) -> str:
+    """sbatch --export for a model-server job: only what the server script
+    reads, as the triage phase gives it (phase.sbatch's `env -i`). Everything
+    else from the submitting shell stays out: the login node's PATH finds an
+    x86 python3 that cannot run on the ARM GPU node."""
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.environ["HOME"],
+           "USER": os.environ["USER"], "LANG": "C.UTF-8", "PORT": "8000",
+           # its own compile cache: never one another server is writing into
+           "EMBEDEVAL_VLLM_CACHE": str(run / "jobs" / f"vllm-cache-{stamp}"),
+           "EMBEDEVAL_SCRATCH": str(run / "jobs" / f"server-scr-{stamp}"),
+           **cluster_config.env_for(cfg)}
+    if any("," in v for v in env.values()):
+        sys.exit(f"a server environment value holds a comma (sbatch --export splits on it): {env}")
+    return ",".join(f"{k}={v}" for k, v in env.items())
+
+
+def freeze_source(source: Path, destination: Path) -> dict:
+    """Copy the code a job runs and record the sha256 of every file."""
+    destination.mkdir(parents=True, exist_ok=False)
+    files = {}
+    paths = [p for root in SOURCE_DIRS for p in (source / root).rglob("*")]
+    paths += [source / name for name in SOURCE_FILES if (source / name).exists()]
+    for src in sorted(paths):
+        rel = src.relative_to(source)
+        if (not src.is_file() or src.is_symlink() or any(part in SKIP_DIRS for part in rel.parts)
+                or rel == Path("cluster/config.yaml") or src.suffix in (".pyc", ".pyo")):
+            continue
+        data = src.read_bytes()
+        (destination / rel).parent.mkdir(parents=True, exist_ok=True)
+        (destination / rel).write_bytes(data)
+        shutil.copymode(src, destination / rel)
+        files[rel.as_posix()] = hashlib.sha256(data).hexdigest()
+    git = lambda *a: subprocess.run(["git", "-C", str(source), *a], capture_output=True,
+                                    text=True).stdout.strip()
+    manifest = {"revision": git("rev-parse", "HEAD") or None, "dirty": bool(git("status", "--porcelain")),
+                "files": files, "sha256": hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}
+    (destination / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def submit_phase(args, cfg: dict, run: Path) -> str | None:
+    """One Mynewt phase as its own job (see the module docstring); returns
+    its job id (None: nothing to submit; a dry run: the job's name in <>)."""
+    s, par, mode = cfg["slurm"], cfg["parallel"], args.mode
+    if mode == "pipeline":
+        sys.exit("Mynewt runs submit each phase as its own job: triage, then validate "
+                 "(and evaluate), each with --after the one before")
+    if mode == "evaluate":
+        if args.model:
+            cfg["evaluate"]["model"] = args.model
+        try:
+            harness_paths.resolve_model(cfg["evaluate"]["model"])
+        except harness_paths.UnknownModelError as e:
+            sys.exit(str(e))
+    model_phase = mode == "triage"
+    partition = s["partition"] if model_phase else s["build_partition"]
+    if not partition:
+        sys.exit("slurm.build_partition must name an x86 CPU partition (e.g. cpu)")
+    if minutes(s["time_limit"]) > 240:
+        sys.exit("Scholar jobs may not exceed four hours")
+    name = f"embedeval-{run.name}-{mode}"
+    if mode == "evaluate":
+        # one job name per evaluation, so the guard below sees only that
+        # evaluation's own job, not another model's
+        name += "-" + status.eval_label(cfg["evaluate"])
+    q = subprocess.run(["squeue", "-h", "--me", "-n", name, "-o", "%i %T"], capture_output=True, text=True)
+    live = [l for l in q.stdout.splitlines() if l.strip() and not l.endswith("COMPLETING")]
+    if live and not args.after:
+        sys.exit(f"run {run.name} already has a {mode} job ({'; '.join(live)}); wait for it, "
+                 "scancel it, or chain this one with --after")
+    todo = (status.evaluate_todo(run, status.eval_label(cfg["evaluate"])) if mode == "evaluate" else
+            {"triage": status.triage_todo, "validate": status.validate_todo}[mode](run))
+    if mode == "validate" and status.triage_todo(run) and not args.after:
+        sys.exit(f"triage is not complete ({len(status.triage_todo(run))} PRs left): submit "
+                 "validate --after the triage job")
+    n = len(todo)
+    if not n:
+        if not args.after:
+            print(f"nothing left to {mode} in {run.name}. Report: python cluster/report.py --run {run.name}")
+            return None
+        n = sum(1 for e in status.manifest(run)["prs"] if e["stage"] in ("to triage", "to validate"))
+        print(f"  --after {args.after}: no {mode} work yet; sized for the run's {n} PRs")
+    per = {"triage": par["triage_per_node"], "validate": par["validate_per_node"],
+           "evaluate": cfg["evaluate"]["per_node"]}[mode]
+    idle = args.idle if args.idle is not None else idle_nodes(partition)
+    lowest, wanted, note = plan_nodes(cfg, math.ceil(n / per), idle)
+    # a local model is served by a job of its own on the GPU partition
+    # (server.sbatch), unless --server-job names one
+    own_server = (mode == "evaluate" and not args.server_job
+                  and cfg["evaluate"]["model"] in harness_paths.LOCAL_PROFILES)
+    if own_server:
+        lowest = wanted        # every node gets a server of its own
+
+    stamp = f"{datetime.now():%Y%m%d-%H%M%S-%f}"   # two submissions may come within a second
+    jobs = run / "jobs"
+    jobs.mkdir(parents=True, exist_ok=True)
+    source = jobs / f"source-{stamp}"
+    frozen_src = freeze_source(REPO, source)
+    deps = [f"afterany:{args.after}"] if args.after else []
+    if args.server_job:
+        cfg["evaluate_server_job"] = args.server_job
+        deps.append(f"after:{args.server_job}")
+    frozen = jobs / f"config-{stamp}.json"
+    frozen.write_text(json.dumps(cfg, indent=2) + "\n")
+    python = (s["triage_python"] if model_phase else s["build_python"]) or sys.executable
+    script = jobs / f"{mode}-{stamp}.sbatch"
+    script.write_text((CLUSTER / "templates" / "phase.sbatch").read_text().format(
+        partition=partition, nodes=f"{lowest}-{wanted}" if lowest < wanted else wanted,
+        cpus=s["cpus_per_node"] if model_phase else s["build_cpus_per_node"],
+        gres_line=f"#SBATCH --gres={s['gres']}" if model_phase else "",
+        mem=s["mem"] if model_phase else s["build_mem"], time_limit=s["time_limit"],
+        name=name, run=run, repo=source, config=frozen, python=python, phase=mode,
+        limit_min=minutes(s["time_limit"]), report_min=REPORT_MIN, stamp=stamp,
+        # the servers this job started serve it alone (a later job starts its
+        # own): they end with the workers, not at their own time limit
+        end_server=(f"scancel $(cat {jobs}/server-of-$SLURM_JOB_ID 2>/dev/null)\n" if own_server else "")))
+    print(f"run {run.name}: {len(todo)} PRs to {mode}")
+    print(f"  nodes: {lowest}-{wanted} on {partition} ({idle} idle; max {s['nodes_max']})"
+          + (f"\n  note: {note}" if note else ""))
+    print(f"  job script: {script}\n  source: {source} (sha256 {frozen_src['sha256'][:16]})")
+    if deps:
+        print(f"  dependency: {','.join(deps)}")
+    if own_server:
+        print(f"  model server: {wanted} node(s) of {s['partition']} for {cfg['evaluate']['model']}, "
+              "submitted with this job")
+    if args.dry_run:
+        print("  --dry-run: not submitted")
+        return f"<{name}>"          # what a later job of a chain would follow
+    # With its own server, the evaluate job is submitted held, so the server
+    # job can name it; it is released once its config names the server.
+    r = subprocess.run(["sbatch", "--parsable", *(["--hold"] if own_server else []),
+                        *([f"--dependency={','.join(deps)}"] if deps else []),
+                        str(script)], capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"sbatch failed: {r.stderr.strip()}")
+    job = r.stdout.strip().split(";")[0]
+    if own_server:
+        server_script = jobs / f"server-{stamp}.sbatch"
+        server_script.write_text((CLUSTER / "templates" / "server.sbatch").read_text().format(
+            partition=s["partition"], cpus=s["cpus_per_node"], gres=s["gres"], mem=s["mem"],
+            time_limit=s["time_limit"], name=f"{name}-server", jobs=jobs, model=cfg["evaluate"]["model"],
+            eval_job=job, stamp=stamp, source=source, grace=SERVER_GRACE_MIN, server_nodes=wanted,
+            warm_cache=cfg["derived"]["vllm_cache"]))
+        r = subprocess.run(["sbatch", "--parsable", "--export=" + server_export(cfg, run, stamp),
+                            *([f"--dependency={deps[0]}"] if args.after else []), str(server_script)],
+                           capture_output=True, text=True, cwd=source)
+        if r.returncode:
+            subprocess.run(["scancel", job])
+            sys.exit(f"sbatch of the model server failed: {r.stderr.strip()}; evaluate job {job} cancelled")
+        server = r.stdout.strip().split(";")[0]
+        cfg["evaluate_server_job"] = server
+        frozen.write_text(json.dumps(cfg, indent=2) + "\n")       # the workers read it at start
+        (jobs / f"server-of-{job}").write_text(server + "\n")
+        deps.append(f"after:{server}")
+        u = subprocess.run(["scontrol", "update", f"JobId={job}", f"Dependency={','.join(deps)}"],
+                           capture_output=True, text=True)
+        rel = subprocess.run(["scontrol", "release", job], capture_output=True, text=True)
+        if u.returncode or rel.returncode:
+            subprocess.run(["scancel", job, server])
+            sys.exit(f"could not chain evaluate job {job} to server job {server}: "
+                     f"{(u.stderr + rel.stderr).strip()}; both cancelled")
+        print(f"  model server: job {server} ({cfg['evaluate']['model']}, {wanted} node(s) of {s['partition']}; "
+              f"ends {SERVER_GRACE_MIN} min after the model answers if job {job} cannot start)")
+    with open(jobs / "submitted.jsonl", "a") as fh:
+        fh.write(json.dumps({"job": job, "script": script.name, "submitted": stamp, "mode": mode,
+                             "nodes": f"{lowest}-{wanted}", "after": args.after,
+                             "server": cfg.get("evaluate_server_job"), "todo": len(todo),
+                             "model": cfg["evaluate"]["model"] if mode == "evaluate" else None,
+                             "source_sha256": frozen_src["sha256"]}) + "\n")
+    print(f"  submitted: job {job}; log {jobs}/job-{job}.out")
+    return job
+
+
+def submit_evaluations(args, cfg: dict, run: Path) -> None:
+    """One evaluate job (with its model servers) per model of --model, each
+    after the one before: the account runs two jobs at once and an x86
+    evaluation is a pair (agents and servers) that must run together, so
+    pairs never interleave. Models not known are refused before anything is
+    submitted."""
+    models = args.model or [cfg["evaluate"]["model"]]
+    if len(set(models)) < len(models):
+        sys.exit(f"--model names a model twice: {' '.join(models)}")
+    for m in models:
+        try:
+            harness_paths.resolve_model(m)
+        except harness_paths.UnknownModelError as e:
+            sys.exit(str(e))
+    previous, chain = args.after, []
+    for m in models:
+        label = status.eval_label({**cfg["evaluate"], "model": m})
+        if not args.after and not status.evaluate_todo(run, label):
+            print(f"nothing left to evaluate as {label} in {run.name}. "
+                  f"Report: python cluster/report.py --run {run.name}")
+            continue                  # (the work of one label never depends on the jobs before it)
+        job = submit_phase(argparse.Namespace(**{**vars(args), "model": m, "after": previous}),
+                           copy.deepcopy(cfg), run)
+        chain.append((m, job))
+        previous = job
+    if chain:
+        print("evaluations, in order: " + " -> ".join(f"{m} (job {j})" for m, j in chain))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("mode", choices=["pipeline"])
+    p.add_argument("mode", choices=["pipeline", "triage", "validate", "evaluate"])
     p.add_argument("--run", required=True, help="run name (folder under runs/) or path")
     p.add_argument("--config", help="default: cluster/config.yaml")
     p.add_argument("--dry-run", action="store_true", help="write the job script, do not submit")
     p.add_argument("--idle", type=int, help="assume this many idle nodes (testing)")
+    p.add_argument("--after", metavar="JOB", help="Mynewt: start once this job has ended")
+    p.add_argument("--model", nargs="+", metavar="MODEL",
+                   help="Mynewt evaluate: the models (triage/models.json profiles, or hosted "
+                   "models harness/paths.py knows), one evaluation each, one after the other; "
+                   "default evaluate.model")
+    p.add_argument("--server-job", metavar="JOB", help="Mynewt evaluate: a running model-server "
+                   "job (scripts/serve_triage_model.sh) to use instead of submitting one")
     args = p.parse_args()
 
     cfg = cluster_config.load_or_exit(args.config)
     run = Path(args.run) if "/" in args.run else Path(cfg["derived"]["runs"]) / args.run
     if not (run / "manifest.json").exists():
         sys.exit(f"{run} is not a prepared run (no manifest.json); run cluster/prepare.py first")
+    if status.project(run) == "mynewt":
+        if args.model and args.mode != "evaluate":
+            sys.exit("--model is for evaluate jobs")
+        return submit_evaluations(args, cfg, run) if args.mode == "evaluate" else submit_phase(args, cfg, run)
+    if args.mode != "pipeline":
+        sys.exit("Zephyr runs use pipeline mode")
 
     s, par = cfg["slurm"], cfg["parallel"]
     if minutes(s["time_limit"]) < REPORT_MIN + VALIDATE_MIN:

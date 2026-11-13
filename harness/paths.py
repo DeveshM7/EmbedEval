@@ -32,7 +32,9 @@ from layout import show  # noqa: E402,F401
 _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
                   if _override else [layout.generated()] if layout.run_dir()
-                  else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "docker" / "instances"])
+                  else [REPO_ROOT / "apptainer" / "instances",
+                        REPO_ROOT / "apptainer" / "instances" / "mynewt",
+                        REPO_ROOT / "docker" / "instances"])
 #
 # Agent runs and their grades go to one folder per run,
 # <eval dir>/<model>/<project>/<PR>/, never overwritten by another run. The eval
@@ -55,7 +57,7 @@ TRAJECTORY_NAME = "trajectory.json"
 RUN_NAME = "run.json"        # how the agent's run ended (harness/run.py)
 GRADE_NAME = "grade.json"    # its grade; the run is finished once this exists
 
-PROJECTS = ("zephyr", "nuttx", "riot")
+PROJECTS = ("zephyr", "nuttx", "riot", "mynewt")
 
 # LiteLLM model name -> directory name under the eval dir.
 # Unknown models raise rather than silently creating a new directory.
@@ -65,15 +67,20 @@ MODEL_DIRS: dict[str, str] = {
     "openai/gpt-5.4": "gpt-5.4",
     "together_ai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": "Qwen-3-coder",
     "together_ai/deepseek-ai/DeepSeek-V3": "DeepSeek-V3",
-    # Local open-weights model served by scripts/serve_triage_model.sh (vLLM,
-    # OpenAI-compatible); see LOCAL_MODELS in harness/run.py.
-    "openai/qwen38-nvfp4": "qwen38-nvfp4",
 }
+# Local open-weights models: every profile of triage/models.json, served by
+# scripts/serve_triage_model.sh (vLLM, OpenAI-compatible) as openai/<profile>;
+# see LOCAL_MODELS in harness/run.py. Adding a model is adding its profile.
+LOCAL_PROFILES = [name for name in json.loads((REPO_ROOT / "triage" / "models.json").read_text())
+                  if not name.startswith("_")]
+MODEL_DIRS.update({f"openai/{name}": name for name in LOCAL_PROFILES})
 
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.
 MODEL_ALIASES: dict[str, str] = {short: full for full, short in MODEL_DIRS.items()}
 
-_INSTANCE_RE = re.compile(r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+)$")
+_INSTANCE_RE = re.compile(
+    r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+(?:-t\d+|-c[0-9a-f]{8})?)$"
+)
 
 
 class UnknownModelError(ValueError):
@@ -81,11 +88,11 @@ class UnknownModelError(ValueError):
 
 
 def split_instance(instance_id: str) -> tuple[str, str]:
-    """'zephyr__zephyr-65697' -> ('zephyr', '65697')."""
+    """Split standard and Mynewt test/fix instance IDs."""
     m = _INSTANCE_RE.match(instance_id)
     if not m:
         raise ValueError(
-            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR>"
+            f"malformed instance id {instance_id!r}; expected <project>__<project>-<PR> with optional -t<test PR> or -c<fix SHA>"
         )
     return m.group("project"), m.group("pr")
 
