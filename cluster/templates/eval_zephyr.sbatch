@@ -18,12 +18,12 @@
 # Results: <eval dir>/<model>/zephyr/<PR>/ (harness/paths.py). Settings go in
 # --export: EVAL_AGENTS, EVAL_GPU_MEMORY, EVAL_MAX_MODEL_LEN, EVAL_INSTANCES
 # (a file of ids, for a trial), EVAL_KEEP_IMAGES, EVAL_MAX_JOBS (6), EVAL_MARGIN
-# (minutes before the end after which no new PR is taken, 135), EVAL_TIME_LIMIT
+# (minutes before the end after which no new PR is taken, 60), EVAL_TIME_LIMIT
 # (minutes per run, 120), EMBEDEVAL_EVAL_DIR
 # (results elsewhere, for a test). A shorter job: -t, also kept on resubmission.
 #
 # Jobs are limited to 4 hours here. Agents take no new PR in a job's last
-# EVAL_MARGIN (135) minutes (a run is capped at EVAL_TIME_LIMIT, 2 hours, then graded); a run cut off at the
+# EVAL_MARGIN (60) minutes (a run is capped at EVAL_TIME_LIMIT, 2 hours, then graded); a run cut off at the
 # end is retried by the next job. The job submits itself again while PRs are
 # left, up to EVAL_MAX_JOBS jobs in all. Submit from the repository.
 set -u

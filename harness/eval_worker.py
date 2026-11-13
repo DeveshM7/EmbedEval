@@ -51,9 +51,10 @@ def main() -> None:
     p.add_argument("--name", required=True, help="<job>-node<N>-w<K>, unique per worker")
     p.add_argument("--stop-at", type=float, required=True,
                    help="epoch seconds: the job's end")
-    p.add_argument("--margin", type=float, default=135,
+    p.add_argument("--margin", type=float, default=60,
                    help="minutes before --stop-at after which no new PR is taken "
-                        "(default 135: the time limit plus grading)")
+                        "(default 60; a run still going at --stop-at is saved and "
+                        "retried by the next job)")
     p.add_argument("--instances", help="file of instance ids to work on (default: all)")
     p.add_argument("--delete-images", action="store_true")
     p.add_argument("--step-limit", type=int, default=250)
