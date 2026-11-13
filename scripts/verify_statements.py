@@ -59,7 +59,7 @@ SHARED = Path(os.environ.get("EMBEDEVAL_SHARED",
                              f"/scratch/scholar/{os.environ.get('USER', 'user')}/embedeval/shared"))
 # Local clones the fix diffs come from (NuttX: the kernel, where its fixes are).
 CLONES = {"zephyr": SHARED / "zephyr.git", "riot": SHARED / "riot" / "riot.git",
-          "nuttx": SHARED / "nuttx.git"}
+          "nuttx": SHARED / "nuttx.git", "mynewt": SHARED / "mynewt-core.git"}
 GITHUB_PR_FILES_CAP = 3000   # GitHub lists at most this many files of a PR
 PROFILE = "qwen38-nvfp4"
 JUDGES = 3
@@ -101,6 +101,14 @@ def fix_diff(meta: dict) -> str:
             parts.append(git(project, "diff", f"{e['base_commit']}..{e['head_commit']}", "--",
                              *(ef if 0 < len(ef) < GITHUB_PR_FILES_CAP else ["."])))
         return "\n".join(parts)
+    if project == "mynewt":
+        # As the Mynewt branch's validate_instance.gold_patch: from gold_base_commit when
+        # the PR's test commit precedes its fix, limited to the fix's files.
+        base = meta.get("gold_base_commit") or meta["base_commit"]
+        files = meta.get("files_changed_by_fix") or []
+        excl = [f":(exclude){p}" for p in (meta.get("protected_paths") or ["test/"])]
+        return git(project, "diff", f"{base}..{meta['fix_commit']}", "--",
+                   *(files if 0 < len(files) < GITHUB_PR_FILES_CAP else [".", *excl]))
     return git(project, "diff", meta["base_commit"], meta["fix_commit"], "--", ".",
                ":(exclude)tests/")
 
@@ -117,6 +125,13 @@ def project_facts(meta: dict) -> str:
                 f"on the {meta.get('sim_config', '?')} configuration."
                 + (f" The agent's build tree is already configured with {json.dumps(cfg)}, which "
                    "the agent can see." if cfg else ""))
+    if project == "mynewt":
+        prot = ", ".join(meta.get("protected_paths") or ["test/"])
+        return ("Project: Apache Mynewt (mynewt-core). One repository; the hidden tests are unit-test "
+                f"packages under {prot} (here {meta.get('test_path', '?')}), built and run with newt on "
+                f"the {meta.get('platform', 'native')} platform. Configuration settings are declared in "
+                "syscfg.yml files (read in C as MYNEWT_VAL(NAME)) and packages and their dependencies "
+                "in pkg.yml files.")
     if project == "zephyr":
         return ("Project: Zephyr RTOS. One repository; the hidden tests are under tests/, built and "
                 f"run with twister for {meta.get('platform', '?')}.")
@@ -169,6 +184,16 @@ def defined_names(diff: str) -> dict[str, str]:
                     if re.fullmatch(r"[A-Za-z_][\w-]*", w):
                         names[w] = "build module"
             continue
+        if f.endswith("syscfg.yml"):        # Mynewt settings: keys under syscfg.defs
+            m = re.match(r"\s{2,6}([A-Z][A-Z0-9_]{2,}):\s*$", line)
+            if m:
+                names[m.group(1)] = "syscfg setting"
+            continue
+        if f.endswith("pkg.yml"):           # Mynewt packages
+            m = re.match(r"pkg\.name:\s*[\"']?([\w./-]+)", s)
+            if m:
+                names[m.group(1)] = "package"
+            continue
         if not f.endswith((".c", ".h")):
             continue
         m = re.match(r"#\s*define\s+(\w+)", s)
@@ -211,6 +236,8 @@ def test_uses(diff: str) -> set[str]:
             words.add(m.group(1))
         for m in re.finditer(r"USEMODULE\s*\+?=\s*(.+)", line):
             words |= set(m.group(1).split())
+        for m in re.finditer(r"[\w-]+(?:/[\w.-]+)+", line):     # package paths in pkg.yml deps
+            words.add(m.group().lstrip("@").split("/", 1)[-1] if m.group().startswith("@") else m.group())
     return words
 
 
