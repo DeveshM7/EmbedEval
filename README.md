@@ -30,7 +30,7 @@ and the tests actually run.
   scenarios in the upstream CI image of the base's era (Apptainer), with no
   network; see [Contiki-NG](#contiki-ng).
 
-**Instances:** 204 Zephyr and 190 RIOT (`apptainer/instances/`), 29 NuttX (in
+**Instances:** 203 Zephyr and 190 RIOT (`apptainer/instances/`), 29 NuttX (in
 `apptainer/instances/nuttx/`: 18 ARM64, 11 x86_64 hosts; and 6 Docker ones in
 `docker/instances/`), 63 Apache Mynewt (`apptainer/instances/mynewt/`), and 38
 Contiki-NG (`apptainer/instances/contiki-ng/`).
@@ -132,7 +132,7 @@ Every command takes the same three selection flags:
 ```bash
 --instance zephyr__zephyr-65697    # one or more, space separated
 --repo nuttx                       # every instance in one project
---all                              # all 530
+--all                              # all 529
 ```
 
 Instance ids are `<project>__<project>-<PR>`, matching the directory names under

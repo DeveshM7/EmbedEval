@@ -34,5 +34,43 @@
     ],
     "pr_url": "https://github.com/zephyrproject-rtos/zephyr/pull/98299",
     "change_type": "fix",
-    "generated": true
+    "generated": true,
+    "verification": {
+        "status": "fixed",
+        "verdict": "fixable",
+        "votes": [
+            "fixable",
+            "fixable",
+            "fixable"
+        ],
+        "reason": "The original bug report identifies the functions and the general defect but not enough of the exact observable free-space contract; the missing contract can be added without dictating the implementation.",
+        "problems": [
+            {
+                "category": "B",
+                "detail": "The statement does not specify the observable active-versus-total semantics, the reserved delete ATE edge case, closed-sector/GC behaviour, duplicate-ID updates across sectors, and consistency with no-double-write behaviour that the hidden tests check."
+            },
+            {
+                "category": "D",
+                "detail": "The exact edge values are missing, especially the empty-sector free space as sector_size minus five ATEs and the ZMS_DATA_IN_ATE_SIZE result when only data inside an ATE fits."
+            },
+            {
+                "category": "F",
+                "detail": "The hidden tests rely on CONFIG_ZMS_NO_DOUBLE_WRITE, but the statement does not say the free-space results must remain correct under that configuration."
+            }
+        ],
+        "missing_names": [],
+        "leak_check": {
+            "leak": "none",
+            "leak_detail": "",
+            "accurate": true,
+            "accuracy_detail": "",
+            "complete": 3,
+            "missing": "",
+            "decision": "accept",
+            "suggested_statement": null
+        },
+        "model": "qwen38-nvfp4",
+        "date": "2026-11-13"
+    },
+    "problem_statement_fixed": "ZMS reports the wrong amount of free space. zms_calc_free_space() and zms_active_sector_free_space() return incorrect values: they can return a negative result (which is misinterpreted as an error code), they overcount the free space by one ATE per sector, they count more than one ATE belonging to the same ID that is stored in the same sector (only the most recent entry should be counted), and they apply a space-correction term in the wrong place and to the wrong sectors. As a result, callers cannot rely on these functions to tell how many bytes can still be written without triggering garbage collection, or whether the storage is full. The functions must return the true non-negative number of writable bytes for an active sector and the total filesystem, accounting correctly for header ATEs, the reserved delete ATE, small data stored inside ATEs, and closed sectors.\n\nzms_active_sector_free_space() must return the number of bytes that can still be written in the currently active sector before ZMS would automatically advance to the next sector. zms_calc_free_space() must return the total number of bytes that can still be written across all non-garbage-collection sectors, i.e. all sectors except the one reserved for GC. Closed sectors must be included in the total as if they would be garbage-collected, and the total must not change merely because the active sector is closed by zms_sector_use_next().\n\nFor an empty active sector, the active free space must be sector_size minus five times sizeof(struct zms_ate), and for an empty filesystem with sector_count sectors the total free space must be (sector_count - 1) times that value. A sector that cannot leave room for the reserved delete ATE must report zero active free space, even if deletions in that sector would make space available in the total garbage-collected calculation. If a sector has room for one more ATE but not enough room for data outside that ATE, its free-space contribution must be ZMS_DATA_IN_ATE_SIZE; a write larger than ZMS_DATA_IN_ATE_SIZE must fail, and a write of exactly ZMS_DATA_IN_ATE_SIZE must fill the sector. Small data that is stored inside an ATE consumes only the ATE, not its data length.\n\nFor each ID, only the most recent valid ATE in the current cycle must be counted for free-space purposes, whether duplicate IDs appear in the same sector or in different sectors. Older ATEs and any data they refer to must be treated as garbage-collectable and must not reduce free space. Therefore, an update of an existing ID should change total free space by the ATE size plus the difference between the new and old data sizes when the data is stored outside ATEs, not by the full size of the new data. Writing the same ID multiple times in the active sector may consume active-sector space, but the total free space must count only the most recent ATE and data for that ID. The results must also remain correct when CONFIG_ZMS_NO_DOUBLE_WRITE is enabled: if a redundant write is rejected because double writes are disabled, the free-space values must not change."
 }

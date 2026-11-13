@@ -268,6 +268,18 @@ def _build_and_test(meta: dict) -> str:
     return f"cd /testbed && {rebuild} && run_tests" if rebuild else "cd /testbed && run_tests"
 
 
+# The problem statement given to the agent: the verified one (scripts/verify_statements.py,
+# "problem_statement_fixed") when there is one, unless EMBEDEVAL_STATEMENT=original.
+STATEMENT = os.environ.get("EMBEDEVAL_STATEMENT", "fixed")
+
+
+def statement_of(meta: dict) -> tuple[str, str]:
+    """(the statement, which one: "fixed" or "original")."""
+    if STATEMENT != "original" and meta.get("problem_statement_fixed"):
+        return meta["problem_statement_fixed"], "fixed"
+    return meta["problem_statement"], "original"
+
+
 def build_task(meta: dict) -> str:
     """The first user message: the problem plus its test context.
 
@@ -277,11 +289,11 @@ def build_task(meta: dict) -> str:
         return "\n".join(f"  - {i}" for i in items)
 
     if hidden_tests.ENABLED:      # the problem statement only, as in SWE-bench
-        return f"## Task\n\n{meta['problem_statement']}\n"
+        return f"## Task\n\n{statement_of(meta)[0]}\n"
     task = f"""\
 ## Task
 
-{meta["problem_statement"]}
+{statement_of(meta)[0]}
 
 ## Failing Tests (must pass after your change)
 
@@ -575,6 +587,7 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         "patch_empty": True,
         "protected_touched": [],
         "tests_hidden": _hide_tests(meta),
+        "statement": statement_of(meta)[1],
     }
     start = time.time()
     env, agent, captured, base = None, None, False, "HEAD"

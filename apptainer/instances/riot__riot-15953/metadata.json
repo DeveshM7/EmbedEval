@@ -27,5 +27,52 @@
     "sys/congure/reno/methods/congure_reno_methods.c",
     "sys/include/congure/reno.h"
   ],
-  "pr_url": "https://github.com/RIOT-OS/RIOT/pull/15953"
+  "pr_url": "https://github.com/RIOT-OS/RIOT/pull/15953",
+  "verification": {
+    "status": "fixed",
+    "verdict": "fixable",
+    "votes": [
+      "fixable",
+      "fixable",
+      "fine"
+    ],
+    "reason": "The statement lists the callback field names but omits their C signatures (function pointer types, parameter types, return types), which the agent needs to define congure_reno_snd_consts_t. It also omits the super (congure_snd_t) and consts (const congure_reno_snd_consts_t *) members that the test harness accesses directly. All three are public interface details that can be added to the statement without revealing implementation.",
+    "problems": [
+      {
+        "category": "A",
+        "detail": "The callback field types (function pointer signatures) for fr, same_wnd_adv, ss_cwnd_inc, ca_cwnd_inc, and fr_cwnd_dec in congure_reno_snd_consts_t are not given. The test's congure_impl.c defines callbacks with specific signatures (e.g. bool (*)(congure_reno_snd_t *, congure_snd_ack_t *) for same_wnd_adv) that must match the struct definition, but the statement only lists the field names."
+      },
+      {
+        "category": "A",
+        "detail": "The state's congure_snd_t super member is not mentioned. The test's main.c and congure_impl.c access c->super.cwnd (e.g. _congure_state.super.cwnd, c->super.cwnd += 1337), requiring cwnd to be inherited via a super field rather than being a direct member of congure_reno_snd_t."
+      },
+      {
+        "category": "A",
+        "detail": "The const congure_reno_snd_consts_t *consts member of the state is not mentioned. The test's main.c accesses _congure_state.consts and prints it as part of the state JSON, and test_no_setup checks consts is null before setup."
+      }
+    ],
+    "missing_names": [
+      {
+        "name": "CONFIG_MODULE_CONGURE_RENO",
+        "kind": "Kconfig option"
+      },
+      {
+        "name": "super",
+        "kind": "field"
+      }
+    ],
+    "leak_check": {
+      "leak": "none",
+      "leak_detail": "",
+      "accurate": true,
+      "accuracy_detail": "The statement says 'increase cwnd by min(in_flight_size, mss)' as the default for ACKs that advance the sequence, then says callbacks override for slow-start vs congestion-avoidance. The fix's congestion-avoidance default is just +mss, not min(in_flight_size, mss). However, the tests only check that cwnd increased by at most mss in congestion avoidance, so this imprecision does not cause any test failure and does not contradict the tests.",
+      "complete": 3,
+      "missing": "",
+      "decision": "accept",
+      "suggested_statement": null
+    },
+    "model": "qwen38-nvfp4",
+    "date": "2026-11-13"
+  },
+  "problem_statement_fixed": "Add a new CongURE sender congestion-control implementation for TCP Reno that is available as module `congure_reno` and declares the names the test code uses in `congure/reno.h`: `congure_reno_snd_t`, `congure_reno_snd_consts_t`, `congure_reno_snd_setup(congure_reno_snd_t *c, const congure_reno_snd_consts_t *consts)`, and `congure_reno_set_mss(congure_reno_snd_t *c, congure_wnd_size_t mss)`. The constants object must contain `fr` (a `void (*)(congure_reno_snd_t *)` callback), `same_wnd_adv` (a `bool (*)(congure_reno_snd_t *, congure_snd_ack_t *)` callback), `ss_cwnd_inc` (a `void (*)(congure_reno_snd_t *)` callback), `ca_cwnd_inc` (a `void (*)(congure_reno_snd_t *)` callback), `fr_cwnd_dec` (a `void (*)(congure_reno_snd_t *)` callback), `init_mss`, `cwnd_upper`, `cwnd_lower`, `init_ssthresh`, and `frthresh`, and setup must make the state respond to CongURE sender events. The observable state must expose `cwnd` (inherited via a `congure_snd_t super` member), `mss`, `last_ack`, `ssthresh`, `in_flight_size`, and `dup_acks` (as direct members), and must also store the passed constants in a `const congure_reno_snd_consts_t *consts` member; before setup all fields should be zero and `consts` should be null. Initialization and later setting of `mss` must reset `cwnd` to the RFC 5681 initial window: 2*mss if mss exceeds `cwnd_upper`, 3*mss if mss is above `cwnd_lower` and not above `cwnd_upper`, otherwise 4*mss. Sending a message increases in-flight size up to cwnd, discarding reduces it, and acknowledging a message consumes the acknowledged size from in-flight. ACKs that advance the acknowledged sequence reset duplicate ACKs and increase cwnd by min(in_flight_size, mss), using the configured slow-start callback if cwnd is below ssthresh or the configured congestion-avoidance callback if cwnd is at or above ssthresh. Duplicate ACKs count only when there is in-flight data, the ACK carries no data, the ACK is clean, its id equals the last acknowledged id, and either its window is zero or `same_wnd_adv` returns true; reaching `frthresh` duplicate ACKs, or reporting lost messages, enters fast retransmit, calls `fr`, forces dup_acks to frthresh, and applies `fr_cwnd_dec` if provided, otherwise the default Reno reduction of ssthresh to max(2*mss, cwnd/2) and cwnd to ssthresh + 3*mss. Timeout reduces ssthresh to max(in_flight_size/2, 2*mss), sets cwnd to mss, and removes the timed-out messages from in-flight. ECN-CE halves cwnd and reduces ssthresh by mss."
 }
