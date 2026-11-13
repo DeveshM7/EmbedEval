@@ -13,15 +13,10 @@ reject, with "kind", "confidence" and "failure_mode"; validation adds
 (prepare.py --instances: a revalidation) has stage "to validate" and no
 triage at all.
 
-The evaluate phase (Mynewt) adds "evaluate:<label>" (eval_label: model and
-limits), {"state": "done", "grade": "pass" | "fail" | ..., "model", "limits",
-"steps", "error"}, or "failed" with a note. Jobs before labels wrote the
-stage "evaluate".
-
 A NuttX run prepared from existing instances (prepare.py --instances, a
 revalidation) has entries {"pr": <apps PR>, "stage": "to validate",
 "instance": <id>, "arch": <host architecture>} and no triage; its phases are
-separate jobs (submit.py statement / validate / evaluate):
+separate jobs (submit.py statement / validate):
 
     statement.state done            "result" kept / written / failed (nuttx_statement.py)
                     failed          no result (the server, the cap; see note): done again
@@ -39,12 +34,6 @@ A stage appears only once it has finished, one way or another:
     validate.state  done            outcome "VALID", or "INVALID: <reason>"
                     skipped         not started (disk guard, ...; see note)
                     failed          generate or build failed, or the cap hit
-    evaluate:<label>.state
-                    done            the agent ran and its patch was graded
-                                    (grade, steps, timed_out)
-                    failed          not graded (build failed, no grade); with
-                                    "retry": the model server went away
-                    <label> is <model>-<steps>steps-<min>min (eval_label)
 
 Only one worker handles a PR, and a stage is written once, all at once
 (written to a temporary file and renamed), so a file is never half-written,
@@ -59,9 +48,6 @@ import os
 from pathlib import Path
 
 TRIAGE_FINAL = {"done", "cap", "server failed", "failed"}
-
-
-CUT_SHORT_MAX = 2     # times an agent run may be cut off by the end of the job before it is final
 
 
 def path(run: Path, pr: int) -> Path:
@@ -191,97 +177,6 @@ def valid(run: Path) -> list[int]:
     """PRs of the run whose validation outcome is VALID."""
     return [e["pr"] for e in manifest(run)["prs"]
             if (read(run, e["pr"]).get("validate") or {}).get("outcome") == "VALID"]
-
-
-def eval_label(ev_cfg: dict) -> str:
-    """One evaluation: a model under its limits (config "evaluate"), e.g.
-    qwen38-nvfp4-50steps-40min, or qwen38-nvfp4-50steps with no per-instance
-    time limit (evaluate.time_limit 0). Each label has its own status stage
-    ("evaluate:<label>") and outputs (<run>/outputs/<label>/), so models and
-    limits are compared on the same instances without overwriting each other."""
-    minutes = ev_cfg.get("time_limit") or 0
-    return f"{ev_cfg['model']}-{ev_cfg['step_limit']}steps" + (f"-{minutes:g}min" if minutes else "")
-
-
-CUT_SHORT_FINAL = 2     # runs cut off by the end of a job, after which the instance is given up
-
-
-def cut_short_count(run: Path, pr: int, label: str) -> int:
-    """How many times this evaluation's agent run was cut off by the end of its job."""
-    return (evaluations(read(run, pr)).get(label) or {}).get("cut_short", 0)
-
-
-def evaluate_key(label: str) -> str:
-    """The status stage of one evaluation: evaluate:<label>."""
-    return f"evaluate:{label}"
-
-
-def evaluations(st: dict) -> dict:
-    """A PR's evaluate results by label. A result recorded under the earlier
-    per-model key (evaluate:<model>) belongs to the label of the limits
-    recorded with it; a labeled stage overrides it. A result with no limits
-    recorded keeps its key's name as its label."""
-    earlier, out = {}, {}
-    for key, ev in st.items():
-        if not key.startswith("evaluate:"):
-            continue
-        name, lim = key.split(":", 1)[1], ev.get("limits")
-        if name == ev.get("model") and lim:
-            earlier[eval_label(name, lim["step_limit"], lim["time_limit"])] = ev
-        else:
-            out[name] = ev
-    return earlier | out
-
-
-# An agent run with no time limit that the end of its job cut off is the
-# infrastructure's, not the agent's: it is run again (the note says "no time
-# left", see evaluate_needed). After MAX_CUTS cuts it is final.
-MAX_CUTS = 2
-CUT_NOTE = "cut off by the end of the job (no time left)"
-UNFINISHED_NOTE = "did not finish within a full job"
-
-
-def evaluation(st: dict, label: str) -> dict:
-    """A PR's outcome for `label`; also the unlabeled "evaluate" stage of the
-    first evaluate jobs, when its model and limits are this label's. (That
-    stage records its limits; one without them belongs to no label.)"""
-    ev = st.get(f"evaluate:{label}")
-    old = st.get("evaluate")
-    if ev is None and old and old.get("limits"):
-        lim = old["limits"]
-        if eval_label({"model": old.get("model"), "step_limit": lim["steps"],
-                       "time_limit": lim["minutes"]}) == label:
-            return old
-    return ev or {}
-
-
-def harness_fault(ev: dict) -> bool:
-    """A grade the harness, not the agent, caused: git apply calling the
-    git-generated diff corrupt (patch capture before the byte-exact capture
-    read the diff as text, and a lone carriage return broke it)."""
-    return ev.get("state") == "done" and "corrupt patch" in (ev.get("error") or "")
-
-
-def cut_short(ev: dict) -> bool:
-    """A run the end of the job cut off (no time limit), not the agent's
-    outcome: it is run again until it has been cut off CUT_SHORT_MAX times."""
-    return ev.get("state") == "done" and bool(ev.get("cut_short")) and ev.get("cuts", 0) < CUT_SHORT_MAX
-
-
-def evaluate_needed(run: Path, pr: int, label: str) -> bool:
-    """No outcome for evaluation `label` yet, or one cut short for a reason
-    that is not the agent's (a cap, no time left, the model server, a
-    harness_fault): the next evaluate job runs it again."""
-    e = evaluation(read(run, pr), label)
-    return not e or harness_fault(e) or (e["state"] == "failed" and any(
-        x in e.get("note", "") for x in ("cap", "no time left", "server")))
-
-
-def evaluate_todo(run: Path, label: str) -> list[int]:
-    """VALID instances still to evaluate under `label` (Mynewt evaluate phase)."""
-    return [e["pr"] for e in manifest(run)["prs"]
-            if (read(run, e["pr"]).get("validate") or {}).get("outcome") == "VALID"
-            and evaluate_needed(run, e["pr"], label)]
 
 
 def entry(run: Path, pr: int) -> dict:

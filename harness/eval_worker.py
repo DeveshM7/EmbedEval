@@ -6,9 +6,10 @@ it and grades it (harness/run.py, run_and_grade), and repeats.
     python harness/eval_worker.py --project zephyr --model qwen38-nvfp4 \
         --name <job>-node<N>-w<K> --stop-at <epoch seconds>
 
-Started by scripts/eval_zephyr_node.sh, several per node, all talking to the
-node's model server. Workers on every node of a job, and of later jobs, share
-one queue (cluster/claims.py) in the model's eval folder:
+Started by scripts/eval_zephyr_node.sh (and its RIOT, Mynewt, NuttX and
+Contiki-NG counterparts), several per node, all talking to a model server.
+Workers on every node of a job, and of later jobs, share one queue
+(cluster/claims.py) in the model's eval folder:
 
     <eval dir>/<model>/claims/<project>.json
 
@@ -23,6 +24,16 @@ the run it is on.
 --instances FILE limits the work to the instance ids listed in it (a trial).
 --delete-images removes each instance image, and its git layer, once its PR
 is graded, so the images of a whole project need not fit on scratch at once.
+
+Mynewt, NuttX and Contiki-NG instances are not published: the worker builds
+an instance's image before its run if it is not there (harness/eval_images.py;
+a build that fails is an infrastructure error, retried and then "not_run",
+never a fail), and --delete-images also removes what the run left (overlays,
+sandboxes). Such an instance runs on one machine architecture only
+(harness/eval_set.py): a worker takes the instances of --arch (default: its
+own machine's) and leaves the others, which stay to do for a job of that
+architecture; it says how many it left. Instance ids keep their suffixes:
+the queue is keyed by the id's PR part ("3299-a651" for NuttX).
 """
 
 from __future__ import annotations
@@ -41,6 +52,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cluster"))
 import paths  # noqa: E402
 import run  # noqa: E402
 import claims  # noqa: E402
+import eval_images  # noqa: E402
+import eval_set  # noqa: E402
 
 
 def main() -> None:
@@ -57,6 +70,9 @@ def main() -> None:
                         "retried by the next job)")
     p.add_argument("--instances", help="file of instance ids to work on (default: all)")
     p.add_argument("--delete-images", action="store_true")
+    p.add_argument("--arch", choices=eval_set.ARCHS,
+                   help="Mynewt, NuttX, Contiki-NG: the architecture of the instances to take "
+                        "(default: this machine's)")
     p.add_argument("--step-limit", type=int, default=250)
     p.add_argument("--cost-limit", type=float, default=3.0)
     p.add_argument("--time-limit", type=float, default=120,
@@ -76,9 +92,13 @@ def main() -> None:
     model = paths.resolve_model(a.model)
     ids = (Path(a.instances).read_text().split() if a.instances
            else paths.discover_instances(a.project))
-    by_pr = {int(paths.split_instance(i)[1]): i for i in ids
+    built_here = a.project in eval_set.BUILT_HERE
+    sorted_out = eval_set.classify(ids, a.project, a.arch) if built_here else None
+    if built_here:
+        ids = sorted_out["mine"]
+    by_pr = {claims.key_of(paths.split_instance(i)[1]): i for i in ids
              if paths.split_instance(i)[0] == a.project}
-    todo = sorted(by_pr)
+    todo = sorted(by_pr, key=claims.order)
     args = argparse.Namespace(step_limit=a.step_limit, cost_limit=a.cost_limit,
                               time_limit=a.time_limit, force=False, verbose=False)
     folder = paths.OUTPUTS_DIR / paths.model_dir(model)
@@ -89,6 +109,13 @@ def main() -> None:
 
     done = 0
     log(f"{len(todo)} PRs, {sum(graded(pr) for pr in todo)} graded already")
+    if built_here:
+        for other, ids_ in sorted(sorted_out["other"].items()):
+            log(f"{len(ids_)} {a.project} PRs need {other}, not taken here (left to a job on {other})")
+        for why in sorted(set(sorted_out["unrunnable"].values())):
+            these = sorted(i for i, w in sorted_out["unrunnable"].items() if w == why)
+            log(f"{len(these)} instances cannot run on the cluster, not taken ({why}): {' '.join(these)}")
+        eval_images.sweep_sandboxes()
     while True:
         left = (a.stop_at - time.time()) / 60
         if left < a.margin:
@@ -104,7 +131,12 @@ def main() -> None:
         iid = by_pr[pr]
         log(f"took {iid} ({left:.0f} min left)")
         try:
-            g = run.run_and_grade(iid, model, args)
+            error = eval_images.ensure(iid) if built_here else None
+            g = (eval_images.record_failure(iid, model, args, error) if error
+                 else run.run_and_grade(iid, model, args))
+            if g is None:               # a failed build, to be tried again
+                log(f"{iid}: {error}")
+                continue
             log(f"{iid}: {g['grade']}" + (f" ({g['error'][:120]})" if g.get("error") else ""))
             done += 1
         except Exception as e:          # this PR only; the worker goes on
@@ -120,6 +152,8 @@ def main() -> None:
             for image in images:
                 if image.exists():
                     au.remove(image)
+            if built_here:
+                eval_images.cleanup(iid)
     log(f"stopping: {done} PRs this run")
 
 

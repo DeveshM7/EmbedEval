@@ -34,6 +34,19 @@ BEAT = 60          # seconds between touches of a worker's alive file
 STALE = 300        # a PR whose worker has been silent this long is free
 
 
+def key_of(text: str) -> int | str:
+    """A PR as the table names it: its number when it is only a number, else
+    the text as it is (NuttX '3299-a651', Mynewt '123-t45', '123-c1a2b3c4')."""
+    return int(text) if text.isdigit() else text
+
+
+def order(key: int | str) -> tuple[int, str]:
+    """The order PRs are taken and written in: by number, a PR with a suffix
+    after the plain one. For numbers alone this is their numeric order."""
+    head, _, rest = str(key).partition("-")
+    return (int(head) if head.isdigit() else 0, rest)
+
+
 def keep_alive(run: Path, me: str) -> None:
     """Touch this worker's alive file now and every BEAT seconds after, from
     a daemon thread, for as long as the worker runs."""
@@ -60,7 +73,7 @@ class Queue:
         self.alive.mkdir(parents=True, exist_ok=True)
         self.file.touch()
         self.me, self.needed = me, needed
-        self.held: set[int] = set()
+        self.held: set[int | str] = set()
         self._mutex = threading.Lock()     # POSIX locks do not exclude a process's own threads
 
     def _this_job(self, owner: str) -> bool:
@@ -84,19 +97,20 @@ class Queue:
             with open(self.file, "r+") as fh:
                 fcntl.lockf(fh, fcntl.LOCK_EX)
                 text = fh.read()
-                table = {int(k): v for k, v in json.loads(text).items()} if text.strip() else {}
+                table = {key_of(k): v for k, v in json.loads(text).items()} if text.strip() else {}
                 before = dict(table)
                 yield table
                 if table != before:
                     fh.seek(0)
                     fh.truncate()
-                    fh.write(json.dumps({str(k): v for k, v in sorted(table.items())}))
+                    fh.write(json.dumps({str(k): v for k, v in sorted(table.items(),
+                                                                     key=lambda kv: order(kv[0]))}))
                     fh.flush()
                     os.fsync(fh.fileno())
         finally:
             self._mutex.release()
 
-    def take(self, todo: list[int]) -> int | None:
+    def take(self, todo: list[int | str]) -> int | str | None:
         """Claim the first PR of `todo` that no live worker has and no
         worker has finished."""
         with self._table() as t:
@@ -115,7 +129,7 @@ class Queue:
                 return pr
         return None
 
-    def release(self, pr: int, done: bool) -> None:
+    def release(self, pr: int | str, done: bool) -> None:
         """done: the PR has its outcome; otherwise it is free again."""
         with self._table() as t:
             if (t.get(pr) or {}).get("owner") == self.me:
@@ -137,7 +151,7 @@ class Queue:
             pass
         self.held.clear()
 
-    def busy_elsewhere(self, todo: list[int]) -> bool:
+    def busy_elsewhere(self, todo: list[int | str]) -> bool:
         """Some PR of `todo` is being worked on by another live worker: it
         may still come free, if that worker dies."""
         with self._table() as t:

@@ -102,27 +102,6 @@ ORDER = ["in ledger", "in another run", "fetch failed", "hard filter", "enrich f
          "INVALID", "VALID"]
 
 
-def evaluations(st: dict) -> dict:
-    """A PR's agent outcome per evaluation label (status.eval_label); the
-    unlabeled stage of the first evaluate jobs is labeled from its limits
-    ("unlabeled" if it recorded none)."""
-    out = {}
-    for key, ev in sorted(st.items()):        # "evaluate" first: a labeled stage overrides it
-        if key == "evaluate":
-            lim = ev.get("limits")
-            label = status.eval_label({"model": ev.get("model"), "step_limit": lim["steps"],
-                                       "time_limit": lim["minutes"]}) if lim else "unlabeled"
-        elif key.startswith("evaluate:"):
-            label = key.split(":", 1)[1]
-        else:
-            continue
-        out[label] = ("harness fault" if status.harness_fault(ev)
-                      else "unfinished" if ev.get("unfinished")      # not a pass or a fail
-                      else "steps" if ev.get("grade") == "fail" and ev.get("step_limit_hit")
-                      else ev.get("grade") or ev["state"])
-    return out
-
-
 def build(run: Path) -> dict:
     m = status.manifest(run)
     nuttx = m.get("project") == "nuttx"
@@ -146,21 +125,18 @@ def build(run: Path) -> dict:
                     "arch": e.get("arch"),
                     "statement": (st.get("statement") or {}).get("result")
                     or (st.get("statement") or {}).get("state")}
-        rows.append(row | ({"agent": evaluations(st)} if evaluations(st) else {}))
+        rows.append(row)
     counts = Counter(r["outcome"] for r in rows)
     statements = (dict(Counter(r.get("statement") or "not yet" for r in rows if "arch" in r))
                   if any("arch" in r for r in rows) else None)
     observations = Counter(r["observe"] for r in rows if r["observe"])
-    agents = {label: dict(Counter(r["agent"][label] for r in rows if label in r.get("agent", {})))
-              for label in sorted({k for r in rows for k in r.get("agent", {})})}
     return {"run": m["name"], "project": m.get("project", "zephyr"),
             "generated": datetime.now().isoformat(timespec="seconds"),
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
             "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"],
             "observations": dict(observations),
-            **({"statements": statements} if statements else {}),
-            **({"agents": dict(agents)} if agents else {}), "rows": rows}
+            **({"statements": statements} if statements else {}), "rows": rows}
 
 
 def to_ledger(run: Path, prs: set[int] | None = None) -> tuple[int, Path]:
@@ -192,8 +168,6 @@ def markdown(rep: dict) -> str:
         out += ["", "**Statements:** " + ", ".join(f"{k} {v}" for k, v in rep["statements"].items())]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
-            *[f"**Agent grades, {label}:** " + ", ".join(f"{k} {v}" for k, v in counts.items()) + "\n"
-              for label, counts in rep.get("agents", {}).items()],
             "| PR | outcome | detail | " + ("instance, oracle" if rep.get("project") == "mynewt" else "pair")
             + " | triage min | validation min |" + (" arch | statement |" if "statements" in rep else ""),
             "|---|---|---|---|---|---|" + ("---|---|" if "statements" in rep else "")]
@@ -227,9 +201,6 @@ def main() -> None:
     if rep.get("observations"):
         print("  observed: " + ", ".join(f"{v} {k}" for k, v in rep["observations"].items()))
     print(f"  valid: {', '.join(map(str, rep['valid'])) or 'none'}")
-    if rep.get("agents"):
-        for label, counts in rep["agents"].items():
-            print(f"  agent grades, {label}: {counts}")
     if "statements" in rep:
         print(f"  statements: {rep['statements']}")
     if rep["project"] == "contiki-ng" and rep["valid"]:

@@ -23,10 +23,8 @@ validate  only once the run's triage is complete: take accepted PRs
           no new PR is taken. No model server runs.
 
 Mynewt runs (the manifest's project) run each phase as its own job:
-triage on a GPU node (scripts/triage_mynewt_prs.py, the local model only),
-validation on an x86 node (mynewt_validate below; no model server), and
-evaluate, which runs an agent on each validated instance and grades its
-patch (mynewt_evaluate below).
+triage on a GPU node (scripts/triage_mynewt_prs.py, the local model only)
+and validation on an x86 node (mynewt_validate below; no model server).
 
 NuttX runs (the manifest's project) run each phase as its own job too:
 triage of nuttx-apps PRs (scripts/triage_nuttx_prs.py apps) on a GPU node;
@@ -154,16 +152,15 @@ def record(run: Path, pr: int, stage: str, info: dict) -> bool:
     return True
 
 
-def assigned_work(run: Path, phase: str, label: str | None = None) -> list[int]:
+def assigned_work(run: Path, phase: str) -> list[int]:
     """The phase's PRs still to do that this node may take (the queue,
-    claims.py, shares them among the nodes). In validate and evaluate, an
+    claims.py, shares them among the nodes). In validate, an
     entry with an "arch" (a prepared NuttX instance) goes only to nodes of
     that architecture; a statement is written on any node."""
     anywhere = phase in ("triage", "statement")
     entries = {e["pr"]: e for e in status.manifest(run)["prs"]}
-    todo = (status.evaluate_todo(run, label) if phase == "evaluate" else
-            {"triage": status.triage_todo, "validate": status.validate_todo,
-             "statement": status.statement_todo}[phase](run))
+    todo = {"triage": status.triage_todo, "validate": status.validate_todo,
+            "statement": status.statement_todo}[phase](run)
     return [pr for pr in sorted(todo)
             if anywhere or entries[pr].get("arch", MACHINE) == MACHINE]
 
@@ -172,7 +169,7 @@ _queue: claims.Queue | None = None     # this phase's queue, for on_sigterm
 
 
 def drain(q: claims.Queue, todo: list[int], one, slots: int, until: float,
-          ready=lambda: True, stop=lambda: False) -> None:
+          ready=lambda: True) -> None:
     """Run one(pr) on PRs taken from the queue, `slots` at a time, until none
     is left or `until` (a time) has passed. While ready() is false, no PR is
     taken. A slot with nothing to take waits while other nodes still hold
@@ -181,7 +178,7 @@ def drain(q: claims.Queue, todo: list[int], one, slots: int, until: float,
     _queue = q
 
     def slot() -> None:
-        while not _stopping.is_set() and time.time() < until and not stop():
+        while not _stopping.is_set() and time.time() < until:
             if not ready():
                 time.sleep(claims.BEAT)
                 continue
@@ -1255,207 +1252,6 @@ def mynewt_validate(run: Path, pr: int, lg: Path, left, venv: dict):
         step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
 
 
-# ---------------------------------------------------------------- Mynewt evaluate
-#
-# Per VALID instance of the run: build its image, run the agent on it
-# (harness/run.py: no network, the problem statement and the tests only), grade
-# the patch in a fresh container (harness/evaluate_patches.py), remove the
-# image. A local model is reached through an SSH tunnel to the node of the
-# model-server job (one submit.py started, which the job script ends once the
-# workers are done, or a running one named with --server-job, which is left
-# alone). Outputs are the evaluation's own (status.eval_label: model and
-# limits): <run>/outputs/<label>/mynewt/<model>/<PR>/ (patch, trajectory) and
-# <run>/outputs/<label>/grades/<iid>.json; its status stage is evaluate:<label>.
-
-
-def model_tunnel(job: str, minutes: float, port: int = 8000):
-    """(the tunnel process, api base) to the server of job `job`, once it answers."""
-    deadline = time.time() + minutes * 60
-    node = ""
-    while time.time() < deadline and not _stopping.is_set():
-        r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T %N"], capture_output=True, text=True)
-        state, _, node = r.stdout.strip().partition(" ")
-        if state == "RUNNING" and node:
-            hosts = subprocess.run(["scontrol", "show", "hostnames", node], capture_output=True,
-                                   text=True).stdout.split()
-            node = hosts[N % len(hosts)] if hosts else node     # a server job of several nodes
-            break
-        if not state:
-            return None, f"server job {job} is not in the queue"
-        time.sleep(30)
-    else:
-        return None, f"server job {job} did not start"
-    tunnel = subprocess.Popen(["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-                               "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=60",
-                               "-N", "-L", f"{port}:127.0.0.1:8000", node], start_new_session=True)
-    with _lock:
-        _children.add(tunnel.pid)
-    base = f"http://127.0.0.1:{port}/v1"
-    while time.time() < deadline and not _stopping.is_set() and tunnel.poll() is None:
-        try:
-            urllib.request.urlopen(base + "/models", timeout=5)
-            return tunnel, base
-        except Exception:
-            time.sleep(20)
-    kill_group(tunnel.pid)
-    return None, f"server of job {job} on {node} did not answer"
-
-
-def server_alive(base: str, tunnel) -> bool:
-    if tunnel.poll() is not None:
-        return False
-    try:
-        urllib.request.urlopen(base + "/models", timeout=10)
-        return True
-    except Exception:
-        return False
-
-
-def server_capacity(job: str) -> float | None:
-    """How many requests of the full context length the server's KV cache
-    holds at once (vLLM's "Maximum concurrency" line in the server job's
-    log), or None when the log cannot be read."""
-    r = subprocess.run(["scontrol", "show", "job", job], capture_output=True, text=True)
-    m = re.search(r"StdOut=(\S+)", r.stdout)
-    try:
-        text = Path(m.group(1).replace("%j", job)).read_text(errors="replace") if m else ""
-    except OSError:
-        return None
-    found = re.findall(r"Maximum concurrency for [\d,]+ tokens per request: ([\d.]+)x", text)
-    return float(found[-1]) if found else None
-
-
-def watch_queue(base: str, stop: threading.Event, samples: list, every: float = 30) -> None:
-    """Append the server's waiting requests (vLLM /metrics) every `every`
-    seconds until `stop` is set."""
-    url = base.removesuffix("/v1") + "/metrics"
-    while not stop.wait(every):
-        try:
-            text = urllib.request.urlopen(url, timeout=10).read().decode(errors="replace")
-        except Exception:
-            continue
-        waiting = re.findall(r"^vllm:num_requests_waiting\{[^}]*\} ([\d.]+)", text, re.M)
-        if waiting:
-            samples.append(sum(float(w) for w in waiting))
-
-
-def agent_record(outputs: Path, model: str, iid: str) -> dict:
-    """What the trajectory says of an agent run (under `outputs`, the
-    evaluation's folder): exit status, model calls."""
-    sys.path.insert(0, str(REPO / "harness"))
-    import paths
-    f = Path(outputs) / "contiki-ng" / paths.model_dir(model) / iid.rsplit("-", 1)[1] / "trajectory.json"
-    try:
-        info = json.loads(f.read_text())["info"]
-        return {"exit_status": info.get("exit_status"), "steps": info["model_stats"]["api_calls"]}
-    except (OSError, ValueError, KeyError):
-        return {"exit_status": None, "steps": None}
-
-
-def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
-    label = status.eval_label(cfg["evaluate"])
-    todo = status.evaluate_todo(run, label)
-    log(f"evaluate {label}: {len(todo)} instances left in the run")
-    if not todo:
-        return
-    ev, caps = cfg["evaluate"], cfg["caps"]
-    t0 = time.time()
-    deadline = t0 + (minutes - 3) * 60
-    venv = {**env, "EMBEDEVAL_BUILD_TIMEOUT_MIN": str(caps["build"])}
-    server = cfg.get("evaluate_server_job")
-    tunnel = None
-    if server:
-        tunnel, base = model_tunnel(server, caps["server_start"])
-        if tunnel is None:
-            log(f"no model server: {base}. Taking no instances")
-            return
-        venv["EMBEDEVAL_LOCAL_API_BASE"] = base
-        log(f"model server of job {server} answers at {base}")
-    sweep(Path(env["EMBEDEVAL_WORK"]))
-    outputs = run / "outputs" / label                  # this evaluation's own outputs
-    venv["EMBEDEVAL_OUTPUTS_DIR"] = str(outputs)
-    grades = outputs / "grades"
-    grades.mkdir(parents=True, exist_ok=True)
-    limits = {"steps": ev["step_limit"], "minutes": ev["time_limit"]}
-
-    lost = threading.Event()        # the model server is gone: take no more instances
-
-    def one(pr: int) -> None:
-        if tunnel is not None and not server_alive(venv["EMBEDEVAL_LOCAL_API_BASE"], tunnel):
-            lost.set()
-            return                                         # stays to do: the next job runs it
-        iid = status.read(run, pr)["validate"]["instance"]
-        lg, start = LOGS / f"evaluate-{pr}.log", time.time()
-        left = lambda: (deadline - time.time()) / 60
-        # time_limit 0: no limit per instance, so only the job's end bounds a run;
-        # min_minutes_left is the least of the job a run is started with
-        minutes_limit = ev.get("time_limit") or 0
-        need = minutes_limit + 20 if minutes_limit else ev.get("min_minutes_left", 90)
-        if left() < need or _stopping.is_set():
-            return                                         # stays to do
-        info = {"model": ev["model"], "instance": iid, "limits": limits, "node": N}
-
-        def done(state: str, **more) -> None:
-            info.update(state=state, minutes=round((time.time() - start) / 60, 1), **more)
-            if record(run, pr, f"evaluate:{label}", info):
-                log(f"evaluate {pr}: {info.get('grade') or info.get('note')}")
-        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
-        try:
-            rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
-                      2 * caps["build"] + 5, venv)
-            if rc == 143:
-                return
-            if rc:
-                return done("failed", note="build failed" if rc != 124 else "build hit the cap")
-            # with no limit the run may use what is left of the job, less 5 min to grade
-            cap = minutes_limit + 15 if minutes_limit else left() - 5
-            rc = step([PY, "harness/run.py", "--instance", iid, "--model", ev["model"],
-                       "--step-limit", str(ev["step_limit"]), "--time-limit", str(minutes_limit)],
-                      lg, cap, venv)
-            if rc == 143:
-                return
-            if tunnel is not None and not server_alive(venv["EMBEDEVAL_LOCAL_API_BASE"], tunnel):
-                # the agent lost its model: not the agent's outcome, so it is run again
-                lost.set()
-                return done("failed", note="model server gone during the run")
-            if rc == 124 and not minutes_limit:
-                # the job's end, not the agent: not graded, run again by the next job
-                cuts = status.evaluation(status.read(run, pr), label).get("cuts", 0) + 1
-                if cuts >= status.MAX_CUTS:
-                    return done("failed", note=status.UNFINISHED_NOTE, cuts=cuts, unfinished=True)
-                return done("failed", note=status.CUT_NOTE, cuts=cuts)
-            out = grades / f"{iid}.json"
-            rc = step([PY, "harness/evaluate_patches.py", "--instance", iid, "--model", ev["model"],
-                       "--output", str(out)], lg, 30, venv)
-            if rc == 143:
-                return
-            if not out.exists():
-                return done("failed", note=f"no grade (rc={rc}); see the log")
-            g = json.loads(out.read_text())["results"][0]
-            steps, exit_status = None, None
-            r = outputs / "mynewt"
-            for f in r.glob(f"*/{iid.split('-', 1)[1]}/trajectory.json"):
-                try:
-                    info_ = json.loads(f.read_text())["info"]
-                    steps, exit_status = info_["model_stats"]["api_calls"], info_.get("exit_status")
-                except (OSError, ValueError, KeyError):
-                    pass
-            done("done", grade=g.get("grade"), error=g.get("error"), steps=steps,
-                 tampering=g.get("tampering", False), exit_status=exit_status,
-                 step_limit_hit=exit_status == "LimitsExceeded")
-        finally:
-            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)
-
-    q = claims.Queue(run, "evaluate", ME, lambda pr: status.evaluate_needed(run, pr, label))
-    try:
-        drain(q, todo, one, ev["per_node"], deadline - 5 * 60, stop=lost.is_set)
-        if lost.is_set():
-            log("the model server is gone: the rest stays to do for the next evaluate job")
-    finally:
-        if tunnel is not None:
-            kill_group(tunnel.pid)
-
-
 # ---------------------------------------------------------------- main
 
 
@@ -1478,7 +1274,7 @@ def main() -> None:
     p.add_argument("--run", required=True)
     p.add_argument("--config", required=True, help="the frozen settings submit.py wrote")
     p.add_argument("--phase", required=True,
-                   choices=["triage", "observe", "validate", "statement", "evaluate"])
+                   choices=["triage", "observe", "validate", "statement"])
     p.add_argument("--minutes", type=float, required=True,
                    help="the phase's time: what is left of the job, less the report's")
     args = p.parse_args()
@@ -1512,8 +1308,6 @@ def main() -> None:
         if contiki and machine != "aarch64":
             sys.exit("model statements run on Spark ARM64")
         statements(cfg, run, env, node_dir, args.minutes)
-    elif args.phase == "evaluate":
-        evaluate(cfg, run, env, args.minutes)
     elif args.phase == "observe":
         if not contiki or machine != "x86_64":
             sys.exit("Contiki-NG observation requires x86_64")

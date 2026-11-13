@@ -35,7 +35,7 @@ timeout -k 2m ${{M}}m srun -N "$SLURM_JOB_NUM_NODES" -n "$SLURM_JOB_NUM_NODES" \
         {python} cluster/node_worker.py --run "{run}" --config "{config}" --phase {phase} --minutes '"$M"
 worker_rc=$?
 echo "[$(date +%T)] {phase} done (rc=$worker_rc)"
-{end_server}{python} cluster/report.py --run "{run}"
+{python} cluster/report.py --run "{run}"
 report_rc=$?
 echo "[$(date +%T)] JOB DONE"
 if [ "$worker_rc" -ne 0 ]; then

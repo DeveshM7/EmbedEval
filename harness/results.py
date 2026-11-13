@@ -11,7 +11,10 @@ Reads each run's folder, <eval dir>/<model>/<project>/<PR>/ (harness/paths.py):
 grade.json for the outcome and run.json for how the agent's run ended. Only
 graded runs count. Like the harness, a run with an infrastructure error after
 its retry is "not run", not a fail; the pass rate is pass / (pass + fail), and
-"to do" counts instances with no grade yet.
+"to do" counts instances with no grade yet. For Mynewt, NuttX and Contiki-NG the
+instances are those that can run on the cluster, on either architecture
+(harness/eval_set.py): one that only a job of the other architecture can take
+stays "to do" until that job has run.
 
 Columns: instances (all the project's, or those in --instances), graded,
 pass, fail, not run, to do, pass rate; how the graded runs ended (submitted,
@@ -32,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import paths  # noqa: E402
+import eval_set  # noqa: E402
 
 
 def ending(run: dict) -> str:
@@ -123,7 +127,7 @@ def main() -> None:
     for project in a.project or paths.PROJECTS:
         if not any((m / project).is_dir() for m in models):
             continue
-        ids = [i for i in paths.discover_instances(project) if chosen is None or i in chosen]
+        ids = [i for i in eval_set.instances(project) if chosen is None or i in chosen]
         rows = {m.name: runs_of(m, project, ids) for m in models}
         print(f"\n## {project} ({len(ids)} instances)\n")
         print(markdown([{"model": name, **summary(r)} for name, r in rows.items()], "model"))

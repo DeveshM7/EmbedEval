@@ -29,8 +29,7 @@ Creates <scratch_root>/runs/<name>/ and, in it:
 
     --instances DIR (project nuttx): a revalidation of existing instances,
     each rendered again into <run>/instances/ with the current templates; no
-    triage. Its phases are separate jobs (submit.py statement, validate,
-    evaluate).
+    triage. Its phases are separate jobs (submit.py statement, validate).
 
 Then `python cluster/submit.py pipeline --run <name>`. Run this from an
 interactive session on a Spark node: the SDK images are built here.
