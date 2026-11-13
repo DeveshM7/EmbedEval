@@ -26,6 +26,10 @@ separate jobs (submit.py statement / validate / evaluate):
     statement.state done            "result" kept / written / failed (nuttx_statement.py)
                     failed          no result (the server, the cap; see note): done again
 
+Contiki-NG runs add observe (observation runs, observe_todo) and finalize
+(finalize_todo) stages; their statement phase writes or rechecks the problem
+statement of each VALID instance (statement_todo).
+
 A stage appears only once it has finished, one way or another:
 
     triage.state    done            a verdict (accept / reject / error)
@@ -35,6 +39,12 @@ A stage appears only once it has finished, one way or another:
     validate.state  done            outcome "VALID", or "INVALID: <reason>"
                     skipped         not started (disk guard, ...; see note)
                     failed          generate or build failed, or the cap hit
+    evaluate:<label>.state
+                    done            the agent ran and its patch was graded
+                                    (grade, steps, timed_out)
+                    failed          not graded (build failed, no grade); with
+                                    "retry": the model server went away
+                    <label> is <model>-<steps>steps-<min>min (eval_label)
 
 Only one worker handles a PR, and a stage is written once, all at once
 (written to a temporary file and renamed), so a file is never half-written,
@@ -101,9 +111,46 @@ def validate_needed(run: Path, pr: int) -> bool:
 
 
 def triage_todo(run: Path) -> list[int]:
-    """PRs that reached triage and have no triage outcome yet."""
-    return [e["pr"] for e in manifest(run)["prs"]
+    """PRs that reached triage and have no triage outcome yet (none in an
+    observation-only run)."""
+    m = manifest(run)
+    if m.get("observe_only"):
+        return []
+    return [e["pr"] for e in m["prs"]
             if e["stage"] == "to triage" and triage_needed(run, e["pr"])]
+
+
+def observe_todo(run: Path) -> list[int]:
+    """Contiki candidates without a completed observation."""
+    return [e["pr"] for e in manifest(run)["prs"]
+            if e["stage"] == "to triage"
+            and read(run, e["pr"]).get("observe", {}).get("state") != "done"]
+
+
+def receipt(run: Path, folder: str, pr: int, name: str) -> dict:
+    """A Contiki instance file of the run (instances/ or finalized/), or {}."""
+    f = Path(run) / folder / f"contiki-ng__contiki-ng-{pr}" / name
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def finalize_todo(run: Path) -> list[int]:
+    """Observed-valid Contiki PRs not yet finalized (generated from the
+    observation into <run>/finalized/, built and validated with repeats)."""
+    return [e["pr"] for e in manifest(run)["prs"]
+            if e["stage"] == "to triage"
+            and read(run, e["pr"]).get("observe", {}).get("state") == "done"
+            and receipt(run, "instances", e["pr"], "observed.json").get("valid") is True
+            and read(run, e["pr"]).get("finalize", {}).get("state") != "done"]
+
+
+# The statement check in force: keep equal to scripts/triage_prs.STATEMENT_CHECK.
+STATEMENT_CHECK = 2
+
+
+def instance_folder(run: Path, pr: int) -> str:
+    """Where a run keeps its validated instance: finalized/ for an
+    observation run, instances/ for a triage run."""
+    return "finalized" if (Path(run) / "finalized" / f"contiki-ng__contiki-ng-{pr}").exists() else "instances"
 
 
 def accepted(run: Path) -> list[int]:
@@ -113,23 +160,37 @@ def accepted(run: Path) -> list[int]:
             or (read(run, e["pr"]).get("triage") or {}).get("verdict") == "accept"]
 
 
-def unfinished(runs: Path, but: Path | None = None, of: str = "zephyr") -> dict[int, str]:
-    """PRs some run of project `of` has taken and not finished -- what a
-    resubmit of that run would still do -- and the run's name. Every such run
-    under `runs` but `but`."""
+def unfinished(runs: Path, but: Path | None = None, of: str = "zephyr",
+               project: str | None = None) -> dict[int, str]:
+    """PRs some run of project `of` (`project`, as Contiki-NG's callers name
+    it) has taken and not finished -- what a resubmit of that run would still
+    do -- and the run's name. Every such run under `runs` but `but`."""
+    of = project or of
     out = {}
     for m in sorted(Path(runs).glob("*/manifest.json")):
         other = m.parent
-        if (but and other.resolve() == Path(but).resolve()) or project(other) != of:
+        if (but and other.resolve() == Path(but).resolve()) or manifest(other).get("project", "zephyr") != of:
             continue
         for pr in triage_todo(other) + validate_todo(other):
             out.setdefault(pr, other.name)
     return out
 
 
+def revalidation(run: Path) -> list[int]:
+    """A Contiki-NG revalidation's PRs (prepare.py --instances): each has an
+    existing instance in <run>/sources/, rendered again under the current runner."""
+    return [e["pr"] for e in manifest(run)["prs"] if e["stage"] == "to validate"]
+
+
 def validate_todo(run: Path) -> list[int]:
     """Accepted PRs with no validation outcome yet."""
     return [pr for pr in accepted(run) if validate_needed(run, pr)]
+
+
+def valid(run: Path) -> list[int]:
+    """PRs of the run whose validation outcome is VALID."""
+    return [e["pr"] for e in manifest(run)["prs"]
+            if (read(run, e["pr"]).get("validate") or {}).get("outcome") == "VALID"]
 
 
 def eval_label(ev_cfg: dict) -> str:
@@ -140,6 +201,36 @@ def eval_label(ev_cfg: dict) -> str:
     limits are compared on the same instances without overwriting each other."""
     minutes = ev_cfg.get("time_limit") or 0
     return f"{ev_cfg['model']}-{ev_cfg['step_limit']}steps" + (f"-{minutes:g}min" if minutes else "")
+
+
+CUT_SHORT_FINAL = 2     # runs cut off by the end of a job, after which the instance is given up
+
+
+def cut_short_count(run: Path, pr: int, label: str) -> int:
+    """How many times this evaluation's agent run was cut off by the end of its job."""
+    return (evaluations(read(run, pr)).get(label) or {}).get("cut_short", 0)
+
+
+def evaluate_key(label: str) -> str:
+    """The status stage of one evaluation: evaluate:<label>."""
+    return f"evaluate:{label}"
+
+
+def evaluations(st: dict) -> dict:
+    """A PR's evaluate results by label. A result recorded under the earlier
+    per-model key (evaluate:<model>) belongs to the label of the limits
+    recorded with it; a labeled stage overrides it. A result with no limits
+    recorded keeps its key's name as its label."""
+    earlier, out = {}, {}
+    for key, ev in st.items():
+        if not key.startswith("evaluate:"):
+            continue
+        name, lim = key.split(":", 1)[1], ev.get("limits")
+        if name == ev.get("model") and lim:
+            earlier[eval_label(name, lim["step_limit"], lim["time_limit"])] = ev
+        else:
+            out[name] = ev
+    return earlier | out
 
 
 # An agent run with no time limit that the end of its job cut off is the
@@ -196,9 +287,31 @@ def evaluate_todo(run: Path, label: str) -> list[int]:
 def entry(run: Path, pr: int) -> dict:
     """The PR's line of the manifest."""
     return next(e for e in manifest(run)["prs"] if e["pr"] == pr)
-def statement_todo(run: Path) -> list[int]:
+def nuttx_statement_todo(run: Path) -> list[int]:
     """Instances of a revalidation run with no statement result yet."""
     return [e["pr"] for e in manifest(run)["prs"] if e.get("instance")
             and (read(run, e["pr"]).get("statement") or {}).get("state") != "done"]
+
+
+def contiki_statement_todo(run: Path, recheck: bool = False) -> list[int]:
+    """VALID instances whose metadata has no problem statement yet; with
+    recheck, also those whose statement has not been checked under the
+    current STATEMENT_CHECK."""
+    out = []
+    for e in manifest(run)["prs"]:
+        folder = instance_folder(run, e["pr"])
+        if receipt(run, folder, e["pr"], "validation.json").get("valid") is not True:
+            continue
+        meta = receipt(run, folder, e["pr"], "metadata.json")
+        if (not (meta.get("problem_statement") or "").strip()
+                or (recheck and (meta.get("statement_check") or {}).get("version") != STATEMENT_CHECK)):
+            out.append(e["pr"])
+    return out
+
+
+def statement_todo(run: Path, recheck: bool = False) -> list[int]:
+    """The statement phase's work: a NuttX run's (its instances' statements),
+    or a Contiki-NG run's (VALID instances; `recheck` is Contiki-NG's)."""
+    return nuttx_statement_todo(run) if project(run) == "nuttx" else contiki_statement_todo(run, recheck)
 
 

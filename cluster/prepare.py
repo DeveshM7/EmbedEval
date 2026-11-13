@@ -4,6 +4,7 @@ Prepare a run: everything before the cluster job, on the node you run it from.
 
     python cluster/prepare.py --name 2025-09 --since 2025-09-01 --until 2025-09-30
     python cluster/prepare.py --name gold --pr 65697 85079 ...
+    python cluster/prepare.py --name reval --instances apptainer/instances/contiki-ng   # Contiki-NG
 
 Creates <scratch_root>/runs/<name>/ and, in it:
 
@@ -44,6 +45,12 @@ Mynewt image is built by the first validation worker (on x86). It needs the
 revalidation of existing instances instead (each <id>/metadata.json and
 test_patch.diff is copied into <run>/sources/): no triage, every PR "to
 validate". Then `submit.py triage`, and `submit.py validate --after <job>`.
+
+Contiki-NG --instances DIR...: a revalidation of existing instances (each DIR
+an instance folder, or a folder of them) under the current runner: their
+instance.json, metadata.json and test_patch.diff are copied to <run>/sources/,
+and `submit.py validate` renders each again from there (generate_instance.py
+--render), builds and validates it. No triage; the ledger is not consulted.
 """
 
 from __future__ import annotations
@@ -69,6 +76,20 @@ import report  # noqa: E402
 import status  # noqa: E402
 
 PY = sys.executable
+
+
+def code_identity(repo: Path, project: str) -> dict:
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                              text=True).stdout.strip()
+
+    git_root = git("rev-parse", "--show-toplevel")
+    archive = project == "contiki-ng" and (not git_root or Path(git_root).resolve() != repo.resolve())
+    if archive:
+        stamp = repo / ".embedeval-revision"
+        return {"commit": (stamp.read_text().strip() or None) if stamp.exists() else None,
+                "dirty": None, "archive": True}
+    return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))}
 
 
 def log(msg: str) -> None:
@@ -325,6 +346,44 @@ def prepare_nuttx(args, cfg: dict, run: Path, env: dict, done: dict) -> None:
                    {"records": time.time() - t0}, [], t0)
 
 
+SOURCE_FILES = ("instance.json", "metadata.json", "test_patch.diff")
+
+
+def instance_sources(dirs: list[Path], run: Path) -> dict[int, Path]:
+    """PR -> <run>/sources/<instance>, copied from the given instance folders
+    (or folders of them). One instance per PR; an id must round-trip."""
+    import shutil
+    sys.path.insert(0, str(REPO / "scripts"))
+    import instances as inst_mod
+    found: dict[int, Path] = {}
+    for d in dirs:
+        d = Path(d).resolve()
+        folders = [d] if (d / "metadata.json").exists() else sorted(
+            x for x in d.iterdir() if (x / "metadata.json").exists())
+        for f in folders:
+            project, pr = inst_mod.split_instance(f.name)
+            if project != "contiki-ng" or f.name != f"contiki-ng__contiki-ng-{int(pr)}":
+                sys.exit(f"{f}: not a contiki-ng__contiki-ng-<PR> instance folder")
+            missing = [n for n in SOURCE_FILES if not (f / n).exists()]
+            if missing:
+                sys.exit(f"{f}: missing {', '.join(missing)}")
+            if json.loads((f / "metadata.json").read_text()).get("instance_id") != f.name:
+                sys.exit(f"{f}: metadata.json names another instance")
+            if int(pr) in found:
+                sys.exit(f"PR {pr} twice: {found[int(pr)]} and {f}")
+            found[int(pr)] = f
+    out = {}
+    for pr, f in found.items():
+        dst = run / "sources" / f.name
+        dst.mkdir(parents=True, exist_ok=True)
+        for n in SOURCE_FILES:
+            shutil.copy2(f / n, dst / n)
+        out[pr] = dst
+    if not out:
+        sys.exit("no instance folders found")
+    return out
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -335,10 +394,12 @@ def main() -> None:
     src.add_argument("--all", action="store_true", help="Mynewt: every PR in the history")
     src.add_argument("--all-ostest", action="store_true",
                      help="project nuttx: every merged apps PR that changes testing/ostest/")
-    src.add_argument("--instances", metavar="DIR",
-                     help="Mynewt or NuttX: revalidate the instances in DIR (e.g. "
-                          "apptainer/instances/mynewt, apptainer/instances/nuttx); NuttX "
-                          "instances are rendered again with the current templates")
+    src.add_argument("--instances", nargs="+", type=Path, metavar="DIR",
+                     help="Mynewt, NuttX or Contiki-NG: revalidate existing instances. Mynewt "
+                          "and NuttX take one folder of them (e.g. apptainer/instances/mynewt, "
+                          "apptainer/instances/nuttx; NuttX instances are rendered again with "
+                          "the current templates); Contiki-NG takes instance folders, or "
+                          "folders of them")
     p.add_argument("--project", choices=cluster_config.PROJECTS,
                    help="default: the config's `project` (nuttx needs it in the config)")
     p.add_argument("--no-filter", action="store_true", help="with --pr: skip the hard filters")
@@ -349,6 +410,12 @@ def main() -> None:
                    help="project nuttx: take these PRs' triage verdicts from an earlier run "
                         "instead of triaging them again (with --pr)")
     p.add_argument("--config", help="default: cluster/config.yaml")
+    p.add_argument("--observe-only", action="store_true",
+                   help="Contiki: a model-free observation run (observe/finalize/statement jobs); "
+                        "it never holds PRs for triage")
+    p.add_argument("--observe-profile", choices=("native", "cooja", "script"),
+                   help="with --observe-only: observe every PR under this profile, so PRs whose "
+                        "units span profiles are covered by one run per profile")
     args = p.parse_args()
     if args.since and not args.until:
         p.error("--since needs --until")
@@ -360,7 +427,7 @@ def main() -> None:
     cfg = cluster_config.load_or_exit(args.config)
     project = args.project or cfg["project"]
     if project == "zephyr" and args.instances:
-        p.error("--instances is for Mynewt and NuttX runs")
+        p.error("--instances is for Mynewt, NuttX and Contiki-NG runs")
     if args.all and project != "mynewt":
         p.error("--all is Mynewt only")
     if project == "nuttx" and cfg["project"] != "nuttx":
@@ -370,6 +437,14 @@ def main() -> None:
         p.error("--all-ostest needs project: nuttx in the config")
     if args.verdicts_from and project != "nuttx":
         p.error("--verdicts-from needs project: nuttx in the config")
+    if args.observe_only and project != "contiki-ng":
+        p.error("--observe-only is Contiki-NG only")
+    if args.instances and project == "contiki-ng" and (args.observe_only or args.no_filter):
+        p.error("--instances goes without --observe-only or --no-filter")
+    if args.instances and project in ("mynewt", "nuttx"):
+        if len(args.instances) > 1:
+            p.error(f"--instances takes one folder of {project} instances")
+        args.instances = args.instances[0]
     run = Path(cfg["derived"]["runs"]) / args.name
     if (run / "manifest.json").exists():
         sys.exit(f"{run} is already prepared; pick another --name "
@@ -396,6 +471,16 @@ def main() -> None:
     done = {} if args.redo else ledger.latest(Path(cfg["derived"]["ledger"]), project)
     taken = status.unfinished(Path(cfg["derived"]["runs"]), but=run, of=project)
 
+    sys.path.insert(0, str(REPO / "scripts"))
+    if project == "contiki-ng":
+        import contiki_ng_candidates as candidates
+    else:
+        import filter_candidates as candidates
+
+    def candidate_cmd(command: str, *more: str, logfile: Path, timeout=None) -> int:
+        return script("filter_candidates.py", command, "--repo", project, *more,
+                      env=env, logfile=logfile, timeout=timeout)
+
     def skip_known(prs):
         for pr in prs:
             if pr in taken:
@@ -418,34 +503,56 @@ def main() -> None:
               f"--run {args.name}" + ("" if args.instances else
                                       f"; then submit.py validate --run {args.name} --after <job>"))
         return
-    if args.pr:
+    sources = {}
+    if args.instances:
+        sources = instance_sources(args.instances, run)
+        prs = sorted(sources)
+        source = {"instances": [str(Path(d).resolve()) for d in args.instances]}
+        # Not held back by another run's unfinished triage or validation of the
+        # PR: a revalidation writes only its own run folder.
+        for pr in prs:
+            stage[pr] = "to validate"
+        log(f"{len(prs)} instances to revalidate")
+    elif args.pr:
         prs = list(dict.fromkeys(args.pr))
         source = {"pr": prs, "hard_filter": not args.no_filter, "redo": args.redo}
         skip_known(prs)
         fresh = [pr for pr in prs if pr not in stage]
         if not args.no_filter and fresh:
             log("hard filters")
-            script("filter_candidates.py", "fetch", "--pr", *map(str, fresh), env=env,
-                   logfile=logs / "fetch.log", timeout=None)
-            sys.path.insert(0, str(REPO / "scripts"))
-            import filter_candidates as fc
+            # Zephyr marks a PR GitHub did not serve below, as it always has
+            if candidate_cmd("fetch", "--pr", *map(str, fresh),
+                             logfile=logs / "fetch.log") and project == "contiki-ng":
+                sys.exit(f"fetch failed; see {logs / 'fetch.log'}")
             for pr in fresh:
-                f = fc.CACHE / f"{pr}.json"
-                if not f.exists():     # GitHub did not answer: not an outcome, so not settled
-                    stage[pr], notes[pr] = "fetch failed", f"see {logs / 'fetch.log'}"
-                    continue
-                ok, why = fc.classify(json.loads(f.read_text()))
+                if project == "contiki-ng":
+                    try:
+                        rec = candidates.find_pr(pr)
+                    except (KeyError, ValueError):
+                        rec = None
+                    if rec is None:
+                        stage[pr], notes[pr] = "fetch failed", f"see {logs / 'fetch.log'}"
+                        continue
+                    ok, why = candidates.classify(rec)
+                else:
+                    f = candidates.CACHE / f"{pr}.json"
+                    if not f.exists():
+                        stage[pr], notes[pr] = "fetch failed", f"see {logs / 'fetch.log'}"
+                        continue
+                    ok, why = candidates.classify(json.loads(f.read_text()))
                 if not ok:
                     stage[pr], notes[pr] = "hard filter", why
     else:
         source = {"since": args.since, "until": args.until, "redo": args.redo}
         log(f"fetching PRs merged {args.since} .. {args.until}")
-        if script("filter_candidates.py", "fetch", "--since", args.since, "--until", args.until,
-                  env=env, logfile=logs / "fetch.log", timeout=None):
+        if candidate_cmd("fetch", "--since", args.since, "--until", args.until,
+                         logfile=logs / "fetch.log"):
             sys.exit(f"fetch failed; see {logs / 'fetch.log'}")
-        if script("filter_candidates.py", "filter", env=env, logfile=logs / "filter.log"):
+        if candidate_cmd("filter", logfile=logs / "filter.log"):
             sys.exit(f"filter failed; see {logs / 'filter.log'}")
-        prs = [json.loads(l)["number"] for l in open(run / "candidates" / "candidates.jsonl")]
+        candidate_file = (run / "candidates" / ("contiki-ng" if project == "contiki-ng" else "")
+                          / "candidates.jsonl")
+        prs = [json.loads(l)["number"] for l in open(candidate_file)]
         skip_known(prs)
     timings["select"] = time.time() - t0
     log(f"{len(prs)} PRs")
@@ -454,9 +561,11 @@ def main() -> None:
     t = time.time()
     log(f"enriching, {par['enrich']} at a time")
     kept = [pr for pr in prs if pr not in stage]
+    if sources:
+        kept = []                       # a revalidation takes no new PR records
     if kept:
-        script("filter_candidates.py", "enrich", "--parallel", str(par["enrich"]),
-               "--pr", *map(str, kept), env=env, logfile=logs / "enrich.log", timeout=None)
+        candidate_cmd("enrich", "--parallel", str(par["enrich"]),
+                      "--pr", *map(str, kept), logfile=logs / "enrich.log")
     enriched = [pr for pr in kept if (run / "enriched" / f"{pr}.json").exists()]
     timings["enrich"] = time.time() - t
     log(f"enriched {len(enriched)}/{len(kept)} in {timings['enrich']:.0f} s")
@@ -464,52 +573,61 @@ def main() -> None:
     # 3. dry runs, in parallel: one process per PR
     t = time.time()
     log(f"dry runs, {par['dry_run']} at a time")
-    with ThreadPoolExecutor(par["dry_run"]) as pool:
-        list(pool.map(lambda pr: script("dry_run.py", str(pr), env=env,
-                                        logfile=logs / "dryrun" / f"{pr}.log", timeout=1800),
-                      enriched))
+    if project == "zephyr":
+        with ThreadPoolExecutor(par["dry_run"]) as pool:
+            list(pool.map(lambda pr: script("dry_run.py", str(pr), env=env,
+                                            logfile=logs / "dryrun" / f"{pr}.log", timeout=1800),
+                          enriched))
     timings["dry_run"] = time.time() - t
 
     for pr in kept:
         f = run / "dryrun" / f"{pr}.json"
         if pr not in enriched:
             stage[pr] = "enrich failed"
+        elif project == "contiki-ng":
+            stage[pr] = "to triage"
         elif not f.exists():
             stage[pr] = "dry run error"
         elif json.loads(f.read_text())["auto_reject"]:
             stage[pr] = "dry run: no runnable pair"
         else:
             stage[pr] = "to triage"
-    to_triage = [pr for pr in prs if stage[pr] == "to triage"]
+    to_triage = [pr for pr in prs if stage[pr] in ("to triage", "to validate")]
     log(f"dry runs done in {timings['dry_run']:.0f} s: {len(to_triage)} to triage")
 
     # 4. shared SDK images the triaged PRs may need, each built once
-    sys.path.insert(0, str(REPO / "scripts"))
-    import apptainer_util as au
     t = time.time()
-    need = {}
-    for pr in to_triage:
-        tw = json.loads((run / "enriched" / f"{pr}.json").read_text())["twister"]
-        need[(tw["python"], tw["sdk"], tw["sdk_archive"])] = pr
-    missing = [k for k in need if not au.sdk_image(k[1], k[0]).exists()]
-    for py, sdk, archive in missing:          # one at a time: two may share a Python image
-        log(f"building SDK image {sdk} (Python {py})")
-        try:
-            au.ensure_base_images(py, sdk, archive, Path(cfg["derived"]["shared"]) / "logs")
-        except RuntimeError as e:
-            log(f"  FAILED: {e}")
+    missing = []
+    if project == "zephyr":
+        import apptainer_util as au
+        need = {}
+        for pr in to_triage:
+            tw = json.loads((run / "enriched" / f"{pr}.json").read_text())["twister"]
+            need[(tw["python"], tw["sdk"], tw["sdk_archive"])] = pr
+        missing = [k for k in need if not au.sdk_image(k[1], k[0]).exists()]
+        for py, sdk, archive in missing:
+            log(f"building SDK image {sdk} (Python {py})")
+            try:
+                au.ensure_base_images(py, sdk, archive, Path(cfg["derived"]["shared"]) / "logs")
+            except RuntimeError as e:
+                log(f"  FAILED: {e}")
     timings["sdk_images"] = time.time() - t
 
     # 5. every commit a worker reads, fetched now: workers never fetch
     t = time.time()
-    import zephyr_env
+    if project == "zephyr":
+        import zephyr_env
     shas = set()
     for pr in to_triage:
-        rec = json.loads((run / "enriched" / f"{pr}.json").read_text())
+        rec = json.loads(((sources[pr] / "metadata.json") if pr in sources
+                          else run / "enriched" / f"{pr}.json").read_text())
         shas |= {s for s in (rec.get("base_commit"), rec.get("head_commit"),
-                             rec.get("merge_commit_sha")) if s}
+                             rec.get("merge_commit_sha"), rec.get("fix_commit")) if s}
     try:
-        zephyr_env.ensure_commits(*sorted(shas))
+        if project == "contiki-ng":
+            candidates.ensure_commits(*sorted(shas))
+        else:
+            zephyr_env.ensure_commits(*sorted(shas))
         fetched = "ok"
     except RuntimeError as e:
         fetched = str(e)[:300]
@@ -518,25 +636,35 @@ def main() -> None:
 
     # 6. the manifest
     write_manifest(args, cfg, project, run, env, source, prs, stage, notes, timings, t0,
-                   [f"{sdk} (Python {py})" for py, sdk, _ in missing if not au.sdk_image(sdk, py).exists()])
-    print(f"\nnext: python cluster/submit.py pipeline --run {args.name}")
+                   [f"{sdk} (Python {py})" for py, sdk, _ in missing if not au.sdk_image(sdk, py).exists()]
+                   if project == "zephyr" else [], sources=sources)
+    mode = (("validate" if sources else "observe" if args.observe_only else "triage")
+            if project == "contiki-ng" else "pipeline")
+    print(f"\nnext: python cluster/submit.py {mode} --run {args.name}")
 
 
 def write_manifest(args, cfg: dict, project: str, run: Path, env: dict, source: dict, prs: list[int],
                    stage: dict, notes: dict, timings: dict, t0: float, missing_images: list[str],
-                   extra: dict | None = None) -> None:
-    """Step 6: the manifest, the ledger's settled outcomes, and the summary."""
-    git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True,
-                                    text=True).stdout.strip()
+                   extra: dict | None = None, sources: dict | None = None) -> None:
+    """Step 6: the manifest, the ledger's settled outcomes, and the summary.
+    `sources`: a Contiki-NG revalidation's instance folders, per PR."""
+    sources = sources or {}
+    observe_profile = getattr(args, "observe_profile", None)
     manifest = {
         "name": args.name, "prepared": datetime.now().isoformat(timespec="seconds"),
         **({"project": project} if project != "zephyr" else {}),
         "source": source,
-        "code": {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))},
+        "code": code_identity(REPO, project),
         "config": {k: v for k, v in cfg.items() if k != "derived"},
         "environment": env,
         "prs": [{"pr": pr, "stage": stage[pr]} | ({"note": notes[pr]} if pr in notes else {})
-                | (extra or {}).get(pr, {}) for pr in prs],
+                | (extra or {}).get(pr, {})
+                | ({"instance": sources[pr].name} if pr in sources else {})
+                | ({"observe_profile": observe_profile}
+                   if observe_profile and stage[pr] == "to triage" else {})
+                for pr in prs],
+        **({"observe_only": True} if getattr(args, "observe_only", False) else {}),
+        **({"revalidation": True} if sources else {}),
         "counts": {s: sum(1 for v in stage.values() if v == s) for s in sorted(set(stage.values()))},
         "missing_sdk_images": missing_images,
         "seconds": {k: round(v) for k, v in timings.items()},

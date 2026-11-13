@@ -53,6 +53,9 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="list what would be removed")
     args = p.parse_args()
     for iid in args.instance:
+        if not args.dry_run:            # a 32-bit image's node-local copy (au.runnable_image)
+            for d in au.remove_local_sandbox(au.instance_image(iid)):
+                print(f"{iid}: removed node-local sandbox {d}")
         found = targets(iid)
         if not found:
             print(f"{iid}: nothing to remove")

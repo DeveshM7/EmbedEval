@@ -337,6 +337,13 @@ def make_environment(meta: dict):
                                         setup_commands=[one_commit], sandbox=True,
                                         network_fixture=meta.get("network_fixture"),
                                         isolate_network=True)
+        if meta["project"] == "contiki-ng":
+            # Contiki-NG: its protected tests are in tests/ and regression-tests/.
+            commit_tests = ("cd /testbed && "
+                            "if [ -d tests ]; then git add -A -- tests/; fi; "
+                            "if [ -d regression-tests ]; then git add -A -- regression-tests/; fi; "
+                            "git -c user.name=EmbedEval -c user.email=embedeval@localhost "
+                            "commit -q -m 'Protected upstream tests'")
         import registry   # the validated image: pulled from the registry if published
         image, layer = apptainer_util.instance_container(
             meta, registry.image_for(meta["instance_id"]))
@@ -357,6 +364,7 @@ def make_environment(meta: dict):
         return ApptainerEnvironment(image=image, layer=layer,
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
+                                    local_overlay=meta["project"] == "contiki-ng",
                                     setup_commands=setup)
 
     # NuttX, RIOT: Docker.

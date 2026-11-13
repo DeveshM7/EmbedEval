@@ -37,6 +37,7 @@ sys.path[:0] = [str(CLUSTER), str(CLUSTER.parent / "scripts")]
 import config as cluster_config  # noqa: E402
 
 ZEPHYR_URL = "https://github.com/zephyrproject-rtos/zephyr.git"
+CONTIKI_NG_URL = "https://github.com/contiki-ng/contiki-ng.git"
 results: list[tuple[str, str, str]] = []      # (status, item, detail)
 
 
@@ -54,18 +55,21 @@ def run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
 
 def check_machine(cfg: dict) -> None:
     arch = platform.machine()
-    report("ok" if arch == "aarch64" else "FAIL", "architecture",
-           arch + ("" if arch == "aarch64" else " -- run this on a Spark (ARM64) node"))
+    wanted = "x86_64" if cfg["project"] == "contiki-ng" else "aarch64"
+    report("ok" if arch == wanted else "FAIL", "architecture",
+           arch + ("" if arch == wanted else f" -- run this on a {wanted} node"))
     r = run(["apptainer", "--version"])
     report("ok" if r.returncode == 0 else "FAIL", "apptainer", (r.stdout or r.stderr).strip()[:80])
     r = run(["gh", "auth", "status"])
     report("ok" if r.returncode == 0 else "FAIL", "gh (GitHub API for enrichment)",
            "logged in" if r.returncode == 0 else "not logged in -- run `gh auth login`")
     s = cfg["slurm"]
-    r = run(["sbatch", "--test-only", "-p", s["partition"], "-N", "1", f"--gres={s['gres']}",
+    partition = s["build_partition"] if cfg["project"] == "contiki-ng" else s["partition"]
+    r = run(["sbatch", "--test-only", "-p", partition, "-N", "1",
+             *([] if cfg["project"] == "contiki-ng" else [f"--gres={s['gres']}"]),
              "-t", "00:05:00", "--wrap", "true"])
     ok = r.returncode == 0
-    report("ok" if ok else "FAIL", f"Slurm partition {s['partition']}",
+    report("ok" if ok else "FAIL", f"Slurm partition {partition}",
            "accepts jobs" if ok else (r.stderr or r.stdout).strip()[-160:])
 
 
@@ -102,26 +106,29 @@ def make_dirs(cfg: dict) -> None:
 
 
 def zephyr_clone(cfg: dict) -> None:
-    clone = Path(cfg["derived"]["zephyr_clone"])
+    contiki = cfg["project"] == "contiki-ng"
+    clone = Path(cfg["derived"]["contiki_ng_clone" if contiki else "zephyr_clone"])
+    label = "Contiki-NG" if contiki else "Zephyr"
+    url = CONTIKI_NG_URL if contiki else ZEPHYR_URL
     if clone.exists():
         r = run(["git", "-C", str(clone), "rev-parse", "--is-bare-repository"])
         ok = r.returncode == 0 and r.stdout.strip() == "true"
-        report("found" if ok else "FAIL", "Zephyr clone",
+        report("found" if ok else "FAIL", f"{label} clone",
                str(clone) if ok else f"{clone} exists but is not a bare git clone")
         return
-    print(f"  cloning {ZEPHYR_URL} into {clone} (full, a few GB; minutes) ...", flush=True)
+    print(f"  cloning {url} into {clone} (full, minutes) ...", flush=True)
     clone.parent.mkdir(parents=True, exist_ok=True)
     tmp = clone.with_name(clone.name + ".partial")
     if tmp.exists():
-        report("FAIL", "Zephyr clone", f"{tmp} is left from an interrupted clone; "
+        report("FAIL", f"{label} clone", f"{tmp} is left from an interrupted clone; "
                "remove it and run again")
         return
-    r = run(["git", "clone", "--bare", "-q", ZEPHYR_URL, str(tmp)], timeout=3600)
+    r = run(["git", "clone", "--bare", "-q", url, str(tmp)], timeout=3600)
     if r.returncode == 0:
         tmp.rename(clone)                      # only a complete clone gets the real name
-        report("created", "Zephyr clone", str(clone))
+        report("created", f"{label} clone", str(clone))
     else:
-        report("FAIL", "Zephyr clone", (r.stderr or r.stdout).strip()[-200:])
+        report("FAIL", f"{label} clone", (r.stderr or r.stdout).strip()[-200:])
 
 
 def base_images(cfg: dict) -> None:
@@ -153,13 +160,25 @@ def main() -> None:
     p.add_argument("--config", help="default: cluster/config.yaml, else the example's defaults")
     args = p.parse_args()
     cfg = cluster_config.load_or_exit(args.config)
+    if cfg["project"] == "contiki-ng" and not cfg["slurm"]["build_partition"]:
+        sys.exit("config error: slurm.build_partition is required for Contiki-NG x86 builds")
     print(f"EmbedEval setup -- config: {cfg['derived']['config_file'] or 'defaults (no config.yaml)'}\n"
           f"  scratch root: {cfg['derived']['root']}\n")
     check_machine(cfg)
-    check_model(cfg)
+    if cfg["project"] == "zephyr":
+        check_model(cfg)
     make_dirs(cfg)
     zephyr_clone(cfg)
-    base_images(cfg)
+    if cfg["project"] == "zephyr":
+        base_images(cfg)
+    else:
+        import apptainer_util as au
+        os.environ.update(cluster_config.env_for(cfg))
+        try:
+            au.ensure_contiki_ng_base()
+            report("found", "Contiki-NG x86 CI image", cfg["derived"]["contiki_ng_image"])
+        except RuntimeError as e:
+            report("FAIL", "Contiki-NG x86 CI image", str(e))
     failed = [r for r in results if r[0] == "FAIL"]
     print(f"\n{len(results) - len(failed)} ok, {len(failed)} failed"
           + ("" if not failed else ": " + "; ".join(r[1] for r in failed)))

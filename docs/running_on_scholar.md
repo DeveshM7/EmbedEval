@@ -10,6 +10,9 @@ How the parts work together, and how to change them, is in
 
 Paths below use `$SCRATCH` for `/scratch/scholar/$USER`.
 
+Contiki-NG uses the same cluster entrypoints with separate phase jobs; see
+[section 12](#12-contiki-ng-runs).
+
 ---
 
 ## 1. What the pipeline does
@@ -755,3 +758,150 @@ python cluster/report.py --run mynewt-reval
   `source-manifest.json` hashes), so editing the checkout never changes a queued job.
 - **promotion** stays manual: `scripts/promote_instance.py --run-dir <run> <id>`. It refuses a
   Mynewt instance without a clean leak check or a 5/5 before state.
+
+## 12. Contiki-NG runs
+
+The same orchestration runs Contiki-NG (`project: contiki-ng` in the cluster
+config; the run's manifest records it). Use a separate scratch root, and set
+`slurm.build_partition` to an x86 CPU partition: builds, observation and
+validation run on x86_64, the model on Spark. CPU jobs use
+`slurm.build_cpus_per_node`, `build_mem` and `build_python`; Spark jobs keep
+`cpus_per_node`, `mem` and `triage_python`. `paths.contiki_ng_image` may point
+at a local copy of the upstream CI image. The model's instructions are
+[contiki_ng_triage.md](contiki_ng_triage.md).
+
+```bash
+P=/path/to/python3   # one with the pipeline's dependencies
+$P cluster/prepare.py --name c-check --pr 3246 3020              # triage run
+$P cluster/prepare.py --name c-obs --pr ... --observe-only --observe-profile native
+$P cluster/submit.py triage   --run c-check --config spark.yaml
+$P cluster/submit.py validate --run c-check --config cpu.yaml --after <triage job>
+$P cluster/submit.py observe  --run c-obs   --config cpu.yaml
+$P cluster/submit.py statement --run c-obs  --config spark.yaml --after <observe job>
+$P cluster/report.py --run c-check
+$P cluster/prepare.py --name c-reval --instances apptainer/instances/contiki-ng   # revalidation
+$P cluster/submit.py validate --run c-reval --config cpu.yaml
+$P cluster/submit.py evaluate --run c-reval --config cpu.yaml --model qwen38-nvfp4 --after <validate job>
+$P cluster/census.py --runs <every run of a campaign> --valid c-reval --out census.md
+```
+
+What differs from Zephyr:
+
+- **Separate phases.** There is no `pipeline` mode: `triage` and `statement`
+  run on Spark, `observe` and `validate` on CPU nodes. `submit.py --after JOB`
+  chains a job behind another, so a campaign keeps within the two-job limit.
+  Each submission freezes the source tree under `<run>/jobs/source-<stamp>/`.
+- **prepare**: PRs, hard filters (touches `tests/` or `regression-tests/`, not
+  a revert) and enrichment are `scripts/contiki_ng_candidates.py`'s. Records
+  carry an enrichment version; a stale record is refused. `--observe-only`
+  makes a model-free run, with `--observe-profile native|cooja|script` for PRs
+  whose units span profiles.
+- **Profiles**: `native` (x86_64 `TARGET=native` unit tests), `cooja`
+  (scenarios, run in the upstream CI image of the base's era: Ant-era 32-bit
+  images to 2022-11, then the newest Gradle-era image on or before the base;
+  `ci_image` in `instance.json`), `script` (script-base). Cross-compiled ARM/NXP
+  ports, Renode, TUN/TAP and external-service fixtures are not supported; such
+  PRs are holds.
+- **observe** runs every supported affected unit before and after the fix with
+  no model plan. An observed-valid PR is finalized in the same slot: generated
+  from the observation into `<run>/finalized/`, built and validated with three
+  before repeats. Statements for these come from `statement` jobs.
+- **statement** asks the model for the problem statement of each VALID
+  instance without one. `--recheck` also checks existing statements under the
+  current rules (`STATEMENT_CHECK`: no quoted fix lines, no fix identifiers the
+  tests do not use, and a fresh model review of whether it gives the fix away),
+  keeps those that pass, and regenerates the rest; the old wording stays under
+  `superseded_statements` in `metadata.json`. A statement that still fails is
+  cleared, so the instance cannot be promoted. Statements are outside the recipe
+  fingerprint.
+- **Runner details**: a native binary killed by a signal is rerun once under
+  gdb, and the innermost `unit_test_function_<name>` frame marks that case
+  `error`; a timeout is never attributed. Before repeats run `make clean` first.
+  Compile oracles also accept a missing header when the fix creates it and its
+  added lines declare a selected symbol. Ant-era Cooja results come from
+  `<scenario>.testlog`; mote-load failures are build failures. 32-bit images run
+  from a node-local sandbox (their SIF inodes break 32-bit `stat`), so graders
+  must start instances through `apptainer_util.exec_args`. On Scholar, TUN/TAP
+  devices cannot be opened from the user namespace.
+- **report**: an observation run's rows follow `observation`, `finalize` and
+  statement outcomes; only a promotable instance is VALID and settles its PR in
+  the ledger.
+- **What an agent sees.** The image holds the repository at the base commit
+  (fetched by URL at depth 1: no remote, ref, reflog or FETCH_HEAD), the
+  upstream test changes, the selected submodules (pinned commit only, refs and
+  remotes stripped), the era's CI image (its own git repositories removed) and
+  `bench.json`, only what `run_tests` needs. `instance.json` (lists, oracle,
+  compile expectations) stays on the host. Every agent, validation and grading
+  command runs with `--net --network none`; Gradle-era Cooja fills its Gradle
+  cache while the image builds. The prompt is the problem statement: no files
+  of the fix, no fail-to-pass or pass-to-pass lists.
+- **Validation receipts** carry `leak_check` (`scripts/contiki_ng_leakcheck.py`
+  on the unpacked image, before any test; a finding makes the instance
+  INVALID) and `determinism` (five before runs with identical results).
+  Compile oracles are attested against `compile_expectations`, derived from
+  the fix when the recipe is written: each native unit's before-build must
+  name every fix-introduced identifier its added test code uses, or report a
+  fix-created header missing; native builds run `make -k`.
+- **Revalidation**: `prepare.py --instances DIR...` copies existing instances
+  to `<run>/sources/`; `submit.py validate` renders each under the current
+  templates (`generate_instance.py --render`), builds and validates it.
+- **Evaluation**: `submit.py evaluate --model PROFILE` (a profile of
+  `triage/models.json`; hosted models are refused) runs an agent on every
+  VALID instance of the run on the CPU partition, with the config's
+  `evaluate.step_limit` and `evaluate.time_limit` for every model (by default
+  50 steps and no time limit: the same limits as the Zephyr and RIOT
+  baseline), and grades
+  each patch in a fresh container. It submits the model's server on the GPU
+  partition with a clean environment (or uses `--server-job`), which starts
+  only once the evaluate job runs, so an idle server never holds one of the
+  two job slots; the evaluate job waits `caps.server_start` for it, tunnels to
+  it and cancels it at the end. `evaluate.python` is an x86
+  Python with mini-swe-agent. An evaluation is a model under its limits and
+  is labeled `<model>-<steps>steps` with no time limit (e.g. `qwen38-nvfp4-50steps`)
+  and `<model>-<steps>steps-<min>min` with one (`qwen38-nvfp4-100steps-60min`):
+  status `evaluate:<label>`, outputs and grades under `<run>/outputs/<label>/`,
+  one tally per label in the report. The same model under other limits is a
+  new evaluation on the same run; results recorded before labels
+  (`evaluate:<model>`, outputs under `<run>/outputs/contiki-ng/`) count for the
+  label of the limits recorded with them. `report.py` counts time-outs apart
+  from failed patches. `--queue` submits even when both job slots are busy.
+  Several models are queued in one command, one evaluation (agents job and its
+  server) per model, each submitted to start after the previous pair has ended
+  (`afterany:<agents job>:<server job>`), so with the account's two job slots
+  pairs never interleave and each job is named after its label:
+
+  ```
+  python cluster/submit.py evaluate --run R --model qwen38 qwen38-nvfp4 nemotron --queue
+  python cluster/submit.py evaluate --run R --model qwen38 nemotron --dry-run   # the plan, nothing submitted
+  ```
+
+  The job ids are printed. A model with nothing left to evaluate is skipped
+  and the chain goes on; `--after JOB` puts the whole chain behind a job, and
+  `--queue` lets the first pair wait when both slots are busy. A job that
+  reaches its limit is not continued by itself: the same command, run again,
+  submits only what is still to do (results already in status are kept, and a
+  chain re-submitted after a failure skips the finished models). Submit at most
+  25 models at once (50 submitted jobs).
+  The server must hold `evaluate.per_node` requests of the full
+  `model.max_model_len` at once: the worker reads vLLM's "Maximum concurrency"
+  from the server's log and runs no more agents than that (none below 1).
+  Spark interactive's 60 GB job limit leaves a 27B model about 1.4 of 131k
+  tokens (`gpu_memory_utilization` 0.4), so an evaluate config puts the
+  server on `spark-batch` with `slurm.mem: 120500M` and 0.8. While an agent
+  runs, the worker samples the server's waiting requests (`/metrics`) into
+  `server_queued`; a time-out during which requests waited is the server's,
+  not the model's, and is run again by the next evaluate job (as is a
+  time-out recorded before `server_queued` existed). With `time_limit: 0` an
+  agent run is bounded only by its job: it is capped at the job's deadline
+  less the grading's 25 minutes, and no run starts with less than
+  `evaluate.min_minutes_left` (90) of the job left. A run cut off by the job's
+  end is never graded from its partial patch; the next job runs it again, and
+  after two cuts it is reported apart as `unfinished: not within a full job`.
+- **promotion** stays manual, after review: `scripts/promote_instance.py
+  --source <run>/instances` (triage and revalidation runs) or `--source
+  <run>/finalized` (observation runs), into `apptainer/instances/contiki-ng/`.
+  It requires a clean leak check under an isolated network, five deterministic
+  before runs and a statement checked under the current `STATEMENT_CHECK` and
+  the leak check's identifier test. Instance images are not pushed to a
+  registry.
+

@@ -29,6 +29,7 @@ import platform
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,7 @@ class ApptainerEnvironment:
                  layer: str | Path | None = None,
                  timeout: int = 900, setup_commands: list[str] | None = None,
                  sandbox: bool = False, network_fixture: str | None = None,
-                 isolate_network: bool = False,
+                 isolate_network: bool = False, local_overlay: bool = False,
                  logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
@@ -63,7 +64,8 @@ class ApptainerEnvironment:
         self.sandbox = au.unpack_sandbox(self.image) if sandbox else None
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = au.path("runs", f"agent-{name}-{stamp}", "x").parent
-        self.overlay = self.run_dir / "overlay"
+        self.local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-agent-", dir="/tmp") if local_overlay else None
+        self.overlay = (Path(self.local_overlay.name) if self.local_overlay else self.run_dir) / "overlay"
         self.overlay.mkdir(parents=True, exist_ok=True)
         self.config = {"image": str(self.image), "cwd": cwd, "timeout": timeout,
                        "overlay": str(self.sandbox or self.overlay)}
@@ -119,5 +121,7 @@ class ApptainerEnvironment:
         if getattr(self, "sandbox", None):
             au.remove_sandbox(self.sandbox)
             self.sandbox = None
+        if getattr(self, "local_overlay", None):
+            self.local_overlay.cleanup()
         if getattr(self, "run_dir", None) and self.run_dir.exists():
             au.remove(self.run_dir)

@@ -1,0 +1,37 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+# Shared layer 1 of an OpenThread instance: the toolchain, nothing else.
+#
+#   apptainer build --fakeroot openthread-base.sif base.def
+#
+# Verified by the smoke control (candidates/openthread/research/smoke.md).
+# Ubuntu 24.04 is required: on 22.04 `apptainer build --fakeroot` fails with
+# libfakeroot needing GLIBC_2.38 on the Scholar nodes. That gives gcc 13.3,
+# cmake 3.28, ninja 1.11 and GoogleTest 1.14. Upstream's unit-test CI uses
+# 22.04 (gcc 11, gtest 1.11), so the compiler differs from CI; the smoke run
+# built and passed clean with it, and instances configure with
+# -DOT_COMPILE_WARNING_AS_ERROR=OFF (generate_instance.py).
+#
+# Network is needed here and in the instance's source fetch, not for building.
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    # Under --fakeroot on the Spark nodes, apt's gpgv step deadlocked (0 CPU,
+    # network fine) in 2 of 3 builds when apt dropped privileges to its _apt
+    # sandbox user. Run the sandbox as root, and bound each attempt so a
+    # remaining hang becomes a retry instead of a stuck build.
+    APT="-o APT::Sandbox::User=root -o Acquire::Retries=5 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60"
+    retry() { for i in 1 2 3; do timeout 600 "$@" && return 0; echo "retry $i: $*"; done; return 1; }
+    retry apt-get $APT update -qq
+    retry apt-get $APT install -y -qq --no-install-recommends \
+        ca-certificates git build-essential cmake ninja-build pkg-config python3 \
+        libgtest-dev libgmock-dev universal-ctags > /dev/null
+    rm -rf /var/lib/apt/lists/*
+
+%environment
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.layer openthread-base

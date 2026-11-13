@@ -56,7 +56,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_an_unknown_project_is_an_error(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
-            f.write("project: nuttx\n")
+            f.write("project: no-such-project\n")
             f.flush()
             with self.assertRaises(config.ConfigError):
                 config.load(f.name)

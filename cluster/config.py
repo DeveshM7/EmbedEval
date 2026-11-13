@@ -20,7 +20,7 @@ CLUSTER_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CLUSTER_DIR.parent
 EXAMPLE = CLUSTER_DIR / "config.example.yaml"
 DEFAULT = CLUSTER_DIR / "config.yaml"
-PROJECTS = ("zephyr", "mynewt", "nuttx")
+PROJECTS = ("zephyr", "mynewt", "nuttx", "contiki-ng")
 
 
 class ConfigError(Exception):
@@ -76,6 +76,8 @@ def load(path: str | Path | None = None) -> dict:
             raise ConfigError(f"{path}: not a mapping of settings")
     elif path != DEFAULT:
         raise ConfigError(f"no config file {path}")
+    if user.get("project") == "contiki-ng" and "scratch_root" not in user:
+        base["scratch_root"] = "/scratch/scholar/${USER}/embedeval-contiki"
     cfg = _expand(_overlay(base, user))
     if cfg["project"] not in PROJECTS:
         raise ConfigError(f"'project' must be one of {', '.join(PROJECTS)}, got {cfg['project']!r}")
@@ -89,6 +91,8 @@ def load(path: str | Path | None = None) -> dict:
         "runs": str(root / "runs"),
         "zephyr_clone": p["zephyr_clone"] or str(shared / "zephyr.git"),
         "mynewt_clone": p["mynewt_clone"] or str(shared / "mynewt-core.git"),
+        "contiki_ng_clone": p["contiki_ng_clone"] or str(shared / "contiki-ng.git"),
+        "contiki_ng_image": p["contiki_ng_image"] or str(shared / "images" / "contiki-ng-ci-dcf5962b-x86_64.sif"),
         "vllm_cache": p["vllm_cache"] or str(shared / "vllm-cache"),
         # Zephyr and Mynewt share one ledger (a non-Zephyr line carries its
         # project, cluster/ledger.py); NuttX keeps its own.
@@ -106,6 +110,8 @@ def env_for(cfg: dict, run_dir: Path | None = None, project: str | None = None) 
     d, p = cfg["derived"], cfg["paths"]
     env = {"EMBEDEVAL_SHARED": d["shared"],
            "EMBEDEVAL_ZEPHYR_CLONE": d["zephyr_clone"],
+           "EMBEDEVAL_CONTIKI_NG_CLONE": d["contiki_ng_clone"],
+           "EMBEDEVAL_CONTIKI_NG_IMAGE": d["contiki_ng_image"],
            "EMBEDEVAL_MODELS": p["models"],
            "EMBEDEVAL_VLLM_IMAGE": p["vllm_image"]}
     if cfg.get("registry"):

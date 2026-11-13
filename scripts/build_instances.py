@@ -31,6 +31,7 @@ apps are checked out from them rather than cloned from GitHub.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -133,7 +134,8 @@ def build_nuttx_apptainer(instance_id: str, dry_run: bool = False) -> bool:
 
 
 def build_apptainer(instance_id: str, dry_run: bool = False) -> bool:
-    """Build a twister-pipeline Zephyr instance as an Apptainer image."""
+    """Build a twister-pipeline Zephyr or a cmake-pipeline OpenThread instance
+    as an Apptainer image."""
     d = instances.instance_dir(instance_id)
     missing = [f for f in APPTAINER_FILES if not (d / f).exists()]
     if missing:
@@ -143,13 +145,19 @@ def build_apptainer(instance_id: str, dry_run: bool = False) -> bool:
     image = au.instance_image(instance_id)
     logdir = au.path("logs", instance_id, "x").parent
     print(f"\n=== {instance_id} -> {image} ===")
-    print(f"  era: Python {meta['python_version']}, SDK {meta['sdk_version']}")
+    cmake = meta.get("pipeline") == "cmake"
+    if not cmake and meta.get("pipeline") != "contiki-ng":
+        print(f"  era: Python {meta['python_version']}, SDK {meta['sdk_version']}")
     if dry_run:
         return True
     start = time.time()
     try:
-        base = au.ensure_base_images(meta["python_version"], meta["sdk_version"],
-                                     meta["sdk_archive"], au.path("logs", "bases", "x").parent)
+        bases = au.path("logs", "bases", "x").parent
+        base = (au.ensure_contiki_ng_base(bases, json.loads((d / "instance.json").read_text()).get("ci_image"))
+                if meta.get("pipeline") == "contiki-ng" else
+                au.ensure_openthread_base(bases) if cmake else
+                au.ensure_base_images(meta["python_version"], meta["sdk_version"],
+                                      meta["sdk_archive"], bases))
     except RuntimeError as e:
         print(f"  ERROR: {e}")
         return False

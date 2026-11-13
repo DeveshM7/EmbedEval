@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Promote validated Zephyr, Mynewt and NuttX instances from generated/ to
-apptainer/instances/ (Mynewt: apptainer/instances/mynewt/; NuttX:
-apptainer/instances/nuttx/).
+Promote validated Zephyr, Mynewt, NuttX and Contiki-NG instances from
+generated/ to apptainer/instances/ (Mynewt: apptainer/instances/mynewt/; NuttX:
+apptainer/instances/nuttx/; Contiki-NG: apptainer/instances/contiki-ng/).
 
     python scripts/promote_instance.py zephyr__zephyr-65697
     python scripts/promote_instance.py --all            # every valid one in generated/
@@ -26,8 +26,10 @@ on, unless --host-arch says otherwise.
 
 Copies the recipe and its record -- instance.def, instance.json,
 run_tests.py, test_patch.diff (NuttX: instance.def, run_tests.sh,
-test_patch.diff), metadata.json, validation.json. Images are not in git;
-build_instances.py rebuilds them from the recipe.
+test_patch.diff; Contiki-NG: and bench.json), metadata.json, validation.json.
+Images are not in git; build_instances.py rebuilds them from the recipe.
+Contiki-NG instances also need a clean leak check, five identical before runs
+and a checked statement (contiki_problem).
 """
 
 from __future__ import annotations
@@ -49,6 +51,35 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 GENERATED = layout.generated()
 DEST = REPO_ROOT / "apptainer" / "instances"
 RECORD_FILES = ("metadata.json", "validation.json")
+# Kept in step with triage_prs.STATEMENT_CHECK (and cluster/status.py).
+STATEMENT_CHECK = 2
+DETERMINISM_RUNS = 5
+
+
+def contiki_problem(report: dict, meta: dict) -> str | None:
+    """Why a Contiki-NG instance may not be promoted, or None: it needs a clean
+    leak check under an isolated network, five identical before runs, and a
+    statement that passed the current statement check and the leak check's
+    fix-identifier check (at validation, or by the statement phase since)."""
+    leak = report.get("leak_check")
+    if not leak:
+        return "no leak check record; validate it again"
+    if not leak.get("ok") or leak.get("network") != "isolated":
+        return f"leak check failed: {leak.get('findings')}"
+    d = report.get("determinism") or {}
+    if d.get("runs", 0) < DETERMINISM_RUNS or not d.get("ok"):
+        return f"no deterministic before state ({DETERMINISM_RUNS} runs); validate it again"
+    check = meta.get("statement_check") or {}
+    if check.get("version") != STATEMENT_CHECK or check.get("result") not in ("kept", "written"):
+        return "the statement has not passed the current statement check"
+    sha = hashlib.sha256((meta.get("problem_statement") or "").encode()).hexdigest()
+    later = meta.get("statement_leak_check") or {}
+    if leak.get("statement_sha256") != sha and not (later.get("statement_sha256") == sha
+                                                    and later.get("fix_identifiers") == []):
+        return "the statement changed since its leak check; recheck the statement or validate again"
+    return None
+
+
 # The saved build output a config or dependency oracle was attributed from
 # (generate_instance.py); render_mynewt_instance.py needs it to re-render.
 EVIDENCE_FILES = ("observed_before.log",)
@@ -59,7 +90,7 @@ def promote(instance_id: str, source: Path = GENERATED,
     src = source / instance_id
     project = instances.split_instance(instance_id)[0]
     recipe = (au.mynewt_recipe_files(src) if project == "mynewt"
-              else au.nuttx_recipe_files(src) if project == "nuttx" else au.RECIPE_FILES)
+              else au.nuttx_recipe_files(src) if project == "nuttx" else au.recipe_files(src))
     report_path = src / "validation.json"
     if not report_path.exists():
         return False, "not validated (no validation.json)"
@@ -87,11 +118,18 @@ def promote(instance_id: str, source: Path = GENERATED,
         if why:
             return False, why
         host_arch = host_arch or report.get("host")
+    if project == "contiki-ng":
+        meta = json.loads((src / "metadata.json").read_text())
+        if not (meta.get("problem_statement") or "").strip():
+            return False, "no problem statement (metadata.json problem_statement is empty)"
+        why = contiki_problem(report, meta)
+        if why:
+            return False, why
     files = (*recipe, *RECORD_FILES, *[f for f in EVIDENCE_FILES if (src / f).exists()])
     missing = [f for f in files if not (src / f).exists()]
     if missing:
         return False, f"missing {', '.join(missing)}"
-    dst = (DEST / project if project in ("mynewt", "nuttx") else DEST) / instance_id
+    dst = (DEST / project if project in ("mynewt", "nuttx", "contiki-ng") else DEST) / instance_id
     dst.mkdir(parents=True, exist_ok=True)
     for f in files:
         shutil.copy2(src / f, dst / f)
@@ -134,14 +172,17 @@ def main() -> None:
     p.add_argument("--host-arch", choices=("x86_64", "aarch64"),
                    help="the architecture the instances validate on only, recorded in "
                         "the promoted metadata")
+    p.add_argument("--source", type=Path, default=GENERATED,
+                   help="folder holding the instances (default: generated/; a Contiki "
+                        "observation run's are in <run>/finalized/)")
     args = p.parse_args()
-    ids = (sorted(d.name for d in GENERATED.iterdir() if (d / "validation.json").exists())
+    ids = (sorted(d.name for d in args.source.iterdir() if (d / "validation.json").exists())
            if args.all else args.instance)
     if not ids:
         p.error("give instance ids or --all")
     ok = 0
     for iid in ids:
-        done, msg = promote(iid, host_arch=args.host_arch)
+        done, msg = promote(iid, args.source, host_arch=args.host_arch)
         ok += done
         print(f"  [{'ok  ' if done else 'skip'}] {iid}: {msg}")
     print(f"\n  {ok}/{len(ids)} promoted")

@@ -1,0 +1,64 @@
+{
+  "instance_id": "contiki-ng__contiki-ng-3230",
+  "project": "contiki-ng",
+  "pipeline": "contiki-ng",
+  "repo": "https://github.com/contiki-ng/contiki-ng",
+  "base_commit": "9fde99fa669707685f9c47ad892d830449e112cd",
+  "fix_commit": "735e87c3e5060e9c427b214e55c372967f595c04",
+  "test_commit": "735e87c3e5060e9c427b214e55c372967f595c04",
+  "problem_statement": "The MQTT client's Variable Byte Integer decoder, used to read the lengths that frame the rest of a packet, misbehaves on inputs whose declared length is too small and on encodings that exceed what the protocol permits. When the decoder is given a non-positive number of available bytes (for example when a caller has parsed more of the packet than the length it was given covers), it reads bytes past the end of the received input instead of rejecting the value, advancing its parse position and producing a result. When a Variable Byte Integer is encoded using more than the four bytes that the MQTT specification allows, the decoder consumes a fifth byte before deciding the encoding is invalid, so the parse position is left past the bytes that belonged to the rejected integer and the next field is skipped. When the encoded value is larger than the 16-bit field it is stored into (for example a Remaining Length of 65538), the decoder accepts it and stores only the low-order bits, so a peer that announced a 65538-byte packet is observed to have sent a 2-byte one, and the rest of that packet is then parsed as further packets. Finally, when the Remaining Length of an incoming packet cannot be decoded, the connection is left open and parsing continues into arbitrary bytes rather than being closed. Required behavior: a non-positive available length must yield failure with no bytes read and the parse position unchanged; a five-byte encoding must be rejected without consuming that fifth byte (the parse position stopping at the fourth byte); an encoded value that does not fit the 16-bit destination must be rejected with the result left at zero, while the largest representable value (65535) must still decode successfully; and an undecodable Remaining Length must close the connection so the application can reconnect from a known state.",
+  "fail_to_pass": [
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_vbi_decoder_bounds",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_vbi_decoder_range"
+  ],
+  "pass_to_pass": [
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_utf8",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_fixed_len_int",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_binary_data",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_utf8_pair",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_vbi"
+  ],
+  "after_required": [
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_utf8",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_fixed_len_int",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_binary_data",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_utf8_pair",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_vbi",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_vbi_decoder_bounds",
+    "tests/08-native-runs/25-mqtt-prop/test-mqtt-prop::test_vbi_decoder_range"
+  ],
+  "files_changed_by_fix": [
+    "os/net/app-layer/mqtt/mqtt-prop.c",
+    "os/net/app-layer/mqtt/mqtt.c",
+    "os/net/app-layer/mqtt/mqtt.h"
+  ],
+  "pr_url": "https://github.com/contiki-ng/contiki-ng/pull/3230",
+  "run_command": "run_tests",
+  "apptainer_image": "contiki-ng__contiki-ng-3230.sif",
+  "generated": true,
+  "oracle": "runtime",
+  "architecture": "x86_64",
+  "observation_only": false,
+  "superseded_statements": [
+    {
+      "problem_statement": "mqtt_decode_var_byte_int() must reject a non-positive input length, must stop before consuming a fifth byte, and must reject a decoded value that does not fit the 16-bit destination; parse_vhdr() must not read an omitted Reason Code/Property Length, and an undecodable Remaining Length must close the connection.",
+      "provenance": "triage verdict",
+      "check_issues": [
+        "`problem_statement` names code of the fix that the tests do not use (parse_vhdr); describe what a caller observes instead"
+      ]
+    }
+  ],
+  "causal_chain": "The two failing cases call mqtt_decode_var_byte_int directly against these boundary inputs. test_vbi_decoder_bounds feeds a five-byte buffer {0x80,0x80,0x80,0x80,0x01} with a negative available length (expecting failure and an unchanged parse position), with a zero length, with a truncated two-byte view, and with the full buffer (expecting the parse position to stop at four and not advance to the fifth byte); the base decoder's unsigned-domain position-vs-length comparison lets the negative length act as a four-billion-byte bound, and its 'read_bytes > 4' check fires only after the fifth byte is already consumed, so all four assertions fail. test_vbi_decoder_range feeds encodings of 65535 (which must succeed and decode to 65535), 65536 and a four-byte 65538 (both must fail and leave the destination at zero); the base decoder accumulates into the 16-bit destination, so 65538 wraps to 2 and is accepted rather than rejected. Because these assertions are part of the run's pass gate, the binary reports failure before the production fix and passes after it.",
+  "change_type": "bugfix",
+  "statement_provenance": {
+    "model": "qwen38-nvfp4",
+    "mode": "statement",
+    "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/full-341-v7/triage/3230.statement.trace.json",
+    "prompt_sha256": "e8c4bf72efe615a2"
+  },
+  "statement_check": {
+    "version": 2,
+    "result": "written",
+    "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/full-341-v7/triage/3230.statement.trace.json"
+  }
+}

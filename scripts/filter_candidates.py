@@ -5,6 +5,9 @@ Hard filters for Zephyr and Mynewt PR candidates.
 Use `--repo mynewt` with selftest, fetch, filter or enrich to dispatch to
 scripts/mynewt_candidates.py; Zephyr remains the default.
 
+Use `--repo openthread` with selftest, fetch, filter or enrich to dispatch to
+scripts/openthread_candidates.py; Zephyr remains the default.
+
     python scripts/filter_candidates.py selftest
     python scripts/filter_candidates.py fetch --since 2024-01-01 --until 2024-06-30
     python scripts/filter_candidates.py filter
@@ -811,7 +814,8 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add_repo(command) -> None:
-        command.add_argument("--repo", choices=("zephyr", "mynewt"), default="zephyr")
+        command.add_argument("--repo", choices=("zephyr", "mynewt", "openthread", "contiki-ng"),
+                             default="zephyr")
 
     check = sub.add_parser("selftest", help="check known-good PRs survive")
     add_repo(check)
@@ -819,8 +823,8 @@ def main() -> None:
     f = sub.add_parser("fetch", help="download PRs into the local cache")
     add_repo(f)
     f.add_argument("--pr", type=int, nargs="+", help="specific PR numbers")
-    f.add_argument("--since", default="2024-01-01")
-    f.add_argument("--until", default="2024-12-31")
+    f.add_argument("--since")
+    f.add_argument("--until")
 
     filtering = sub.add_parser("filter", help="apply hard filters to the cache")
     add_repo(filtering)
@@ -844,6 +848,17 @@ def main() -> None:
     if getattr(args, "repo", "zephyr") == "mynewt":
         import mynewt_candidates
         mynewt_candidates.dispatch(args)
+        return
+    if getattr(args, "repo", "zephyr") == "contiki-ng":
+        import contiki_ng_candidates
+        contiki_ng_candidates.dispatch(args)
+        return
+    if args.cmd == "fetch":
+        args.since = args.since or "2024-01-01"
+        args.until = args.until or "2024-12-31"
+    if getattr(args, "repo", "zephyr") == "openthread":
+        import openthread_candidates
+        openthread_candidates.dispatch(args)
         return
     if PROJECT != "zephyr":
         if not layout.run_dir():

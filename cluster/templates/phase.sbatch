@@ -6,6 +6,7 @@
 {gres_line}
 #SBATCH --mem={mem}
 #SBATCH -t {time_limit}
+#SBATCH --export=NONE
 #SBATCH -J {name}
 #SBATCH -o {run}/jobs/job-%j.out
 #
@@ -13,9 +14,12 @@
 # One phase on every node (node_worker.py, PRs from a shared queue), then the
 # report. It runs the frozen code in {repo}, whose files' sha256 are in its
 # source-manifest.json and checked here first. To run again (e.g. to resume),
-# submit again rather than edit this.
+# submit again rather than edit this. Nothing of the submitting shell reaches
+# the job (--export=NONE); the job's own environment goes on to srun.
 
 set -u
+export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin
+export SLURM_EXPORT_ENV=ALL
 cd {repo}
 sha256sum --quiet -c source-sha256.txt || {{ echo "frozen source changed"; exit 1; }}
 END=$(( $(date +%s) + {limit_min} * 60 ))
@@ -25,10 +29,16 @@ echo "[$(date +%T)] {phase} job $SLURM_JOB_ID on $SLURM_JOB_NODELIST ($M min)"
 # login node's PATH can hold tools of another architecture).
 timeout -k 2m ${{M}}m srun -N "$SLURM_JOB_NUM_NODES" -n "$SLURM_JOB_NUM_NODES" \
     --ntasks-per-node=1 -c {cpus} --kill-on-bad-exit=0 \
-    /bin/bash -c 'exec /usr/bin/env -i PATH="{path_prefix}$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    /bin/bash -c 'exec /usr/bin/env -i PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         HOME="$HOME" USER="$USER" LANG=C.UTF-8 SLURM_JOB_ID="$SLURM_JOB_ID" \
         SLURM_PROCID="$SLURM_PROCID" SLURM_NTASKS="$SLURM_NTASKS" \
         {python} cluster/node_worker.py --run "{run}" --config "{config}" --phase {phase} --minutes '"$M"
-echo "[$(date +%T)] {phase} done (rc=$?)"
+worker_rc=$?
+echo "[$(date +%T)] {phase} done (rc=$worker_rc)"
 {end_server}{python} cluster/report.py --run "{run}"
+report_rc=$?
 echo "[$(date +%T)] JOB DONE"
+if [ "$worker_rc" -ne 0 ]; then
+    exit "$worker_rc"
+fi
+exit "$report_rc"

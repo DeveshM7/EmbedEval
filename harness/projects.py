@@ -51,6 +51,14 @@ _ORIENTATION = {
         "newt project at /project. `run_tests` builds and runs every test case. "
         "Fix library source, never the selftest package. Do not edit /project."
     ),
+    "openthread": (
+        "OpenThread is built with CMake and Ninja into /testbed/build, which is "
+        "already configured and built for this instance's test target. Run "
+        "`run_tests` to rebuild incrementally (only what you changed is "
+        "recompiled), run the tests and print a status for every test in the "
+        "task. Do not run cmake or change its options, and do not build or run "
+        "test binaries by hand -- `run_tests` does it with the right target."
+    ),
     "riot": (
         "Builds use GNU Make. Tests are unit-test suites under tests/unittests that "
         "compile to a native host binary -- there is no emulator. `run_tests` already "
@@ -58,7 +66,7 @@ _ORIENTATION = {
     ),
 }
 
-# Zephyr and Mynewt: their run_tests have exit codes of their own.
+# Zephyr, Mynewt and OpenThread: their run_tests have exit codes of their own.
 _EXTRA_WARNINGS = {
     "zephyr": (
         "`run_tests` exit codes on this instance: 0 = all tests passed, "
@@ -72,6 +80,13 @@ _EXTRA_WARNINGS = {
         "`run_tests` exit codes on this instance: 0 = every test case passed, "
         "1 = a test case failed, 2 = timed out, 3 = the build failed or the "
         "results were incomplete."
+    ),
+    "openthread": (
+        "`run_tests` exit codes on this instance: 0 = every listed test passed, "
+        "1 = a listed test failed or crashed (a crash marks the running test "
+        "`error` and the ones after it `not_run`), 2 = the configure or the "
+        "build failed, 3 = a listed test did not run. After a change to a "
+        "widely included header a rebuild can take several minutes."
     ),
 }
 
@@ -107,6 +122,13 @@ _RIOT_LAYER_WARNINGS = (
 )
 
 PROJECTS: dict[str, dict] = {
+    "contiki-ng": {
+        "label": "Contiki-NG",
+        "orientation": "Run `run_tests` to rebuild and execute the fixed upstream native units or Cooja scenarios. The selected target and configuration are fixed by this instance.",
+        "extra_warnings": "Exit 2 means a build failed; exit 3 means required named tests did not execute.",
+        "protected_paths": ["tests/", "regression-tests/", "tools/cooja/"],
+        "runtime": "apptainer", "rebuild_command": "", "command_timeout": 1800,
+    },
     "zephyr": {
         "label": "Zephyr RTOS",
         "orientation": _ORIENTATION["zephyr"],
@@ -129,6 +151,17 @@ PROJECTS: dict[str, dict] = {
         "command_timeout": 900,
         # The image has a ctags index at /testbed/tags; the prompt points to it.
         "ctags": True,
+    },
+    "openthread": {
+        "label": "OpenThread",
+        "orientation": _ORIENTATION["openthread"],
+        "extra_warnings": _EXTRA_WARNINGS["openthread"],
+        "protected_paths": ["tests/"],
+        "runtime": "apptainer",
+        # run_tests configures (once), builds and runs.
+        "rebuild_command": "",
+        # A rebuild of the core library after a header change, then the tests.
+        "command_timeout": 1800,
     },
     "nuttx": {
         "label": "NuttX RTOS",
@@ -171,10 +204,18 @@ PROJECTS: dict[str, dict] = {
 }
 
 
+# Instance pipelines graded as Apptainer images (evaluate_patches.py): twister
+# (Zephyr), riot-layer (RIOT), cmake (OpenThread), contiki-ng. Apptainer NuttX
+# and Mynewt instances are told apart by their metadata "runtime" instead.
+APPTAINER_PIPELINES = ("twister", "riot-layer", "cmake", "contiki-ng")
+
+
 def config_for(meta: dict) -> dict:
     """The project configuration for one instance. A Zephyr instance must come
     from the twister pipeline; the Docker ones in docker/instances/ are kept as
     reference metadata only and cannot be run."""
+    if meta["project"] == "contiki-ng" and meta.get("pipeline") != "contiki-ng":
+        raise ValueError("Contiki-NG requires a generated Contiki-NG pipeline instance")
     if meta.get("pipeline") == "riot-layer":
         return {**config("riot"), "runtime": "apptainer", "orientation": _RIOT_LAYER,
                 "extra_warnings": _RIOT_LAYER_WARNINGS}

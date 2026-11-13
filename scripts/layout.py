@@ -29,6 +29,7 @@ Shared between runs, set by environment variable:
                             full NuttX kernel and apps clones, if any: NuttX
                             Apptainer images check out from them instead of
                             GitHub, and the validator diffs the fix there
+    EMBEDEVAL_OPENTHREAD_CLONE  the OpenThread clone; default <shared root>/openthread.git
 
 Imported before any module computes a path, so it reads `--run-dir` from the
 command line itself and removes it, before argparse sees the arguments.
@@ -123,6 +124,14 @@ def nuttx_clones() -> tuple[Path | None, Path | None]:
                  for v in ("EMBEDEVAL_NUTTX_CLONE", "EMBEDEVAL_NUTTX_APPS_CLONE"))
 
 
+def openthread_clone() -> Path:
+    value = os.environ.get("EMBEDEVAL_OPENTHREAD_CLONE")
+    if value:
+        return Path(value)
+    import apptainer_util   # imports this module, so not at the top
+    return apptainer_util.shared_root() / "openthread.git"
+
+
 def show(p: Path) -> str:
     """A path for printing: relative to the repository or the run folder when
     inside one, else absolute."""
@@ -131,3 +140,11 @@ def show(p: Path) -> str:
         if root is not None and (p == root or root in p.parents):
             return str(p.relative_to(root))
     return str(p)
+
+
+def contiki_ng_clone() -> Path:
+    value = os.environ.get("EMBEDEVAL_CONTIKI_NG_CLONE")
+    if value:
+        return Path(value)
+    import apptainer_util
+    return apptainer_util.shared_root() / "contiki-ng.git"

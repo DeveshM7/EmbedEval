@@ -1,0 +1,109 @@
+Bootstrap: localimage
+From: {{ BASE_IMAGE }}
+
+# EmbedEval Contiki-NG instance contiki-ng__contiki-ng-3286.
+#
+# What an agent finds in this image is the repository at the base commit (a
+# shallow boundary: no history, remote, other ref, reflog or FETCH_HEAD), the
+# upstream test changes, the submodules the selected tests need (pinned
+# commits, their refs and remotes removed), the era's CI toolchain and
+# bench.json -- nothing from after the base. scripts/contiki_ng_leakcheck.py
+# checks this on every validation.
+
+%arguments
+    BASE_IMAGE=contiki-ng-base.sif
+
+%files
+    test_patch.diff /opt/embedeval/test_patch.diff
+    bench.json /opt/embedeval/bench.json
+    run_tests.py /usr/local/bin/run_tests
+
+%post
+    set -e
+    retry() { for i in 1 2 3; do "$@" && return 0; sleep 20; done; return 1; }
+
+    git init -q /testbed
+    cd /testbed
+    # Fetched by URL, so no remote is configured; only the base commit, shallow.
+    retry git fetch -q --depth 1 https://github.com/contiki-ng/contiki-ng.git 16831162a18a66e67ad013d570acce42f71935f7
+    git checkout -q --detach 16831162a18a66e67ad013d570acce42f71935f7
+
+    # Add only the upstream test changes selected for this instance.
+    git apply /opt/embedeval/test_patch.diff
+
+    # The instance profile lists the submodules needed by its selected tests.
+    # Only gitlinks present at this base are initialized: older bases predate
+    # e.g. os/net/security/mbedtls, and their tests cannot depend on it.
+    python3 - <<'PY'
+import json
+import shutil
+import subprocess
+
+with open('/opt/embedeval/bench.json') as stream:
+    config = json.load(stream)
+paths = []
+for path in [*(path for unit in config['units'] for path in unit.get('submodules', [])),
+             *config.get('submodules', [])]:
+    if path not in paths:
+        paths.append(path)
+for path in paths:
+    entry = subprocess.run(['git', 'ls-files', '--stage', '--', path], cwd='/testbed',
+                           stdout=subprocess.PIPE,
+                           check=True).stdout.decode()
+    if not entry.startswith('160000 '):
+        print('submodule ' + path + ' is not a gitlink at this base; skipped')
+        continue
+    # Recursive: Ant-era Cooja nests MSPSim. Old git (16.04 images) cannot
+    # fetch a pinned commit shallowly, so fall back to a full fetch.
+    shallow = ['git', 'submodule', 'update', '--init', '--recursive', '--depth', '1', '--', path]
+    if subprocess.run(shallow, cwd='/testbed').returncode:
+        subprocess.run(['git', 'submodule', 'deinit', '-f', '--', path], cwd='/testbed')
+        shutil.rmtree('/testbed/.git/modules/' + path, ignore_errors=True)
+        subprocess.run(['git', 'submodule', 'update', '--init', '--recursive', '--', path],
+                       cwd='/testbed', check=True)
+PY
+
+    # Each submodule keeps its pinned commit (detached HEAD) and what it
+    # reaches; its remotes, branches, tags and reflogs go, and gc drops every
+    # object only those reached (a full fetch's later commits).
+    # (%post runs under /bin/sh, so the steps are a script, not a function; in
+    # the image, not /tmp, which an i386 base's %post shares with the host.)
+    cat > /opt/embedeval/strip-repo.sh <<'SH'
+set -e
+dir=$(git rev-parse --git-dir)
+# HEAD must be detached at its commit: the refs go.
+if git symbolic-ref -q HEAD >/dev/null; then echo "HEAD is a branch in $dir" >&2; exit 1; fi
+for r in $(git remote); do git config --remove-section "remote.$r"; done
+# The ref store itself, not `git remote remove`: old git leaves a dangling
+# refs/remotes/origin/HEAD that breaks gc.
+rm -rf "$dir/refs" "$dir/packed-refs" "$dir/FETCH_HEAD" "$dir/ORIG_HEAD" "$dir/logs"
+mkdir -p "$dir/refs/heads" "$dir/refs/tags"
+git reflog expire --expire=now --all
+git gc -q --prune=now
+SH
+    git submodule --quiet foreach --recursive 'sh /opt/embedeval/strip-repo.sh'
+    sh /opt/embedeval/strip-repo.sh
+    rm -f /opt/embedeval/strip-repo.sh
+
+    # The git repositories older CI images carry in their user's home (the
+    # Renode sources) are not needed to run anything. Only that directory is
+    # searched: an i386 base runs this script with the host's directories
+    # bound in. The leak check reports any repository elsewhere.
+    if [ -d /home/user ]; then
+        find /home/user -xdev -name .git -prune -exec rm -rf {} +
+    fi
+
+    mkdir -p /testbed/.embedeval/logs
+    printf '.embedeval/\ntags\n' >> .git/info/exclude
+    ctags -R --languages=C,C++ -f /testbed/tags os arch tests examples 2>/dev/null || true
+    chmod 755 /usr/local/bin/run_tests
+    # Native units are built once at base; Gradle-era Cooja fills its Gradle
+    # cache here, while the build has a network: runs have none.
+    run_tests --build-only || true
+
+%environment
+    export LANG=C.UTF-8
+
+%labels
+    embedeval.instance contiki-ng__contiki-ng-3286
+    embedeval.base_commit 16831162a18a66e67ad013d570acce42f71935f7

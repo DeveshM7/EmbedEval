@@ -45,9 +45,11 @@ PORT="${PORT:-8000}"
 # from an x86 node (RIOT's agent), from a smaller allocation: HOST=0.0.0.0, with
 # VLLM_API_KEY set, and less GPU memory, sequences and context.
 HOST="${HOST:-127.0.0.1}"
-GPU_MEMORY="${GPU_MEMORY:-0.80}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
+# (The cluster's model settings arrive as EMBEDEVAL_GPU_MEMORY_UTILIZATION,
+# EMBEDEVAL_MAX_NUM_SEQS and EMBEDEVAL_MAX_MODEL_LEN.)
+GPU_MEMORY="${GPU_MEMORY:-${EMBEDEVAL_GPU_MEMORY_UTILIZATION:-0.80}}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-${EMBEDEVAL_MAX_NUM_SEQS:-4}}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-${EMBEDEVAL_MAX_MODEL_LEN:-262144}}"
 if [ "$HOST" != 127.0.0.1 ] && [ -z "${VLLM_API_KEY:-}" ]; then
     echo "HOST=$HOST needs VLLM_API_KEY: this would open the server to the whole cluster" >&2
     exit 1

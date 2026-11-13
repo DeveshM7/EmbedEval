@@ -35,13 +35,13 @@ _override = os.environ.get("EMBEDEVAL_INSTANCES_DIR")
 INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_ROOT / _override]
                   if _override else [layout.generated()] if layout.run_dir()
                   else [APPTAINER_INSTANCES, APPTAINER_INSTANCES / "mynewt",
-                        APPTAINER_INSTANCES / "nuttx",
+                        APPTAINER_INSTANCES / "nuttx", APPTAINER_INSTANCES / "contiki-ng",
                         REPO_ROOT / "docker" / "instances"])
 
-PROJECTS = ("zephyr", "nuttx", "riot", "mynewt")
+PROJECTS = ("zephyr", "nuttx", "riot", "mynewt", "openthread", "contiki-ng")
 
 _INSTANCE_RE = re.compile(
-    r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+(?:-a\d+|-t\d+|-c[0-9a-f]{8})?)$")
+    r"^(?P<project>[a-z][a-z0-9-]*)__(?P=project)-(?P<pr>\d+(?:-a\d+|-t\d+|-c[0-9a-f]{8})?)$")
 
 
 def split_instance(instance_id: str) -> tuple[str, str]:

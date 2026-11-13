@@ -36,6 +36,7 @@ INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_RO
                   else [REPO_ROOT / "apptainer" / "instances",
                         REPO_ROOT / "apptainer" / "instances" / "mynewt",
                         REPO_ROOT / "apptainer" / "instances" / "nuttx",
+                        REPO_ROOT / "apptainer" / "instances" / "contiki-ng",
                         REPO_ROOT / "docker" / "instances"])
 #
 # Agent runs and their grades go to one folder per run,
@@ -59,7 +60,7 @@ TRAJECTORY_NAME = "trajectory.json"
 RUN_NAME = "run.json"        # how the agent's run ended (harness/run.py)
 GRADE_NAME = "grade.json"    # its grade; the run is finished once this exists
 
-PROJECTS = ("zephyr", "nuttx", "riot", "mynewt")
+PROJECTS = ("zephyr", "nuttx", "riot", "mynewt", "openthread", "contiki-ng")
 
 # LiteLLM model name -> directory name under the eval dir.
 # Unknown models raise rather than silently creating a new directory.
@@ -81,7 +82,7 @@ MODEL_DIRS.update({f"openai/{name}": name for name in LOCAL_PROFILES})
 MODEL_ALIASES: dict[str, str] = {short: full for full, short in MODEL_DIRS.items()}
 
 _INSTANCE_RE = re.compile(
-    r"^(?P<project>[a-z]+)__(?P=project)-(?P<pr>\d+(?:-a\d+|-t\d+|-c[0-9a-f]{8})?)$"
+    r"^(?P<project>[a-z][a-z0-9-]*)__(?P=project)-(?P<pr>\d+(?:-a\d+|-t\d+|-c[0-9a-f]{8})?)$"
 )
 
 

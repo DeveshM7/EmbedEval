@@ -26,9 +26,14 @@ and the tests actually run.
   `apptainer/instances/mynewt/`, built and run on Linux x86_64 with
   `hw/bsp/native` and `compiler/sim`.
 
+- **Contiki-NG** instances run the upstream native unit tests or Cooja
+  scenarios in the upstream CI image of the base's era (Apptainer), with no
+  network; see section 12 of [docs/running_on_scholar.md](docs/running_on_scholar.md).
+
 **Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 29 NuttX (in
 `apptainer/instances/nuttx/`: 18 ARM64, 11 x86_64 hosts; and 6 Docker ones in
-`docker/instances/`), 3 RIOT, plus 63 Apache Mynewt.
+`docker/instances/`), 3 RIOT, 63 Apache Mynewt, and 38 Contiki-NG
+(`apptainer/instances/contiki-ng/`).
 
 ---
 
@@ -349,6 +354,33 @@ python harness/evaluate_patches.py --instance nuttx__nuttx-11889-a2327 --model <
   directory: a full sim:nsh build takes about two minutes, an ostest run
   about two.
 
+## Contiki-NG
+
+The promoted instances (`apptainer/instances/contiki-ng/`) build and run on
+Linux x86_64 with Apptainer. An agent run gets the problem statement and the
+repository at the base commit with the PR's tests; not the fix, its history,
+the fail-to-pass lists, or a network (every agent, validation and grading
+command runs with `--net --network none`). Validation checks that on each image
+before any test runs (`scripts/contiki_ng_leakcheck.py`) and requires five
+identical runs of the unfixed code.
+
+```bash
+python scripts/build_instances.py --instance contiki-ng__contiki-ng-3246
+python scripts/validate_instance.py contiki-ng__contiki-ng-3246
+python harness/run.py --instance contiki-ng__contiki-ng-3246 --model <model> -v
+python harness/evaluate_patches.py --instance contiki-ng__contiki-ng-3246 --model <model>
+```
+
+`<model>` is a hosted model or a profile of `triage/models.json` served at
+`EMBEDEVAL_LOCAL_API_BASE`. On Scholar, triage, validation and evaluating
+several open-weight models on one run go through `cluster/`
+(`python cluster/submit.py evaluate --run R --model A B C --queue`; by
+default 50 steps and no time limit per instance, the same limits as the Zephyr
+and RIOT baseline):
+[docs/running_on_scholar.md, section 12](docs/running_on_scholar.md#12-contiki-ng-runs).
+The [Contiki-NG triage document](docs/contiki_ng_triage.md) is the triage
+model's instructions.
+
 ---
 
 ## Layout
@@ -360,7 +392,8 @@ cluster/            the Zephyr pipeline on Scholar: config, setup.py, prepare.py
                     submit.py, node_worker.py, report.py, the job template
 docs/               running_on_scholar.md (using the pipeline),
                     pipeline_internals.md (how it works), pr_triage.md (the
-                    model's triage instructions), stage1_pr_candidates.md (the gold PRs)
+                    model's triage instructions; contiki_ng_triage.md for
+                    Contiki-NG), stage1_pr_candidates.md (the gold PRs)
 triage/             models.json (model profiles), gold.json (the Zephyr gold set),
                     NuttX: nuttx_apps_gold.json, ga/ (prompt tuning), nuttx_reviewed/
 scripts/            Zephyr pipeline: filter_candidates.py, zephyr_env.py,

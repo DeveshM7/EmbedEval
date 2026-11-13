@@ -38,6 +38,13 @@ writes or rechecks each instance's problem statement with the node's own
 model server (scripts/nuttx_statement.py). Prepared instances go only to
 nodes of their architecture (manifest "arch", assigned_work).
 
+Contiki-NG runs (the manifest's project) run triage on a GPU node
+(scripts/triage_prs.py --project contiki-ng), observe (an observation-only run:
+the PR's upstream tests run without model-chosen expectations, and what
+observes valid is finalized), validate on an x86 node (a revalidation renders
+the existing instance again), and statement (the served model writes or
+rechecks each VALID instance's problem statement).
+
 Every PR gets status/<pr>.json once a phase is through with it (status.py).
 Each step runs in its own process group, killed whole on a timeout. On
 SIGTERM (scancel, the job's time limit) it stops its steps and the server and
@@ -242,6 +249,9 @@ def cache_filled(cfg: dict) -> None:
 def start_server(cfg: dict, env: dict, node_dir: Path, profile: str | None = None) -> subprocess.Popen:
     scr = node_dir / "scr"
     senv = {**env, "EMBEDEVAL_SCRATCH": str(scr), "PORT": "8000",
+            "EMBEDEVAL_GPU_MEMORY_UTILIZATION": str(cfg["model"]["gpu_memory_utilization"]),
+            "EMBEDEVAL_MAX_MODEL_LEN": str(cfg["model"]["max_model_len"]),
+            "EMBEDEVAL_MAX_NUM_SEQS": str(cfg["model"]["max_num_seqs"]),
             "EMBEDEVAL_VLLM_CACHE": str(compile_cache(cfg, node_dir))}
     senv.pop("SLURM_SUBMIT_DIR", None)    # the script then reads models.json from the repo
     out = open(LOGS / "server.log", "a")
@@ -330,7 +340,9 @@ def verdict_fields(v: dict) -> dict:
         ok = tm.is_accept(v)
         return {"verdict": "accept" if ok else "error" if v.get("kind") == "error" else "reject",
                 "kind": v.get("kind"), "failure_mode": v.get("failure_mode", "runtime") if ok else None}
-    pair = f"{v['platform']} / {v['scenario']}" if v.get("platform") else None
+    # Zephyr's board and scenario; Contiki-NG's profile or test target
+    pair = (f"{v['platform']} / {v['scenario']}" if v.get("platform") else
+            v.get("profile") or v.get("test_target"))
     return {"verdict": v.get("verdict"), "pair": pair}
 
 
@@ -367,7 +379,8 @@ def triage(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> N
                     cmd = [PY, "scripts/triage_mynewt_prs.py", "run", "--profile", profile, "--case",
                            str(pr), "--parallel", "1", "--out", str(run / "triage")]
                 else:
-                    cmd = [PY, "scripts/triage_prs.py", "--run-dir", str(run), "run", "--profile",
+                    cmd = [PY, "scripts/triage_prs.py", "--run-dir", str(run), "run",
+                           *(["--project", "contiki-ng"] if (PROJECT == "contiki-ng" or cfg.get("project") == "contiki-ng") else []), "--profile",
                            profile, "--pr", str(pr), "--parallel", "1"]
                 rc = step(cmd, LOGS / f"triage-{pr}.log", cap, env)
             if rc == 143:
@@ -444,13 +457,14 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     if not todo:
         return
     caps = cfg["caps"]
+    contiki = (PROJECT == "contiki-ng" or cfg.get("project") == "contiki-ng")
     t0 = time.time()
     deadline = t0 + (minutes - 3) * 60
     venv = {**env, "EMBEDEVAL_BUILD_TIMEOUT_MIN": str(caps["build"])}
     sweep(Path(env["EMBEDEVAL_WORK"]))
 
     def one(pr: int) -> None:
-        iid = f"zephyr__zephyr-{pr}"
+        iid = f"contiki-ng__contiki-ng-{pr}" if contiki else f"zephyr__zephyr-{pr}"
         start = time.time()
 
         def left() -> float:
@@ -483,17 +497,24 @@ def validate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
             if record(run, pr, "validate", info):
                 log(f"validate {pr}: {what}")
             return
+        source = status.entry(run, pr).get("instance")
+        if contiki and source:                  # a revalidation: render the existing instance again
+            res = attempt(run, pr, iid, None, lg, left, venv, render=run / "sources" / source)
+            if res is None:
+                return
+            state, what, published = res
+            return done(state, published, outcome=what) if state == "done" else done("failed", what)
         verdict = run / "triage" / f"{pr}.json"
         tried = []
         while True:
-            tried.append(json.loads(verdict.read_text())["platform"])
+            tried.append(json.loads(verdict.read_text()).get("platform", "contiki-ng"))
             note = f"retried on {tried[-1]}: nothing ran on {tried[0]}" if len(tried) > 1 else ""
             res = attempt(run, pr, iid, verdict, lg, left, venv)
             if res is None:
                 return                                     # stopping: stays to do
             state, what, published = res
             nothing_ran = what.startswith("INVALID: nothing ran")
-            if nothing_ran and len(tried) == 1 and left() >= 10:
+            if not contiki and nothing_ran and len(tried) == 1 and left() >= 10:
                 verdict = other_board(run, pr, verdict, tried)
                 if verdict:
                     log(f"validate {pr}: nothing ran on {tried[0]}; retrying on another board")
@@ -816,19 +837,29 @@ def validate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, lef
              f"INVALID: {results[0][2]}")
 
 
-def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: dict):
-    """One generate, build, validate of the verdict's pair: ("done", outcome,
-    note), ("failed", why, ""), or None if the worker is stopping. A VALID
-    image is pushed to the registry, if there is one, before it is removed;
-    a push that fails leaves the PR VALID, with a note."""
+def attempt(run: Path, pr: int, iid: str, verdict: Path | None, lg: Path, left, venv: dict,
+            render: Path | None = None):
+    """One generate (or, with render, a re-render of an existing instance),
+    build, validate of the verdict's pair: ("done", outcome, note), ("failed",
+    why, ""), or None if the worker is stopping. A VALID image is pushed to
+    the registry, if there is one, before it is removed; a push that fails
+    leaves the PR VALID, with a note."""
     step([PY, "scripts/cleanup_instance.py", iid], lg, 10, venv)   # leftovers of a cut-short try
     try:
-        rc = step([PY, "scripts/generate_instance.py", "--pr", str(pr), "--triage", str(verdict)],
-                  lg, min(5, left()), venv)
+        project = "contiki-ng" if iid.startswith("contiki-ng__") else "zephyr"
+        if render:
+            shutil.rmtree(run / "instances" / iid, ignore_errors=True)
+            generate = [PY, "scripts/generate_instance.py", "--project", project, "--render", str(render),
+                        "--out", str(run / "instances")]
+        else:
+            generate = [PY, "scripts/generate_instance.py", "--project", project,
+                        "--pr", str(pr), "--triage", str(verdict)]
+        rc = step(generate, lg, min(10, left()), venv)
         if rc == 143:
             return None
         if rc:
-            return "failed", "generate failed: the verdict's pair is not runnable", ""
+            return "failed", ("render failed; see the log" if render
+                              else "generate failed: the verdict's pair is not runnable"), ""
         rc = step([PY, "scripts/build_instances.py", "--instance", iid], lg,
                   min(2 * float(venv["EMBEDEVAL_BUILD_TIMEOUT_MIN"]) + 5, left()), venv)
         if rc == 143:
@@ -841,7 +872,10 @@ def attempt(run: Path, pr: int, iid: str, verdict: Path, lg: Path, left, venv: d
         if rc == 143:
             return None
         report = run / "instances" / iid / "validation.json"
-        reason = json.loads(report.read_text()).get("reason") if report.exists() else None
+        receipt = json.loads(report.read_text()) if report.exists() else {}
+        reason = receipt.get("reason")
+        if receipt.get("status") == "hold":
+            return "done", "HOLD", reason or "infrastructure/profile hold"
         if rc == 0:
             if not venv.get("EMBEDEVAL_REGISTRY"):
                 return "done", "VALID", ""
@@ -897,7 +931,7 @@ def nuttx_instance_env(cfg: dict, env: dict, node_dir: Path) -> dict:
             "EMBEDEVAL_BUILD_TIMEOUT_MIN": str(cfg["caps"]["build"])}
 
 
-def statements(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> None:
+def nuttx_statements(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> None:
     """Write or recheck the problem statement of each instance of the run
     (triage_nuttx_prs.py statement --recheck), taken from the queue, with the
     node's own model server."""
@@ -949,6 +983,167 @@ def statements(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) 
         with _lock:
             _children.discard(server.pid)
         log("model server stopped")
+
+
+def contiki_statements(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> None:
+    """Problem statements, written by the served model, for VALID instances
+    without one (observation-only instances have no triage verdict to take
+    one from); with statement_recheck, existing statements are checked under
+    the current rules and replaced when they fail."""
+    recheck = bool(cfg.get("statement_recheck"))
+    todo = status.statement_todo(run, recheck)
+    log(f"statements: {len(todo)} instances to " + ("write or recheck" if recheck else "write"))
+    if not todo:
+        return
+    caps, profile = cfg["caps"], cfg["model"]["profile"]
+    t0 = time.time()
+    server = start_server(cfg, env, node_dir)
+    try:
+        if not server_ready(server, caps["server_start"]):
+            log("model server did not come up; see server.log. Taking no instances")
+            return
+        log(f"model server ready after {(time.time() - t0) / 60:.1f} min")
+        deadline = t0 + (minutes - 5) * 60
+
+        tried: set[int] = set()     # a statement that failed is not retried in this job
+
+        def one(pr: int) -> None:
+            left = (deadline - time.time()) / 60
+            if left < 2 or _stopping.is_set():
+                return
+            tried.add(pr)
+            start = time.time()
+            folder = run / status.instance_folder(run, pr) / f"contiki-ng__contiki-ng-{pr}"
+            rc = step([PY, "scripts/triage_prs.py", "--run-dir", str(run), "statement", "--project",
+                       "contiki-ng", "--profile", profile, "--instance", str(folder),
+                       *(["--recheck"] if recheck else [])],
+                      LOGS / f"statement-{pr}.log", min(caps["triage_pr"], left), env)
+            if rc == 143:
+                return
+            info = {"state": "done" if rc == 0 else "failed", "node": N,
+                    "minutes": round((time.time() - start) / 60, 1)}
+            if record(run, pr, "statement", info):
+                log(f"statement {pr}: {info['state']} ({info['minutes']} min)")
+
+        q = claims.Queue(run, "statement", ME, lambda pr: pr not in tried and pr in status.statement_todo(run, recheck))
+        drain(q, todo, one, cfg["parallel"]["triage_per_node"], deadline - 2 * 60)
+    finally:
+        kill_group(server.pid)
+        with _lock:
+            _children.discard(server.pid)
+        log("model server stopped")
+
+
+# ---------------------------------------------------------------- validate
+
+
+def statements(cfg: dict, run: Path, env: dict, node_dir: Path, minutes: float) -> None:
+    """The statement phase: a NuttX run's (nuttx_statement.py) or a Contiki-NG
+    run's (triage_prs.py statement)."""
+    (nuttx_statements if status.project(run) == "nuttx" else contiki_statements)(
+        cfg, run, env, node_dir, minutes)
+
+
+def finalize(cfg: dict, run: Path, pr: int, env: dict, left) -> None:
+    """An observed-valid PR as a runtime instance: generated from its observation
+    into <run>/finalized/, built, and validated there (named before failures,
+    after passes, three before repeats). The observation folder stays as it is."""
+    iid = f"contiki-ng__contiki-ng-{pr}"
+    final = run / "finalized"
+    fenv = {**env, "EMBEDEVAL_INSTANCES_DIR": str(final)}
+    lg = LOGS / f"finalize-{pr}.log"
+    start = time.time()
+    outcome = None
+    try:
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, fenv)
+        for cmd, cap in (([PY, "scripts/generate_instance.py", "--project", "contiki-ng", "--pr", str(pr),
+                           "--from-observed", str(run / "instances" / iid), "--out", str(final)], 5),
+                         ([PY, "scripts/build_instances.py", "--instance", iid], 2 * cfg["caps"]["build"] + 5),
+                         ([PY, "scripts/validate_instance.py", iid], left())):
+            rc = step(cmd, lg, min(cap, left()), fenv)
+            if rc == 143:
+                return
+            if rc and cmd[1] != "scripts/validate_instance.py":
+                outcome = f"failed: {Path(cmd[1]).stem} rc={rc}"
+                break
+        if outcome is None:
+            receipt = final / iid / "validation.json"
+            r = json.loads(receipt.read_text()) if receipt.exists() else {}
+            outcome = ("VALID" if r.get("valid") else
+                       "HOLD" if r.get("status") == "hold" else f"INVALID: {r.get('reason', 'no receipt')}")
+        if record(run, pr, "finalize", {"state": "done" if not outcome.startswith("failed") else "failed",
+                                        "outcome": outcome, "node": N,
+                                        "minutes": round((time.time() - start) / 60, 1)}):
+            log(f"finalize {pr}: {outcome}")
+    finally:
+        step([PY, "scripts/cleanup_instance.py", iid], lg, 10, fenv)
+
+
+def observe(cfg: dict, run: Path, env: dict, minutes: float) -> None:
+    """Run Contiki's upstream test inventory without model-selected expectations,
+    and finalize what observes valid."""
+    todo = list(dict.fromkeys(status.observe_todo(run) + status.finalize_todo(run)))
+    log(f"observation: {len(todo)} PRs left in the run")
+    if not todo:
+        return
+    deadline = time.time() + (minutes - 3) * 60
+    sweep(Path(env["EMBEDEVAL_WORK"]))
+    attempted = set()
+    # A PR whose affected units span profiles is observed under the one its
+    # manifest entry names; without one, generation refuses to choose.
+    profiles = {e["pr"]: e["observe_profile"] for e in status.manifest(run)["prs"]
+                if e.get("observe_profile")}
+
+    def one(pr: int) -> None:
+        attempted.add(pr)
+        start = time.time()
+        iid = f"contiki-ng__contiki-ng-{pr}"
+        lg = LOGS / f"observe-{pr}.log"
+
+        def left() -> float:
+            return min(cfg["caps"]["validate_pr"] - (time.time() - start) / 60,
+                       (deadline - time.time()) / 60)
+
+        if left() < 10 or _stopping.is_set():
+            return
+        if pr in status.finalize_todo(run):               # observed in an earlier job
+            finalize(cfg, run, pr, env, left)
+            return
+        try:
+            for cmd, cap in (([PY, "scripts/generate_instance.py", "--project", "contiki-ng",
+                               "--pr", str(pr), "--observe",
+                               *(["--profile", profiles[pr]] if pr in profiles else [])], 5),
+                             ([PY, "scripts/build_instances.py", "--instance", iid],
+                              2 * cfg["caps"]["build"] + 5),
+                             ([PY, "scripts/validate_instance.py", iid], left())):
+                rc = step(cmd, lg, min(cap, left()), env)
+                if rc == 143:
+                    return
+                observed = run / "instances" / iid / "observed.json"
+                if rc == 3 and cmd[1] == "scripts/generate_instance.py":
+                    state = "done"                       # nothing to observe: final, not retried
+                    break
+                if rc and not (cmd[1] == "scripts/validate_instance.py" and observed.exists()):
+                    state = "cap" if rc == 124 else "failed"
+                    break
+            else:
+                state = "done"
+            note = (str(observed) if observed.exists() else
+                    "not observable under this profile (see the log)" if rc == 3 else "")
+            if record(run, pr, "observe", {"state": state, "minutes": round((time.time() - start) / 60, 1),
+                                            "node": N, "note": note}):
+                log(f"observe {pr}: {state}")
+        finally:
+            step([PY, "scripts/cleanup_instance.py", iid], lg, 10, env)
+        if pr in status.finalize_todo(run) and left() >= 10 and not _stopping.is_set():
+            finalize(cfg, run, pr, env, left)
+
+    # Failed/capped observations may resume in a later job, but must not spin
+    # on the same deterministic failure for this job's entire wall time.
+    q = claims.Queue(run, "observe", ME,
+                     lambda pr: pr not in attempted and (pr in status.observe_todo(run)
+                                                         or pr in status.finalize_todo(run)))
+    drain(q, todo, one, cfg["parallel"]["validate_per_node"], deadline - 10 * 60)
 
 
 def revalidate_nuttx(cfg: dict, run: Path, pr: int, env: dict, node_dir: Path, left, done) -> None:
@@ -1116,6 +1311,47 @@ def server_alive(base: str, tunnel) -> bool:
         return False
 
 
+def server_capacity(job: str) -> float | None:
+    """How many requests of the full context length the server's KV cache
+    holds at once (vLLM's "Maximum concurrency" line in the server job's
+    log), or None when the log cannot be read."""
+    r = subprocess.run(["scontrol", "show", "job", job], capture_output=True, text=True)
+    m = re.search(r"StdOut=(\S+)", r.stdout)
+    try:
+        text = Path(m.group(1).replace("%j", job)).read_text(errors="replace") if m else ""
+    except OSError:
+        return None
+    found = re.findall(r"Maximum concurrency for [\d,]+ tokens per request: ([\d.]+)x", text)
+    return float(found[-1]) if found else None
+
+
+def watch_queue(base: str, stop: threading.Event, samples: list, every: float = 30) -> None:
+    """Append the server's waiting requests (vLLM /metrics) every `every`
+    seconds until `stop` is set."""
+    url = base.removesuffix("/v1") + "/metrics"
+    while not stop.wait(every):
+        try:
+            text = urllib.request.urlopen(url, timeout=10).read().decode(errors="replace")
+        except Exception:
+            continue
+        waiting = re.findall(r"^vllm:num_requests_waiting\{[^}]*\} ([\d.]+)", text, re.M)
+        if waiting:
+            samples.append(sum(float(w) for w in waiting))
+
+
+def agent_record(outputs: Path, model: str, iid: str) -> dict:
+    """What the trajectory says of an agent run (under `outputs`, the
+    evaluation's folder): exit status, model calls."""
+    sys.path.insert(0, str(REPO / "harness"))
+    import paths
+    f = Path(outputs) / "contiki-ng" / paths.model_dir(model) / iid.rsplit("-", 1)[1] / "trajectory.json"
+    try:
+        info = json.loads(f.read_text())["info"]
+        return {"exit_status": info.get("exit_status"), "steps": info["model_stats"]["api_calls"]}
+    except (OSError, ValueError, KeyError):
+        return {"exit_status": None, "steps": None}
+
+
 def evaluate(cfg: dict, run: Path, env: dict, minutes: float) -> None:
     label = status.eval_label(cfg["evaluate"])
     todo = status.evaluate_todo(run, label)
@@ -1241,7 +1477,8 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True)
     p.add_argument("--config", required=True, help="the frozen settings submit.py wrote")
-    p.add_argument("--phase", required=True, choices=["triage", "validate", "statement", "evaluate"])
+    p.add_argument("--phase", required=True,
+                   choices=["triage", "observe", "validate", "statement", "evaluate"])
     p.add_argument("--minutes", type=float, required=True,
                    help="the phase's time: what is left of the job, less the report's")
     args = p.parse_args()
@@ -1265,13 +1502,25 @@ def main() -> None:
         env = mynewt_env(env)
     log(f"phase {args.phase}, node {N} of {NN}, run {run}, {args.minutes:.0f} min")
     claims.keep_alive(run, ME)
+    contiki = PROJECT == "contiki-ng"
+    machine = os.uname().machine
     if args.phase == "triage":
+        if contiki and machine != "aarch64":
+            sys.exit("Contiki-NG model triage requires Spark ARM64")
         triage(cfg, run, env, node_dir, args.minutes)
     elif args.phase == "statement":
+        if contiki and machine != "aarch64":
+            sys.exit("model statements run on Spark ARM64")
         statements(cfg, run, env, node_dir, args.minutes)
     elif args.phase == "evaluate":
         evaluate(cfg, run, env, args.minutes)
+    elif args.phase == "observe":
+        if not contiki or machine != "x86_64":
+            sys.exit("Contiki-NG observation requires x86_64")
+        observe(cfg, run, env, args.minutes)
     else:
+        if contiki and machine != "x86_64":
+            sys.exit("Contiki-NG validation requires x86_64")
         validate(cfg, run, env, args.minutes)
     log(f"phase {args.phase} done")
 

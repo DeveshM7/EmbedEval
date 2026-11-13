@@ -16,10 +16,11 @@ in a container started fresh from the instance image, so nothing the agent left
 behind -- stale build artefacts, a modified test file, a running process -- can
 influence the result. The patch text is the only thing that crosses over.
 
-Twister-pipeline Zephyr instances are graded in their Apptainer image instead
-(evaluate_apptainer): the patch on a fresh overlay, then the instance's
-`run_tests`, which must pass every test of the scenario. So are NuttX
-instances whose metadata says "runtime": "apptainer".
+Twister-pipeline Zephyr and cmake-pipeline OpenThread instances are graded in
+their Apptainer image instead (evaluate_apptainer): the patch on a fresh
+overlay, then the instance's `run_tests`, which must pass every test of the
+scenario (OpenThread: every listed test). So are RIOT layers, Contiki-NG
+instances, and NuttX instances whose metadata says "runtime": "apptainer".
 
     EMBEDEVAL_INSTANCES_DIR=generated python harness/evaluate_patches.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
@@ -33,6 +34,7 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -83,6 +85,11 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     if not patch_bytes.strip():
         result.update(patch_empty=True, error="empty patch — agent made no changes")
         return result
+    if meta["project"] == "contiki-ng":
+        from contiki_ng_pipeline import protected_test_change
+        if protected_test_change(patch_bytes.decode("utf-8", errors="replace")):
+            result["error"] = "patch modifies protected upstream tests"
+            return result
     import registry       # the validated image: pulled from the registry if published
     try:
         image = registry.image_for(instance_id)
@@ -93,7 +100,8 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
 
     start = time.time()
     run_dir = au.path("runs", f"eval-{instance_id}-{time.strftime('%Y%m%d-%H%M%S')}", "x").parent
-    overlay = run_dir / "overlay"
+    local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-grade-", dir="/tmp") if meta["project"] == "contiki-ng" else None
+    overlay = (Path(local_overlay.name) if local_overlay else run_dir) / "overlay"
     overlay.mkdir(parents=True)
     (run_dir / "agent.patch").write_bytes(patch_bytes)
     base, layer = au.instance_container(meta, image)
@@ -163,6 +171,8 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
         print("  FAIL — overall timeout")
     finally:
         result["elapsed_seconds"] = round(time.time() - start, 1)
+        if local_overlay:
+            local_overlay.cleanup()
         au.remove(run_dir)
     return result
 
@@ -296,8 +306,9 @@ def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dic
     meta = paths.load_metadata(instance_id)
     if meta["project"] == "mynewt" and projects.setting(meta, "runtime") == "apptainer":
         return evaluate_mynewt(instance_id, model_name, meta, timeout)
-    # Twister Zephyr, RIOT layers, and NuttX instances rendered for Apptainer.
-    if meta.get("pipeline") in ("twister", "riot-layer") or meta.get("runtime") == "apptainer":
+    # Twister Zephyr, RIOT layers, OpenThread, Contiki-NG, and NuttX instances
+    # rendered for Apptainer.
+    if meta.get("pipeline") in projects.APPTAINER_PIPELINES or meta.get("runtime") == "apptainer":
         return evaluate_apptainer(instance_id, model_name, meta, timeout)
     if meta["project"] == "zephyr":
         return {"instance_id": instance_id, "model": paths.resolve_model(model_name),

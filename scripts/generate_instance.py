@@ -139,7 +139,8 @@ def changed_test_paths(record: dict, project: str) -> list[str]:
 
 
 def build_test_patch(
-    base: str, head: str, project: str = "zephyr", test_files: list[str] | None = None
+    base: str, head: str, project: str = "zephyr", test_files: list[str] | None = None,
+    clone: Path | None = None,
 ) -> str:
     """The PR's test-file changes, as a diff written by git.
 
@@ -160,7 +161,7 @@ def build_test_patch(
     commit* -- base..merge_commit traverses everyone else's work, which is what
     put seven foreign files into the nuttx-11889 patch.
     """
-    clone = ensure_clone(project)
+    clone = clone or ensure_clone(project)
     for sha in (base, head):
         if run(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"],
                check=False).returncode:
@@ -173,7 +174,7 @@ def build_test_patch(
 
 
 def check_applies(
-    patch: str, base: str, inst: Path, project: str = "zephyr"
+    patch: str, base: str, inst: Path, project: str = "zephyr", clone: Path | None = None
 ) -> None:
     """Refuse to emit an instance whose patch git will not accept.
 
@@ -182,7 +183,7 @@ def check_applies(
     build. A dry run against the base commit costs about a second and covers
     every instance, every time.
     """
-    clone = ensure_clone(project)
+    clone = clone or ensure_clone(project)
     patch_file = (inst / "test_patch.diff").resolve()
     with tempfile.TemporaryDirectory(prefix="embedeval-applycheck-") as tmp:
         work = Path(tmp) / "tree"
@@ -1177,13 +1178,208 @@ def generate(pr: int, triage: dict, out_root: Path, tag_suffix: str = "",
     sys.exit(f"ERROR: unknown project {project!r}")
 
 
+# --- OpenThread --------------------------------------------------------------
+OPENTHREAD_URL = "https://github.com/openthread/openthread"
+OPENTHREAD_TEMPLATES = REPO_ROOT / "templates" / "openthread" / "apptainer"
+
+# THE arguments of an OpenThread instance's `script/cmake-build simulation`
+# (instance.json "configure"), for both suites; the verdict's cmake_options are
+# added to them. From the smoke control (candidates/openthread/research/smoke.md):
+# upstream unit.yml's first simulation step, which cmake-build completes with its
+# own option list. Plain cmake with hand-picked flags does not configure.
+OPENTHREAD_CONFIGURE = "script/cmake-build simulation"
+OPENTHREAD_CMAKE_ARGS = ["-DOT_BUILD_GTEST=ON", "-DOT_BORDER_ROUTING=ON",
+                         "-DOT_BORDER_ROUTING_DHCP6_PD=ON", "-DOT_WAKE_INITIATOR=ON",
+                         "-DOT_WAKE_LISTENER=ON"]
+# The other profiles are upstream's own CI test jobs (openthread_candidates.profile_defs()): the
+# record holds their `configure` and `cmake_args`. The toranj one (toranj-unittest, tests/toranj/
+# build.sh `all`) is plain `cmake -GNinja`; run_tests adds `-S /testbed -B /testbed/build`.
+OPENTHREAD_TORANJ_CONFIGURE = "cmake -GNinja"
+# Always last, after the verdict's: cmake-build passes -Werror, and a newer
+# compiler's warnings on older code are not the oracle.
+OPENTHREAD_LAST_ARG = "-DOT_COMPILE_WARNING_AS_ERROR=OFF"
+
+
+def merge_cmake_args(base: list[str], extra: list[str]) -> list[str]:
+    """base args, minus any whose option the verdict sets again, then the
+    verdict's. The union of CI options can hold ON and OFF of one option; the
+    verdict must pick one."""
+    key = lambda a: a.split("=")[0]
+    if len({key(a) for a in extra}) != len(extra):
+        sys.exit(f"ERROR: verdict cmake_options set an option twice: {extra}")
+    return [a for a in base if key(a) not in {key(e) for e in extra}] + extra
+
+
+def observed_config(prior: dict, obs: dict, inventory: list | None = None) -> dict:
+    """instance.json fields of the verdict-style instance an observation
+    finalizes into. run_tests holds one gtest target or the unit tests, so a
+    selection of both is refused. Several gtest targets finalize to the one
+    that holds every fail_to_pass case (inventory: the record's gtest list)."""
+    f2p, p2p = obs["fail_to_pass"], obs["pass_to_pass"]
+    if prior["gtest"] and not prior["unit"] and len(prior["gtest"]) == 1:
+        return {"suite": "gtest", "target": prior["gtest"][0], "fail_to_pass": f2p,
+                "pass_to_pass": p2p}
+    if prior["unit"] and not prior["gtest"]:
+        return {"suite": "unit", "target": f2p[0], "fail_to_pass": f2p, "pass_to_pass": p2p}
+    if prior["gtest"] and not prior["unit"] and inventory:
+        owners = lambda c: [g["target"] for g in inventory if c in g["cases"]]
+        targets = {t for c in f2p for t in owners(c)}
+        if len(targets) == 1 and all(len(owners(c)) == 1 for c in f2p):
+            target = targets.pop()
+            return {"suite": "gtest", "target": target, "fail_to_pass": f2p,
+                    "pass_to_pass": [c for c in p2p if owners(c) == [target]]}
+    sys.exit("ERROR: --from-observed handles one gtest target or unit tests only, not "
+             f"gtest {prior['gtest']} with unit {prior['unit']}")
+
+
+def generate_openthread(pr: int, verdict: dict | None, out_root: Path, observe: bool = False,
+                        observed: Path | None = None, observe_profile: str | None = None) -> Path:
+    """Build `openthread__openthread-<pr>` from an accepted verdict. The
+    verdict is checked again here, mechanically, so an unchecked one is refused.
+
+    observe: no verdict; the executables are those whose sources the PR's test
+    diff changed (instance.json "observe": true, validate_instance.py observes
+    which cases flip). observed: the directory of an observed-valid instance,
+    regenerated as a normal instance from observed.json (with the profile and
+    arguments of the observation). observe_profile: observe under this profile
+    instead of the record's, one of its `extra_observe` entries (only the
+    targets listed there, whose test bodies the chosen profile compiles out)."""
+    import openthread_candidates
+    import triage_prs
+    rec_path = openthread_candidates.enriched_dir() / f"{pr}.json"
+    if not rec_path.exists():
+        sys.exit(f"ERROR: no enriched record at {rec_path}. Run `openthread_candidates.py enrich` first.")
+    rec = json.loads(rec_path.read_text())
+    if openthread_candidates.stale_record(rec):
+        sys.exit(f"ERROR: the enriched record of {pr} is enrich_version {rec.get('enrich_version')}, not "
+                 f"{openthread_candidates.ENRICH_VERSION}. Run `python3 scripts/openthread_candidates.py enrich --local`.")
+    extra_meta = {}
+    if observed:
+        obs = json.loads((observed / "observed.json").read_text())
+        if not obs.get("valid"):
+            sys.exit(f"ERROR: {observed} is not observed-valid: {obs.get('reason')}")
+        prior = json.loads((observed / "instance.json").read_text())
+        old = json.loads((observed / "metadata.json").read_text())
+        cfg = observed_config(prior, obs, rec["test_inventory"]["gtest"])
+        configure, cmake_args = prior["configure"], prior["cmake_args"]
+        profile = prior.get("profile", "simulation")
+        statement, change_type = old["problem_statement"], old["change_type"]
+        extra_meta = {"oracle": "observed", "oracle_note": "observed by validate_instance.py "
+                      "(fail before, pass after the fix); the unit oracle is per executable, "
+                      "so check attribution of the cases to the PR's change"}
+    elif observe:
+        profile = observe_profile or rec.get("profile", "simulation")
+        extra = {e["profile"]: e["targets"] for e in rec["extra_observe"]}
+        if profile != rec.get("profile", "simulation") and profile not in extra:
+            sys.exit(f"ERROR: {profile!r} is neither the chosen profile ({rec.get('profile', 'simulation')}) nor in "
+                     f"extra_observe of {pr} ({list(extra) or 'empty'})")
+        sel = openthread_candidates.select_tests(rec)
+        if profile in extra:
+            sel = {k: [t for t in rec["test_inventory"][k] if t["target"] in extra[profile]] for k in ("unit", "gtest")}
+        gated = openthread_candidates.gated_targets(rec)
+        if not sel["unit"] and not sel["gtest"] and gated:
+            opts = sorted({o for _, m in gated for o in m})
+            sys.exit(f"ERROR: no runnable target for {pr} in our profile: its tests are only "
+                     f"built with {', '.join(opts)} (profile-gated)")
+        if not sel["unit"] and not sel["gtest"]:
+            sys.exit(f"ERROR: no runnable target for {pr}: its changed test files "
+                     f"{rec['test_files']} are compiled into no unit or gtest executable")
+        configure, cmake_args = rec["profiles"][profile]["configure"], rec["profiles"][profile]["cmake_args"]
+        cfg = {"observe": True, "unit": [t["ctest_name"] for t in sel["unit"]],
+               "gtest": [t["target"] for t in sel["gtest"]],
+               "targets": [t["target"] for t in sel["unit"] + sel["gtest"]],
+               "fail_to_pass": [], "pass_to_pass": []}
+        statement = change_type = None
+    else:
+        if verdict.get("verdict") != "accept":
+            sys.exit(f"ERROR: verdict for {pr} is {verdict.get('verdict')!r}, not accept: "
+                     f"{verdict.get('reason', 'no reason given')}")
+        triage_prs.use_project("openthread")
+        issues = triage_prs.check_verdict_openthread(verdict, rec)
+        if issues:
+            sys.exit(f"ERROR: verdict for {pr} fails the check:\n  " + "\n  ".join(issues))
+        profile = verdict.get("profile") or rec.get("profile", "simulation")
+        configure, cmake_args = rec["profiles"][profile]["configure"], rec["profiles"][profile]["cmake_args"]
+        if profile == "simulation":
+            cmake_args = merge_cmake_args(OPENTHREAD_CMAKE_ARGS, verdict.get("cmake_options", [])) + [OPENTHREAD_LAST_ARG]
+        cfg = {"suite": verdict["suite"], "target": verdict["target"],
+               "fail_to_pass": verdict["fail_to_pass"],
+               "pass_to_pass": verdict.get("pass_to_pass", [])}
+        if verdict.get("oracle") == "compile":
+            # the build failure before the fix is the oracle (validate_instance.py)
+            cfg |= {"oracle": "compile", "compile_symbols": verdict["compile_symbols"]}
+            extra_meta = {"oracle": "compile", "compile_symbols": verdict["compile_symbols"]}
+        statement, change_type = verdict["problem_statement"], verdict["change_type"]
+
+    base, fix = rec["base_commit"], rec["fix_commit"]
+    instance_id = f"openthread__openthread-{pr}"
+    inst = out_root / instance_id
+    inst.mkdir(parents=True, exist_ok=True)
+
+    clone = layout.openthread_clone()
+    patch = build_test_patch(base, fix, clone=clone)
+    if not patch.strip():
+        sys.exit(f"ERROR: no tests/ diff for {pr}; instance would have no tests")
+    (inst / "test_patch.diff").write_text(patch)
+    check_applies(patch, base, inst, clone=clone)
+
+    f2p, p2p = cfg["fail_to_pass"], cfg["pass_to_pass"]
+    (inst / "instance.json").write_text(json.dumps(
+        {**{k: v for k, v in cfg.items() if k not in ("fail_to_pass", "pass_to_pass")},
+         **({"profile": profile} if profile != "simulation" else {}),
+         "configure": configure,
+         "cmake_args": cmake_args,
+         "fail_to_pass": f2p, "pass_to_pass": p2p}, indent=2) + "\n")
+    shutil.copy(OPENTHREAD_TEMPLATES / "run_tests.py", inst / "run_tests.py")
+
+    definition = (OPENTHREAD_TEMPLATES / "instance.def.tmpl").read_text()
+    for key, val in {"@@INSTANCE_ID@@": instance_id, "@@REPO@@": OPENTHREAD_URL,
+                     "@@BASE_COMMIT@@": base}.items():
+        definition = definition.replace(key, val)
+    (inst / "instance.def").write_text(definition)
+
+    meta = {
+        "instance_id": instance_id,
+        "project": "openthread",
+        "pipeline": "cmake",
+        "repo": OPENTHREAD_URL,
+        "base_commit": base,
+        "fix_commit": fix,
+        "test_commit": fix,
+        "problem_statement": statement,
+        "fail_to_pass": f2p,
+        "pass_to_pass": p2p,
+        "files_changed_by_fix": rec["source_files"],
+        "pr_url": rec["url"],
+        "change_type": change_type,
+        "run_command": "run_tests",
+        "apptainer_image": f"{instance_id}.sif",
+        "generated": True,
+        **extra_meta,
+    }
+    (inst / "metadata.json").write_text(json.dumps(meta, indent=4) + "\n")
+    return inst
+
+
 def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Generate a Zephyr or Mynewt instance from a triage verdict."
-    )
-    p.add_argument("--repo", choices=("zephyr", "mynewt"), default="zephyr")
-    p.add_argument("--pr", type=int, required=True)
-    p.add_argument("--triage", required=True, help="path to the triage verdict JSON")
+    p = argparse.ArgumentParser(description="Generate an instance from a triage verdict.")
+    p.add_argument("--repo", choices=("zephyr", "mynewt"), default="zephyr",
+                   help="Zephyr or Mynewt (generate below)")
+    p.add_argument("--project", choices=("zephyr", "openthread", "contiki-ng"), default="zephyr",
+                   help="OpenThread or Contiki-NG (generate_openthread, contiki_ng_pipeline)")
+    p.add_argument("--pr", type=int)
+    p.add_argument("--render", type=Path, metavar="DIR",
+                   help="Contiki-NG: write this existing instance folder's recipe again under the "
+                        "current templates (a revalidation), into --out")
+    p.add_argument("--triage", help="path to the triage verdict JSON")
+    p.add_argument("--observe", action="store_true",
+                   help="OpenThread: no verdict; run the test executables the PR changed and "
+                        "observe which cases flip (validate_instance.py writes observed.json)")
+    p.add_argument("--profile", help="with --observe: observe under this profile, one of the record's "
+                                     "extra_observe entries (default: the record's chosen profile)")
+    p.add_argument("--from-observed", type=Path, metavar="DIR",
+                   help="OpenThread: regenerate an observed-valid instance directory as a "
+                        "normal instance with the observed test lists")
     p.add_argument("--enriched-root", type=Path,
                    help="Mynewt only: directory containing enriched <pr>.json records")
     p.add_argument("--out", default=str(DEFAULT_OUT),
@@ -1197,13 +1393,50 @@ def main() -> None:
                    help="Mynewt only: write an Apptainer recipe (instance.def, for hosts "
                         "without Docker such as Scholar) instead of a Dockerfile")
     args = p.parse_args()
+    if args.repo != "zephyr" and args.project != "zephyr":
+        p.error("--repo and --project name one project; give one of them")
 
-    triage = json.loads(Path(args.triage).read_text())
-    if triage.get("verdict") == "reject" or triage.get("kind") in ("maintenance", "needs_hw"):
-        sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
+    if args.render:
+        if args.project != "contiki-ng" or args.triage or args.observe or args.from_observed:
+            p.error("--render is Contiki-NG only and takes no verdict or observation")
+        from contiki_ng_pipeline import render
+        inst = render(args.render, Path(args.out))
+        print(f"  wrote {layout.show(inst)}")
+        return
+    if args.pr is None:
+        p.error("--pr is required")
+    if args.project == "contiki-ng":
+        from contiki_ng_pipeline import generate as generate_contiki
+        verdict = json.loads(Path(args.triage).read_text()) if args.triage else None
+        if not (args.observe or args.from_observed or verdict):
+            p.error("--triage, --observe or --from-observed required")
+        from contiki_ng_pipeline import NotObservable
+        try:
+            inst = generate_contiki(args.pr, verdict, Path(args.out), args.observe, args.from_observed, args.profile)
+        except NotObservable as e:
+            print(f"  not observable: {e}")
+            sys.exit(3)
+        print(f"  wrote {layout.show(inst)}")
+        return
 
-    inst = generate(args.pr, triage, Path(args.out), args.tag_suffix, args.repo, args.force,
-                    enriched_root=args.enriched_root, runtime=args.runtime)
+    if args.observe or args.from_observed:
+        if args.project != "openthread" or args.triage:
+            p.error("--observe and --from-observed are OpenThread only and take no --triage")
+        if args.profile and not args.observe:
+            p.error("--profile goes with --observe")
+        inst = generate_openthread(args.pr, None, Path(args.out), args.observe, args.from_observed, args.profile)
+    else:
+        if not args.triage:
+            p.error("--triage is required")
+        triage = json.loads(Path(args.triage).read_text())
+        if triage.get("verdict") == "reject" or (args.project != "openthread"
+                                                 and triage.get("kind") in ("maintenance", "needs_hw")):
+            sys.exit(f"triage rejected PR {args.pr}: {triage.get('reason','no reason given')}")
+        if args.project == "openthread":
+            inst = generate_openthread(args.pr, triage, Path(args.out))
+        else:
+            inst = generate(args.pr, triage, Path(args.out), args.tag_suffix, args.repo, args.force,
+                            enriched_root=args.enriched_root, runtime=args.runtime)
     print(f"  wrote {layout.show(inst)}")
     for f in sorted(inst.iterdir()):
         print(f"    {f.name:<20} {f.stat().st_size:>7} B")
