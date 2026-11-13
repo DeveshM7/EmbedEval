@@ -11,6 +11,8 @@ an Apptainer environment instead of Docker, e.g. with the local Qwen server:
     EMBEDEVAL_INSTANCES_DIR=generated python harness/run.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
 
+So do NuttX instances whose metadata says "runtime": "apptainer".
+
 Each run goes to its own folder, <eval dir>/<model>/<project>/<PR>/ (see
 harness/paths.py): patch.diff, trajectory.json, run.json (how the run ended),
 and grade.json, written as soon as the run ends. As on SWE-bench, only a run
@@ -241,9 +243,9 @@ _WORKFLOW_STEP3 = """\
 
 def _hide_tests(meta: dict) -> bool:
     """Whether this run hides the PR's tests (harness/hidden_tests.py): when it is
-    on, for the projects it supports (Zephyr, RIOT). A Mynewt run keeps the PR's
-    tests in place until hidden tests support it; its task message is still the
-    problem statement alone (build_task)."""
+    on, for the projects it supports (Zephyr, RIOT). A Mynewt or NuttX run keeps
+    the PR's tests in place until hidden tests support it; its task message is
+    still the problem statement alone (build_task)."""
     return hidden_tests.ENABLED and hidden_tests.project_of(meta) in hidden_tests.ORIENTATION
 
 
@@ -301,10 +303,14 @@ def build_task(meta: dict) -> str:
 def make_environment(meta: dict):
     cfg = projects.config_for(meta)
     if cfg.get("runtime") == "apptainer":
-        # Zephyr: an Apptainer image built by scripts/build_instances.py.
+        # Zephyr: an Apptainer image built by scripts/build_instances.py. So are
+        # RIOT layers, Mynewt, and NuttX instances whose metadata says
+        # "runtime": "apptainer" (projects.config_for).
         sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
         import apptainer_util
         from apptainer_env import ApptainerEnvironment
+
+        apptainer_util.require_host_arch(meta)   # a no-op without metadata host_arch
 
         # The image carries the PR's test changes as uncommitted edits.
         # Committing them in this run's overlay before the agent starts makes
@@ -325,7 +331,6 @@ def make_environment(meta: dict):
             # network namespace of its own (scripts/mynewt_network.py). The PR's
             # tests are committed in the image already, and hidden tests do not
             # support Mynewt yet (_hide_tests), so the one-commit check is all.
-            apptainer_util.require_host_arch(meta)
             return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
                                         name=meta["instance_id"], cwd="/testbed",
                                         timeout=projects.setting(meta, "command_timeout", 900),
@@ -340,11 +345,19 @@ def make_environment(meta: dict):
             # it behind a one-commit .git (scripts/zephyr_gitlayer.py).
             import zephyr_gitlayer
             layer = zephyr_gitlayer.pull(meta["instance_id"])
+        if _hide_tests(meta):
+            setup = [one_commit, hidden_tests.setup_command(meta)]
+        elif meta["project"] == "nuttx":
+            # NuttX needs no tests commit: its test changes are in apps/, a
+            # repository of its own that the image keeps out of the kernel's
+            # git. Hidden tests do not support NuttX yet (_hide_tests).
+            setup = [one_commit]
+        else:
+            setup = [one_commit, commit_tests]
         return ApptainerEnvironment(image=image, layer=layer,
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
-                                    setup_commands=[one_commit, hidden_tests.setup_command(meta)]
-                                    if _hide_tests(meta) else [one_commit, commit_tests])
+                                    setup_commands=setup)
 
     # NuttX, RIOT: Docker.
     kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)

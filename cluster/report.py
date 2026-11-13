@@ -83,18 +83,26 @@ def evaluations(st: dict) -> dict:
 
 def build(run: Path) -> dict:
     m = status.manifest(run)
+    nuttx = m.get("project") == "nuttx"
     rows = []
     for e in m["prs"]:
         st = status.read(run, e["pr"])
         where, detail = outcome(e, st)
         v = st.get("validate") or {}
-        rows.append({"pr": e["pr"], "outcome": where, "detail": detail,
-                     "triage_min": (st.get("triage") or {}).get("minutes"),
-                     "validate_min": v.get("minutes"),
-                     "pair": (st.get("triage") or {}).get("pair")
-                     or " ".join(x for x in (v.get("instance"), v.get("failure_mode")) if x) or None}
-                    | ({"agent": evaluations(st)} if evaluations(st) else {}))
+        row = {"pr": e["pr"], "outcome": where, "detail": detail,
+               "triage_min": (st.get("triage") or {}).get("minutes"),
+               "validate_min": v.get("minutes"),
+               "pair": (st.get("triage") or {}).get("pair")
+               or " ".join(x for x in (v.get("instance"), v.get("failure_mode")) if x) or None}
+        if nuttx and e.get("instance"):     # a NuttX instance prepared for revalidation
+            row |= {"pair": row["pair"] or e["instance"], "instance": e["instance"],
+                    "arch": e.get("arch"),
+                    "statement": (st.get("statement") or {}).get("result")
+                    or (st.get("statement") or {}).get("state")}
+        rows.append(row | ({"agent": evaluations(st)} if evaluations(st) else {}))
     counts = Counter(r["outcome"] for r in rows)
+    statements = (dict(Counter(r.get("statement") or "not yet" for r in rows if "instance" in r))
+                  if any("instance" in r for r in rows) else None)
     agents = {label: dict(Counter(r["agent"][label] for r in rows if label in r.get("agent", {})))
               for label in sorted({k for r in rows for k in r.get("agent", {})})}
     return {"run": m["name"], "project": m.get("project", "zephyr"),
@@ -102,6 +110,7 @@ def build(run: Path) -> dict:
             "prs": len(rows), "funnel": {k: counts[k] for k in ORDER if counts[k]}
             | {k: v for k, v in counts.items() if k not in ORDER},
             "valid": [r["pr"] for r in rows if r["outcome"] == "VALID"],
+            **({"statements": statements} if statements else {}),
             **({"agents": dict(agents)} if agents else {}), "rows": rows}
 
 
@@ -115,9 +124,12 @@ def to_ledger(run: Path, prs: set[int] | None = None) -> tuple[int, Path]:
         if prs is None or e["pr"] in prs:
             where, detail = outcome(e, status.read(run, e["pr"]))
             rows.append({"pr": e["pr"], "outcome": where, "detail": detail})
-    book = Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl"
+    # A NuttX run names its own ledger (config.py), whose lines carry no project;
+    # Zephyr and Mynewt share one, a Mynewt line tagged with its project.
+    book = Path(m.get("ledger") or Path(m["environment"]["EMBEDEVAL_SHARED"]) / "ledger.jsonl")
+    project = "zephyr" if m.get("project") == "nuttx" else m.get("project", "zephyr")
     n = ledger.record(book, m["name"], m["code"]["commit"],
-                      datetime.now().isoformat(timespec="seconds"), rows, m.get("project", "zephyr"))
+                      datetime.now().isoformat(timespec="seconds"), rows, project)
     return n, book
 
 
@@ -125,17 +137,20 @@ def markdown(rep: dict) -> str:
     out = [f"# Run {rep['run']}", "", f"{rep['prs']} PRs; report made {rep['generated']}.", "",
            "| Outcome | PRs |", "|---|---|"]
     out += [f"| {k} | {v} |" for k, v in rep["funnel"].items()]
+    if "statements" in rep:
+        out += ["", "**Statements:** " + ", ".join(f"{k} {v}" for k, v in rep["statements"].items())]
     out += ["", f"**Valid instances ({len(rep['valid'])}):** "
             + (", ".join(map(str, rep["valid"])) or "none"), "",
             *[f"**Agent grades, {label}:** " + ", ".join(f"{k} {v}" for k, v in counts.items()) + "\n"
               for label, counts in rep.get("agents", {}).items()],
             "| PR | outcome | detail | " + ("instance, oracle" if rep.get("project") == "mynewt" else "pair")
-            + " | triage min | validation min |",
-            "|---|---|---|---|---|---|"]
+            + " | triage min | validation min |" + (" arch | statement |" if "statements" in rep else ""),
+            "|---|---|---|---|---|---|" + ("---|---|" if "statements" in rep else "")]
     for r in rep["rows"]:
         out.append(f"| {r['pr']} | {r['outcome']} | {r['detail'][:100]} | {r['pair'] or ''} | "
                    f"{r['triage_min'] if r['triage_min'] is not None else ''} | "
-                   f"{r['validate_min'] if r['validate_min'] is not None else ''} |")
+                   f"{r['validate_min'] if r['validate_min'] is not None else ''} |"
+                   + (f" {r.get('arch')} | {r.get('statement') or ''} |" if "instance" in r else ""))
     return "\n".join(out) + "\n"
 
 
@@ -162,6 +177,8 @@ def main() -> None:
     if rep.get("agents"):
         for label, counts in rep["agents"].items():
             print(f"  agent grades, {label}: {counts}")
+    if "statements" in rep:
+        print(f"  statements: {rep['statements']}")
     print(f"  -> {run / 'report.md'}")
     n, book = to_ledger(run)      # normally already there: workers record as PRs settle
     print(f"  ledger: {n} new settled outcomes -> {book}")

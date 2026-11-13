@@ -586,7 +586,7 @@ R=$SCRATCH/embedeval/runs/2025-09
 ```
 
 Promotion copies the recipe files, `metadata.json` and `validation.json`
-into `apptainer/instances/<id>/`; `validation.json` carries `published`
+into `apptainer/instances/<id>/` (NuttX: `apptainer/instances/nuttx/<id>/`); `validation.json` carries `published`
 (where the image is in the registry, and its sha256) when it was pushed. It refuses an instance that is not VALID,
 or whose recipe -- `instance.def`, `instance.json`, `run_tests.py`,
 `test_patch.diff` -- changed after it was validated; that needs validating

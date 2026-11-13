@@ -1,0 +1,85 @@
+{
+    "instance_id": "nuttx__nuttx-20417-a3805",
+    "project": "nuttx",
+    "kernel_repo": "https://github.com/apache/nuttx",
+    "apps_repo": "https://github.com/apache/nuttx-apps",
+    "kernel_pr": 20417,
+    "apps_pr": 3805,
+    "kernel_pr_url": "https://github.com/apache/nuttx/pull/20417",
+    "apps_pr_url": "https://github.com/apache/nuttx-apps/pull/3805",
+    "kernel_base_commit": "9cf38e7fbeb054aecd21086cfb673361589bb72f",
+    "kernel_merge_commit": "1bba737c46ba205ddc289f8bb056f140fcaf7947",
+    "apps_base_commit": "00b6e59123363d7fc92d0a08cb43f449d438e4bc",
+    "apps_merge_commit": "c1b2663c8dc393701d05699016e95e94ba1c3a59",
+    "files_changed_by_fix": [
+        "Documentation/os/scheduling/capabilities.rst",
+        "Documentation/os/scheduling/index.rst",
+        "binfmt/binfmt_exec.c",
+        "boards/arm/stm32g4/b-g431b-esc1/configs/cansock/defconfig",
+        "boards/arm/stm32g4/nucleo-g431rb/configs/cansock/defconfig",
+        "boards/boardctl.c",
+        "drivers/bch/bchdev_driver.c",
+        "fs/mount/fs_mount.c",
+        "fs/mount/fs_umount2.c",
+        "fs/vfs/fs_open.c",
+        "include/nuttx/sched.h",
+        "include/sys/prctl.h",
+        "sched/Kconfig",
+        "sched/group/group_create.c",
+        "sched/init/nx_start.c",
+        "sched/task/task_create.c",
+        "sched/task/task_prctl.c",
+        "sched/task/task_spawn.c"
+    ],
+    "files_changed_by_test_patch": [
+        "testing/ostest/caps.c",
+        "testing/ostest/Makefile",
+        "testing/ostest/CMakeLists.txt",
+        "testing/ostest/ostest.h",
+        "testing/ostest/ostest_main.c"
+    ],
+    "sim_config": "sim:nsh",
+    "test_app": "ostest",
+    "fail_type": "compile_error",
+    "problem_statement": "Title: Missing process capability interface and privilege checks\n\nIn a build configured with CONFIG_SCHED_CAPABILITIES, an application that includes <sys/prctl.h> and uses PR_CAPS_GET, PR_CAPS_DROP, PR_CAP_RAWIO, PR_CAP_SPAWN, PR_CAP_ADMIN, or PR_CAP_ALL fails to compile because the kernel does not provide these definitions.\n\nEven if those definitions were present, the expected runtime behavior is missing: a process has no way to reduce its privileges, and dropping a capability does not cause the guarded operation to fail. In particular, after a process calls prctl(PR_CAPS_DROP, PR_CAP_SPAWN), it can still successfully call task_create(); after a process calls prctl(PR_CAPS_DROP, PR_CAP_RAWIO), it can still successfully call mount() when a mountable filesystem is available. If the system has no mountable filesystem, mount() may fail with ENOSYS because no filesystem is available; when a mountable filesystem is available, dropping PR_CAP_RAWIO must cause mount() to fail with EPERM.\n\nThe kernel should provide a process capability mechanism controlled by CONFIG_SCHED_CAPABILITIES. When the option is disabled, the existing behavior should remain, and prctl() should reject PR_CAPS_GET and PR_CAPS_DROP. When the option is enabled, every process should start with all capabilities, kernel threads should hold all capabilities, and a child task should inherit the capability set of its creator at the time of creation.\n\nThe required interface behavior is:\n\n- prctl(PR_CAPS_GET) returns the current capability set of the calling process.\n- prctl(PR_CAPS_DROP, mask) removes the named capabilities from the calling process and only removes capabilities; it does not grant or restore capabilities. Once dropped, a capability cannot be gained again by that process.\n- A child task created after a drop sees the reduced set, while a child created before the drop retains the capabilities it inherited.\n- PR_CAP_RAWIO, PR_CAP_SPAWN, PR_CAP_ADMIN, and PR_CAP_ALL must be defined, with PR_CAP_ALL meaning all capabilities.\n\nThe required enforcement behavior is:\n\n- If PR_CAP_SPAWN has been dropped, task_create() must fail with EPERM.\n- If PR_CAP_RAWIO has been dropped, mounting a filesystem must fail with EPERM when a mountable filesystem is available; if no mountable filesystem is available, mount() may fail with ENOSYS instead.\n- PR_CAP_ADMIN must guard administrative board-control operations, so a process without PR_CAP_ADMIN must not be able to request administrative board actions.\n\nThe restrictions should apply to user-space calls in flat and protected builds, and an operation performed on behalf of a process should be subject to that process's capability set. A process that drops all three capabilities should subsequently be unable to create a task, mount a filesystem, or perform administrative board-control requests, while prctl(PR_CAPS_GET) should report that no capabilities remain. A process that has not dropped a capability must remain unaffected.",
+    "fail_to_pass": [
+        "caps_test"
+    ],
+    "pass_to_pass": [],
+    "config_overrides": {
+        "CONFIG_SCHED_CAPABILITIES": "y",
+        "CONFIG_SCHED_WAITPID": "y"
+    },
+    "clean_after_patch": false,
+    "compile_test_source": "testing/ostest/caps.c",
+    "missing_api": "PR_CAPS_GET",
+    "test_banners": [
+        "user_main: caps test"
+    ],
+    "build_command": "make -j$(nproc)",
+    "generated": true,
+    "runtime": "apptainer",
+    "apptainer_image": "nuttx__nuttx-20417-a3805.sif",
+    "needs_version_file": false,
+    "superseded_statements": [
+        {
+            "problem_statement": "The ostest caps test requires a process-capability subsystem: a task's capability set readable and droppable via prctl(PR_CAPS_GET/PR_CAPS_DROP), with PR_CAP_RAWIO/PR_CAP_SPAWN/PR_CAP_ADMIN inherited from the creator's group, and the SPAWN and RAWIO checks enforced by task_create()/mount() returning EPERM once the relevant capability is dropped. With the old kernel this subsystem (CONFIG_SCHED_CAPABILITIES and the prctl PR_CAPS_* options and PR_CAP_* bit definitions) does not exist, so the test compiles to nothing and never runs; the behavior it asserts (child full set, grandchild reduced set, EPERM on task_create and mount after dropping SPAWN/RAWIO, empty set after dropping all) must be present for the test to pass.",
+            "check_issues": [
+                "`problem_statement` gives the fix away: \"a task's capability set readable and droppable via prctl(PR_CAPS_GET/PR_CAPS_DROP)\"; \"with PR_CAP_RAWIO/PR_CAP_SPAWN/PR_CAP_ADMIN inherited from the creator's group\"; \"and the SPAWN and RAWIO checks enforced by task_create()/mount() returning EPERM once the relevant capability is dropped\"; \"With the old kernel this subsystem (CONFIG_SCHED_CAPABILITIES and the prctl PR_CAPS_* options and PR_CAP_* bit definitions) does not exist\"; \"EPERM on task_create and mount after dropping SPAWN/RAWIO\". Describe only the observable symptom, its trigger and the required behavior, not what the code checks or must do internally"
+            ]
+        },
+        {
+            "problem_statement": "An apps change adds a new capabilities test to testing/ostest. When CONFIG_SCHED_CAPABILITIES=y and CONFIG_SCHED_WAITPID=y in a flat or protected build, i.e. when CONFIG_BUILD_KERNEL is not set, the ostest build includes testing/ostest/caps.c. In the current kernel the build fails because caps.c uses PR_CAPS_DROP, PR_CAPS_GET, PR_CAP_ALL, PR_CAP_SPAWN, PR_CAP_RAWIO, and PR_CAP_ADMIN, and those identifiers are undeclared.\n\nThe expected result is that, with the capability feature enabled, ostest builds and caps_test runs and reports PASSED. The test observes that a child process starts with the full capability set, can query its current set, and can request removal of capabilities; after the capability used by task spawning is removed, task_create() fails with EPERM; after the capability used by raw I/O is removed, mount() fails with EPERM, or ENOSYS if no mountable filesystem is configured; a child created after the reduced set is observed to see the reduced set; and a parent that has not dropped the capability retains the full set. When CONFIG_SCHED_CAPABILITIES is not set, the caps test is not built and ostest behavior is unchanged.",
+            "check_issues": null,
+            "reason": "rewritten 2026-11-09 with the writer prompt that describes kernel behavior, not the test"
+        }
+    ],
+    "statement_check": {
+        "version": 1,
+        "result": "written",
+        "model": "qwen38-nvfp4",
+        "trace": "/scratch/scholar/zhan5136/embedeval-stmt-pilot/runs/nuttx-stmt-rewrite-1109/statements/nuttx__nuttx-20417-a3805.statement.json",
+        "prompt_sha256": "bb2ae5743591f552"
+    },
+    "host_arch": "aarch64"
+}

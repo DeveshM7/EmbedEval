@@ -20,7 +20,7 @@ CLUSTER_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CLUSTER_DIR.parent
 EXAMPLE = CLUSTER_DIR / "config.example.yaml"
 DEFAULT = CLUSTER_DIR / "config.yaml"
-PROJECTS = ("zephyr", "mynewt")
+PROJECTS = ("zephyr", "mynewt", "nuttx")
 
 
 class ConfigError(Exception):
@@ -90,7 +90,10 @@ def load(path: str | Path | None = None) -> dict:
         "zephyr_clone": p["zephyr_clone"] or str(shared / "zephyr.git"),
         "mynewt_clone": p["mynewt_clone"] or str(shared / "mynewt-core.git"),
         "vllm_cache": p["vllm_cache"] or str(shared / "vllm-cache"),
-        "ledger": str(shared / "ledger.jsonl"),
+        # Zephyr and Mynewt share one ledger (a non-Zephyr line carries its
+        # project, cluster/ledger.py); NuttX keeps its own.
+        "ledger": str(shared / ("ledger-nuttx.jsonl" if cfg["project"] == "nuttx"
+                                else "ledger.jsonl")),
         "riot": str(shared / "riot"),
     }
     return cfg
@@ -113,6 +116,8 @@ def env_for(cfg: dict, run_dir: Path | None = None, project: str | None = None) 
         env["EMBEDEVAL_MYNEWT_CLONE"] = env["MYNEWT_CLONE"] = d["mynewt_clone"]
         if run_dir is not None:
             env["MYNEWT_ENRICHED"] = str(Path(run_dir) / "candidates" / "mynewt" / "enriched")
+    if (project or cfg["project"]) == "nuttx" and cfg["nuttx"]["data"]:
+        env["EMBEDEVAL_NUTTX_DATA"] = cfg["nuttx"]["data"]
     if run_dir is not None:
         env["EMBEDEVAL_RUN_DIR"] = str(run_dir)
     return env

@@ -1,0 +1,83 @@
+{
+    "instance_id": "nuttx__nuttx-5120-a955",
+    "project": "nuttx",
+    "kernel_repo": "https://github.com/apache/nuttx",
+    "apps_repo": "https://github.com/apache/nuttx-apps",
+    "kernel_pr": 5120,
+    "apps_pr": 955,
+    "kernel_pr_url": "https://github.com/apache/nuttx/pull/5120",
+    "apps_pr_url": "https://github.com/apache/nuttx-apps/pull/955",
+    "kernel_base_commit": "68bbcf74c4f410ad1ec6e71fb9c73ee991074817",
+    "kernel_merge_commit": "6fabe981aef701f425aa783792c0ce3ea482ec0e",
+    "apps_base_commit": "33475cbff604ecba73dcd90802e83bd4e6197742",
+    "apps_merge_commit": "a2c61ec87198a77f276f0e562fbb2a3cdb2640ea",
+    "files_changed_by_fix": [
+        "arch/arm/src/arm/arm_sigdeliver.c",
+        "arch/arm/src/armv6-m/arm_sigdeliver.c",
+        "arch/arm/src/armv7-a/arm_sigdeliver.c",
+        "arch/arm/src/armv7-m/arm_sigdeliver.c",
+        "arch/arm/src/armv7-r/arm_sigdeliver.c",
+        "arch/arm/src/armv8-m/arm_sigdeliver.c",
+        "arch/avr/src/avr/up_sigdeliver.c",
+        "arch/avr/src/avr32/up_sigdeliver.c",
+        "arch/mips/src/mips32/mips_sigdeliver.c",
+        "arch/misoc/src/lm32/lm32_sigdeliver.c",
+        "arch/misoc/src/minerva/minerva_sigdeliver.c",
+        "arch/renesas/src/m16c/m16c_sigdeliver.c",
+        "arch/renesas/src/rx65n/rx65n_sigdeliver.c",
+        "arch/renesas/src/sh1/sh1_sigdeliver.c",
+        "arch/risc-v/src/rv32im/riscv_sigdeliver.c",
+        "arch/risc-v/src/rv64gc/riscv_sigdeliver.c",
+        "arch/sim/src/sim/up_sigdeliver.c",
+        "arch/x86/src/i486/up_sigdeliver.c",
+        "arch/x86_64/src/intel64/up_sigdeliver.c",
+        "arch/xtensa/src/common/xtensa_sigdeliver.c",
+        "arch/z16/src/common/z16_sigdeliver.c",
+        "arch/z80/src/ez80/ez80_sigdeliver.c",
+        "arch/z80/src/z180/z180_sigdeliver.c",
+        "arch/z80/src/z8/z8_sigdeliver.c",
+        "arch/z80/src/z80/z80_sigdeliver.c",
+        "sched/signal/sig_deliver.c"
+    ],
+    "files_changed_by_test_patch": [
+        "testing/ostest/sighand.c"
+    ],
+    "sim_config": "sim:nsh",
+    "test_app": "ostest",
+    "fail_type": "runtime_assert",
+    "problem_statement": "On a configuration with counting semaphores and POSIX signal support, a signal delivered to a task blocked in sem_wait() can be incorrectly reported as a successful semaphore acquisition after a signal handler has itself completed a successful sem_wait().\n\nAn application can trigger the problem by initializing two counting semaphores to zero with sem_init(), installing a signal handler that calls sem_wait() on one semaphore, and then having a task block in sem_wait() on the other semaphore. Another task, for example started with task_create(), posts the semaphore used by the signal handler. When the signal is delivered to the blocked task, the signal handler runs, its sem_wait() succeeds, and then the handler returns. After the handler completes, the original sem_wait() returns 0, as if it had acquired the first semaphore, even though that first semaphore was never posted and the original wait was interrupted by signal delivery.\n\nThe expected behavior is that a signal interrupting a blocking sem_wait() causes the interrupted sem_wait() to report failure after the signal handler completes. A successful sem_wait() executed inside the signal handler may produce a success result for that handler call, but that result must not cause the original interrupted sem_wait() to appear as if it had successfully acquired its semaphore. After the signal handler returns, the application must observe that the original sem_wait() failed due to interruption, not that it succeeded.",
+    "fail_to_pass": [
+        "sighand_test"
+    ],
+    "pass_to_pass": [],
+    "config_overrides": {},
+    "clean_after_patch": false,
+    "host_arch": "x86_64",
+    "test_banners": [
+        "user_main: signal handler test"
+    ],
+    "build_command": "make -j$(nproc)",
+    "generated": true,
+    "runtime": "apptainer",
+    "apptainer_image": "nuttx__nuttx-5120-a955.sif",
+    "superseded_statements": [
+        {
+            "problem_statement": "A task blocked in sem_wait on one semaphore receives a signal whose handler itself successfully takes a second semaphore. After the handler returns, the originally blocked sem_wait must resume and return -EINTR, but on the buggy kernel it instead returns success (OK). The signal-handler test exercises this: the waiter task blocks on sem1, a second semaphore is taken inside the signal handler, and the test asserts the waiter's sem_wait resumes with -EINTR; on the buggy kernel it reports an 'awakened with no error' error when the waiter returns OK.",
+            "check_issues": [
+                "`problem_statement` names code of the fix that the tests do not use (EINTR); describe what a test or caller observes instead"
+            ]
+        },
+        {
+            "problem_statement": "In apps/testing/ostest, the sighand_test case fails when a signal handler performs a successful semaphore wait. The test initializes sem1 and sem2 to 0 and starts waiter_main. waiter_main blocks in sem_wait(&sem1). While that task is blocked, a signal is delivered and the installed handler runs; the handler calls sem_wait(&sem2). A second task, poster_main, then calls sem_post(&sem2), so the handler's sem_wait(&sem2) succeeds. After the handler returns, the waiter task resumes from its original sem_wait(&sem1). With the current behavior, that original sem_wait(&sem1) returns success, so the test prints 'waiter_main: ERROR awakened with no error!' and run_tests reports failure, even though the signal handler ran and the handler's sem_wait(&sem2) succeeded. The expected behavior is that a successful sem_wait(&sem2) performed inside the signal handler must not make the interrupted sem_wait(&sem1) appear to have succeeded. When the waiter is resumed after the signal handler completes, the original sem_wait(&sem1) must return a non-zero status indicating that it was interrupted by the signal, rather than returning 0. The test should observe both the waiter and poster threads exiting, the signal handler having run, and no 'ERROR awakened with no error!' output.",
+            "check_issues": null,
+            "reason": "rewritten 2026-11-09 with the writer prompt that describes kernel behavior, not the test"
+        }
+    ],
+    "statement_check": {
+        "version": 1,
+        "result": "written",
+        "model": "qwen38-nvfp4",
+        "trace": "/scratch/scholar/zhan5136/embedeval-stmt-pilot/runs/nuttx-stmt-rewrite-1109/statements/nuttx__nuttx-5120-a955.statement.json",
+        "prompt_sha256": "bb2ae5743591f552"
+    }
+}

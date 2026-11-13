@@ -14,14 +14,21 @@ and the tests actually run.
   On Purdue Scholar the pipeline runs as one Slurm job over many nodes:
   [docs/running_on_scholar.md](docs/running_on_scholar.md) (how to use it) and
   [docs/pipeline_internals.md](docs/pipeline_internals.md) (how it works).
-- **NuttX and RIOT** instances are hand-built **Docker** images in
-  `docker/instances/`.
+- **NuttX** instances pair a `nuttx-apps` ostest change with the kernel fix it
+  checks, found by model triage and proven by validation — see
+  [docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md). They are
+  **Apptainer** recipes in `apptainer/instances/nuttx/` (see
+  [NuttX in Apptainer](#nuttx-in-apptainer)), each validated with a leak
+  check, no network and 5 deterministic before runs.
+- **RIOT** instances are **Docker** images in `docker/instances/`.
 
 - **Mynewt** has 63 validated Apptainer instances under
   `apptainer/instances/mynewt/`, built and run on Linux x86_64 with
   `hw/bsp/native` and `compiler/sim`.
 
-**Instances:** 8 Zephyr (validated, in `apptainer/instances/`), 6 NuttX, 3 RIOT, plus 63 Apache Mynewt.
+**Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 29 NuttX (in
+`apptainer/instances/nuttx/`: 18 ARM64, 11 x86_64 hosts; and 6 Docker ones in
+`docker/instances/`), 3 RIOT, plus 63 Apache Mynewt.
 
 ---
 
@@ -77,22 +84,26 @@ These are deliberately separate and share no code:
 You only need `scripts/` when adding or repairing instances. Day to day, you use
 `harness/`.
 
+For NuttX PR discovery and instance generation, see
+[`docs/nuttx_pr_workflow.md`](docs/nuttx_pr_workflow.md).
+
 ---
 
 ## Quick start
 
-Run one agent on one instance and grade the result. NuttX (Docker):
+Run one agent on one instance and grade the result. NuttX (Apptainer; the
+image is built from the recipe in `apptainer/instances/nuttx/`, on the
+architecture its metadata's `host_arch` names):
 
 ```bash
-# 1. build the images (once per project, slow)
-python scripts/build_bases.py --repo nuttx
-python scripts/build_instances.py --instance nuttx__nuttx-11889
+# 1. build the image (the shared NuttX layer is built the first time)
+python scripts/build_instances.py --instance nuttx__nuttx-11889-a2327
 
-# 2. run the agent
-python harness/run.py --instance nuttx__nuttx-11889 --model claude-opus-4-6 -v
+# 2. run the agent (no network inside the container)
+python harness/run.py --instance nuttx__nuttx-11889-a2327 --model qwen38-nvfp4 -v
 
-# 3. grade the patch it produced
-python harness/evaluate_patches.py --instance nuttx__nuttx-11889 --model claude-opus-4-6
+# 3. grade the patch it produced, in a fresh overlay
+python harness/evaluate_patches.py --instance nuttx__nuttx-11889-a2327 --model qwen38-nvfp4
 ```
 
 Zephyr (Apptainer): the same three steps. The instances are read from
@@ -116,11 +127,12 @@ Every command takes the same three selection flags:
 ```bash
 --instance zephyr__zephyr-65697    # one or more, space separated
 --repo nuttx                       # every instance in one project
---all                              # all 17
+--all                              # all 58
 ```
 
 Instance ids are `<project>__<project>-<PR>`, matching the directory names under
-`apptainer/instances/` (Zephyr) and `docker/instances/` (NuttX, RIOT). Use
+`apptainer/instances/` (Zephyr), `apptainer/instances/nuttx/` (NuttX, Apptainer;
+ids `nuttx__nuttx-<kernel PR>-a<apps PR>`) and `docker/instances/` (RIOT). Use
 lowercase. `EMBEDEVAL_INSTANCES_DIR` points every command at another folder
 instead -- `generated/`, say, to work on instances before they are promoted.
 
@@ -156,7 +168,9 @@ outputs/results.json    grades from the last evaluate run
 
 ## How an instance works
 
-A NuttX or RIOT directory under `docker/instances/` holds four things:
+A RIOT directory under `docker/instances/` holds four things (a NuttX one in
+`apptainer/instances/nuttx/` holds `instance.def` instead of the Dockerfile,
+plus `validation.json`):
 
 | file | purpose |
 |---|---|
@@ -191,14 +205,18 @@ An instance is only useful if it **fails before the fix and passes after**.
 commit, expects failure, applies the real upstream fix, and expects a pass.
 
 ```bash
-python scripts/validate_instance.py nuttx__nuttx-11889 --verbose
+python scripts/validate_instance.py nuttx__nuttx-11889-a2327 --determinism 5
 python scripts/validate_instance.py zephyr__zephyr-65697
 ```
 
 Run this on any instance you build or change. An instance that passes step 1 is
 broken — it means the test cannot detect the bug, and every agent will score a
-free pass on it. This is not theoretical; see the `CONFIG_NDEBUG` note in
-`docker/instances/nuttx__nuttx-11889/Dockerfile` for a case where it happened.
+free pass on it. This is not theoretical: with `CONFIG_NDEBUG` set, ostest's
+`ASSERT()`s compile away and 11889's test passed before the fix, which is why
+every NuttX image sets `CONFIG_NDEBUG=n`. For NuttX the validator also checks,
+before any test, that the image holds nothing of the fix or of either
+repository's later history and has no network
+([docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md#what-the-agent-gets)).
 
 ---
 
@@ -282,6 +300,55 @@ need several functions the fix adds (or turns on, behind a configuration macro
 the fix changes), the generator lists each one. `run_tests` builds with
 `newt test -j 1`, so a failing build reports the same errors in every run.
 
+## NuttX in Apptainer
+
+NuttX instances are Apptainer recipes (metadata `"runtime": "apptainer"`),
+built natively on the host -- on Scholar, ARM64 Spark nodes or x86 CPU nodes,
+as the instance's `host_arch` says. A recipe is rendered again from its own
+files with the current templates by `--instance` (as
+`cluster/prepare.py --instances` does for a revalidation):
+
+```bash
+python scripts/render_nuttx_instance.py --out generated \
+    --instance apptainer/instances/nuttx/nuttx__nuttx-11889-a2327
+
+# inside a spark-batch job; local clones instead of GitHub, if you have them
+export EMBEDEVAL_INSTANCES_DIR=generated
+export EMBEDEVAL_NUTTX_CLONE=/scratch/scholar/$USER/repos/nuttx.git
+export EMBEDEVAL_NUTTX_APPS_CLONE=/scratch/scholar/$USER/repos/nuttx-apps.git
+python scripts/build_instances.py --instance nuttx__nuttx-11889-a2327
+python scripts/validate_instance.py nuttx__nuttx-11889-a2327 --determinism 5
+python harness/run.py --instance nuttx__nuttx-11889-a2327 --model <model>
+python harness/evaluate_patches.py --instance nuttx__nuttx-11889-a2327 --model <model>
+```
+
+- **Images** (`templates/nuttx/apptainer/`): `base.def` is the shared layer
+  (Ubuntu 24.04 and sim:nsh's tools, built once, named by a hash of its
+  recipe); `instance.def` adds the kernel and apps, each a depth-1
+  repository of its base commit alone, configured for ostest, with the test
+  patch. Both go under the work root (`scripts/apptainer_util.py`), as
+  Zephyr's do.
+- **Validation** checks the image for leaks, then builds and runs ostest in
+  one overlay (the before state N times with `--determinism N`, each in a
+  fresh overlay), and writes `validation.json`. Grading builds, then runs
+  `run_tests`, in a fresh overlay. Every container command runs without a
+  network.
+- **apps/** is kept out of the kernel's git in the image, so the agent's patch
+  holds kernel changes only. (Under Docker, `git add -A` picks up the nested
+  apps repository as a submodule entry.)
+- **Old kernels on ARM64.** sim on an ARM64 host needs a kernel from
+  2022-02-02 on. Kernels from 2023-07-17 to 2023-11-17 lack the ARM64 table in
+  `sim_tcbinfo.c` and do not build; the image backports it from upstream
+  (`sim_tcbinfo_arm64.patch`) and commits it before the agent starts, so it is
+  never part of a patch.
+- **Not every instance carries over to ARM64**; each is validated, and
+  evaluated, on its `host_arch` only. 14152's fix is in the x86 setjmp code,
+  so on ARM64 its test passes before the fix; kernels from before the 2023-07
+  fork rework (c33d1c9c97) crash in the ARM64 sim's vfork().
+- **Speed.** Builds in an overlay on `/scratch` are slower than in a plain
+  directory: a full sim:nsh build takes about two minutes, an ostest run
+  about two.
+
 ---
 
 ## Layout
@@ -294,17 +361,18 @@ cluster/            the Zephyr pipeline on Scholar: config, setup.py, prepare.py
 docs/               running_on_scholar.md (using the pipeline),
                     pipeline_internals.md (how it works), pr_triage.md (the
                     model's triage instructions), stage1_pr_candidates.md (the gold PRs)
-triage/             models.json (model profiles), gold.json (the gold set)
+triage/             models.json (model profiles), gold.json (the Zephyr gold set),
+                    NuttX: nuttx_apps_gold.json, ga/ (prompt tuning), nuttx_reviewed/
 scripts/            Zephyr pipeline: filter_candidates.py, zephyr_env.py,
                     dry_run.py, triage_prs.py, generate_instance.py,
                     build_instances.py, validate_instance.py, twister_pipeline.py, ...
                     Docker side: build_bases.py, build_config.py
 templates/zephyr/   Apptainer recipes, run_tests, lookup tables
 docker/bases/       Docker base images (NuttX, RIOT)
-docker/instances/   NuttX and RIOT instances; the hand-built Zephyr ones are
+docker/instances/   RIOT instances; the hand-built Zephyr ones are
                     kept as reference metadata only and are not built
 apptainer/instances/  validated Zephyr instances: the benchmark (recipes; images
-                    are built from them)
+                    are built from them); nuttx/ holds the validated NuttX ones
 generated/          Zephyr instances being generated and validated (not in git)
 outputs/            agent runs and grades
 archive/            superseded work, kept for provenance

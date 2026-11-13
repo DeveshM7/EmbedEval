@@ -1,0 +1,219 @@
+diff --git a/testing/ostest/CMakeLists.txt b/testing/ostest/CMakeLists.txt
+index 2ec79d11c..fdcc9e187 100644
+--- a/testing/ostest/CMakeLists.txt
++++ b/testing/ostest/CMakeLists.txt
+@@ -66,6 +66,9 @@ if(CONFIG_TESTING_OSTEST)
+ 
+   if(CONFIG_SCHED_WAITPID)
+     list(APPEND SRCS waitpid.c)
++    if(CONFIG_SCHED_CAPABILITIES AND NOT CONFIG_BUILD_KERNEL)
++      list(APPEND SRCS caps.c)
++    endif()
+   endif()
+ 
+   if(CONFIG_FS_CHROOT)
+diff --git a/testing/ostest/Makefile b/testing/ostest/Makefile
+index d79b9d87d..ba2883025 100644
+--- a/testing/ostest/Makefile
++++ b/testing/ostest/Makefile
+@@ -81,6 +81,11 @@ endif
+ 
+ ifeq ($(CONFIG_SCHED_WAITPID),y)
+ CSRCS += waitpid.c
++ifeq ($(CONFIG_SCHED_CAPABILITIES),y)
++ifneq ($(CONFIG_BUILD_KERNEL),y)
++CSRCS += caps.c
++endif
++endif
+ endif
+ 
+ ifeq ($(CONFIG_FS_CHROOT),y)
+diff --git a/testing/ostest/caps.c b/testing/ostest/caps.c
+new file mode 100644
+index 000000000..30e52670c
+--- /dev/null
++++ b/testing/ostest/caps.c
+@@ -0,0 +1,140 @@
++/****************************************************************************
++ * apps/testing/ostest/caps.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++#include <nuttx/compiler.h>
++
++#include <sys/mount.h>
++#include <sys/prctl.h>
++#include <sys/wait.h>
++#include <assert.h>
++#include <errno.h>
++#include <sched.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++#include "ostest.h"
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#define CAPS_PRIO 100
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++static int caps_fail(FAR const char *msg)
++{
++  printf("caps_test: ERROR %s errno=%d\n", msg, errno);
++  ASSERT(false);
++  return EXIT_FAILURE;
++}
++
++static int caps_wait(pid_t pid)
++{
++  int status;
++
++  if (pid < 0 || waitpid(pid, &status, 0) != pid)
++    {
++      return ERROR;
++    }
++
++  return WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS ?
++         OK : ERROR;
++}
++
++static int caps_grandchild(int argc, FAR char *argv[])
++{
++  UNUSED(argc);
++  UNUSED(argv);
++
++  return prctl(PR_CAPS_GET) == (PR_CAP_ALL & ~PR_CAP_ADMIN) ?
++         EXIT_SUCCESS : EXIT_FAILURE;
++}
++
++static int caps_child(int argc, FAR char *argv[])
++{
++  UNUSED(argc);
++  UNUSED(argv);
++
++  if (prctl(PR_CAPS_GET) != PR_CAP_ALL)
++    {
++      return caps_fail("child does not start with all caps");
++    }
++
++  prctl(PR_CAPS_DROP, PR_CAP_ADMIN);
++  if (caps_wait(task_create("caps_grandchild", CAPS_PRIO, STACKSIZE,
++                            caps_grandchild, NULL)) < 0)
++    {
++      return caps_fail("grandchild did not inherit the set");
++    }
++
++  prctl(PR_CAPS_DROP, PR_CAP_SPAWN);
++  if (task_create("caps_grandchild", CAPS_PRIO, STACKSIZE,
++                  caps_grandchild, NULL) >= 0 || errno != EPERM)
++    {
++      return caps_fail("task_create without PR_CAP_SPAWN");
++    }
++
++  prctl(PR_CAPS_DROP, PR_CAP_RAWIO);
++#ifndef CONFIG_DISABLE_MOUNTPOINT
++  if (mount(NULL, "/caps", "tmpfs", 0, NULL) == 0 ||
++      (errno != EPERM && errno != ENOSYS))
++    {
++      return caps_fail("mount without PR_CAP_RAWIO");
++    }
++#endif
++
++  if (prctl(PR_CAPS_GET) != 0)
++    {
++      return caps_fail("caps left after dropping all");
++    }
++
++  return EXIT_SUCCESS;
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++int caps_test(void)
++{
++  printf("caps_test: Starting test\n");
++
++  if (caps_wait(task_create("caps_child", CAPS_PRIO, STACKSIZE,
++                            caps_child, NULL)) < 0 ||
++      prctl(PR_CAPS_GET) != PR_CAP_ALL)
++    {
++      printf("caps_test: ERROR\n");
++      ASSERT(false);
++      return ERROR;
++    }
++
++  printf("caps_test: PASSED\n");
++  return OK;
++}
+diff --git a/testing/ostest/ostest.h b/testing/ostest/ostest.h
+index c889a4354..130dacd72 100644
+--- a/testing/ostest/ostest.h
++++ b/testing/ostest/ostest.h
+@@ -148,6 +148,13 @@ int waitpid_test(void);
+ int chroot_test(void);
+ #endif
+ 
++/* caps.c *******************************************************************/
++
++#if defined(CONFIG_SCHED_CAPABILITIES) && defined(CONFIG_SCHED_WAITPID) && \
++    !defined(CONFIG_BUILD_KERNEL)
++int caps_test(void);
++#endif
++
+ /* wqueue.c *****************************************************************/
+ 
+ #ifdef CONFIG_TESTING_OSTEST_WQUEUE
+diff --git a/testing/ostest/ostest_main.c b/testing/ostest/ostest_main.c
+index cd53d1a29..b4a77ee5b 100644
+--- a/testing/ostest/ostest_main.c
++++ b/testing/ostest/ostest_main.c
+@@ -419,6 +419,20 @@ static int user_main(int argc, char *argv[])
+       check_test_memory_usage();
+ #endif
+ 
++#if defined(CONFIG_SCHED_CAPABILITIES) && defined(CONFIG_SCHED_WAITPID) && \
++    !defined(CONFIG_BUILD_KERNEL)
++      /* Check process capabilities */
++
++      printf("\nuser_main: caps test\n");
++      if (caps_test() != 0)
++        {
++          printf("user_main: ERROR caps test failed\n");
++          ASSERT(false);
++        }
++
++      check_test_memory_usage();
++#endif
++
+ #if defined(CONFIG_TESTING_OSTEST_MULTIUSER) && defined(CONFIG_SCHED_USER_IDENTITY)
+       /* Multi-user identity and file permission regression tests */
+ 

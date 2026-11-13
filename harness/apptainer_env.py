@@ -2,8 +2,8 @@
 An agent environment that runs commands in an Apptainer instance image.
 
 The Apptainer counterpart of mini-swe-agent's DockerEnvironment, for the
-twister-pipeline Zephyr instances (scripts/build_instances.py builds them as
-.sif images under the work root). Same interface -- execute(), cleanup(),
+twister-pipeline Zephyr instances and NuttX instances rendered for Apptainer
+(scripts/build_instances.py builds them as .sif images under the work root). Same interface -- execute(), cleanup(),
 get_template_vars(), serialize() -- so DefaultAgent uses it unchanged.
 
 Every command runs in its own `apptainer exec` over one writable overlay

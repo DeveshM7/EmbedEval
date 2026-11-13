@@ -9,9 +9,10 @@
 #   <scratch_root>/runs/     one folder per run
 scratch_root: /scratch/scholar/${USER}/embedeval
 
-# The repository the pipeline runs on: zephyr or mynewt. prepare.py records it
-# in the run's manifest (its --project overrides this for one run); submit and
-# the workers read it from there, so a run keeps its project.
+# The repository the pipeline runs on: zephyr, mynewt, or nuttx (the unit is
+# then a nuttx-apps PR that changes testing/ostest/; see the nuttx section).
+# prepare.py records it in the run's manifest (its --project overrides this for
+# one run); submit and the workers read it from there, so a run keeps its project.
 project: zephyr
 
 # Where large shared things already are. null means the default under
@@ -46,9 +47,10 @@ slurm:
   gres: gpu:1
   # Mynewt runs triage on `partition` (the model needs the GPU) and builds and
   # validates on this x86 CPU partition instead: old mynewt-core trees build
-  # -m32 binaries, which only x86 runs. Each phase is its own job there
-  # (submit.py triage / validate / evaluate). null: the Mynewt CPU phases
-  # cannot be submitted.
+  # -m32 binaries, which only x86 runs. NuttX phase jobs (submit.py statement /
+  # validate) for instances that validate on x86_64 only run here too; the GPU
+  # partition above runs the ARM64 ones and the model. Each phase is its own
+  # job there. null: these CPU phases cannot be submitted.
   build_partition: null     # e.g. cpu
   build_cpus_per_node: 64
   build_mem: 240G
@@ -56,6 +58,11 @@ slurm:
   # node's architecture). null: the one submit.py runs with.
   triage_python: null
   build_python: null
+  # Directories put first on a phase job's PATH, per kind of job: tools of
+  # the node's architecture (e.g. an x86 `gh` where ~/.local/bin holds an
+  # ARM one). null: none.
+  triage_path: null
+  build_path: null
 
 model:
   profile: qwen38-nvfp4     # an entry of triage/models.json
@@ -65,6 +72,10 @@ caps:                       # minutes
   triage_pr: 30             # one PR's triage
   build: 45                 # one instance image
   validate_pr: 70           # generate + build + validate, one PR
+  # NuttX phase jobs only (submit.py statement / triage / validate): the
+  # workers' time; Zephyr's pipeline and Mynewt's phases use the job's.
+  triage_phase: 95          # all of triage, or of the statements
+  validate_phase: 75        # all of validation
 
 parallel:                   # at once
   enrich: 4                 # PRs, on the node running prepare.py (GitHub API)
@@ -100,3 +111,18 @@ riot:
     time_limit: "04:00:00"  # hard limit; Scholar allows at most 4 hours
     cpus_per_node: 64       # the smaller of the partition's nodes; others have 128
     mem: 240000M
+
+nuttx:                      # only read when project is nuttx
+  individual: null          # frozen triage version to run: a directory holding
+                            # scripts/, docs/nuttx_apps_triage.md and triage/ (a GA
+                            # snapshot); null means this checkout
+  data: null                # pre-warmed candidates/nuttx data (PR records, bare clones);
+                            # copied to each node, which then writes only its own copy
+  max_tool_calls: 40        # per apps PR
+  max_minutes: 30           # per apps PR
+  max_repairs: 2            # times an invalid verdict is sent back with its issues
+  followup_review: false    # triage_nuttx_prs.py apps --followup-review
+  validate: false           # validate accepted pairs (needs the NuttX Apptainer images)
+  validate_confidence: [high, medium]   # pair confidences that count as accepted
+  determinism: 5            # before-state runs when validating a prepared instance
+                            # (prepare.py --instances); promotion needs 5

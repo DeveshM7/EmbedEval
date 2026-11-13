@@ -75,6 +75,25 @@ _EXTRA_WARNINGS = {
     ),
 }
 
+# NuttX instances rendered for Apptainer (scripts/render_nuttx_instance.py), whose
+# metadata says "runtime": "apptainer". Their images are configured but not
+# prebuilt, and their run_tests (templates/nuttx/apptainer/run_tests.sh.tmpl)
+# only runs ostest. The Docker NuttX instances keep the project's settings.
+_NUTTX_APPTAINER = (
+    "Two repos: the kernel at /testbed and the applications at /testbed/apps. "
+    "Builds use GNU Make and are already configured for sim:nsh, which produces "
+    "a native binary at /testbed/nuttx. Run `make -j$(nproc)` to build; "
+    "later builds are incremental. Never run distclean or configure.sh -- reconfiguring "
+    "discards the container's setup and breaks the test runner."
+)
+_NUTTX_APPTAINER_WARNINGS = (
+    "`run_tests` exit codes on this instance: run it after building; it runs the whole "
+    "ostest suite. 0 = ostest finished cleanly and every changed test ran, 1 = any "
+    "other completed run (a test failed, or a changed test did not run), 2 = timed out. "
+    "If `run_tests` times out (exit code 2) with no test results, your change has "
+    "introduced a hang or an infinite loop. Do NOT submit -- investigate further."
+)
+
 # RIOT instances built as a layer (scripts/riot_instance.py).
 _RIOT_LAYER = (
     "Builds use GNU Make and RIOT's native board, which compiles RIOT into an ordinary "
@@ -97,7 +116,9 @@ PROJECTS: dict[str, dict] = {
         # were touched.
         "protected_paths": ["tests/"],
         # Zephyr instances are Apptainer images from the twister pipeline
-        # (harness/apptainer_env.py). NuttX and RIOT still run in Docker.
+        # (harness/apptainer_env.py). NuttX and RIOT still run in Docker,
+        # except NuttX instances whose metadata sets "runtime": "apptainer"
+        # and RIOT layer instances (config_for).
         "runtime": "apptainer",
         # run_tests rebuilds as well as running, so there is no separate
         # rebuild step to show the agent.
@@ -157,6 +178,11 @@ def config_for(meta: dict) -> dict:
     if meta.get("pipeline") == "riot-layer":
         return {**config("riot"), "runtime": "apptainer", "orientation": _RIOT_LAYER,
                 "extra_warnings": _RIOT_LAYER_WARNINGS}
+    if meta["project"] == "nuttx" and meta.get("runtime") == "apptainer":
+        # A cold native compile plus ostest took up to five minutes in local
+        # validation, hence the longer command limit.
+        return {**config("nuttx"), "runtime": "apptainer", "orientation": _NUTTX_APPTAINER,
+                "extra_warnings": _NUTTX_APPTAINER_WARNINGS, "command_timeout": 600}
     if meta["project"] == "zephyr" and meta.get("pipeline") != "twister":
         raise ValueError(f"{meta.get('instance_id')}: not a twister-pipeline instance. "
                          "Zephyr instances are run from generated/ "

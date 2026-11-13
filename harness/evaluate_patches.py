@@ -18,7 +18,8 @@ influence the result. The patch text is the only thing that crosses over.
 
 Twister-pipeline Zephyr instances are graded in their Apptainer image instead
 (evaluate_apptainer): the patch on a fresh overlay, then the instance's
-`run_tests`, which must pass every test of the scenario.
+`run_tests`, which must pass every test of the scenario. So are NuttX
+instances whose metadata says "runtime": "apptainer".
 
     EMBEDEVAL_INSTANCES_DIR=generated python harness/evaluate_patches.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
@@ -43,10 +44,11 @@ from patch_checks import protected_ranges_touched
 
 RUN_TESTS_ERRORS = {1: "tests failed (a test, the build or the configuration)",
                     2: "the test runner did not start", 3: "nothing ran"}
+NUTTX_RUN_TESTS_ERRORS = {1: "tests failed", 2: "tests timed out (possible infinite loop)"}
 
 
 def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: int) -> dict:
-    """Grade a patch on an instance run in Apptainer (twister-pipeline Zephyr, RIOT).
+    """Grade a patch on an instance run in Apptainer (twister-pipeline Zephyr, RIOT, NuttX).
 
     A fresh writable overlay on the image as built (base commit + the PR's
     tests), the agent's patch applied on top, then `run_tests`: twister builds
@@ -54,6 +56,11 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     of the scenario passed, not just the listed ones. The patch never contains
     tests/ (the runner excludes protected paths when capturing it), so the
     tests graded are the PR's own.
+
+    A NuttX instance rendered for Apptainer is graded the same way, except
+    that it is built first and `run_tests` runs ostest, as under Docker. Its
+    tests are in apps/, which the patch cannot reach: the image keeps that
+    repository out of the kernel's git.
     """
     sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
     import apptainer_util as au
@@ -63,6 +70,11 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
               "patch_file": str(paths.show(patch_path)),
               "patch_empty": False, "patch_applied": False, "build_ok": False,
               "tests_passed": False, "grade": "fail", "error": None, "elapsed_seconds": 0}
+    try:
+        au.require_host_arch(meta)
+    except RuntimeError as e:      # our side: this host cannot grade the instance
+        result.update(error=str(e), infra_error=f"host: {e}")
+        return result
     if not patch_path.exists():
         result.update(grade="missing", error="no patch file (run not found)")
         return result
@@ -100,17 +112,51 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
                 result["infra_error"] = f"container: {text[:300]}"
             return result
         result["patch_applied"] = True
-        print("  run_tests (twister build + run) ...")
-        tp = subprocess.run(container + ["run_tests"], capture_output=True, text=True,
-                            timeout=max(timeout, 1800))
+        if meta["project"] == "nuttx":
+            # NuttX's run_tests only runs the simulator: build first, as in
+            # Docker. Before that, as in validation: re-apply the config
+            # overrides (some exist only once the fix is in) and clean if the
+            # fix needs it.
+            prepare = au.nuttx_reconfigure(meta.get("config_overrides") or {})
+            if meta.get("clean_after_patch"):
+                prepare += " && make clean"
+            cp = subprocess.run(container + ["bash", "-c", f"cd /testbed && {prepare}"],
+                                capture_output=True, text=True, timeout=600)
+            if cp.returncode != 0:
+                out = (cp.stdout or "") + (cp.stderr or "")
+                dropped = re.search(r"config override dropped: \S+", out)
+                result["error"] = (f"{dropped.group(0)} with the patch" if dropped
+                                   else f"reconfigure failed (rc={cp.returncode})")
+                result["build_output_tail"] = out[-600:]
+                return result
+            build_command = projects.setting(meta, "build_command")
+            print(f"  building ({build_command}) ...")
+            bp = subprocess.run(container + ["bash", "-c", f"cd /testbed && {build_command}"],
+                                capture_output=True, text=True, timeout=900)
+            if bp.returncode != 0:
+                result["error"] = f"build failed (rc={bp.returncode})"
+                result["build_output_tail"] = ((bp.stdout or "") + (bp.stderr or ""))[-600:]
+                return result
+            result["build_ok"] = True
+            print("  run_tests (ostest) ...")
+            # A minute over run_tests' own limit, so a hang ends as its exit 2.
+            tp = subprocess.run(container + ["run_tests"], capture_output=True, text=True,
+                                timeout=timeout + 60)
+            errors = NUTTX_RUN_TESTS_ERRORS
+        else:
+            print("  run_tests (twister build + run) ...")
+            tp = subprocess.run(container + ["run_tests"], capture_output=True, text=True,
+                                timeout=max(timeout, 1800))
+            errors = RUN_TESTS_ERRORS
         out = (tp.stdout or "") + (tp.stderr or "")
         result["test_output_tail"] = out[-2000:]
-        result["build_ok"] = tp.returncode in (0, 3) or "Build failure" not in out
+        if meta["project"] != "nuttx":
+            result["build_ok"] = tp.returncode in (0, 3) or "Build failure" not in out
         if tp.returncode == 0:
             result.update(tests_passed=True, grade="pass")
             print("  PASS")
         else:
-            result["error"] = RUN_TESTS_ERRORS.get(tp.returncode, f"run_tests exited {tp.returncode}")
+            result["error"] = errors.get(tp.returncode, f"run_tests exited {tp.returncode}")
             print(f"  FAIL — {result['error']}")
     except subprocess.TimeoutExpired:
         result["error"] = "evaluation timed out"
@@ -250,7 +296,8 @@ def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dic
     meta = paths.load_metadata(instance_id)
     if meta["project"] == "mynewt" and projects.setting(meta, "runtime") == "apptainer":
         return evaluate_mynewt(instance_id, model_name, meta, timeout)
-    if meta.get("pipeline") in ("twister", "riot-layer"):
+    # Twister Zephyr, RIOT layers, and NuttX instances rendered for Apptainer.
+    if meta.get("pipeline") in ("twister", "riot-layer") or meta.get("runtime") == "apptainer":
         return evaluate_apptainer(instance_id, model_name, meta, timeout)
     if meta["project"] == "zephyr":
         return {"instance_id": instance_id, "model": paths.resolve_model(model_name),

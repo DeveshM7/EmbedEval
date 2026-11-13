@@ -49,6 +49,11 @@ mynewt-core) and for a route out; a finding makes the instance invalid. With
 --determinism N the before state runs N - 1 more times and must be judged as
 in step 1 every time (for a runtime oracle: every fail_to_pass case fails and
 every pass_to_pass case passes; for the others, the same attributed failure).
+
+NuttX instances rendered for Apptainer (metadata "runtime": "apptainer";
+scripts/render_nuttx_instance.py --runtime apptainer) are validated the same
+way in their image, with the NuttX steps of the Docker validator and the same
+validation.json report.
 """
 
 from __future__ import annotations
@@ -70,14 +75,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout  # noqa: E402  (first: reads --run-dir)
 import apptainer_util as au
+from apptainer_util import nuttx_reconfigure
 import build_config
 import instances
 import mynewt_leakcheck
 from mynewt_network import isolated_command
+import nuttx_config_probe as probe
+import nuttx_leakcheck
 
 
 def sh(cmd: list[str], timeout: int = 120, quiet: bool = True):
     return subprocess.run(cmd, capture_output=quiet, text=True, timeout=timeout)
+
+
+# GitHub lists at most this many files of a pull request.
+GITHUB_PR_FILES_CAP = 3000
 
 
 def compile_line_matches(source: str, api: str, diagnostic) -> bool:
@@ -370,7 +382,6 @@ def baseline_proof(meta: dict, git) -> tuple[str | None, dict | None, str]:
     except ValueError as e:
         return None, None, str(e)
 
-# GitHub lists at most this many files of a pull request.
 
 
 def gold_patch(meta: dict, workdir: Path) -> str:
@@ -380,7 +391,8 @@ def gold_patch(meta: dict, workdir: Path) -> str:
 
     Zephyr and RIOT are single-repo (base_commit..fix_commit). NuttX is two
     repos and the fix lives in the kernel one, between kernel_base_commit and
-    kernel_merge_commit.
+    kernel_merge_commit. With a local kernel clone (EMBEDEVAL_NUTTX_CLONE) the
+    diff is taken there, fetching only a commit it lacks.
     """
     project = meta["project"]
     if project == "nuttx":
@@ -388,7 +400,8 @@ def gold_patch(meta: dict, workdir: Path) -> str:
     else:
         repo, base, fix = meta["repo"], meta.get("gold_base_commit", meta["base_commit"]), meta["fix_commit"]
 
-    local = au.mynewt_clone() if project == "mynewt" else None
+    local = (au.mynewt_clone() if project == "mynewt"
+             else layout.nuttx_clones()[0] if project == "nuttx" else None)
     if local:
         clone = local
         for sha in (base, fix):
@@ -401,7 +414,12 @@ def gold_patch(meta: dict, workdir: Path) -> str:
         sh(["git", "-C", str(clone), "fetch", "origin", base, fix], timeout=900)
 
     files = meta.get("files_changed_by_fix", [])
-    cmd = ["git", "-C", str(clone), "diff", f"{base}..{fix}", "--"]
+    if len(files) >= GITHUB_PR_FILES_CAP:
+        files = []  # GitHub truncated the PR's file list: take the whole diff
+    cmd = ["git", "-C", str(clone), "diff"]
+    if project == "nuttx":
+        cmd.append("--binary")
+    cmd += [f"{base}..{fix}", "--"]
     cmd += files if files else [".", ":(exclude)tests/"]
     # Bytes as git wrote them: text mode would turn a CRLF file's \r\n into \n
     # and the patch would no longer apply.
@@ -416,6 +434,65 @@ def gold_patch(meta: dict, workdir: Path) -> str:
 
 
 
+
+
+def nuttx_fix_patches(meta: dict, workdir: Path,
+                      primary_override: Path | None = None) -> list[tuple[str, str]]:
+    """Primary NuttX fix followed by the merged PRs it needs, in merge order."""
+    patches = [("primary", primary_override.read_text() if primary_override
+                else gold_patch(meta, workdir))]
+    extras = meta.get("extra_fix_prs") or []
+    if not extras:
+        return patches
+    clone = layout.nuttx_clones()[0] or workdir / "repo"
+    for extra in extras:
+        base, head = extra["base_commit"], extra["head_commit"]
+        for sha in (base, head):
+            if sh(["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:
+                fetched = sh(["git", "-C", str(clone), "fetch", "-q", "origin", sha], timeout=900)
+                if fetched.returncode:
+                    raise RuntimeError(f"could not fetch follow-up commit {sha}: {fetched.stderr[:200]}")
+        files = extra["files_changed"]
+        r = sh(["git", "-C", str(clone), "diff", "--binary", f"{base}..{head}", "--",
+                *(files if len(files) < GITHUB_PR_FILES_CAP else ["."])], timeout=300)
+        if r.returncode or not r.stdout.strip():
+            raise RuntimeError(f"could not produce follow-up patch for #{extra['kernel_pr']}: "
+                               f"{r.stderr[:200]}")
+        patches.append((f"follow-up-{extra['kernel_pr']}", r.stdout))
+    # In merge order: a needed PR that merged before the primary one (a
+    # prerequisite) goes first.
+    if meta.get("kernel_merged_at") and not primary_override:
+        merged = {"primary": meta["kernel_merged_at"],
+                  **{f"follow-up-{e['kernel_pr']}": e.get("merged_at", "") for e in extras}}
+        patches.sort(key=lambda p: merged[p[0]])
+    return patches
+
+
+def config_fallbacks(makefile: str, kconfig: str, test_paths: list[str]) -> list[dict]:
+    """Config sets that should build the changed ostest sources: the options the
+    ostest Makefile tests before adding each source, plus one alternative of
+    each such option's Kconfig "depends on" (at most three sets)."""
+    required = {}
+    for path in test_paths:
+        if path.startswith("testing/ostest/") and path.endswith(".c"):
+            for condition in probe.makefile_conditions(makefile, Path(path).name):
+                if condition:
+                    required.update(probe.requirements(condition.split(" && "))["required"])
+    depends = probe.kconfig_depends(kconfig)
+    sets = [dict(required)]
+    for name, value in required.items():
+        dep = re.match(r"depends on ([^;]+)", depends.get(name, ""))
+        if value != "y" or not dep:
+            continue
+        alternatives = []
+        for alternative in probe.split_top(probe.strip_parens(dep[1]), "||"):
+            terms = [re.fullmatch(r"(!?)\s*(\w+)", probe.strip_parens(term))
+                     for term in probe.split_top(probe.strip_parens(alternative), "&&")]
+            if all(terms):
+                alternatives.append({f"CONFIG_{t[2]}": "n" if t[1] else "y" for t in terms})
+        if alternatives:
+            sets = [{**s, **a} for s in sets for a in alternatives]
+    return [s for s in sets if s][:3]
 
 
 def local_fix_patch(meta: dict) -> str:
@@ -611,10 +688,413 @@ def test_build_error(meta: dict, output: str):
 NUTTX_RUN_TESTS_MEANING = {0: "passed", 1: "failed", 2: "timed out"}
 
 
+def nuttx_summary(output: str) -> list[str]:
+    """run_tests' verdict lines, and the lines of ostest's output that say
+    what went wrong."""
+    return [l for l in output.splitlines()
+            if l.startswith(("run_tests:", "ostest_main: Exiting"))
+            or "ERROR" in l or re.search(r"assert", l, re.IGNORECASE)][-20:]
 
 
+def nuttx_fix_commits(meta: dict) -> dict[str, str]:
+    """The commit each fix patch of nuttx_fix_patches() ends at."""
+    return {"primary": meta["kernel_merge_commit"],
+            **{f"follow-up-{e['kernel_pr']}": e["head_commit"] for e in meta.get("extra_fix_prs") or []}}
 
 
+def kernel_clone(run_dir: Path) -> Path:
+    """The host kernel clone gold_patch() read: the local one, or its own."""
+    return layout.nuttx_clones()[0] or run_dir / "repo"
+
+
+# A diagnostic of the build in a changed test source: the file, and what it says.
+DIAGNOSTIC = re.compile(r"(?:^|[\s/])([\w.+-]+\.c):\d+(?::\d+)?:\s*(?:\([^\n)]*\):\s*)?"
+                        r"((?:fatal )?error:[^\n]*|undefined reference to[^\n]*)")
+NAMED = re.compile(r"[`'‘\"]([A-Za-z_][\w./]*)['’`\"]|([\w./-]+\.h): No such file")
+
+
+def test_diagnostics(meta: dict, output: str) -> list[str]:
+    """Every error the build reports in a changed test source, normalized
+    (file and message, no line numbers), sorted: the before state of a
+    build-failure oracle, compared across determinism runs."""
+    out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", output)
+    sources = {Path(p).name for p in meta.get("files_changed_by_test_patch", []) if p.endswith(".c")}
+    found = {f"{m[1]}: {m[2].strip()}" for m in DIAGNOSTIC.finditer(out) if m[1] in sources}
+    return sorted(found)
+
+
+def attest_build_failure(clone: Path, meta: dict, fixes: list[tuple[str, str]],
+                         diagnostics: list[str], base_patch: str = "", output: str = "") -> list[dict]:
+    """The before build's diagnostics that the fix explains, each with its
+    proof (kept host-side, in validation.json): a name the diagnostic quotes
+    that the fix adds and the starting tree lacks, a name whose declaration
+    the fix changes in a public header (include/: a signature change the test
+    already uses), or a header it reports missing that the fix adds. Failing
+    that, an error inside a host header /usr/include/<h> (`output`, the whole
+    build log) where the fix adds include/<h>: without it the build read the
+    host's header in its place. Derived
+    from the fix alone, not from triage's missing_api."""
+    added_lines = [l[1:] for _, p in fixes for l in p.splitlines()
+                   if l.startswith("+") and not l.startswith("+++")]
+    new_files = {f for _, p in fixes
+                 for f in re.findall(r"^diff --git a/\S+ b/(\S+)\nnew file mode", p, re.M)}
+    base_added = "\n".join(l[1:] for l in base_patch.splitlines() if l.startswith("+"))
+    # per public header the fix changes: the names on its removed and added lines
+    header_lines: dict[str, tuple[list[str], list[str]]] = {}
+    for _, p in fixes:
+        for block in re.split(r"^diff --git ", p, flags=re.M)[1:]:
+            path = re.match(r"a/\S+ b/(\S+)", block)
+            if path and path[1].startswith("include/") and path[1].endswith(".h"):
+                removed, added = header_lines.setdefault(path[1], ([], []))
+                for l in block.splitlines():
+                    if l.startswith("-") and not l.startswith("---"):
+                        removed.append(l[1:])
+                    elif l.startswith("+") and not l.startswith("+++"):
+                        added.append(l[1:])
+    proofs = []
+    for d in diagnostics:
+        for m in NAMED.finditer(d.split(": ", 1)[1]):
+            name = m[1] or m[2]
+            if m[2] or name.endswith(".h"):
+                header = next((f for f in new_files if f.endswith("/" + name.lstrip("/"))
+                               and f.startswith("include/")), None)
+                if header:
+                    proofs.append({"diagnostic": d, "name": name,
+                                   "proof": f"the fix adds the header {header}"})
+                    break
+                continue
+            word = re.compile(rf"\b{re.escape(name)}\b")
+            if not any(word.search(l) for l in added_lines):
+                continue
+            at_base = sh(["git", "-C", str(clone), "grep", "-q", "-w", "-F", name,
+                          meta["kernel_base_commit"]], timeout=300).returncode == 0
+            if not at_base and not word.search(base_added):
+                proofs.append({"diagnostic": d, "name": name,
+                               "proof": "the fix adds it; the starting kernel tree has no such name"})
+                break
+            changed = next((h for h, (rm, ad) in header_lines.items()
+                            if any(word.search(l) for l in rm) and any(word.search(l) for l in ad)), None)
+            if at_base and changed:
+                proofs.append({"diagnostic": d, "name": name,
+                               "proof": f"the fix changes its declaration in {changed}"})
+                break
+    if not proofs and diagnostics:
+        for m in re.finditer(r"/usr/include/([\w./-]+\.h):\d+(?::\d+)?: (?:fatal )?error:[^\n]*",
+                             re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", output)):
+            header = f"include/{m[1]}"
+            if header in new_files:
+                proofs.append({"diagnostic": m[0].strip(), "name": m[1],
+                               "proof": f"the fix adds {header}; without it the build reads the host's "
+                                        f"/usr/include/{m[1]}"})
+                break
+    return proofs
+
+
+def statement_sha256(meta: dict) -> str:
+    import hashlib
+    return hashlib.sha256((meta.get("problem_statement") or "").strip().encode()).hexdigest()
+
+
+def nuttx_leak_check(image: Path, meta: dict, fixes: list[tuple[str, str]], clone: Path,
+                     run_dir: Path, test_patch: str, base_patch: str) -> dict:
+    """scripts/nuttx_leakcheck.py on the unpacked image, and the network
+    probe under the isolation every container command runs with."""
+    commits = nuttx_fix_commits(meta)
+    facts = nuttx_leakcheck.fix_facts(clone, meta, [(l, commits[l], p) for l, p in fixes],
+                                      test_patch, base_patch)
+    sandbox = au.unpack_sandbox(image, run_dir)
+    try:
+        leak = nuttx_leakcheck.scan(sandbox, facts)
+    finally:
+        au.remove_sandbox(sandbox)
+    r = subprocess.run(au.exec_args(image, network=False) + ["bash", "-c", au.NETWORK_PROBE],
+                       capture_output=True, text=True, timeout=120)
+    # the statement the identifier check read: one changed later is checked again
+    leak["statement_sha256"] = statement_sha256(meta)
+    leak["network"] = "isolated" if r.returncode == 0 and au.network_isolated(r.stdout) else "reachable"
+    if leak["network"] != "isolated":
+        leak["ok"] = False
+        leak["findings"].append(f"network: {(r.stdout + r.stderr).strip()[-200:]}")
+    return leak
+
+
+def refresh_nuttx_statement(instance_id: str) -> bool:
+    """Recompute the statement fields of a valid NuttX record (statement_ok,
+    statement_fix_identifiers, statement_sha256) without building or running
+    anything: the statement is not in the image. leak_check["ok"] and
+    findings do not depend on it (nuttx_leakcheck.scan), so they stay as
+    recorded. True if the statement is now clean."""
+    meta = instances.load_metadata(instance_id)
+    folder = instances.instance_dir(instance_id)
+    path = folder / "validation.json"
+    if not path.exists():
+        print(f"  REFUSED: {instance_id} has no validation.json")
+        return False
+    report = json.loads(path.read_text())
+    leak = report.get("leak_check") or {}
+    why = ("the record is not valid" if not report.get("valid")
+           else "the recipe changed since it was validated" if report.get("recipe_sha256")
+           != au.recipe_fingerprint(folder, au.nuttx_recipe_files(folder))
+           else "the leak check is not clean with the network isolated"
+           if not leak.get("ok") or leak.get("network") != "isolated" else None)
+    if why:
+        print(f"  REFUSED: {instance_id}: {why}; validate it again")
+        return False
+    test_patch = (folder / "test_patch.diff").read_text()
+    base_patch = (folder / "base_patch.diff").read_text() if (folder / "base_patch.diff").exists() else ""
+    with tempfile.TemporaryDirectory() as tmp:
+        run_dir = Path(tmp)
+        gold = nuttx_fix_patches(meta, run_dir)
+        commits = nuttx_fix_commits(meta)
+        facts = nuttx_leakcheck.fix_facts(kernel_clone(run_dir), meta,
+                                          [(l, commits[l], p) for l, p in gold], test_patch, base_patch)
+    named = facts["statement_fix_identifiers"]
+    leak.update(statement_ok=not named, statement_fix_identifiers=named,
+                statement_sha256=statement_sha256(meta),
+                statement_refreshed_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    path.write_text(json.dumps(report, indent=2) + "\n")
+    print(f"  {instance_id}: statement " + ("clean" if not named else f"names what only the fix introduces: {named}"))
+    return not named
+
+
+def validate_nuttx_apptainer(instance_id: str, patch_override: Path | None, timeout: int,
+                             verbose: bool, determinism: int = 1) -> bool:
+    """A NuttX instance in its Apptainer image (metadata "runtime":
+    "apptainer"). The steps of the Docker validator below, in one writable
+    overlay on the image, and a validation.json report as for Zephyr. Every
+    container command runs without a network (apptainer_util.exec_args).
+
+        0. leak check           -> nothing of the fix or of either repository's
+                                   later history in the image, no network
+                                   (scripts/nuttx_leakcheck.py)
+        1. build (make -k)      -> fails with errors in the changed test sources,
+                                   at least one of them explained by the fix
+                                   (attest_build_failure), or builds and run_tests
+                                   must FAIL (exit 1) or hang (exit 2); if the
+                                   changed test did not run, retry with
+                                   config_fallbacks()
+           --determinism N: step 1 N - 1 more times, each in a fresh overlay,
+           with the same outcome (the same diagnostics, or the same rc)
+        2. apply the kernel fix (kernel_base_commit..kernel_merge_commit,
+           files_changed_by_fix only), re-apply config_overrides; make clean if
+           clean_after_patch
+        3. build, run_tests     -> must PASS (exit 0)
+    """
+    meta = instances.load_metadata(instance_id)
+    au.require_host_arch(meta)
+    image = au.instance_image(instance_id)
+    folder = instances.instance_dir(instance_id)
+    build_cmd = meta["build_command"]
+    # -k: a failing build reports every error whatever the order of its jobs,
+    # so a build-failure before state is the same from run to run.
+    before_build = build_cmd.replace("make ", "make -k ", 1) if build_cmd.startswith("make ") else build_cmd
+    compile_case = meta.get("fail_type") == "compile_error"
+    print(f"\n{'=' * 70}\n{instance_id}  ({image})\n{'=' * 70}")
+    report = {"instance_id": instance_id, "image": str(image), "host": platform.machine(),
+              "fail_type": meta.get("fail_type"), "valid": False,
+              "recipe_sha256": au.recipe_fingerprint(folder, au.nuttx_recipe_files(folder)),
+              "base_image": au.nuttx_base_image(meta.get("sim_config", "sim:nsh")).name,
+              "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if not image.exists():
+        print(f"  ERROR: image not built: {image}")
+        report["reason"] = "image not built"
+        return _finish(instance_id, report)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_dir = au.path("runs", f"{instance_id}-{stamp}", "x").parent
+    overlays = [run_dir / "overlay"]
+    overlays[0].mkdir(parents=True)
+    logdir = au.path("logs", instance_id, f"validate-{stamp}", "x").parent
+    logdir.mkdir(parents=True, exist_ok=True)
+    report["logs"] = str(logdir)
+
+    def step(label: str, cmd: str, log: str, t: int):
+        print(f"    {label} ...", end="", flush=True)
+        t0 = time.time()
+        container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlays[-1],
+                                 network=False)
+        try:
+            r = subprocess.run(container + ["bash", "-c", f"cd /testbed && {cmd}"],
+                               capture_output=True, text=True, timeout=t)
+            rc, out = r.returncode, (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            rc = "timeout"
+        (logdir / log).write_text(out)
+        secs = time.time() - t0
+        print(f" {secs:.0f}s (rc={rc})")
+        if verbose:
+            print(out)
+        return rc, out, secs
+
+    def invalid(why: str, detail: str = "") -> bool:
+        print(f"  INVALID: {why}")
+        if detail:
+            print(detail)
+        report["reason"] = why
+        return _finish(instance_id, report)
+
+    def run_tests(when: str, log: str | None = None):
+        rc, out, secs = step("run_tests", "run_tests", log or f"{when}.log", timeout)
+        report[when].update(rc=rc, meaning=NUTTX_RUN_TESTS_MEANING.get(rc, str(rc)),
+                            seconds=round(secs), summary=nuttx_summary(out))
+        for line in report[when]["summary"]:
+            print(f"      {line}")
+        return rc
+
+    try:
+        test_patch = (folder / "test_patch.diff").read_text()
+        base_patch = (folder / "base_patch.diff").read_text() if (folder / "base_patch.diff").exists() else ""
+        gold = nuttx_fix_patches(meta, run_dir)
+        clone = kernel_clone(run_dir)
+
+        print("\n  Step 0: what the agent could find in the image")
+        print("    leak check ...", end="", flush=True)
+        t0 = time.time()
+        report["leak_check"] = leak = nuttx_leak_check(image, meta, gold, clone, run_dir,
+                                                       test_patch, base_patch)
+        print(f" {time.time() - t0:.0f}s: " + ("clean" if leak["ok"] else "FOUND: " + "; ".join(leak["findings"]))
+              + f" ({leak['commits']} commits, {leak['fix_blobs_checked']} fixed blobs, "
+              f"{leak['fix_lines_checked']} fix lines; network {leak['network']})")
+        if not leak["statement_ok"]:
+            # not the image's: the statement phase rewrites it; promotion refuses it until then
+            print(f"    statement names what only the fix introduces: {leak['statement_fix_identifiers']}")
+        if not leak["ok"]:
+            return invalid("leak: " + "; ".join(leak["findings"]))
+
+        print("\n  Step 1: expecting the tests to FAIL at the base commit")
+        rc, out, secs = step("build", before_build, "build-before.log", 900)
+        report["before"] = {"build_rc": rc, "build_seconds": round(secs)}
+        overrides = meta.get("config_overrides") or {}
+        fallback = None
+
+        def did_not_run() -> bool:
+            return any("run_tests: changed test did not run:" in line
+                       for line in report["before"].get("summary", []))
+
+        def config_fallback(rc: int):
+            """Retry the pre-fix run with config sets that build the changed tests;
+            the run's rc and the overrides that ran them, or None."""
+            _, makefile, _ = step("read Makefile", "cat apps/testing/ostest/Makefile",
+                                  "fallback-makefile.log", 60)
+            _, kconfig, _ = step("read Kconfig", "cat apps/testing/ostest/Kconfig",
+                                 "fallback-kconfig.log", 60)
+            tried = report["before"]["config_fallback"] = []
+            sets = config_fallbacks(makefile, kconfig, meta.get("files_changed_by_test_patch", []))
+            for n, extra in enumerate(sets, 1):
+                tried.append(extra)
+                trial = {**overrides, **extra}
+                if step(f"fallback config {n}", nuttx_reconfigure(trial),
+                        f"config-fallback{n}.log", 300)[0] != 0:
+                    continue
+                if step("build", before_build, f"build-fallback{n}.log", 900)[0] != 0:
+                    continue
+                rc = run_tests("before")
+                if not did_not_run():
+                    return rc, trial
+            return rc, None
+
+        # The predicted fail_type only picks the expected diagnostic; what the
+        # pre-fix build does decides: errors in the changed test sources that
+        # the fix explains are a build failure, and a clean build is judged by
+        # its ostest run.
+        if rc != 0:
+            diagnostics = test_diagnostics(meta, out)
+            proofs = attest_build_failure(clone, meta, gold, diagnostics, base_patch, out)
+            report["before"]["diagnostics"] = diagnostics
+            report["before"]["attested"] = proofs
+            if not diagnostics:
+                return invalid("the build failed outside the changed test sources" if not compile_case else
+                               "expected a compile or link error in a changed test source", error_lines(out))
+            if not proofs:
+                return invalid("no build error in the changed test sources names something the fix "
+                               "introduces", "  " + "\n  ".join(diagnostics[:10]))
+            report["before"]["diagnostic"] = proofs[0]["diagnostic"]
+            signature = ("build", diagnostics)
+            print(f"  ok: {len(diagnostics)} test-side build error(s), "
+                  f"{len(proofs)} explained by the fix: {proofs[0]['diagnostic']}")
+        else:
+            rc = run_tests("before")
+            if did_not_run():
+                rc, found = config_fallback(rc)
+                if not found:
+                    return invalid("changed test did not run before the fix")
+                overrides = fallback = report["config_overrides_used"] = found
+            # A crash or ERROR line gives rc=1, a hang rc=2 (or "timeout" when the
+            # runner outlasted this step).
+            if rc not in (1, 2, "timeout"):
+                return invalid({0: "tests PASSED before the fix -- the instance does not "
+                                   "isolate the bug"}.get(rc, f"expected a test failure (rc=1), "
+                                                              f"got rc={rc}"))
+            signature = ("run", 2 if rc == "timeout" else rc)
+
+        if determinism > 1:
+            print(f"\n  Determinism: step 1 {determinism - 1} more times, each in a fresh overlay")
+            seen = [signature]
+            for k in range(2, determinism + 1):
+                overlays.append(run_dir / f"overlay-{k}")
+                overlays[-1].mkdir()
+                try:
+                    if fallback and step(f"config {k}", nuttx_reconfigure(fallback),
+                                         f"config-before-{k}.log", 300)[0] != 0:
+                        seen.append(("config failed", None))
+                        continue
+                    rc, out, _ = step(f"build {k}", before_build, f"build-before-{k}.log", 900)
+                    if rc != 0:
+                        seen.append(("build", test_diagnostics(meta, out)))
+                    else:
+                        r = step(f"run_tests {k}", "run_tests", f"before-{k}.log", timeout)[0]
+                        seen.append(("run", 2 if r == "timeout" else r))
+                finally:
+                    au.remove(overlays.pop())
+            same = all(s == signature for s in seen)
+            report["determinism"] = {"runs": determinism, "ok": same,
+                                     "outcomes": [s[1] if s[0] == "run" else f"{s[0]}: {len(s[1] or [])} diagnostics"
+                                                  for s in seen]}
+            if not same:
+                return invalid(f"flaky before state in {determinism} runs: {report['determinism']['outcomes']}")
+            print(f"    deterministic: {determinism}/{determinism}")
+
+        print("\n  Step 2: applying the upstream fix, expecting the tests to PASS")
+        patches = nuttx_fix_patches(meta, run_dir, patch_override) if patch_override else gold
+        for label, patch_text in patches:
+            (run_dir / "fix.diff").write_text(patch_text)
+            rc, out, _ = step(f"git apply {label}", "git apply /embedeval-run/fix.diff",
+                              f"apply-{label}.log", 300)
+            if rc != 0:
+                return invalid(f"the {label} fix does not apply", "  " + out.strip()[:300])
+        # The fix can introduce Kconfig defaults required by its new source files,
+        # and the overrides it introduces could not be set before it.
+        rc, out, _ = step("reconfigure", nuttx_reconfigure(overrides), "config-after.log", 300)
+        dropped = re.search(r"config override dropped: \S+", out)
+        if dropped:
+            return invalid(f"{dropped.group(0)} after the fix (unmet dependency?)")
+        if rc != 0:
+            return invalid(f"reconfigure failed (rc={rc})", error_lines(out))
+        if meta.get("clean_after_patch"):
+            rc, out, _ = step("make clean", "make clean", "clean.log", 300)
+            if rc != 0:
+                return invalid(f"make clean failed (rc={rc})", error_lines(out))
+        rc, out, secs = step("rebuild", build_cmd, "build-after.log", 900)
+        report["after"] = {"build_rc": rc, "build_seconds": round(secs)}
+        if rc != 0:
+            return invalid(f"the build failed with the fix (rc={rc})", error_lines(out))
+        rc = run_tests("after")
+        if rc != 0:
+            return invalid({1: "tests still fail with the fix",
+                            2: "run_tests timed out with the fix"}.get(rc, f"run_tests ended "
+                                                                           f"with {rc}"))
+
+        print("\n  VALID: fails before the fix, passes after")
+        report["valid"] = True
+        report["reason"] = "fails before the fix, passes after"
+        return _finish(instance_id, report)
+    except Exception as e:
+        print(f"  ERROR: {type(e).__name__}: {e}")
+        report["reason"] = f"error: {type(e).__name__}: {e}"
+        return _finish(instance_id, report)
+    finally:
+        au.remove(run_dir)
 
 
 NO_ROUTE = ("python3 -c \"import socket; socket.create_connection(('140.82.112.3', 443), 5)\" "
@@ -839,12 +1319,14 @@ def validate_mynewt_apptainer(instance_id: str, patch_override: Path | None, tim
 
 
 def validate(instance_id: str, patch_override: Path | None = None, timeout: int = 600,
-             verbose: bool = False, determinism: int = 0) -> bool:
+             verbose: bool = False, determinism: int = 1) -> bool:
     meta = instances.load_metadata(instance_id)
     if meta.get("pipeline") == "twister":
         return validate_apptainer(instance_id, patch_override, max(timeout, 1800), verbose)
     if meta["project"] == "mynewt" and meta.get("runtime") == "apptainer":
         return validate_mynewt_apptainer(instance_id, patch_override, timeout, verbose, determinism)
+    if meta["project"] == "nuttx" and meta.get("runtime") == "apptainer":
+        return validate_nuttx_apptainer(instance_id, patch_override, timeout, verbose, determinism)
     if meta["project"] == "zephyr":
         print(f"  SKIP: {instance_id} is a Docker Zephyr instance, kept as reference "
               f"metadata only; Zephyr instances are validated from the twister pipeline "
@@ -966,13 +1448,33 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
                 return False
             print(f"  ok: run_tests exited {r1.returncode} as expected")
         else:
-            dexec(f"cd /testbed && {build_cmd}", 900, "build")
-            r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
-            if r1.returncode == 0:
-                print("  FAIL: tests PASSED before the fix -- the instance does not "
-                      "isolate the bug (test patch may not apply, or the bug is absent)")
-                return False
-            print(f"  ok: run_tests exited {r1.returncode} as expected")
+            compile_before = meta["project"] == "nuttx" and meta.get("fail_type") == "compile_error"
+            before_build = dexec(f"cd /testbed && {build_cmd}", 900, "build",
+                                 capture=compile_before)
+            if compile_before:
+                output = (before_build.stdout or "") + (before_build.stderr or "")
+                diagnostic = compile_diagnostic(meta, output)
+                if before_build.returncode == 0 or not diagnostic:
+                    print("  FAIL: expected a compile or link error in the changed test "
+                          "source naming the missing API")
+                    if before_build.returncode != 0:
+                        print(build_errors(before_build))
+                    return False
+                print(f"  ok: expected test-side build error: {diagnostic.group(0).strip()}")
+            else:
+                if meta["project"] == "nuttx" and before_build.returncode != 0:
+                    print(f"  FAIL: runtime test did not build (rc={before_build.returncode})")
+                    print(build_errors(before_build))
+                    return False
+                r1 = dexec("cd /testbed && run_tests", timeout, "run_tests")
+                if r1.returncode == 0:
+                    print("  FAIL: tests PASSED before the fix -- the instance does not "
+                          "isolate the bug (test patch may not apply, or the bug is absent)")
+                    return False
+                if meta["project"] == "nuttx" and r1.returncode != 1:
+                    print(f"  FAIL: expected a test failure (rc=1), got rc={r1.returncode}")
+                    return False
+                print(f"  ok: run_tests exited {r1.returncode} as expected")
 
         # --- Step 2: tests must PASS with the fix applied ------------------
         print("\n  Step 2: applying the fix, expecting tests to PASS")
@@ -991,6 +1493,21 @@ def validate(instance_id: str, patch_override: Path | None = None, timeout: int 
             print(f"  FAIL: git apply failed: {step_output(ra).strip()[:300]}")
             return False
 
+        if meta["project"] == "nuttx":
+            configured = dexec("cd /testbed && "
+                               + nuttx_reconfigure(meta.get("config_overrides") or {}),
+                               300, "reconfigure")
+            if configured.returncode != 0:
+                print(f"  FAIL: reconfigure failed (rc={configured.returncode})")
+                print(build_errors(configured))
+                return False
+
+        if meta["project"] == "nuttx" and meta.get("clean_after_patch"):
+            clean = dexec("cd /testbed && make clean", 300, "make clean")
+            if clean.returncode != 0:
+                print(f"  FAIL: make clean failed (rc={clean.returncode})")
+                print(build_errors(clean))
+                return False
         cleaned = cfg["clean_paths"]
         if cleaned:
             dexec("rm -rf " + " ".join(cleaned), 60, f"clean {' '.join(cleaned)}")
@@ -1028,11 +1545,17 @@ def main() -> None:
     p.add_argument("--all", action="store_true")
     p.add_argument("--patch", help="validate this patch instead of the upstream fix")
     p.add_argument("--timeout", type=int, default=600)
+    p.add_argument("--determinism", type=int, default=1, metavar="N",
+                   help="NuttX Apptainer and Mynewt: judge the before state N times in all, "
+                        "each in a fresh overlay or sandbox; all must agree (promotion needs 5)")
+    p.add_argument("--statement-only", action="store_true",
+                   help="NuttX: after only the problem statement changed, recompute the "
+                        "statement fields of a valid validation.json (no build, no container); "
+                        "needs EMBEDEVAL_NUTTX_CLONE (a kernel clone holding the base and fix "
+                        "commits; without it the kernel is cloned) and, for follow-up fix PRs, "
+                        "the same network as a full validation")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="stream build and test output instead of capturing it")
-    p.add_argument("--determinism", type=int, default=0, metavar="N",
-                   help="Mynewt instances: run the before state N times in all and "
-                        "require the same judgement every time")
     args = p.parse_args()
 
     if args.all:
@@ -1047,10 +1570,20 @@ def main() -> None:
     if args.patch and len(targets) != 1:
         p.error("--patch applies to exactly one instance")
 
+    if args.statement_only:
+        if args.patch:
+            p.error("--statement-only does not take --patch")
+        other = [t for t in targets if instances.load_metadata(t)["project"] != "nuttx"]
+        if other:
+            p.error(f"--statement-only is for NuttX instances only, not: {', '.join(other)}")
+
     start = time.time()
-    results = {t: validate(t, Path(args.patch) if args.patch else None, args.timeout,
-                           args.verbose, args.determinism)
-               for t in targets}
+    if args.statement_only:
+        results = {t: refresh_nuttx_statement(t) for t in targets}
+    else:
+        results = {t: validate(t, Path(args.patch) if args.patch else None, args.timeout,
+                               args.verbose, args.determinism)
+                   for t in targets}
 
     print(f"\n{'=' * 70}\nSUMMARY  ({(time.time() - start) / 60:.1f} min)\n{'=' * 70}")
     for t, ok in results.items():

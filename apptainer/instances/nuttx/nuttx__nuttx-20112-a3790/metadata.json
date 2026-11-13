@@ -1,0 +1,61 @@
+{
+    "instance_id": "nuttx__nuttx-20112-a3790",
+    "project": "nuttx",
+    "kernel_repo": "https://github.com/apache/nuttx",
+    "apps_repo": "https://github.com/apache/nuttx-apps",
+    "kernel_pr": 20112,
+    "apps_pr": 3790,
+    "kernel_pr_url": "https://github.com/apache/nuttx/pull/20112",
+    "apps_pr_url": "https://github.com/apache/nuttx-apps/pull/3790",
+    "kernel_base_commit": "2a6a86cb68d9e665580aadc395707af002ed1ac5",
+    "kernel_merge_commit": "81efe031412c98782d2c47e31b25a274257cf848",
+    "apps_base_commit": "2f76986584ddd3881335e5897bbd80e12ae431a2",
+    "apps_merge_commit": "a8bfbe05c7b7b8056b0db547ff9364b85b357133",
+    "files_changed_by_fix": [
+        "sched/wqueue/kwork_cancel.c"
+    ],
+    "files_changed_by_test_patch": [
+        "testing/ostest/wqueue.c"
+    ],
+    "sim_config": "sim:nsh",
+    "test_app": "ostest",
+    "fail_type": "runtime_assert",
+    "problem_statement": "Workqueue cancellation returns success for work that is not queued.\n\nThe workqueue cancellation APIs, including work_cancel(), work_cancel_wq(), and work_cancel_sync_wq(), must report whether a work item was actually queued. A caller can queue a work item with zero delay and immediately request cancellation. Because a worker may already have consumed the item, the result of such a race may be OK or -ENOENT, and both are acceptable. For a work item that is not queued, however, the caller observes OK from both work_cancel_wq() and work_cancel_sync_wq(); the required result is -ENOENT.\n\nThe non-synchronous cancellation functions should return OK only when the work item was queued and cancelled, and -ENOENT when the work item was not queued. The synchronous variant must be able to wait for a callback that has already been dequeued and is running: if such a running callback is found, the call should wait for it and return OK. If the work item is neither queued nor running, the synchronous call should return -ENOENT.\n\nWith the current behavior, a caller cannot use the return value to decide whether a callback may still be executing. In SMP configurations, a cancellation-based teardown can therefore release an object while a work callback still references it, leading to use-after-free, a page fault, or a panic. The kernel must restore the observable contract: unqueued work is reported with -ENOENT, queued work cancellation and synchronous waiting on an already-running callback are reported with OK.",
+    "fail_to_pass": [
+        "wqueue_test"
+    ],
+    "pass_to_pass": [],
+    "config_overrides": {
+        "CONFIG_TESTING_OSTEST_WQUEUE": "y"
+    },
+    "clean_after_patch": false,
+    "test_banners": [
+        "user_main: wqueue test"
+    ],
+    "build_command": "make -j$(nproc)",
+    "generated": true,
+    "runtime": "apptainer",
+    "apptainer_image": "nuttx__nuttx-20112-a3790.sif",
+    "superseded_statements": [
+        {
+            "problem_statement": "After a kernel change, work_cancel() and work_cancel_wq() (and their _sync variants) now return -ENOENT when the work item is not currently queued (and, for the sync variant, not running) rather than returning OK unconditionally. The wqueue ostest's api_validation_test still expects OK when cancelling idle work, and the zero-delay tester thread still asserts an exact OK return, so the test now fails against the new kernel behavior. Update the test to expect -ENOENT for idle work and to accept -ENOENT alongside OK for the raced zero-delay cancel.",
+            "check_issues": [
+                "`problem_statement` gives the fix away: \"After a kernel change, work_cancel() and work_cancel_wq() (and their _sync variants) now return -ENOENT when the work item is not currently queued (and, for the sync variant, not running) rather than returning OK unconditionally.\"; \"Update the test to expect -ENOENT for idle work and to accept -ENOENT alongside OK for the raced zero-delay cancel.\". Describe only the observable symptom, its trigger and the required behavior, not what the code checks or must do internally"
+            ]
+        },
+        {
+            "problem_statement": "The workqueue cancellation behavior is wrong for work items that are not in the queue. The updated test testing/ostest/wqueue.c now expects cancellation of unqueued work to report -ENOENT instead of success. Specifically, api_validation_test now asserts that work_cancel_wq(wqueue, &work) and work_cancel_sync_wq(wqueue, &work) return -ENOENT for idle/unqueued work, and tester now accepts either OK or -ENOENT after work_queue_wq(..., empty_worker, NULL, 0) followed by work_cancel_wq / work_cancel because a zero-delay item may already have been consumed by a worker before cancellation.\n\nWith the current kernel, wqueue_test fails. ostest aborts with an assertion failure such as: Assertion failed work_cancel_wq(wqueue, &work) == -ENOENT at wqueue.c:773. The cancellation API returns OK for work that is not queued, but the updated test and kernel callers now require -ENOENT in that case. This can also affect callers that use the cancellation return value to decide whether the work callback may still be running; treating unqueued work as successfully cancelled can cause the caller to release resources while a worker callback may still be using them, leading to failures in SMP workqueue/AIO-related tests.\n\nRequired behavior: work_cancel, work_cancel_wq, and work_cancel_sync_wq must return -ENOENT when the specified work item is not queued and, for the synchronous variant, is not currently running. They should continue to return OK when the work was actually queued and cancelled, or when the synchronous variant successfully waited for a running callback to finish. Invalid queue or work arguments should continue to return -EINVAL. The test that must pass after the fix is wqueue_test in ostest.",
+            "check_issues": null,
+            "reason": "rewritten 2026-11-09 with the writer prompt that describes kernel behavior, not the test"
+        }
+    ],
+    "statement_check": {
+        "version": 1,
+        "result": "written",
+        "model": "qwen38-nvfp4",
+        "trace": "/scratch/scholar/zhan5136/embedeval-stmt-pilot/runs/nuttx-stmt-rewrite-1109/statements/nuttx__nuttx-20112-a3790.statement.json",
+        "prompt_sha256": "bb2ae5743591f552"
+    },
+    "needs_version_file": false,
+    "host_arch": "aarch64"
+}

@@ -1,6 +1,7 @@
 """
-Apptainer plumbing shared by the Zephyr twister pipeline: where large files
-live, how images are built, and the only way anything gets deleted.
+Apptainer plumbing shared by the Zephyr twister pipeline and the NuttX
+Apptainer instances: where large files live, how images are built, and the
+only way anything gets deleted.
 
 Images are layered, each built FROM the previous one (Bootstrap: localimage):
 
@@ -14,6 +15,14 @@ Images are layered, each built FROM the previous one (Bootstrap: localimage):
                                  pre-build. One per instance; deleted once the
                                  instance has been validated.
 
+NuttX has one shared layer, from templates/nuttx/apptainer/:
+
+    nuttx-sim-<hash>.sif         Ubuntu 24.04 and the tools sim:nsh builds
+                                 with, plus compatibility patches for old
+                                 kernels.
+    instances/<id>.sif           + the kernel and apps at their base commits,
+                                 configured, with the test patch.
+
 All of it lives under the work root -- $EMBEDEVAL_WORK, else <run dir>/work
 with --run-dir (scripts/layout.py), else $SCRATCH/embedeval-twister, else
 work/ in the repo -- never in the repo itself. What every run reuses (the
@@ -25,15 +34,18 @@ default work root, where the shared images have always been.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
 import layout
+import nuttx_platforms
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates" / "zephyr" / "apptainer"
+NUTTX_TEMPLATES = REPO_ROOT / "templates" / "nuttx" / "apptainer"
 
 
 def _default_root() -> Path:
@@ -200,13 +212,16 @@ def instance_container(meta: dict, image: Path) -> tuple[Path, Path | None]:
 
 
 def host_tag() -> str:
-    """Return an architecture suffix for host-specific shared images."""
+    """Empty on an ARM64 host, "-x86_64" on an x86 one: an image is built for
+    the host's own architecture, and one shared folder can hold both."""
     import platform
     return "" if platform.machine() == "aarch64" else f"-{platform.machine()}"
 
 
 def require_host_arch(meta: dict) -> None:
-    """Reject an instance on a host architecture it cannot validate on."""
+    """An instance whose metadata names a host architecture (host_arch, set
+    for NuttX pairs of eras the ARM64 simulator cannot run, or that validate
+    on one architecture only) is built, validated and evaluated there only."""
     import platform
     want = meta.get("host_arch")
     if want and want != platform.machine():
@@ -265,6 +280,23 @@ def remove_sandbox(root: Path) -> None:
     shutil.rmtree(base, ignore_errors=True)
 
 
+def nuttx_base_image(sim_config: str = "sim:nsh") -> Path:
+    """The shared NuttX image. Named by a fingerprint of its recipe and of
+    the patch it carries, for the same reason as recipe_tag."""
+    import hashlib
+    h = hashlib.sha256()
+    if sim_config != "sim:nsh":
+        if not nuttx_platforms.is_qemu(sim_config):
+            raise ValueError(f"unsupported NuttX config: {sim_config}")
+        recipe = nuttx_platforms.image_recipe(nuttx_platforms.canonical(sim_config))
+        h.update(recipe.read_bytes())
+        name = "nuttx-qemu-armv8a" if recipe.stem == "nuttx-qemu" else recipe.stem   # the first image's name
+        return shared_path("images", f"{name}-{h.hexdigest()[:8]}{host_tag()}.sif")
+    for name in ("base.def", "sim_tcbinfo_arm64.patch"):
+        h.update((NUTTX_TEMPLATES / name).read_bytes())
+    return shared_path("images", f"nuttx-sim-{h.hexdigest()[:8]}{host_tag()}.sif")
+
+
 def instance_image(instance_id: str) -> Path:
     return path("images", "instances", f"{instance_id}.sif")
 
@@ -272,7 +304,8 @@ def instance_image(instance_id: str) -> Path:
 def build(image: Path, definition: Path, build_args: dict, log: Path,
           timeout_min: int = 60, attempts: int = 2,
           binds: dict[Path, str] | None = None) -> bool:
-    """apptainer build --fakeroot, with a time limit and a retry.
+    """apptainer build --fakeroot, with a time limit and a retry. `binds`
+    are host paths %post can read, such as a local clone to check out from.
 
     The retry is for the network, not for broken recipes: an image build once
     hung for 21 minutes inside `apt-get update`. A recipe that fails the same
@@ -336,6 +369,41 @@ def ensure_base_images(py: str, sdk: str, sdk_archive: str, logdir: Path) -> Pat
     return simg
 
 
+def ensure_nuttx_base_image(logdir: Path, sim_config: str = "sim:nsh") -> Path:
+    """Build the shared NuttX image if it does not exist yet."""
+    img = nuttx_base_image(sim_config)
+    if not img.exists():
+        print(f"  building shared image {img.name} ...")
+        if not build(img, nuttx_platforms.image_recipe(nuttx_platforms.canonical(sim_config)), {},
+                     logdir / f"build-{img.stem}.log"):
+            raise RuntimeError(f"could not build {img.name}")
+    return img
+
+
+def nuttx_reconfigure(overrides: dict) -> str:
+    """Shell that re-applies a NuttX pair's config overrides after the kernel fix
+    (in validation) or a patch (in evaluation).
+
+    An override whose symbol only exists once the fix is applied does not survive
+    the pre-fix configure and build, so append each one again, let olddefconfig
+    resolve its dependencies, and fail if one was still dropped. An option that
+    no Kconfig file in the tree defines (one the kernel has since removed, e.g.
+    when the feature became unconditional) is ignored with a note.
+    """
+    cmds = []
+    for name, value in sorted(overrides.items()):
+        cmds.append(f"sed -i '/^{name}=/d; /^# {name} is not set/d' .config")
+        cmds.append(f"printf '%s\\n' '{name}={value}' >> .config")
+    cmds.append("make olddefconfig")
+    for name, value in sorted(overrides.items()):
+        kept = f"! grep -q '^{name}=' .config" if value == "n" else f"grep -qx '{name}={value}' .config"
+        defined = (f"grep -rqsE --include='Kconfig*' "
+                   f"'^[[:space:]]*(menu)?config[[:space:]]+{name[len('CONFIG_'):]}[[:space:]]*$' .")
+        cmds.append(f"{{ {kept} || {{ {defined} && {{ echo 'config override dropped: {name}={value}'; "
+                    f"exit 3; }}; }} || echo 'config override ignored: {name} (no Kconfig defines it)'; }}")
+    return " && ".join(cmds)
+
+
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
               overlay: Path | None = None, env: dict | None = None,
               home: Path | None = None, layer: Path | None = None,
@@ -383,6 +451,28 @@ def mynewt_recipe_files(instance_dir: Path) -> tuple[str, ...]:
     """Recipe files for a Mynewt instance, including optional compatibility patches."""
     return MYNEWT_RECIPE_FILES + tuple(name for name in ("sim_arm64.patch", "simulator_compat.diff")
                                       if (Path(instance_dir) / name).exists())
+
+
+NUTTX_RECIPE_FILES = ("instance.def", "run_tests.sh", "test_patch.diff")
+
+
+# Run inside a container: its network interfaces, and REACHABLE if a TCP
+# connection out (to github.com's address, no DNS needed) succeeds.
+NETWORK_PROBE = ("echo interfaces: $(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | sort); "
+                 "timeout 5 bash -c 'exec 3<>/dev/tcp/140.82.112.3/443' 2>/dev/null && echo REACHABLE; true")
+
+
+def network_isolated(probe_output: str) -> bool:
+    """NETWORK_PROBE's output: loopback only and no connection out."""
+    m = re.search(r"^interfaces: (.*)$", probe_output, re.M)
+    return bool(m) and m[1].split() == ["lo"] and "REACHABLE" not in probe_output
+
+
+def nuttx_recipe_files(instance_dir: Path) -> tuple[str, ...]:
+    """A NuttX recipe's files, with base_patch.diff where its base carries
+    prerequisite kernel PRs."""
+    return NUTTX_RECIPE_FILES + (("base_patch.diff",)
+                                 if (Path(instance_dir) / "base_patch.diff").exists() else ())
 
 
 def recipe_fingerprint(instance_dir: Path, files: tuple[str, ...] = RECIPE_FILES) -> str:

@@ -18,6 +18,14 @@ limits), {"state": "done", "grade": "pass" | "fail" | ..., "model", "limits",
 "steps", "error"}, or "failed" with a note. Jobs before labels wrote the
 stage "evaluate".
 
+A NuttX run prepared from existing instances (prepare.py --instances, a
+revalidation) has entries {"pr": <apps PR>, "stage": "to validate",
+"instance": <id>, "arch": <host architecture>} and no triage; its phases are
+separate jobs (submit.py statement / validate / evaluate):
+
+    statement.state done            "result" kept / written / failed (nuttx_statement.py)
+                    failed          no result (the server, the cap; see note): done again
+
 A stage appears only once it has finished, one way or another:
 
     triage.state    done            a verdict (accept / reject / error)
@@ -41,6 +49,9 @@ import os
 from pathlib import Path
 
 TRIAGE_FINAL = {"done", "cap", "server failed", "failed"}
+
+
+CUT_SHORT_MAX = 2     # times an agent run may be cut off by the end of the job before it is final
 
 
 def path(run: Path, pr: int) -> Path:
@@ -160,6 +171,12 @@ def harness_fault(ev: dict) -> bool:
     return ev.get("state") == "done" and "corrupt patch" in (ev.get("error") or "")
 
 
+def cut_short(ev: dict) -> bool:
+    """A run the end of the job cut off (no time limit), not the agent's
+    outcome: it is run again until it has been cut off CUT_SHORT_MAX times."""
+    return ev.get("state") == "done" and bool(ev.get("cut_short")) and ev.get("cuts", 0) < CUT_SHORT_MAX
+
+
 def evaluate_needed(run: Path, pr: int, label: str) -> bool:
     """No outcome for evaluation `label` yet, or one cut short for a reason
     that is not the agent's (a cap, no time left, the model server, a
@@ -179,3 +196,9 @@ def evaluate_todo(run: Path, label: str) -> list[int]:
 def entry(run: Path, pr: int) -> dict:
     """The PR's line of the manifest."""
     return next(e for e in manifest(run)["prs"] if e["pr"] == pr)
+def statement_todo(run: Path) -> list[int]:
+    """Instances of a revalidation run with no statement result yet."""
+    return [e["pr"] for e in manifest(run)["prs"] if e.get("instance")
+            and (read(run, e["pr"]).get("statement") or {}).get("state") != "done"]
+
+
