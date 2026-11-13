@@ -509,7 +509,7 @@ def report(final: dict) -> None:
     lines = ["# Statement verification", "",
              f"{len(final)} tasks: " + ", ".join(f"{k} {v}" for k, v in sorted(by.items())), "",
              "| project | fine | fixed | unfair | review |", "|---|---|---|---|---|"]
-    for p in ("zephyr", "riot"):
+    for p in sorted({r["project"] for r in final.values()}):
         c = Counter(r["status"].split(":")[0] for r in final.values() if r["project"] == p)
         lines.append(f"| {p} | {c['fine']} | {c['fixed']} | {c['unfair']} | {c['review']} |")
     order = lambda r: (not r["status"].startswith("review"), r["status"], r["instance_id"])  # noqa: E731
