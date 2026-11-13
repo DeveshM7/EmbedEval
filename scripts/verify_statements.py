@@ -381,23 +381,21 @@ def done(iid: str) -> bool:
 
 # -- step 3: combine -----------------------------------------------------------
 
-def mechanical_issues(new: str, task: dict) -> list[str]:
-    """Names the fix changes that the tests never use (a hint at the implementation),
-    and 'how' wording. Borrowed from scripts/riot_triage.py's statement check."""
-    fix_words = {w for f, l in added(task["fix"]) for w in IDENT.findall(l)} | removed_words(task["fix"])
-    test_words = set(IDENT.findall(task["tests"]))
+def mechanical_issues(new: str, task: dict) -> tuple[list[str], list[str]]:
+    """(blocking, notes). Blocking: names the FIX DEFINES (new functions, macros, fields,
+    types, modules...) that the tests never use and the original statement does not
+    have: an internal of the fix, a hint at the implementation. Notes: 'how' or test
+    wording, for the report only (words like "modify" also occur innocently)."""
+    defined = defined_names(task["fix"])
+    test_words = set(IDENT.findall(task["tests"])) | test_uses(task["tests"])
     old = set(IDENT.findall(task["statement"]))
-    code_like = {m.group() for m in IDENT.finditer(new)
-                 if "_" in m.group() or new[m.end():m.end() + 1] == "("}
-    leaks = sorted(w for w in code_like if w in fix_words and w not in test_words and w not in old)
-    out = []
-    if leaks:
-        out.append(f"names the fix uses that the tests never do: {leaks}")
+    leaks = sorted(w for w in set(IDENT.findall(new))
+                   if w in defined and w not in test_words and w not in old and len(w) > 2)
+    blocking = [f"names the fix defines that the tests never use: {leaks}"] if leaks else []
     how = sorted({m.group().lower() for m in HOW_NOT_WHAT.finditer(new)}
                  - {m.group().lower() for m in HOW_NOT_WHAT.finditer(task["statement"])})
-    if how:
-        out.append(f"'how' or test wording: {how}")
-    return out
+    notes = [f"'how' or test wording: {how}"] if how else []
+    return blocking, notes
 
 
 def combine() -> dict:
@@ -437,9 +435,9 @@ def combine() -> dict:
                 new = r["new_statement"]
                 if lk.get("leak") == "minor" and lk.get("suggested_statement"):
                     new = lk["suggested_statement"]
-                mech = mechanical_issues(new, task)
+                mech, notes = mechanical_issues(new, task)
                 cand = {"judge": k, "new_statement": new, "leak_check": lk, "mechanical": mech,
-                        "added": r.get("added") or []}
+                        "notes": notes, "added": r.get("added") or []}
                 good = lk.get("decision") == "accept" and lk.get("accurate") is True \
                     and lk.get("leak") in ("none", "minor") and not mech
                 score = (good, lk.get("complete") or 0, -len(new))
@@ -478,7 +476,8 @@ def report(final: dict) -> None:
             lines += ["", f"Leak check: leak {c.get('leak')}, accurate {c.get('accurate')}, "
                           f"complete {c.get('complete')}, decision {c.get('decision')}"
                           + (f"; {c.get('leak_detail')}" if c.get("leak_detail") else "")
-                          + (f"; mechanical: {lk['mechanical']}" if lk.get("mechanical") else ""),
+                          + (f"; mechanical: {lk['mechanical']}" if lk.get("mechanical") else "")
+                          + (f"; notes: {lk['notes']}" if lk.get("notes") else ""),
                       "", "Original:", "", "> " + r_orig(r["instance_id"]).replace("\n", "\n> "),
                       "", "New:", "", "> " + r["new_statement"].replace("\n", "\n> ")]
     (WORK / "report.md").write_text("\n".join(lines) + "\n")
