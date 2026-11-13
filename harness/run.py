@@ -188,10 +188,11 @@ def build_prompts(meta: dict) -> tuple[str, str]:
         project = hidden_tests.project_of(meta)
         cfg = {**cfg, "orientation": hidden_tests.ORIENTATION[project],
                "extra_warnings": hidden_tests.WARNINGS[project]}
+    own = hidden_tests.instance_warnings(meta) if hide else meta.get("extra_warnings")
     # An instance's metadata may name its own protected paths, and add warnings
     # of its own after the project's (Mynewt: test support in production files).
     protected = " or ".join(f"`{p}`" for p in projects.setting(meta, "protected_paths"))
-    warn = "\n\n".join(w for w in (cfg["extra_warnings"], meta.get("extra_warnings")) if w)
+    warn = "\n\n".join(w for w in (cfg["extra_warnings"], own) if w)
     system = SYSTEM_TEMPLATE.format(
         label=cfg["label"], orientation=cfg["orientation"]
     )
@@ -243,10 +244,10 @@ _WORKFLOW_STEP3 = """\
 
 def _hide_tests(meta: dict) -> bool:
     """Whether this run hides the PR's tests (harness/hidden_tests.py): when it is
-    on, for the projects it supports (Zephyr, RIOT). A Mynewt or NuttX run keeps
-    the PR's tests in place until hidden tests support it; its task message is
-    still the problem statement alone (build_task)."""
-    return hidden_tests.ENABLED and hidden_tests.project_of(meta) in hidden_tests.ORIENTATION
+    on, for Zephyr, RIOT, Mynewt, Apptainer NuttX and Contiki-NG. OpenThread and
+    Docker NuttX keep the PR's tests in place; their task message is still the
+    problem statement alone (build_task)."""
+    return hidden_tests.ENABLED and hidden_tests.supported(meta)
 
 
 def _swap(text: str, old: str, new: str) -> str:
@@ -329,12 +330,17 @@ def make_environment(meta: dict):
             # Mynewt: the instance image as built here, unpacked to a writable
             # sandbox (native builds are much faster there than in a .sif), in a
             # network namespace of its own (scripts/mynewt_network.py). The PR's
-            # tests are committed in the image already, and hidden tests do not
-            # support Mynewt yet (_hide_tests), so the one-commit check is all.
+            # tests are committed in the image already: hidden, they come out
+            # before the history becomes one commit (hidden_tests.history_command);
+            # otherwise the history is made one commit with them in it.
+            hide = _hide_tests(meta)
+            setup = [hidden_tests.history_command(meta, hide), one_commit]
+            if hide:
+                setup.append(hidden_tests.setup_command(meta))
             return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
                                         name=meta["instance_id"], cwd="/testbed",
                                         timeout=projects.setting(meta, "command_timeout", 900),
-                                        setup_commands=[one_commit], sandbox=True,
+                                        setup_commands=setup, sandbox=True,
                                         network_fixture=meta.get("network_fixture"),
                                         isolate_network=True)
         if meta["project"] == "contiki-ng":
@@ -352,15 +358,20 @@ def make_environment(meta: dict):
             # it behind a one-commit .git (scripts/zephyr_gitlayer.py).
             import zephyr_gitlayer
             layer = zephyr_gitlayer.pull(meta["instance_id"])
-        if _hide_tests(meta):
-            setup = [one_commit, hidden_tests.setup_command(meta)]
+        # NuttX, Contiki-NG: the history becomes one commit first, for both
+        # repositories (hidden_tests.history_command), hidden or not.
+        hide = _hide_tests(meta)
+        history = ([hidden_tests.history_command(meta, hide)]
+                   if meta["project"] in ("nuttx", "contiki-ng") else [])
+        if hide:
+            setup = [*history, one_commit, hidden_tests.setup_command(meta)]
         elif meta["project"] == "nuttx":
             # NuttX needs no tests commit: its test changes are in apps/, a
             # repository of its own that the image keeps out of the kernel's
-            # git. Hidden tests do not support NuttX yet (_hide_tests).
-            setup = [one_commit]
+            # git.
+            setup = [*history, one_commit]
         else:
-            setup = [one_commit, commit_tests]
+            setup = [*history, one_commit, commit_tests]
         return ApptainerEnvironment(image=image, layer=layer,
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
