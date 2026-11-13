@@ -59,7 +59,8 @@ SHARED = Path(os.environ.get("EMBEDEVAL_SHARED",
                              f"/scratch/scholar/{os.environ.get('USER', 'user')}/embedeval/shared"))
 # Local clones the fix diffs come from (NuttX: the kernel, where its fixes are).
 CLONES = {"zephyr": SHARED / "zephyr.git", "riot": SHARED / "riot" / "riot.git",
-          "nuttx": SHARED / "nuttx.git", "mynewt": SHARED / "mynewt-core.git"}
+          "nuttx": SHARED / "nuttx.git", "mynewt": SHARED / "mynewt-core.git",
+          "contiki-ng": SHARED / "contiki-ng.git"}
 GITHUB_PR_FILES_CAP = 3000   # GitHub lists at most this many files of a PR
 PROFILE = "qwen38-nvfp4"
 JUDGES = 3
@@ -109,6 +110,12 @@ def fix_diff(meta: dict) -> str:
         excl = [f":(exclude){p}" for p in (meta.get("protected_paths") or ["test/"])]
         return git(project, "diff", f"{base}..{meta['fix_commit']}", "--",
                    *(files if 0 < len(files) < GITHUB_PR_FILES_CAP else [".", *excl]))
+    if project == "contiki-ng":
+        # As the Contiki-NG branch's gold_patch: base..fix, limited to the fix's files.
+        files = meta.get("files_changed_by_fix") or []
+        excl = [":(exclude)tests/", ":(exclude)regression-tests/", ":(exclude)tools/cooja/"]
+        return git(project, "diff", f"{meta['base_commit']}..{meta['fix_commit']}", "--",
+                   *(files if 0 < len(files) < GITHUB_PR_FILES_CAP else [".", *excl]))
     return git(project, "diff", meta["base_commit"], meta["fix_commit"], "--", ".",
                ":(exclude)tests/")
 
@@ -132,6 +139,12 @@ def project_facts(meta: dict) -> str:
                 f"the {meta.get('platform', 'native')} platform. Configuration settings are declared in "
                 "syscfg.yml files (read in C as MYNEWT_VAL(NAME)) and packages and their dependencies "
                 "in pkg.yml files.")
+    if project == "contiki-ng":
+        kind = ("Cooja network simulations, .csc scenarios" if meta.get("oracle") == "runtime"
+                else "native builds and unit tests")
+        return ("Project: Contiki-NG. One repository; the hidden tests are under tests/ (here "
+                f"{kind}), run on the instance's fixed target. Build configuration is given by "
+                "Makefile variables such as MODULES and by project-conf.h settings.")
     if project == "zephyr":
         return ("Project: Zephyr RTOS. One repository; the hidden tests are under tests/, built and "
                 f"run with twister for {meta.get('platform', '?')}.")
@@ -179,7 +192,7 @@ def defined_names(diff: str) -> dict[str, str]:
                 names["CONFIG_" + m.group(1)] = "Kconfig option"
             continue
         if f.endswith(("Makefile", ".mk", "Makefile.dep", "Makefile.include")) or "/Makefile" in f:
-            for m in re.finditer(r"(?:PSEUDOMODULES|USEMODULE|DEFAULT_MODULE)\s*\+?=\s*(.+)", s):
+            for m in re.finditer(r"(?:PSEUDOMODULES|USEMODULE|DEFAULT_MODULE|MODULES)\s*\+?=\s*(.+)", s):
                 for w in m.group(1).split():
                     if re.fullmatch(r"[A-Za-z_][\w-]*", w):
                         names[w] = "build module"
