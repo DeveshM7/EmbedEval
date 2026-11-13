@@ -6,6 +6,7 @@ hidden tests without seeing them? If not, add what is missing, without giving aw
 the fix.
 
     python scripts/verify_statements.py prepare [--only <id>...]   # name check + task files
+        [--project zephyr riot mynewt nuttx contiki-ng]            # default: zephyr riot
     python scripts/verify_statements.py review --api-base URL      # judges + leak checks (a node)
     python scripts/verify_statements.py combine                    # verdicts, report
     python scripts/verify_statements.py apply                      # write into metadata.json
@@ -32,6 +33,11 @@ Steps (docs: the plan's "Statement verification and cleaning"):
      reason, problems, missing names, leak check) and, when accepted,
      "problem_statement_fixed". The original "problem_statement" is never changed.
 
+Mynewt, NuttX (Apptainer) and Contiki-NG instances are covered the same way, selected with
+`prepare --project`; what is particular to them (where their instances and clones are, what
+their fix is) is in scripts/verify_ports.py. Give them a work folder of their own when
+Zephyr and RIOT have been verified already: `prepare` rewrites <work>/tasks.txt.
+
 The work folder is <EMBEDEVAL_VERIFY_DIR> (default /scratch/scholar/$USER/embedeval/verify).
 """
 
@@ -49,6 +55,9 @@ import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verify_ports  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 INSTANCES = REPO / "apptainer" / "instances"
@@ -86,6 +95,8 @@ def git(project: str, *args: str) -> str:
 
 def fix_diff(meta: dict) -> str:
     project = meta["project"]
+    if project in verify_ports.PORTS:
+        return verify_ports.fix_diff(meta, SHARED)
     return git(project, "diff", meta["base_commit"], meta["fix_commit"], "--", ".",
                ":(exclude)tests/")
 
@@ -199,15 +210,24 @@ def shorten(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit] + f"\n[... {len(text) - limit} more characters not shown ...]\n", True
 
 
-def prepare(only: list[str] | None) -> None:
+def instance_dir(iid: str) -> Path:
+    """An instance's folder: apptainer/instances/<id>, or, for a port, its project's folder."""
+    for root in (INSTANCES, *verify_ports.instance_roots().values()):
+        if (root / iid / "metadata.json").exists():
+            return root / iid
+    return INSTANCES / iid
+
+
+def prepare(only: list[str] | None, projects: tuple[str, ...] = tuple(CLONES)) -> None:
     (WORK / "tasks").mkdir(parents=True, exist_ok=True)
-    ids = sorted(d.name for d in INSTANCES.iterdir()
-                 if (d / "metadata.json").exists() and d.name.split("__")[0] in CLONES)
+    roots = {**{p: INSTANCES for p in CLONES}, **verify_ports.instance_roots()}
+    ids = sorted(d.name for p in projects for d in roots[p].iterdir()
+                 if (d / "metadata.json").exists() and d.name.split("__")[0] == p)
     if only:
         ids = [i for i in ids if i in only]
     bad = []
     for n, iid in enumerate(ids, 1):
-        d = INSTANCES / iid
+        d = instance_dir(iid)
         meta = json.loads((d / "metadata.json").read_text())
         tests = (d / "test_patch.diff").read_text(errors="replace")
         try:
@@ -468,7 +488,8 @@ def report(final: dict) -> None:
     lines = ["# Statement verification", "",
              f"{len(final)} tasks: " + ", ".join(f"{k} {v}" for k, v in sorted(by.items())), "",
              "| project | fine | fixed | unfair | review |", "|---|---|---|---|---|"]
-    for p in ("zephyr", "riot"):
+    shown = ("zephyr", "riot") + tuple(sorted({r["project"] for r in final.values()} - {"zephyr", "riot"}))
+    for p in shown:
         c = Counter(r["status"].split(":")[0] for r in final.values() if r["project"] == p)
         lines.append(f"| {p} | {c['fine']} | {c['fixed']} | {c['unfair']} | {c['review']} |")
     order = lambda r: (not r["status"].startswith("review"), r["status"], r["instance_id"])  # noqa: E731
@@ -496,7 +517,7 @@ def report(final: dict) -> None:
 
 
 def r_orig(iid: str) -> str:
-    return json.loads((INSTANCES / iid / "metadata.json").read_text())["problem_statement"]
+    return json.loads((instance_dir(iid) / "metadata.json").read_text())["problem_statement"]
 
 
 # -- step 4: apply -------------------------------------------------------------
@@ -520,7 +541,7 @@ def apply() -> None:
     stamp = time.strftime("%Y-%m-%d")
     n = Counter()
     for iid, r in final.items():
-        p = INSTANCES / iid / "metadata.json"
+        p = instance_dir(iid) / "metadata.json"
         text = p.read_text()
         meta = json.loads(text)
         # keep the file's own layout, so the diff shows only what was added
@@ -548,6 +569,8 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("prepare")
     p.add_argument("--only", nargs="+")
+    p.add_argument("--project", nargs="+", default=list(CLONES),
+                   choices=[*CLONES, *verify_ports.PORTS], help="default: zephyr riot")
     p = sub.add_parser("review")
     p.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
     p.add_argument("--share", default="0/1", help="I/N: tasks with index %% N == I")
@@ -556,7 +579,7 @@ def main() -> None:
     sub.add_parser("apply")
     a = ap.parse_args()
     if a.cmd == "prepare":
-        prepare(a.only)
+        prepare(a.only, tuple(a.project))
     elif a.cmd == "review":
         review(a.api_base, a.share, a.parallel)
     elif a.cmd == "combine":
