@@ -685,7 +685,6 @@ YAML
 python cluster/prepare.py --name mynewt-full --all             # or --pr N..., or --since/--until
 python cluster/submit.py triage   --run mynewt-full            # the local model on Spark
 python cluster/submit.py validate --run mynewt-full --after <triage job>
-python cluster/submit.py evaluate --run mynewt-full --after <validate job>   # optional: an agent on each VALID one (--model M ...)
 
 # a revalidation of instances that exist (no triage)
 python cluster/prepare.py --name mynewt-reval --instances apptainer/instances/mynewt
@@ -710,50 +709,8 @@ python cluster/report.py --run mynewt-reval
   route out, and a problem statement that names nothing only the fix introduces. A finding
   is INVALID. The before state must also be judged the same in 5 runs (a compile
   oracle can depend on which file a parallel build stops at; a runtime one on timing).
-- **evaluate** (`submit.py evaluate`) runs `harness/run.py` and `harness/evaluate_patches.py`
-  on each VALID instance (`evaluate:` in the config: model, steps, minutes, agents per
-  node; the default is 50 steps and no per-instance time limit, `time_limit: 0`, the same
-  limits as the Zephyr and RIOT baseline; `--model` takes a profile of `triage/models.json` in place of `evaluate.model`).
-  The agent sees the repository at the base commit with the PR's tests and the problem
-  statement: not the fix's files, not the history, not the network. Its patch crosses to the
-  grader byte for byte.
-  - *Labels.* Each evaluation is labeled by model and limits: `<model>-<steps>steps`
-    (`qwen38-nvfp4-50steps`) with no time limit, `<model>-<steps>steps-<min>min`
-    (`qwen38-nvfp4-50steps-40min`) with one: its status stage is `evaluate:<label>`, its trajectories,
-    patches and grades are under `<run>/outputs/<label>/`, and the report has one tally per
-    label. A second model, or the same one under other limits, runs on the same instances
-    without being seen as done and without overwriting anything. Results of the first,
-    unlabeled evaluate jobs count for the label of the limits they recorded (those that
-    recorded none are run again).
-  - *No time limit.* A run is then bounded only by the end of its job: it gets what is
-    left of the job less 5 minutes for grading, and no run starts with less than
-    `evaluate.min_minutes_left` (90) left. A run the job's end cuts off is not graded and not
-    the agent's failure: it is run again by the next job. After 2 cuts it is final, reported
-    as `unfinished` (it did not finish within a full job), apart from pass and fail. The
-    report also tallies `steps` (failures at the step limit; the agent's exit status
-    `LimitsExceeded` is read from its trajectory, which the cost limit also sets).
-  - *Model servers.* With a local model the job submits a model-server job on `partition`
-    (`scripts/serve_triage_model.sh`): as many GPU nodes as the evaluate job has nodes, one
-    server each, and each evaluate node tunnels (SSH) to the server of its own index, so
-    `per_node` agents share a server. The evaluate job is submitted held and released once
-    its server job exists; the server job ends when the evaluate job is gone, serves at most
-    30 minutes after the model answers while the evaluate job still has no slot (the account
-    runs two jobs at once), and is cancelled by the evaluate job when its workers are done.
-    `--server-job J` uses a running server instead and leaves it alone.
-  - *Resuming.* An instance cut short for a reason that is not the agent's (model server
-    gone, a build that hit its cap, no time left in the job, a patch `git apply` calls corrupt) has no outcome
-    for its label: submit the same command again and only those run. A job ends at
-    `slurm.time_limit` (at most 4 hours) and does not resubmit itself.
-  - *Several models.* `--model` takes several names and submits one evaluation per model,
-    each `afterany` the one before, so the pairs of agent job and server job never overlap
-    (the account runs 2 jobs at once and submits 50). The job ids are printed;
-    `--dry-run` shows the plan of every link without calling `sbatch`.
-
-    ```bash
-    python cluster/submit.py evaluate --run mynewt-full --model nemotron   # one model
-    python cluster/submit.py evaluate --run mynewt-full --after <validate job> \
-        --model qwen38-nvfp4 nemotron qwen38                               # three, one after the other
-    ```
+- **evaluation** is not a phase of `submit.py`: an agent run on the validated instances is
+  a job of its own, with its own template and rules ([section 13](#13-evaluating-on-the-cluster)).
 - **jobs** run a frozen copy of the code (`<run>/jobs/source-<time>/`, with
   `source-manifest.json` hashes), so editing the checkout never changes a queued job.
 - **promotion** stays manual: `scripts/promote_instance.py --run-dir <run> <id>`. It refuses a
@@ -781,7 +738,6 @@ $P cluster/submit.py statement --run c-obs  --config spark.yaml --after <observe
 $P cluster/report.py --run c-check
 $P cluster/prepare.py --name c-reval --instances apptainer/instances/contiki-ng   # revalidation
 $P cluster/submit.py validate --run c-reval --config cpu.yaml
-$P cluster/submit.py evaluate --run c-reval --config cpu.yaml --model qwen38-nvfp4 --after <validate job>
 $P cluster/census.py --runs <every run of a campaign> --valid c-reval --out census.md
 ```
 
@@ -845,58 +801,9 @@ What differs from Zephyr:
 - **Revalidation**: `prepare.py --instances DIR...` copies existing instances
   to `<run>/sources/`; `submit.py validate` renders each under the current
   templates (`generate_instance.py --render`), builds and validates it.
-- **Evaluation**: `submit.py evaluate --model PROFILE` (a profile of
-  `triage/models.json`; hosted models are refused) runs an agent on every
-  VALID instance of the run on the CPU partition, with the config's
-  `evaluate.step_limit` and `evaluate.time_limit` for every model (by default
-  50 steps and no time limit: the same limits as the Zephyr and RIOT
-  baseline), and grades
-  each patch in a fresh container. It submits the model's server on the GPU
-  partition with a clean environment (or uses `--server-job`), which starts
-  only once the evaluate job runs, so an idle server never holds one of the
-  two job slots; the evaluate job waits `caps.server_start` for it, tunnels to
-  it and cancels it at the end. `evaluate.python` is an x86
-  Python with mini-swe-agent. An evaluation is a model under its limits and
-  is labeled `<model>-<steps>steps` with no time limit (e.g. `qwen38-nvfp4-50steps`)
-  and `<model>-<steps>steps-<min>min` with one (`qwen38-nvfp4-100steps-60min`):
-  status `evaluate:<label>`, outputs and grades under `<run>/outputs/<label>/`,
-  one tally per label in the report. The same model under other limits is a
-  new evaluation on the same run; results recorded before labels
-  (`evaluate:<model>`, outputs under `<run>/outputs/contiki-ng/`) count for the
-  label of the limits recorded with them. `report.py` counts time-outs apart
-  from failed patches. `--queue` submits even when both job slots are busy.
-  Several models are queued in one command, one evaluation (agents job and its
-  server) per model, each submitted to start after the previous pair has ended
-  (`afterany:<agents job>:<server job>`), so with the account's two job slots
-  pairs never interleave and each job is named after its label:
-
-  ```
-  python cluster/submit.py evaluate --run R --model qwen38 qwen38-nvfp4 nemotron --queue
-  python cluster/submit.py evaluate --run R --model qwen38 nemotron --dry-run   # the plan, nothing submitted
-  ```
-
-  The job ids are printed. A model with nothing left to evaluate is skipped
-  and the chain goes on; `--after JOB` puts the whole chain behind a job, and
-  `--queue` lets the first pair wait when both slots are busy. A job that
-  reaches its limit is not continued by itself: the same command, run again,
-  submits only what is still to do (results already in status are kept, and a
-  chain re-submitted after a failure skips the finished models). Submit at most
-  25 models at once (50 submitted jobs).
-  The server must hold `evaluate.per_node` requests of the full
-  `model.max_model_len` at once: the worker reads vLLM's "Maximum concurrency"
-  from the server's log and runs no more agents than that (none below 1).
-  Spark interactive's 60 GB job limit leaves a 27B model about 1.4 of 131k
-  tokens (`gpu_memory_utilization` 0.4), so an evaluate config puts the
-  server on `spark-batch` with `slurm.mem: 120500M` and 0.8. While an agent
-  runs, the worker samples the server's waiting requests (`/metrics`) into
-  `server_queued`; a time-out during which requests waited is the server's,
-  not the model's, and is run again by the next evaluate job (as is a
-  time-out recorded before `server_queued` existed). With `time_limit: 0` an
-  agent run is bounded only by its job: it is capped at the job's deadline
-  less the grading's 25 minutes, and no run starts with less than
-  `evaluate.min_minutes_left` (90) of the job left. A run cut off by the job's
-  end is never graded from its partial patch; the next job runs it again, and
-  after two cuts it is reported apart as `unfinished: not within a full job`.
+- **Evaluation** is not a phase of `submit.py`: an agent run on the promoted instances
+  is a job of its own, with its own template and rules
+  ([section 13](#13-evaluating-on-the-cluster)).
 - **promotion** stays manual, after review: `scripts/promote_instance.py
   --source <run>/instances` (triage and revalidation runs) or `--source
   <run>/finalized` (observation runs), into `apptainer/instances/contiki-ng/`.
@@ -905,3 +812,178 @@ What differs from Zephyr:
   the leak check's identifier test. Instance images are not pushed to a
   registry.
 
+
+---
+
+## 13. Evaluating on the cluster
+
+An evaluation runs one model on every instance of one project and grades each
+patch. It is one `sbatch` of a runner template, not a phase of `submit.py`;
+every project has its own runner, and all follow the same rules.
+
+| Project | Runner | Shape | Instances |
+|---|---|---|---|
+| Zephyr | `cluster/templates/eval_zephyr.sbatch` | `spark-batch` nodes (`-N`), each serves the model and runs its agents (`scripts/eval_zephyr_node.sh`) | every one |
+| RIOT | `cluster/templates/eval_riot.sbatch` | one heterogeneous job: model servers on `spark-batch`, agents on `cpu` (`scripts/eval_riot_server.sh`, `eval_riot_agents.sh`) | every one |
+| Mynewt | `cluster/templates/eval_mynewt.sbatch` | heterogeneous, as RIOT (`scripts/eval_mynewt_server.sh`, `eval_mynewt_agents.sh`) | 63, all x86_64 |
+| NuttX, aarch64 | `cluster/templates/eval_nuttx.sbatch` | `spark-batch` nodes, as Zephyr (`scripts/eval_nuttx_node.sh`) | 18 |
+| NuttX, x86_64 | `cluster/templates/eval_nuttx_x86.sbatch` | heterogeneous, as RIOT (`scripts/eval_nuttx_x86_server.sh`, `eval_nuttx_x86_agents.sh`) | 11 |
+| Contiki-NG | `cluster/templates/eval_contiki_ng.sbatch` | heterogeneous, as RIOT (`scripts/eval_contiki_ng_server.sh`, `eval_contiki_ng_agents.sh`) | 38, all x86_64 |
+
+The header comment of each template is the reference for its command line and
+settings. Submit from the repository, with `--export=NONE` and the model:
+
+```bash
+# Zephyr, NuttX aarch64: one node serves the model and runs the agents; -N nodes
+sbatch -N 10 --export=NONE,EVAL_MODEL=qwen38-nvfp4 \
+    -o $SCRATCH/embedeval/eval/logs/%x-%j.out cluster/templates/eval_nuttx.sbatch
+
+# RIOT, Mynewt, NuttX x86_64, Contiki-NG: one server and one cpu node (4 agents)
+sbatch --export=NONE,EVAL_MODEL=qwen38-nvfp4 \
+    -o $SCRATCH/embedeval/eval/logs/%x-%j.out cluster/templates/eval_mynewt.sbatch
+
+# more of each: sizes per component, separated by ":" (3 servers, 1 cpu node of 48 cores)
+sbatch --export=NONE,EVAL_MODEL=qwen38-nvfp4 -N 3 : -N 1 -c 48 --export=NONE,EVAL_MODEL=qwen38-nvfp4 \
+    -o $SCRATCH/embedeval/eval/logs/%x-%j.out cluster/templates/eval_mynewt.sbatch
+```
+
+A heterogeneous job counts as one job against the account's limit. The Spark
+component serves the model on the cluster network behind an API key made for
+the job; the `cpu` component runs `EVAL_AGENTS` agents per server. Before any
+agent starts, it checks that the server answers with the key, refuses a
+request without it, and cannot be reached from inside an agent's container; a
+failed check stops the job, which then does not resubmit itself
+(`checks-failed` in the job's log folder).
+
+Settings go in `--export` (repeat them after `:` for a heterogeneous job):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `EVAL_MODEL` | required | a model `harness/paths.py` knows, served from its profile in `triage/models.json` |
+| `EVAL_AGENTS` | 4 | agents per server |
+| `EVAL_GPU_MEMORY` | 0.80 (heterogeneous runners), 0.70 (`eval_zephyr.sbatch`, `eval_nuttx.sbatch`: the node also builds) | share of GPU memory for the server |
+| `EVAL_MAX_MODEL_LEN` | 262144 | the server's context |
+| `EVAL_INSTANCES` | all of the project | a file of instance ids, for a trial |
+| `EVAL_TIME_LIMIT` | 120 | minutes per agent run |
+| `EVAL_MARGIN` | 60 | minutes before the job's end after which no new PR is taken |
+| `EVAL_MAX_JOBS` | 6 | jobs in all, counting resubmissions |
+| `EVAL_KEEP_IMAGES` | 0 | 1: keep instance images after grading |
+| `EMBEDEVAL_EVAL_DIR` | `$SCRATCH/embedeval/eval` | where results go (a test, say) |
+
+Mynewt takes `EMBEDEVAL_MYNEWT_CLONE` (a local mynewt-core clone for the image
+builds; else GitHub), NuttX `EMBEDEVAL_NUTTX_CLONE` and
+`EMBEDEVAL_NUTTX_APPS_CLONE`, Contiki-NG `EMBEDEVAL_CONTIKI_NG_IMAGE` (the
+current CI image, if it is not under `<shared>/images`). `-t` gives a shorter
+job; it is kept on resubmission.
+
+### 13.1 The rules
+
+Every project is evaluated the same way:
+
+- **Limits.** 250 steps and 120 minutes per run, and no network in the
+  container. The agent's run ends at the first limit it reaches; the 120
+  minutes are the agent's run alone, not the image build before it or the
+  grading after it.
+- **History.** The repository the agent works in has exactly one commit.
+- **Hidden tests.** The agent works without the PR's tests (section 13.4);
+  grading still runs them, in a fresh overlay of the image, with the image's
+  own `run_tests`.
+- **Only a submitted run is tested.** A run that ends any other way (step
+  limit, time cap, context overflow) is a fail.
+- **Infrastructure errors** (a failed image build, a model server that went
+  away) are retried once; after that the PR is `not_run`, never a fail.
+- **One queue.** Every worker of every job takes PRs from
+  `<eval dir>/<model>/claims/<project>.json`, so any number of nodes and jobs
+  work on one model's evaluation; a PR is finished once its `grade.json`
+  exists. No worker takes a new PR in the last `EVAL_MARGIN` minutes of a job;
+  a run still going at the job's end is saved and recorded as cut off, and the
+  next job runs it again. While PRs are left (and the checks passed), a job
+  submits itself again, up to `EVAL_MAX_JOBS` jobs. The same `sbatch` command,
+  run again, takes up where a stopped evaluation left off.
+
+### 13.2 Where the results are
+
+```
+<eval dir>/<model>/<project>/<PR>/
+    patch.diff          the agent's changes
+    trajectory.json     every message, command, and result
+    run.json            how the run ended (steps, time, exit status, infrastructure error)
+    grade.json          pass, fail or not_run
+<eval dir>/<model>/claims/<project>.json     the queue
+<eval dir>/<model>/logs/<project>/job-<id>/  one folder per job: server and worker logs
+```
+
+`<eval dir>` is `$SCRATCH/embedeval/eval` on the cluster, `outputs/` in the
+repository elsewhere, or `EMBEDEVAL_EVAL_DIR`. A NuttX PR paired with an apps
+PR is `<kernel PR>-a<apps PR>`. The table, one row per model and project:
+
+```bash
+python harness/results.py                                         # every model and project found
+python harness/results.py --model qwen38-nvfp4 --project nuttx    # one
+python harness/results.py --runs --csv results.csv                # a row per run
+```
+
+It counts graded runs (pass, fail, not run), how they ended, and the median
+time and steps; an instance with no grade yet is "to do".
+
+### 13.3 Mynewt, NuttX and Contiki-NG: images built in the job
+
+The images of these projects are not published to the registry. Each worker
+builds the instance's image just before its run (`harness/eval_images.py`,
+which runs `scripts/build_instances.py`) and, unless `EVAL_KEEP_IMAGES=1`,
+removes it, its overlays and its sandboxes after the PR is graded, so the
+images of a whole project never have to fit on scratch at once. The shared
+base image of the project is built once, under a lock, the first time a job
+needs it (the `cpu` side's checks use it), and is kept.
+
+What this costs: the build runs inside the job, before the agent starts, once
+per instance and again for every retry; it counts against the job's time and
+not against the 120-minute run cap. A build is capped at 60 minutes (Mynewt,
+NuttX) or 120 (Contiki-NG). A build that fails or hits its cap is an infrastructure error (13.1). Zephyr and
+RIOT images are pulled from the registry instead.
+
+Each of these instances is built for one architecture and is taken only by a
+job of that architecture; the others stay "to do" in the table until a job of
+theirs has run (`python harness/eval_set.py summary --project nuttx --model
+qwen38-nvfp4` lists the counts). Mynewt (63) and Contiki-NG (38) are
+all x86_64. NuttX has 18 aarch64 and 11 x86_64 instances, so **a NuttX
+evaluation is two submissions**, `eval_nuttx.sbatch` for the aarch64 ones and
+`eval_nuttx_x86.sbatch` for the x86_64 ones, with the same `EVAL_MODEL`. They
+share one queue and one results tree, and each resubmits itself only while
+instances of its own architecture are left.
+
+The heterogeneous runners (Mynewt, NuttX x86_64, Contiki-NG, and RIOT) run
+their `cpu` side with the Python environment that `python cluster/setup_riot.py`
+creates, `$EMBEDEVAL_SHARED/riot/venv/bin/python` (`EMBEDEVAL_SHARED` defaults
+to `/scratch/scholar/$USER/embedeval/shared`); the job stops at its first check
+if it is missing. The same script also clones RIOT and pulls RIOT's build
+images, which the other projects do not use. The Spark side of every runner
+uses the repository's `.venv`.
+
+### 13.4 What is hidden from the agent
+
+For Zephyr, RIOT, Mynewt, Contiki-NG and NuttX instances that are Apptainer
+images, `harness/hidden_tests.py` removes the PR's tests in the run's own
+overlay before the agent starts (the image is never changed):
+
+- the PR's test changes in `/testbed` (for NuttX, in `/testbed/apps`), and
+  their build output and entries in the ctags index;
+- the test diff the image was built from, and the test names in the image's
+  runner settings (for NuttX, the runner's list of test banners);
+- the repository's history, which becomes one commit (for Mynewt, whose images
+  commit the PR's tests, after they are taken out of the tree);
+- `run_tests`, which is replaced by one that builds and runs the tests the
+  agent names, on the same board and with the same code
+  (`harness/agent_run_tests/`; NuttX runs the whole ostest suite and can
+  require named tests to have run).
+
+The task message is the problem statement only. Only the part of the test diff
+under the instance's protected paths is hidden: a file of it outside them
+(Mynewt's test support in a production file) stays as the image has it.
+`EMBEDEVAL_HIDE_TESTS=0` turns hiding off for a local run.
+
+### 13.5 What is not covered
+
+The six NuttX instances in `docker/instances/` (Docker images) are not part of
+a cluster evaluation and their tests are not hidden. OpenThread has no
+instances. `harness/results.py` does not count either.

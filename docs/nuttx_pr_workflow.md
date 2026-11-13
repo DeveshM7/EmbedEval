@@ -141,6 +141,11 @@ test change applied, and the problem statement. Nothing else:
   (`scripts/nuttx_statement.py`) that names nothing of the fix the tests do
   not use.
 
+That describes the image. When an agent is evaluated, the apps test change is
+hidden from it as well and each repository's history is made one commit
+([running_on_scholar.md, section
+13.4](running_on_scholar.md#134-what-is-hidden-from-the-agent)).
+
 `validate_instance.py` checks the image before any test
 (`scripts/nuttx_leakcheck.py`: history, refs, fix commits and fixed blobs,
 fix lines anywhere in the image, other repositories, the statement, the
@@ -183,39 +188,40 @@ python cluster/submit.py triage   --run R
 python cluster/submit.py validate --run R --arch aarch64 --after <job>
 
 # existing instances: rendered again with the current templates, statements
-# rechecked, revalidated with the leak check and 5 before runs, evaluated
+# rechecked, revalidated with the leak check and 5 before runs
 python cluster/prepare.py --name R --instances apptainer/instances/nuttx
 python cluster/submit.py statement --run R
 python cluster/submit.py validate --run R --arch aarch64 --after <statement job>
 python cluster/submit.py validate --run R --arch x86_64  --after <statement job>
-python cluster/submit.py evaluate --run R --arch aarch64 --model qwen38-nvfp4 --after <job>
-python cluster/submit.py evaluate --run R --arch x86_64  --model qwen38-nvfp4 --after <job>
 python scripts/promote_instance.py --run-dir <runs>/R nuttx__nuttx-<k>-a<a> ...
 ```
 
-`--model` is any profile of `triage/models.json` (or a hosted model
-`harness/paths.py` knows); every model gets `evaluate.step_limit` (50) and
-`evaluate.time_limit` (0: no per-instance time limit), recorded with each
-result. These are the same limits as the Zephyr and RIOT baseline. A GPU node serves the model
-itself to its own agents; an x86 evaluate job submits a model-server job of
-as many GPU nodes as it has nodes (one server each, so every server has as
-many agents as on a GPU node: `--max-num-seqs 4`, two agents), each x86
-node reaches its own over SSH, and the evaluate job cancels the server job
-when its workers are done (the account
-runs two jobs at once, so the ARM64 evaluate job queues meanwhile). Each evaluation is labeled by
-model and limits (`qwen38-nvfp4-50steps`, or `qwen38-nvfp4-50steps-80min`
-under a time limit of 80 minutes): its status is
-`evaluate:<label>` and its trajectories, patches and grades are under
-`<run>/outputs/<label>/`, so models and limits are compared on the same
-instances without overwriting each other. The report counts agent outcomes
-per label as pass, fail, timeout (a time limit, not the patch), steps
-(the step limit) and unfinished. With no time limit a run is bounded only by
-the end of its job: no new run starts with less than `evaluate.min_minutes_left`
-(90) of the job left, and a run the job's end cuts off is not graded and is run
-again by the next job; one cut off twice is unfinished (it did not finish
-within a full job). With qwen38-nvfp4 on a Spark node, two agents per node, a
-step took 80-100 s, so 50 steps need about 80 minutes; size `caps.validate_phase`
-(the evaluate job's length) so a run has that much of it left.
+### Evaluating a model
+
+An evaluation of the 29 Apptainer instances is not a phase of `submit.py`.
+It takes **two submissions**, one per architecture, with the same
+`EVAL_MODEL`; they share one queue and one results tree
+(`<eval dir>/<model>/nuttx/<kernel PR>-a<apps PR>/`):
+
+```bash
+# the 18 aarch64 instances, on the Spark nodes themselves
+sbatch -N 10 --export=NONE,EVAL_MODEL=qwen38-nvfp4 \
+    -o $SCRATCH/embedeval/eval/logs/%x-%j.out cluster/templates/eval_nuttx.sbatch
+# the 11 x86_64 instances: servers on Spark, agents on the cpu partition
+sbatch --export=NONE,EVAL_MODEL=qwen38-nvfp4 \
+    -o $SCRATCH/embedeval/eval/logs/%x-%j.out cluster/templates/eval_nuttx_x86.sbatch
+```
+
+An instance is taken only by the job of its architecture (`host_arch`), so the
+other job's instances stay "to do" in `python harness/results.py --project
+nuttx` until it has run. The images are not published: each worker builds an
+instance's image before its run and removes it afterwards. The runners'
+settings, the rules every evaluation follows (250 steps, 120 minutes per run,
+no network, one commit of history, the PR's tests hidden, a run is tested only
+if the agent submitted it), the Python environment the x86 runner needs and
+what a cluster evaluation does not cover (the six Docker instances in
+`docker/instances/`) are in [running_on_scholar.md, section
+13](running_on_scholar.md#13-evaluating-on-the-cluster).
 
 The triage tools read full bare clones of both repositories, linked where the
 scripts look for them:

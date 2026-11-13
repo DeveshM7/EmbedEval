@@ -2,10 +2,12 @@
 
 A benchmark for evaluating LLM coding agents on **embedded RTOS bug fixes**.
 
-Each task is a real merged pull request from Zephyr, NuttX, RIOT, or Apache Mynewt. The agent
-gets the repository at the commit *before* the fix, plus the tests the PR added.
-It has to make those tests pass. Everything runs inside a container with a real
-cross-compiler toolchain, so a patch only counts if the firmware actually builds
+Each task is a real merged pull request from Zephyr, NuttX, RIOT, Apache Mynewt,
+or Contiki-NG. The agent gets the repository at the commit *before* the fix and
+a problem statement. The tests the PR added are hidden from it and decide the
+grade: it has to make them pass (see
+[Evaluating on the cluster](#evaluating-on-the-cluster)). Everything runs inside
+a container with a real cross-compiler toolchain, so a patch only counts if the firmware actually builds
 and the tests actually run.
 
 - **Zephyr** instances are built, validated and run with Zephyr's own test
@@ -21,19 +23,17 @@ and the tests actually run.
   [NuttX in Apptainer](#nuttx-in-apptainer)), each validated with a leak
   check, no network and 5 deterministic before runs.
 - **RIOT** instances are **Docker** images in `docker/instances/`.
-
 - **Mynewt** has 63 validated Apptainer instances under
   `apptainer/instances/mynewt/`, built and run on Linux x86_64 with
-  `hw/bsp/native` and `compiler/sim`.
-
+  `hw/bsp/native` and `compiler/sim`; see [Apache Mynewt](#apache-mynewt).
 - **Contiki-NG** instances run the upstream native unit tests or Cooja
   scenarios in the upstream CI image of the base's era (Apptainer), with no
-  network; see section 12 of [docs/running_on_scholar.md](docs/running_on_scholar.md).
+  network; see [Contiki-NG](#contiki-ng).
 
-**Instances:** 18 Zephyr (validated, in `apptainer/instances/`), 29 NuttX (in
+**Instances:** 204 Zephyr and 190 RIOT (`apptainer/instances/`), 29 NuttX (in
 `apptainer/instances/nuttx/`: 18 ARM64, 11 x86_64 hosts; and 6 Docker ones in
-`docker/instances/`), 3 RIOT, 63 Apache Mynewt, and 38 Contiki-NG
-(`apptainer/instances/contiki-ng/`).
+`docker/instances/`), 63 Apache Mynewt (`apptainer/instances/mynewt/`), and 38
+Contiki-NG (`apptainer/instances/contiki-ng/`).
 
 ---
 
@@ -132,13 +132,14 @@ Every command takes the same three selection flags:
 ```bash
 --instance zephyr__zephyr-65697    # one or more, space separated
 --repo nuttx                       # every instance in one project
---all                              # all 58
+--all                              # all 530
 ```
 
 Instance ids are `<project>__<project>-<PR>`, matching the directory names under
-`apptainer/instances/` (Zephyr), `apptainer/instances/nuttx/` (NuttX, Apptainer;
-ids `nuttx__nuttx-<kernel PR>-a<apps PR>`) and `docker/instances/` (RIOT). Use
-lowercase. `EMBEDEVAL_INSTANCES_DIR` points every command at another folder
+`apptainer/instances/` (Zephyr, RIOT), `apptainer/instances/nuttx/` (NuttX, Apptainer;
+ids `nuttx__nuttx-<kernel PR>-a<apps PR>`), `apptainer/instances/mynewt/`,
+`apptainer/instances/contiki-ng/` and `docker/instances/` (the remaining Docker
+ones). Use lowercase. `EMBEDEVAL_INSTANCES_DIR` points every command at another folder
 instead -- `generated/`, say, to work on instances before they are promoted.
 
 ## Selecting models
@@ -163,11 +164,16 @@ spending money.
 ## Where results go
 
 ```
-outputs/<project>/<model>/<PR>/
+<eval dir>/<model>/<project>/<PR>/
     patch.diff          the agent's changes
     trajectory.json     every message, command, and result
-outputs/results.json    grades from the last evaluate run
+    run.json            how the run ended
+    grade.json          pass, fail or not_run
 ```
+
+`<eval dir>` is `outputs/` in the repository, `$SCRATCH/embedeval/eval` when
+`SCRATCH` is set (on the cluster), or `EMBEDEVAL_EVAL_DIR`. `python
+harness/results.py` gathers the folders into one table per project.
 
 ---
 
@@ -194,7 +200,10 @@ valid instance whose recipe still matches that fingerprint.
 
 The agent is given the problem statement and a shell. It never sees the real
 fix. Test files are protected — the runner diffs against `protected_paths` and
-warns if the agent edited them, so it cannot pass by rewriting the test.
+warns if the agent edited them, so it cannot pass by rewriting the test. For
+Zephyr, RIOT, Mynewt, Contiki-NG and the Apptainer NuttX instances the PR's
+tests are not in the agent's container at all (see
+[Evaluating on the cluster](#evaluating-on-the-cluster)).
 
 Grading happens in a **fresh container** (for Zephyr, a fresh overlay on the
 image), not the one the agent worked in. Only
@@ -266,9 +275,10 @@ together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 ## Apache Mynewt
 
 The 63 promoted instances (`apptainer/instances/mynewt/`) build and run on Linux
-x86_64 (historical native builds need multilib). An agent run gets exactly the
-task: mynewt-core at the base commit with the PR's tests committed (history:
-that one commit, fetched `--depth 1`) and the problem statement.
+x86_64 (historical native builds need multilib). The image holds mynewt-core at
+the base commit with the PR's tests committed (history: that one commit,
+fetched `--depth 1`); an agent run gets that repository with the PR's tests
+taken out, and the problem statement.
 It does not get the files the fix changed (SWE-bench's "oracle" setting), a
 network (every container command runs in its own network namespace:
 `scripts/mynewt_network.py`), the fix's history, or the newt sources (they hold
@@ -282,17 +292,16 @@ python harness/run.py --instance mynewt__mynewt-3680 --model <model> -v
 python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <model>
 ```
 
-On Scholar, campaigns, revalidations and agent evaluations run through
-`cluster/` (triage on Spark, validation and agents on the x86 `cpu`
-partition, each agent node with a model server of its own on Spark):
+On Scholar, campaigns and revalidations run through `cluster/` (triage on
+Spark, validation on the x86 `cpu` partition):
 [docs/running_on_scholar.md, section 11](docs/running_on_scholar.md#11-mynewt-runs).
-Each evaluation is labeled by model and limits and keeps its own status and
-outputs. By default an agent gets 50 steps and no wall-time limit per instance
-(`evaluate.time_limit: 0`), the same limits as the Zephyr and RIOT baseline.
-Several models queue in one call, one after the other:
+Evaluating a model on the 63 instances is one `sbatch`
+of `cluster/templates/eval_mynewt.sbatch` (a model server on Spark, the agents
+on `cpu`; [section 13](docs/running_on_scholar.md#13-evaluating-on-the-cluster)):
 
 ```bash
-python cluster/submit.py evaluate --run <run> --model qwen38-nvfp4 nemotron qwen38
+sbatch --export=NONE,EVAL_MODEL=qwen38-nvfp4 \
+    -o $SCRATCH/embedeval/eval/logs/%x-%j.out cluster/templates/eval_mynewt.sbatch
 ```
 
 The [Mynewt triage document](docs/mynewt_triage.md) is the triage model's
@@ -353,12 +362,18 @@ python harness/evaluate_patches.py --instance nuttx__nuttx-11889-a2327 --model <
 - **Speed.** Builds in an overlay on `/scratch` are slower than in a plain
   directory: a full sim:nsh build takes about two minutes, an ostest run
   about two.
+- **Evaluating a model** on the 29 instances takes two `sbatch` submissions
+  with the same `EVAL_MODEL`, one per architecture
+  (`cluster/templates/eval_nuttx.sbatch` for the 18 aarch64 instances,
+  `eval_nuttx_x86.sbatch` for the 11 x86_64 ones); see
+  [docs/nuttx_pr_workflow.md](docs/nuttx_pr_workflow.md#evaluating-a-model).
+  The six Docker instances in `docker/instances/` are not part of it.
 
 ## Contiki-NG
 
 The promoted instances (`apptainer/instances/contiki-ng/`) build and run on
 Linux x86_64 with Apptainer. An agent run gets the problem statement and the
-repository at the base commit with the PR's tests; not the fix, its history,
+repository at the base commit without the PR's tests; not the fix, its history,
 the fail-to-pass lists, or a network (every agent, validation and grading
 command runs with `--net --network none`). Validation checks that on each image
 before any test runs (`scripts/contiki_ng_leakcheck.py`) and requires five
@@ -372,14 +387,37 @@ python harness/evaluate_patches.py --instance contiki-ng__contiki-ng-3246 --mode
 ```
 
 `<model>` is a hosted model or a profile of `triage/models.json` served at
-`EMBEDEVAL_LOCAL_API_BASE`. On Scholar, triage, validation and evaluating
-several open-weight models on one run go through `cluster/`
-(`python cluster/submit.py evaluate --run R --model A B C --queue`; by
-default 50 steps and no time limit per instance, the same limits as the Zephyr
-and RIOT baseline):
-[docs/running_on_scholar.md, section 12](docs/running_on_scholar.md#12-contiki-ng-runs).
+`EMBEDEVAL_LOCAL_API_BASE`. On Scholar, triage and validation go through
+`cluster/`
+([docs/running_on_scholar.md, section 12](docs/running_on_scholar.md#12-contiki-ng-runs)),
+and evaluating a model on the 38 instances is one `sbatch` of
+`cluster/templates/eval_contiki_ng.sbatch`
+([section 13](docs/running_on_scholar.md#13-evaluating-on-the-cluster)).
 The [Contiki-NG triage document](docs/contiki_ng_triage.md) is the triage
 model's instructions.
+
+---
+
+## Evaluating on the cluster
+
+On Scholar a model is evaluated on a whole project with one `sbatch` of a
+runner template, `cluster/templates/eval_<project>.sbatch` (NuttX has two,
+`eval_nuttx.sbatch` and `eval_nuttx_x86.sbatch`), whose header comment lists
+its settings. Every project runs under the same rules: 250 steps and 120
+minutes per run, no network, a repository with exactly one commit of history,
+and the PR's tests hidden from the agent, which has a `run_tests` that runs the
+tests it names (`EMBEDEVAL_HIDE_TESTS=0` turns hiding off for a local run). Only
+a run the agent submitted is tested; an infrastructure error is retried once and
+then recorded as `not_run`, not as a fail. A local `harness/run.py` run follows
+the same rules.
+
+Mynewt, NuttX and Contiki-NG images are not published: a worker builds each
+instance's image inside the job, before its run, and removes it after grading.
+Each of those instances runs on one architecture only (Mynewt and Contiki-NG:
+x86_64; NuttX: 18 aarch64 and 11 x86_64). The six NuttX instances in
+`docker/instances/` and OpenThread (no instances) are not part of cluster
+evaluation and have no hidden tests. Settings, results and what is hidden:
+[docs/running_on_scholar.md, section 13](docs/running_on_scholar.md#13-evaluating-on-the-cluster).
 
 ---
 
@@ -387,9 +425,11 @@ model's instructions.
 
 ```
 harness/            run.py, evaluate_patches.py, paths.py, projects.py,
-                    apptainer_env.py (Zephyr agent environment)
-cluster/            the Zephyr pipeline on Scholar: config, setup.py, prepare.py,
-                    submit.py, node_worker.py, report.py, the job template
+                    apptainer_env.py (Zephyr agent environment), eval_worker.py,
+                    results.py, hidden_tests.py (the cluster evaluation)
+cluster/            the pipeline on Scholar: config, setup.py, prepare.py,
+                    submit.py, node_worker.py, report.py, the job templates;
+                    templates/eval_*.sbatch are the evaluation runners
 docs/               running_on_scholar.md (using the pipeline),
                     pipeline_internals.md (how it works), pr_triage.md (the
                     model's triage instructions; contiki_ng_triage.md for
@@ -402,10 +442,12 @@ scripts/            Zephyr pipeline: filter_candidates.py, zephyr_env.py,
                     Docker side: build_bases.py, build_config.py
 templates/zephyr/   Apptainer recipes, run_tests, lookup tables
 docker/bases/       Docker base images (NuttX, RIOT)
-docker/instances/   RIOT instances; the hand-built Zephyr ones are
-                    kept as reference metadata only and are not built
-apptainer/instances/  validated Zephyr instances: the benchmark (recipes; images
-                    are built from them); nuttx/ holds the validated NuttX ones
+docker/instances/   RIOT and the six Docker NuttX instances; the hand-built
+                    Zephyr ones are kept as reference metadata only and are
+                    not built
+apptainer/instances/  validated Zephyr and RIOT instances: the benchmark (recipes;
+                    images are built from them); nuttx/, mynewt/ and contiki-ng/
+                    hold those projects' validated instances
 generated/          Zephyr instances being generated and validated (not in git)
 outputs/            agent runs and grades
 archive/            superseded work, kept for provenance

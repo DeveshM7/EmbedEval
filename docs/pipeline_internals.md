@@ -68,6 +68,8 @@ Two layers, kept apart on purpose:
 | `claims.py` | (library) | the work queue of a phase: who has which PR, and taking over PRs of a node that died (4.3) | `claims/` |
 | `ledger.py` | (library) | every PR's settled outcome across runs: which outcomes count as settled, `latest`, `record` (under a lock) | `shared/ledger.jsonl` |
 | `templates/pipeline.sbatch` | -- | the job script template | -- |
+| `templates/phase.sbatch` | -- | the job script template of one phase (`triage`, `observe`, `statement`, `validate`), submitted by `submit.py` for Mynewt, NuttX and Contiki-NG runs (running_on_scholar.md, sections 11 and 12) | -- |
+| `templates/eval_<project>.sbatch` | -- | the evaluation runners, submitted with `sbatch` directly, not by `submit.py` (running_on_scholar.md, section 13) | -- |
 
 ### 2.2 `scripts/`, the pipeline stages
 
