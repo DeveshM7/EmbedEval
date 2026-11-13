@@ -511,13 +511,19 @@ def combine() -> dict:
                 p = out / f"leak{k}.json"
                 lk = (json.loads(p.read_text())["result"] if p.exists() else None) or {}
                 new = r["new_statement"]
+                fragment = False
                 if lk.get("leak") == "minor" and lk.get("suggested_statement"):
-                    new = lk["suggested_statement"]
+                    # The leak checker's cleaned statement, if it is a whole statement: one far
+                    # shorter than the rewrite is only the sentence it changed (seen: Mynewt 1174).
+                    if len(lk["suggested_statement"]) >= 0.5 * len(new):
+                        new = lk["suggested_statement"]
+                    else:
+                        fragment = True
                 mech, notes = mechanical_issues(new, task)
                 cand = {"judge": k, "new_statement": new, "leak_check": lk, "mechanical": mech,
                         "notes": notes, "added": r.get("added") or []}
                 good = lk.get("decision") == "accept" and lk.get("accurate") is True \
-                    and lk.get("leak") in ("none", "minor") and not mech
+                    and lk.get("leak") in ("none", "minor") and not mech and not fragment
                 score = (good, lk.get("complete") or 0, -len(new))
                 if best is None or score > best[0]:
                     best = (score, cand)
@@ -570,7 +576,9 @@ def folder_of(iid: str) -> Path:
 
 
 def r_orig(iid: str) -> str:
-    return json.loads((folder_of(iid) / "metadata.json").read_text())["problem_statement"]
+    """The original statement, as `prepare` recorded it (the instance's folder may be gone:
+    a removed worktree)."""
+    return json.loads((WORK / "tasks" / f"{iid}.json").read_text())["statement"]
 
 
 # -- step 4: apply -------------------------------------------------------------
