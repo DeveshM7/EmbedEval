@@ -6,18 +6,47 @@ instead of the <tool_call>...</tool_call> its chat template asks for: the JSON
 is right, the tag is the one the template uses to list the tools. The Hermes
 parser looks only for <tool_call>, so every such reply would reach the agent
 as text with no tool call (a format error). This parser renames the tag and
-leaves the rest to the Hermes parser. Its SWE-bench bash-only score was
+leaves the rest to the Hermes parser. It also writes a call as bare JSON with no
+tags at all; a reply that is only that (optionally in a code fence) is read as
+the call. Prose, or prose around JSON, stays text: a format error, as it
+should be. Its SWE-bench bash-only score was
 measured with mini-swe-agent 1.0, whose actions are text, not tool calls.
 
 Loaded with --tool-parser-plugin <this file> --tool-call-parser qwen25_coder.
 """
 
+import json
+import re
+
 from vllm.tool_parsers.abstract_tool_parser import ToolParserManager
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
+_FENCE = re.compile(r"^```[a-zA-Z]*\s*\n?(.*?)\n?```$", re.DOTALL)
+
+
+def _is_call(obj) -> bool:
+    return isinstance(obj, dict) and isinstance(obj.get("name"), str) and "arguments" in obj
+
 
 def _retag(text: str) -> str:
-    return text.replace("<tools>", "<tool_call>").replace("</tools>", "</tool_call>")
+    """<tools> -> <tool_call>; and a reply that is nothing but a tool call as bare
+    JSON (no tags), optionally in a code fence, is wrapped in <tool_call> tags.
+    Anything else (prose, or prose around JSON) is left as it is."""
+    text = text.replace("<tools>", "<tool_call>").replace("</tools>", "</tool_call>")
+    if "<tool_call>" in text:
+        return text
+    body = text.strip()
+    m = _FENCE.match(body)
+    if m:
+        body = m.group(1).strip()
+    try:
+        obj = json.loads(body)
+    except ValueError:
+        return text
+    calls = obj if isinstance(obj, list) else [obj]
+    if calls and all(_is_call(c) for c in calls):
+        return "".join(f"<tool_call>\n{json.dumps(c)}\n</tool_call>" for c in calls)
+    return text
 
 
 @ToolParserManager.register_module("qwen25_coder")
