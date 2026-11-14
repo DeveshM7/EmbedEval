@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import hidden_tests
 import paths
 import projects
 
@@ -169,15 +170,66 @@ def build_prompts(meta: dict) -> tuple[str, str]:
     protected = " or ".join(f"`{p}`" for p in cfg["protected_paths"])
     warn = cfg["extra_warnings"]
     system = SYSTEM_TEMPLATE.format(
-        label=cfg["label"], orientation=cfg["orientation"]
+        label=cfg["label"], orientation=_orientation(meta, cfg["orientation"])
     )
+    hide = hidden_tests.applies(meta)
     instance = INSTANCE_TEMPLATE.format(
         protected=protected,
         extra_warnings=f"\n{warn}\n" if warn else "",
         build_and_test=_build_and_test(meta),
-        test_help=TEST_HELP.get(meta["project"], TEST_HELP["default"]),
+        test_help=(hidden_tests.RUNNING_TESTS + "\n\n" + _HANG.format(code=" (exit code 2)")) if hide
+        else TEST_HELP.get(meta["project"], TEST_HELP["default"]),
     )
+    if hide:      # the PR's tests are hidden (harness/hidden_tests.py)
+        system = _swap(system, _SYSTEM_RULE, hidden_tests.SYSTEM_RULE)
+        instance = _swap(instance, _PROTECTED_RULE.format(protected=protected),
+                         hidden_tests.PROTECTED_RULE.format(protected=protected))
+        instance = _swap(instance, _RULE_3_END, _RULE_3_END + "\n" + hidden_tests.SUBMIT_RULE)
+        instance = _swap(instance, _WORKFLOW_STEP3.format(build_and_test=_build_and_test(meta)),
+                         hidden_tests.WORKFLOW)
+        instance = _swap(instance, "Mandatory workflow:",
+                         hidden_tests.TESTING_AND_SUBMITTING + "Mandatory workflow:")
+    if meta["project"] == "nuttx":    # NuttX images build no ctags index
+        instance = _swap(instance, _CTAGS_LINE, "")
     return system, instance
+
+
+_CTAGS_LINE = '- ctags index: grep "function_name" /testbed/tags\n'
+_NUTTX_SIM = ("configured for sim:nsh, which produces "
+              "a native binary at /testbed/nuttx.")
+
+
+def _orientation(meta: dict, text: str) -> str:
+    """The project's orientation, with the instance's own board for a NuttX
+    instance not on the simulator (e.g. qemu-armv8a:nsh_smp)."""
+    board = meta.get("sim_config") or "sim:nsh"
+    if meta["project"] != "nuttx" or board == "sim:nsh":
+        return text
+    return _swap(text, _NUTTX_SIM,
+                 f"configured for {board}, a QEMU board: the build produces /testbed/nuttx, "
+                 "which `run_tests` boots in QEMU (it cannot be run directly).")
+
+
+# The parts of the prompt that assume the PR's tests are visible; replaced when
+# they are hidden (harness/hidden_tests.py).
+_SYSTEM_RULE = """\
+- After a successful build you MUST still run `run_tests` before submitting.
+  A passing build does NOT mean tests pass.
+"""
+_PROTECTED_RULE = "2. Do NOT modify any files under {protected}."
+_RULE_3_END = "   prefix commands with `cd /testbed &&`."
+_WORKFLOW_STEP3 = """\
+3. Build and test: `{build_and_test}`
+   - If the build fails: fix the error and repeat
+   - If run_tests shows tests FAILING: fix the bug and go back to step 3
+   - If run_tests shows all target tests PASSING: go to step 4
+"""
+
+
+def _swap(text: str, old: str, new: str) -> str:
+    if text.count(old) != 1:
+        raise RuntimeError(f"prompt: expected one copy of {old[:60]!r}")
+    return text.replace(old, new)
 
 
 _HANG = ("If `run_tests` times out{code} with no test results, your change has\n"
@@ -218,6 +270,38 @@ def _build_and_test(meta: dict) -> str:
     return f"cd /testbed && {rebuild} && run_tests" if rebuild else "cd /testbed && run_tests"
 
 
+# Which problem statement the agent gets: the verified one
+# (problem_statement_fixed, written by scripts/verify_statements.py on main)
+# where a statement was repaired, else the original. EMBEDEVAL_STATEMENT=original
+# forces the originals.
+STATEMENT = os.environ.get("EMBEDEVAL_STATEMENT", "fixed")
+
+
+def statement_of(meta: dict) -> tuple[str, str]:
+    """(the statement, which one: "fixed" or "original")."""
+    if STATEMENT != "original" and (meta.get("problem_statement_fixed") or "").strip():
+        return meta["problem_statement_fixed"], "fixed"
+    return meta["problem_statement"], "original"
+
+
+# How a run may end that is the model's doing, not ours (as on main). Only
+# Submitted is graded by running the tests; the others are fails
+# (cluster/node_worker.py). No exit_status at all is a harness error: run again.
+MODEL_ENDINGS = {"Submitted", "LimitsExceeded", "TimeExceeded", "RepeatedFormatError",
+                 "ContextWindowExceededError"}
+
+
+def _context_overflow(e: Exception) -> bool:
+    """The conversation outgrew the model's context: the model's doing, a fail,
+    as on SWE-bench. LiteLLM usually raises ContextWindowExceededError; a bare
+    400 from vLLM that says so counts too."""
+    if type(e).__name__ == "ContextWindowExceededError":
+        return True
+    text = str(e).lower()
+    return type(e).__name__ == "BadRequestError" and (
+        "maximum context length" in text or "context window" in text)
+
+
 def build_task(meta: dict) -> str:
     """The first user message: the problem statement.
 
@@ -228,10 +312,17 @@ def build_task(meta: dict) -> str:
     the repository, and `run_tests` runs them."""
     if not (meta.get("problem_statement") or "").strip():
         sys.exit(f"ERROR: {meta['instance_id']} has no problem statement; write one first")
+    statement = statement_of(meta)[0]
+    if hidden_tests.applies(meta):    # the tests are hidden: the statement alone
+        return f"""\
+## Bug Description
+
+{statement}
+"""
     return f"""\
 ## Bug Description
 
-{meta["problem_statement"]}
+{statement}
 
 ## Tests
 
@@ -268,8 +359,10 @@ def make_environment(meta: dict):
         return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
+                                    # NuttX: the PR's tests hidden (harness/hidden_tests.py)
                                     setup_commands=[commit_tests] if meta["project"] == "zephyr"
-                                    else [],
+                                    else [hidden_tests.setup_command(meta)]
+                                    if hidden_tests.applies(meta) else [],
                                     # NuttX: no network for the agent
                                     network=meta["project"] != "nuttx")
 
@@ -428,6 +521,8 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
         "protected_touched": [],
         "elapsed_seconds": 0.0,
         "error": None,
+        "tests_hidden": hidden_tests.applies(meta),
+        "statement": statement_of(meta)[1],
     }
     start = time.time()
     env, captured, base = None, False, "HEAD"
@@ -471,6 +566,8 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
         raise
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
+        if _context_overflow(e):       # the model's doing: a fail, as on SWE-bench
+            result["exit_status"] = "ContextWindowExceededError"
         print(f"  ERROR: {result['error']}")
     finally:
         _CURRENT.clear()
@@ -537,11 +634,12 @@ def main() -> None:
     sel.add_argument("--all", action="store_true", help="every instance, all projects")
     p.add_argument("--model", nargs="+", required=True,
                    help="one or more models (full LiteLLM name or shorthand)")
-    p.add_argument("--step-limit", type=int, default=50)
+    p.add_argument("--step-limit", type=int, default=250)
     p.add_argument("--cost-limit", type=float, default=3.0)
-    p.add_argument("--time-limit", type=float, default=0,
+    p.add_argument("--time-limit", type=float, default=120,
                    help="minutes of wall-clock time per run, checked before each model "
-                        "call; the patch is captured as usual (default 0: no limit)")
+                        "call; the patch is captured as usual (default 120, as on main; "
+                        "0: no limit)")
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="print the planned runs and exit without starting containers")

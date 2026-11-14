@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -176,6 +177,7 @@ class Submit(unittest.TestCase):
         self.assertIn("#SBATCH --gres=gpu:1", server_script)
         self.assertIn("serve_triage_model.sh qwen38-nvfp4", server_script)
         self.assertIn("#SBATCH -N 1\n", server_script)            # one server per evaluate node
+        self.assertIn("#SBATCH -t 04:00:00\n", server_script)    # as long as its evaluate job
         self.assertIn('node$SLURM_PROCID', server_script)
         self.assertIn("server-of-$SLURM_JOB_ID", self.script("evaluate", "x86_64"))
         self.assertEqual((self.run / "jobs" / "server-of-1001").read_text().strip(), "1002")
@@ -192,6 +194,11 @@ class Submit(unittest.TestCase):
         self.assertEqual(cfg["evaluate"]["model"], "nemotron")
         self.assertNotIn("evaluate_server_job", cfg)
         self.assertNotIn("scancel", self.script("evaluate", "aarch64"))
+        # the whole job: evaluate.job_time_limit, the phase all of it but the report
+        script = self.script("evaluate", "aarch64")
+        self.assertIn("#SBATCH -t 04:00:00\n", script)
+        self.assertIn("timeout -k 2m 230m srun", script)
+        self.assertIn('EMBEDEVAL_PHASE_END="$PHASE_END"', script)
 
     def test_unknown_model(self):
         r = self.s.run("submit.py", "evaluate", "--run", self.run.name, "--arch", "aarch64",
@@ -257,10 +264,12 @@ class Worker(unittest.TestCase):
         cfg["nuttx"]["data"] = str(self.s.root / "data")
         (self.s.root / "data").mkdir()
         cfg["evaluate"]["time_limit"] = 40
-        label = "qwen38-nvfp4-50steps-40min"
+        label = "qwen38-nvfp4-250steps-40min"
         out = self.run / "outputs" / label / "nuttx" / "qwen38-nvfp4" / "11889-a2327"
+        graded = []
 
         def fake_step(cmd, logfile, minutes, env, cwd=REPO):
+            graded.extend(c for c in cmd if c == "harness/evaluate_patches.py")
             if "harness/run.py" in cmd:
                 out.mkdir(parents=True, exist_ok=True)
                 (out / "result.json").write_text(json.dumps(
@@ -281,9 +290,12 @@ class Worker(unittest.TestCase):
         self.assertEqual(start.call_args[0][3], "qwen38-nvfp4")
         kill.assert_called_with(4242)
         ev = status.read(self.run, 2327)[f"evaluate:{label}"]
-        self.assertEqual((ev["state"], ev["grade"], ev["timed_out"], ev["steps"], ev["network"]),
-                         ("done", "fail", True, 31, "isolated"))
-        self.assertEqual(ev["limits"], {"steps": 50, "minutes": 40})
+        # not submitted (the time limit): a fail, never graded (as main)
+        self.assertEqual((ev["state"], ev["grade"], ev["timed_out"], ev["steps"], ev["tests_run"]),
+                         ("done", "fail", True, 31, False))
+        self.assertEqual(ev["error"], "not submitted (run ended: TimeExceeded)")
+        self.assertEqual(graded, [])
+        self.assertEqual(ev["limits"], {"steps": 250, "minutes": 40})
         self.assertEqual(status.evaluate_todo(self.run, label), [])
         self.assertEqual(status.evaluate_todo(self.run, "qwen38-nvfp4-50steps-80min"), [2327])
         # a git-generated diff that git apply calls corrupt is the harness's fault: run again
@@ -313,12 +325,12 @@ class Worker(unittest.TestCase):
                 mock.patch.object(node_worker, "server_alive", return_value=False), \
                 mock.patch.object(node_worker, "kill_group"):
             node_worker.evaluate(cfg, self.run, {}, self.s.root / "node")
-        label = "qwen38-nvfp4-50steps-40min"
+        label = "qwen38-nvfp4-250steps-40min"
         self.assertEqual(status.read(self.run, 2327)[f"evaluate:{label}"]["state"], "failed")
         self.assertEqual(status.evaluate_todo(self.run, label), [2327])
 
 
-    def run_evaluate(self, minutes, left=170, agent_rc=0):
+    def run_evaluate(self, minutes, left=170, agent_rc=0, ending="Submitted"):
         """evaluate() on instance 2327 with evaluate.time_limit `minutes` and `left`
         minutes of the job (validate_phase = left + 3) left; returns the commands run."""
         status.write_stage(self.run, 2327, "validate", {"state": "done", "outcome": "VALID"})
@@ -330,9 +342,15 @@ class Worker(unittest.TestCase):
         cfg["caps"]["validate_phase"] = left + 3
         calls = []
 
+        label = status.eval_label(cfg["evaluate"])
+        out = self.run / "outputs" / label / "nuttx" / "qwen38-nvfp4" / "11889-a2327"
+
         def fake_step(cmd, logfile, mins, env, cwd=REPO):
             calls.append((cmd, mins))
             if "harness/run.py" in cmd:
+                if ending is not None:
+                    out.mkdir(parents=True, exist_ok=True)
+                    (out / "result.json").write_text(json.dumps({"exit_status": ending, "steps": 3}))
                 return agent_rc
             if "harness/evaluate_patches.py" in cmd:
                 Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(
@@ -365,18 +383,61 @@ class Worker(unittest.TestCase):
         cmd, cap = next(c for c in calls if "harness/run.py" in c[0])
         self.assertEqual(cmd[cmd.index("--time-limit") + 1], "0")
         self.assertAlmostEqual(cap, 170 - 30, delta=1)       # less the grading margin, not 20
-        self.assertEqual(status.read(self.run, 2327)["evaluate:qwen38-nvfp4-50steps"]["grade"], "fail")
+        self.assertEqual(status.read(self.run, 2327)["evaluate:qwen38-nvfp4-250steps"]["grade"], "fail")
 
     def test_positive_limit_cap_unchanged(self):
         cmd, cap = next(c for c in self.run_evaluate(40) if "harness/run.py" in c[0])
         self.assertEqual((cmd[cmd.index("--time-limit") + 1], cap), ("40", 60))
 
     def test_no_new_run_with_less_than_min_minutes_left(self):
-        self.assertFalse([c for c in self.run_evaluate(0, left=80) if "harness/run.py" in c[0]])
-        self.assertEqual(status.evaluate_todo(self.run, "qwen38-nvfp4-50steps"), [2327])
+        self.assertFalse([c for c in self.run_evaluate(0, left=50) if "harness/run.py" in c[0]])
+        self.assertEqual(status.evaluate_todo(self.run, "qwen38-nvfp4-250steps"), [2327])
+
+    def test_time_limited_run_starts_until_the_last_hour(self):
+        # as main's EVAL_MARGIN: a 120-min run starts with 61 min left, not with 59
+        self.assertFalse([c for c in self.run_evaluate(120, left=59) if "harness/run.py" in c[0]])
+        self.assertEqual(status.evaluate_todo(self.run, "qwen38-nvfp4-250steps-120min"), [2327])
+        cmd, cap = next(c for c in self.run_evaluate(120, left=100) if "harness/run.py" in c[0])
+        self.assertEqual(cmd[cmd.index("--time-limit") + 1], "120")
+        self.assertAlmostEqual(cap, 100 - 30, delta=1)       # the time left, less grading
+
+    def test_only_a_submitted_run_is_graded(self):
+        label = "qwen38-nvfp4-250steps-120min"
+        for ending in ("LimitsExceeded", "RepeatedFormatError", "ContextWindowExceededError"):
+            status.write_stage(self.run, 2327, f"evaluate:{label}", {"state": "failed"})   # to do again
+            calls = self.run_evaluate(120, ending=ending)
+            self.assertFalse([c for c in calls if "harness/evaluate_patches.py" in c[0]], ending)
+            ev = status.read(self.run, 2327)[f"evaluate:{label}"]
+            self.assertEqual((ev["state"], ev["grade"], ev["tests_run"]), ("done", "fail", False), ending)
+        status.write_stage(self.run, 2327, f"evaluate:{label}", {"state": "failed"})
+        calls = self.run_evaluate(120, ending="Submitted")
+        self.assertTrue([c for c in calls if "harness/evaluate_patches.py" in c[0]])
+        self.assertTrue(status.read(self.run, 2327)[f"evaluate:{label}"]["tests_run"])
+
+    def test_run_with_no_ending_runs_again(self):
+        # no exit_status (setup or harness error, e.g. hiding the tests): not the agent's
+        label = "qwen38-nvfp4-250steps-120min"
+        calls = self.run_evaluate(120, ending=None)
+        self.assertFalse([c for c in calls if "harness/evaluate_patches.py" in c[0]])
+        self.assertEqual(status.read(self.run, 2327)[f"evaluate:{label}"]["state"], "failed")
+        self.assertEqual(status.evaluate_todo(self.run, label), [2327])
+
+    def test_deadline_is_the_phase_end(self):
+        # phase.sbatch's EMBEDEVAL_PHASE_END, not caps.validate_phase (set to 1000 here)
+        with mock.patch.dict(os.environ, {"EMBEDEVAL_PHASE_END": str(time.time() + 103 * 60)}):
+            cmd, cap = next(c for c in self.run_evaluate(120, left=1000) if "harness/run.py" in c[0])
+        self.assertAlmostEqual(cap, 100 - 30, delta=1)
+
+    def test_time_limited_run_cut_by_the_job_runs_again(self):
+        label = "qwen38-nvfp4-250steps-120min"
+        calls = self.run_evaluate(120, left=100, agent_rc=124)
+        self.assertFalse([c for c in calls if "harness/evaluate_patches.py" in c[0]])   # never graded
+        ev = status.read(self.run, 2327)[f"evaluate:{label}"]
+        self.assertEqual((ev["cut_short"], ev["cuts"]), (True, 1))
+        self.assertEqual(status.evaluate_todo(self.run, label), [2327])
 
     def test_cut_short_runs_again_then_is_final(self):
-        label = "qwen38-nvfp4-50steps"
+        label = "qwen38-nvfp4-250steps"
         calls = self.run_evaluate(0, agent_rc=124)
         self.assertFalse([c for c in calls if "harness/evaluate_patches.py" in c[0]])   # never graded
         ev = status.read(self.run, 2327)[f"evaluate:{label}"]

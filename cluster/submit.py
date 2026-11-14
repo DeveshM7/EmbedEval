@@ -163,12 +163,16 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
     if x86 and not s["build_partition"]:
         sys.exit("slurm.build_partition must name an x86 CPU partition (e.g. cpu)")
     partition = s["build_partition"] if x86 else s["partition"]
-    if minutes(s["time_limit"]) > 240:
+    # An evaluate job is evaluate.job_time_limit long and its phase takes all of it
+    # but the report (and timeout's 2-minute kill grace): runs have the whole job.
+    job_limit = cfg["evaluate"]["job_time_limit"] if mode == "evaluate" else s["time_limit"]
+    if minutes(job_limit) > 240:
         sys.exit("Scholar jobs may not exceed four hours")
-    phase_min = caps["triage_phase"] if mode in ("triage", "statement") else caps["validate_phase"]
-    if phase_min + REPORT_MIN > minutes(s["time_limit"]):
+    phase_min = (caps["triage_phase"] if mode in ("triage", "statement") else
+                 minutes(job_limit) - REPORT_MIN - 5 if mode == "evaluate" else caps["validate_phase"])
+    if phase_min + REPORT_MIN > minutes(job_limit):
         sys.exit(f"the {mode} phase cap ({phase_min} min) leaves no time for the report "
-                 f"within slurm.time_limit {s['time_limit']}")
+                 f"within the job's time limit {job_limit}")
     if mode == "evaluate":
         if args.model:
             cfg["evaluate"]["model"] = args.model
@@ -225,7 +229,7 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
         cpus=s["build_cpus_per_node"] if x86 else s["cpus_per_node"],
         # Scholar's GPU partitions take only jobs that request a GPU
         gres_line="" if x86 or not s["gres"] else f"#SBATCH --gres={s['gres']}\n",
-        mem=s["build_mem"] if x86 else s["mem"], time_limit=s["time_limit"],
+        mem=s["build_mem"] if x86 else s["mem"], time_limit=job_limit,
         name=name, run=run, repo=source, config=frozen, python=python, phase=mode,
         phase_min=phase_min, stamp=stamp, path_prefix=f"{extra_path}:" if extra_path else "",
         # the server this job started serves it alone; it ends with the
@@ -250,7 +254,7 @@ def submit_phase(args, cfg: dict, run: Path) -> None:
         server_script = jobs / f"server-{arch}-{stamp}.sbatch"
         server_script.write_text((CLUSTER / "templates" / "server.sbatch").read_text().format(
             partition=s["partition"], cpus=s["cpus_per_node"], gres=s["gres"], mem=s["mem"],
-            time_limit=s["time_limit"], name=f"{name}-server", jobs=jobs, model=cfg["evaluate"]["model"],
+            time_limit=job_limit, name=f"{name}-server", jobs=jobs, model=cfg["evaluate"]["model"],
             eval_job=job, stamp=stamp, source=source, grace=SERVER_GRACE_MIN, server_nodes=wanted,
             warm_cache=cfg["derived"]["vllm_cache"]))
         r = subprocess.run(["sbatch", "--parsable", "--export=" + server_export(cfg, run, stamp),

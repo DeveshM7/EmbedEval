@@ -15,8 +15,8 @@ separate jobs (submit.py statement / validate / evaluate):
     evaluate.state  done            "grade" pass / fail / ..., "exit_status", "timed_out",
                                     "model", "steps", "limits"
                     failed          not the agent's outcome (build, server, cap): done again
-                    done, "cut_short"  the run was cut off by the end of the job (no time
-                                    limit): "cuts" counts them; done again until CUT_SHORT_MAX
+                    done, "cut_short"  the run was cut off by the end of the job (before its
+                                    time limit): "cuts" counts them; done again until CUT_SHORT_MAX
 
 A stage appears only once it has finished, one way or another:
 
