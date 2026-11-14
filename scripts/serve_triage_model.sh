@@ -47,7 +47,7 @@ PORT="${PORT:-8000}"
 HOST="${HOST:-127.0.0.1}"
 GPU_MEMORY="${GPU_MEMORY:-0.80}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
+# MAX_MODEL_LEN: the environment, else the profile's max_model_len, else 262144.
 if [ "$HOST" != 127.0.0.1 ] && [ -z "${VLLM_API_KEY:-}" ]; then
     echo "HOST=$HOST needs VLLM_API_KEY: this would open the server to the whole cluster" >&2
     exit 1
@@ -64,6 +64,7 @@ if sys.argv[2] not in profiles or sys.argv[2].startswith("_"):
              + ", ".join(k for k in profiles if not k.startswith("_")))
 p, models = profiles[sys.argv[2]], os.environ["EMBEDEVAL_MODELS"]
 print(f"{models}/{p['weights']}")
+print(f"MAXLEN {p.get('max_model_len', 262144)}")
 for k, v in p.get("env", {}).items():
     print(f"ENV {k}={v}")
 for a in p["vllm_args"]:
@@ -71,6 +72,9 @@ for a in p["vllm_args"]:
 PY
 )
 WEIGHTS="${ARGS[0]}"
+PROFILE_MAXLEN="${ARGS[1]#MAXLEN }"
+ARGS=("${ARGS[0]}" "${ARGS[@]:2}")
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-$PROFILE_MAXLEN}"
 SERVE_ARGS=()
 for a in "${ARGS[@]:1}"; do
     if [[ "$a" == ENV\ * ]]; then export "APPTAINERENV_${a#ENV }"; else SERVE_ARGS+=("$a"); fi

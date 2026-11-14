@@ -9,7 +9,7 @@
 # When it answers, this node writes its address to $EVAL_SERVERS/node<I>.url;
 # if it does not start, node<I>.failed, with the reason. Settings, from the
 # environment: EVAL_AGENTS (4, = sequences the server takes), EVAL_GPU_MEMORY
-# (0.80), EVAL_MAX_MODEL_LEN (262144), EVAL_LOGS, EVAL_SERVERS.
+# (0.80), EVAL_MAX_MODEL_LEN (the profile's max_model_len, else 262144), EVAL_LOGS, EVAL_SERVERS.
 set -u
 MODEL=${1:?usage: eval_riot_server.sh <model>}
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"     # the repository (this may be a job's copy)
@@ -27,14 +27,15 @@ print(run.LOCAL_MODELS[paths.resolve_model(sys.argv[1])])" "$MODEL") \
 export HOST=0.0.0.0 PORT=8000 VLLM_API_KEY
 VLLM_API_KEY=$(cat "$S/key") || fail "no API key in $S/key"
 export GPU_MEMORY=${EVAL_GPU_MEMORY:-0.80} MAX_NUM_SEQS=${EVAL_AGENTS:-4}
-export MAX_MODEL_LEN=${EVAL_MAX_MODEL_LEN:-262144}
+# the profile's max_model_len (262144 if none) unless EVAL_MAX_MODEL_LEN is given
+[ -n "${EVAL_MAX_MODEL_LEN:-}" ] && export MAX_MODEL_LEN=$EVAL_MAX_MODEL_LEN
 SHARED=${EMBEDEVAL_SHARED:-/scratch/scholar/$USER/embedeval/shared}
 export EMBEDEVAL_VLLM_CACHE=$LOGS/vllm-cache-server$I
 [ -d "$EMBEDEVAL_VLLM_CACHE" ] || cp -r "$SHARED/vllm-cache" "$EMBEDEVAL_VLLM_CACHE" 2>/dev/null
 rm -f "$EMBEDEVAL_VLLM_CACHE/.fill.lock"
 
 ADDR=$(hostname -f)
-log "on $ADDR: $PROFILE, $MAX_NUM_SEQS sequences, GPU memory $GPU_MEMORY, context $MAX_MODEL_LEN"
+log "on $ADDR: $PROFILE, $MAX_NUM_SEQS sequences, GPU memory $GPU_MEMORY, context ${MAX_MODEL_LEN:-from the profile}"
 bash scripts/serve_triage_model.sh "$PROFILE" > "$LOGS/server$I.log" 2>&1 &
 SERVER=$!
 trap 'pkill -u "$USER" -f "vllm serve" 2>/dev/null; kill $SERVER 2>/dev/null' EXIT TERM

@@ -13,7 +13,7 @@
 #   EVAL_AGENTS       workers on this node, = sequences the server takes (4)
 #   EVAL_GPU_MEMORY   share of GPU memory for the server (0.70: the node's
 #                     builds and QEMU need the rest of its 120 GB)
-#   EVAL_MAX_MODEL_LEN  context (262144)
+#   EVAL_MAX_MODEL_LEN  context (the profile's max_model_len, else 262144)
 #   EVAL_INSTANCES    file of instance ids (default: every Zephyr instance)
 #   EVAL_MARGIN       minutes before the end after which no new PR is taken (60)
 #   EVAL_TIME_LIMIT   minutes per run before it is stopped (120); keep EVAL_MARGIN above it
@@ -36,14 +36,15 @@ print(run.LOCAL_MODELS[paths.resolve_model(sys.argv[1])])" "$MODEL") \
     || { log "no server profile for model $MODEL (harness/run.py LOCAL_MODELS)"; exit 1; }
 
 export GPU_MEMORY=${EVAL_GPU_MEMORY:-0.70} MAX_NUM_SEQS=$AGENTS
-export MAX_MODEL_LEN=${EVAL_MAX_MODEL_LEN:-262144}
+# the profile's max_model_len (262144 if none) unless EVAL_MAX_MODEL_LEN is given
+[ -n "${EVAL_MAX_MODEL_LEN:-}" ] && export MAX_MODEL_LEN=$EVAL_MAX_MODEL_LEN
 # a copy of the warm compile cache for this node, so the server starts without compiling
 SHARED=${EMBEDEVAL_SHARED:-/scratch/scholar/$USER/embedeval/shared}
 export EMBEDEVAL_VLLM_CACHE=$LOGS/vllm-cache-node$I
 [ -d "$EMBEDEVAL_VLLM_CACHE" ] || cp -r "$SHARED/vllm-cache" "$EMBEDEVAL_VLLM_CACHE" 2>/dev/null
 rm -f "$EMBEDEVAL_VLLM_CACHE/.fill.lock"
 
-log "on $(hostname): $PROFILE, $AGENTS agents, GPU memory $GPU_MEMORY, context $MAX_MODEL_LEN"
+log "on $(hostname): $PROFILE, $AGENTS agents, GPU memory $GPU_MEMORY, context ${MAX_MODEL_LEN:-from the profile}"
 bash scripts/serve_triage_model.sh "$PROFILE" > "$LOGS/node$I-server.log" 2>&1 &
 SERVER=$!
 trap 'pkill -u "$USER" -f "vllm serve" 2>/dev/null; kill $SERVER 2>/dev/null' EXIT

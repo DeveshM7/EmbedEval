@@ -139,7 +139,7 @@ PROVIDER_KEYS = {
 # EMBEDEVAL_LOCAL_API_BASE overrides the address, and EMBEDEVAL_LOCAL_API_KEY the key,
 # for a server on another node. By default the server listens on 127.0.0.1, so the
 # harness must run on its node.
-LOCAL_MODELS = {"openai/qwen38-nvfp4": "qwen38-nvfp4"}
+LOCAL_MODELS = {f"openai/{name}": name for name in paths.LOCAL_PROFILES}
 REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
 
 
@@ -150,7 +150,7 @@ def model_config(full_model: str) -> dict:
         return {}
     prof = json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile]
     sampling = dict(prof.get("sampling", {}))
-    extra = {k: sampling.pop(k) for k in ("top_k", "min_p") if k in sampling}
+    extra = {k: sampling.pop(k) for k in ("top_k", "min_p", "repetition_penalty") if k in sampling}
     kwargs = dict(api_base=os.environ.get("EMBEDEVAL_LOCAL_API_BASE", "http://127.0.0.1:8000/v1"),
                   api_key=os.environ.get("EMBEDEVAL_LOCAL_API_KEY", "local"),
                   timeout=REQUEST_TIMEOUT, num_retries=0,
