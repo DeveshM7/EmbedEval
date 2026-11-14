@@ -68,7 +68,7 @@ print(f"MAXLEN {p.get('max_model_len', 262144)}")
 for k, v in p.get("env", {}).items():
     print(f"ENV {k}={str(v).replace('{models}', models)}")
 for a in p["vllm_args"]:
-    print(a.replace("{models}", models))
+    print(a.replace("{models}", models).replace("{repo}", os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[1])))))
 PY
 )
 WEIGHTS="${ARGS[0]}"
@@ -107,6 +107,24 @@ mkdir -p "$SCRATCH_ROOT/cache"
 
 echo "profile=$PROFILE node=$(hostname) port=$PORT start=$(date +%T)"
 echo "weights=$WEIGHTS"
+# One model over several nodes (VLLM_NNODES > 1): pipeline parallel, one stage
+# per node, over the nodes' 10 Gb/s link. Every node runs this script with its
+# VLLM_NODE_RANK; rank 0 (VLLM_MASTER_ADDR) serves the API, the others run
+# headless. VLLM_NCCL_IFNAME names the interface carrying the node addresses.
+NNODES="${VLLM_NNODES:-1}"
+if [ "$NNODES" -gt 1 ]; then
+    : "${VLLM_NODE_RANK:?multi-node needs VLLM_NODE_RANK}" "${VLLM_MASTER_ADDR:?multi-node needs VLLM_MASTER_ADDR}"
+    IFNAME="${VLLM_NCCL_IFNAME:-enp1s0f0np0}"
+    export APPTAINERENV_NCCL_SOCKET_IFNAME="$IFNAME" APPTAINERENV_GLOO_SOCKET_IFNAME="$IFNAME"
+    # NCCL over TCP sockets by default: its RDMA (RoCE) path fails in the container
+    # ("unhandled system error"); VLLM_NCCL_IB=1 tries RDMA. VLLM_NCCL_DEBUG sets NCCL_DEBUG.
+    [ "${VLLM_NCCL_IB:-0}" = 1 ] || export APPTAINERENV_NCCL_IB_DISABLE=1
+    [ -n "${VLLM_NCCL_DEBUG:-}" ] && export APPTAINERENV_NCCL_DEBUG="$VLLM_NCCL_DEBUG"
+    SERVE_ARGS+=(--pipeline-parallel-size "$NNODES" --nnodes "$NNODES" --node-rank "$VLLM_NODE_RANK"
+                 --master-addr "$VLLM_MASTER_ADDR" --master-port "${VLLM_MASTER_PORT:-29501}")
+    [ "$VLLM_NODE_RANK" -gt 0 ] && SERVE_ARGS+=(--headless)
+    echo "multi-node: rank $VLLM_NODE_RANK of $NNODES, master $VLLM_MASTER_ADDR, interface $IFNAME"
+fi
 exec apptainer exec --cleanenv --bind "$(IFS=,; echo "${BINDS[*]}")" "$IMAGE" \
     vllm serve "$WEIGHTS" --served-model-name "$PROFILE" \
         --host "$HOST" --port "$PORT" \
