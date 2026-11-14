@@ -67,5 +67,35 @@
     "version": 2,
     "result": "kept",
     "trace": "/scratch/scholar/zhan5136/embedeval-contiki/runs/c341-obs-native/triage/3198.statement.trace.json"
-  }
+  },
+  "verification": {
+    "status": "fixed",
+    "verdict": "fixable",
+    "votes": [
+      "fixable",
+      "unfair",
+      "fixable"
+    ],
+    "reason": "The problem statement describes only the size-0/1 buffer overflow bug, but the hidden tests check six additional bugs in the dbg-io formatting engine. All of these are public behaviors describable from the caller's perspective without revealing implementation, so the task is fixable by expanding the statement.",
+    "problems": [
+      {
+        "category": "B",
+        "detail": "The statement only describes the size-0/1 buffer overflow, but the hidden tests also check: negative dynamic width must left-justify with |w|; %c return value must not double-count padding; %n must be disabled (no write) yet still consume its pointer argument; negative dynamic precision must be treated as omitted per C99; floating-point specifiers (%f,%F,%e,%E,%g,%G,%a,%A) must consume their double argument without rendering; %p must output '0x...' without a '#' prefix."
+      }
+    ],
+    "missing_names": [],
+    "leak_check": {
+      "leak": "none",
+      "leak_detail": "",
+      "accurate": true,
+      "accuracy_detail": "",
+      "complete": 3,
+      "missing": "",
+      "decision": "accept",
+      "suggested_statement": null
+    },
+    "model": "qwen38-nvfp4",
+    "date": "2026-11-13"
+  },
+  "problem_statement_fixed": "The bounded string-formatting routine in dbg-io is unsafe when called with a destination capacity of zero. A user calling it with a buffer of size 0 (for example to query the formatted length without storing output) finds that the supplied destination buffer is modified instead of left untouched: the routine still attempts to write a terminating NUL into the empty region, overwriting whatever was already there, and its remaining-length counter can wrap to a huge value so that a much larger-than-declared region is written, corrupting adjacent memory. Even with a capacity of 1, the behavior is wrong: the routine should place only a terminator and write nothing else. Observable symptom: passing a buffer filled with a known sentinel pattern and requesting size 0 returns the would-be formatted length but the buffer's first byte has been changed from its sentinel value (a buffer overrun), and a size-1 call can also corrupt the buffer. The routine must not write to the destination when there is no room, and must produce a correctly terminated result when capacity is at least 1. Truncation at any positive boundary must NUL-terminate the output correctly at that boundary without overwriting beyond it.\n\nThe underlying format-string engine has several additional correctness issues that must also be fixed:\n\n- When a dynamic width is specified via '*' and the corresponding integer argument is negative, it must be treated as left-justification with the absolute value of the width (for example, \"%*d\" with arguments -5 and 42 must produce \"42   \").\n\n- The return value for a '%c' conversion with a width must count only the character itself, not the padding fill characters (for example, \"%5c\" with 'x' must produce \"    x\" and return 5, and \"%c\" with 'A' must return 1).\n\n- The '%n' format specifier must be disabled: it must not write through its pointer argument. However, it must still consume the pointer argument from the variadic argument list so that subsequent format specifiers remain correctly aligned (for example, \"%n%d\" with arguments &sentinel and 42 must produce \"42\" and leave sentinel unchanged).\n\n- When a dynamic precision is specified via '*' and the corresponding integer argument is negative, it must be treated as if the precision was omitted (per C99), not as a large positive precision (for example, \"%.*d\" with arguments -5 and 42 must produce \"42\", and \"%.*s\" with arguments -3 and \"hello\" must produce \"hello\").\n\n- The floating-point format specifiers ('%f', '%F', '%e', '%E', '%g', '%G', '%a', '%A') are not implemented for rendering, but must still consume their double argument from the variadic argument list so that subsequent format specifiers remain correctly aligned (for example, \"%f%d\" with arguments 3.14 and 42 must produce \"42\").\n\n- The '%p' format specifier must output the pointer value in hexadecimal with a '0x' prefix (for example, '0x0' for a NULL pointer, '0xff' for a pointer value of 0xff), without any spurious '#' character."
 }
