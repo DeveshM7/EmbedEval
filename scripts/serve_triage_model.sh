@@ -66,7 +66,7 @@ p, models = profiles[sys.argv[2]], os.environ["EMBEDEVAL_MODELS"]
 print(f"{models}/{p['weights']}")
 print(f"MAXLEN {p.get('max_model_len', 262144)}")
 for k, v in p.get("env", {}).items():
-    print(f"ENV {k}={v}")
+    print(f"ENV {k}={str(v).replace('{models}', models)}")
 for a in p["vllm_args"]:
     print(a.replace("{models}", models))
 PY
