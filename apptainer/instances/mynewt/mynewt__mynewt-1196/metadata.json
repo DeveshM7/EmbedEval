@@ -99,5 +99,72 @@
     "staging_provenance": {
         "catalog_evidence": "evidence/recovery-review-20261029/deep-linker-with-controls/deep-linker-v7/codex/1196/sys__log__full__test__align1",
         "recovery_receipt": "recovery.json"
-    }
+    },
+    "verification": {
+        "status": "fixed",
+        "verdict": "fixable",
+        "votes": [
+            "fixable",
+            "fixable",
+            "fixable"
+        ],
+        "reason": "The original statement is a one-sentence vague description that omits every public function name, signature, return-contract, handler field, and the MCU_FLASH_MIN_WRITE_SIZE-to-native-HAL wiring that the hidden tests depend on. All omissions are fixable by adding the public interface and observable behaviour to the statement without dictating implementation.",
+        "problems": [
+            {
+                "category": "A",
+                "detail": "The statement names none of the six new public API functions the hidden tests call (log_append_body, log_append_mbuf_body, log_read_hdr, log_read_body, log_read_mbuf_body, log_walk_body) nor the new callback type log_walk_body_func_t. An agent cannot guess these exact names, signatures, or parameter types from the vague prose."
+            },
+            {
+                "category": "B",
+                "detail": "The statement does not describe the observable behaviour of the new functions: log_append_body / log_append_mbuf_body write header and body as separate writes; log_read_hdr / log_read_body / log_read_mbuf_body read only the body (offset excludes the header); log_walk_body passes the header pointer to its callback. The tests assert exact return values (0 on success, -1 on failure for the read functions) and the body-walk callback signature."
+            },
+            {
+                "category": "F",
+                "detail": "The hidden test syscfg files set MCU_FLASH_MIN_WRITE_SIZE to 1, 2, 4, and 8 and expect the native HAL to honour it for hf_align so that fcb->f_align actually varies. The statement mentions 'flash-alignment configurations' but never says the native HAL must derive its alignment from MCU_FLASH_MIN_WRITE_SIZE; without that the agent has no way to know the configuration is wired in."
+            },
+            {
+                "category": "G",
+                "detail": "The tests exercise log_handler fields log_append_body and log_append_mbuf_body (and the changed lh_append_mbuf_func_t taking const struct os_mbuf *om). The statement does not mention these struct fields or the const-qualifier change, so an agent implementing only the public log_* functions without the handler plumbing would fail the cbmem/fcb handler registration."
+            }
+        ],
+        "missing_names": [
+            {
+                "name": "log_append_body",
+                "kind": "function"
+            },
+            {
+                "name": "log_append_mbuf_body",
+                "kind": "function"
+            },
+            {
+                "name": "log_read_body",
+                "kind": "function"
+            },
+            {
+                "name": "log_read_hdr",
+                "kind": "function"
+            },
+            {
+                "name": "log_read_mbuf_body",
+                "kind": "function"
+            },
+            {
+                "name": "log_walk_body",
+                "kind": "function"
+            }
+        ],
+        "leak_check": {
+            "leak": "none",
+            "leak_detail": "",
+            "accurate": true,
+            "accuracy_detail": "",
+            "complete": 3,
+            "missing": "",
+            "decision": "accept",
+            "suggested_statement": null
+        },
+        "model": "qwen38-nvfp4",
+        "date": "2026-11-13"
+    },
+    "problem_statement_fixed": "The log API must append a body without a header and store the expected payload for flat and mbuf writes across the supplied flash-alignment configurations.\n\nThe following functions and type must be added to the log API (declared in log/log.h). Each append function returns 0 on success and a negative errno on failure.\n\n- log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype, const void *body, uint16_t body_len): prepares the entry header and appends the body, which is a flat buffer, without the header.\n- log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype, struct os_mbuf *om): prepares the entry header and appends the body from an mbuf chain, consuming the chain.\n\nThe following read functions operate on a log entry identified by dptr (the medium-specific pointer produced by log_walk). log_read_hdr returns 0 on success and a negative value on failure; the others return the number of bytes read on success and -1 on failure:\n\n- log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr): reads the entry header.\n- log_read_body(struct log *log, void *dptr, void *buf, uint16_t off, uint16_t len): reads the body of the entry into a flat buffer, starting at offset off within the body.\n- log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om, uint16_t off, uint16_t len): reads the body of the entry into an mbuf, starting at offset off within the body.\n\nA body-walk callback type and function must be added:\n\n- typedef int (*log_walk_body_func_t)(struct log *log, struct log_offset *log_offset, const struct log_entry_hdr *hdr, void *dptr, uint16_t len)\n- log_walk_body(struct log *log, log_walk_body_func_t walk_body_func, struct log_offset *log_offset): applies walk_body_func to each entry, passing the entry header and the body length (the entry length excluding the header); returns 0 if the walk completed successfully and a nonzero value on error or if the walk was aborted.\n\nThe appended data must round-trip correctly: data written with the append functions must be read back identically by the read functions above and by log_walk, across the supplied flash-alignment configurations."
 }
