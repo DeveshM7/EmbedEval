@@ -825,7 +825,7 @@ every project has its own runner, and all follow the same rules.
 |---|---|---|---|
 | Zephyr | `cluster/templates/eval_zephyr.sbatch` | `spark-batch` nodes (`-N`), each serves the model and runs its agents (`scripts/eval_zephyr_node.sh`) | every one |
 | RIOT | `cluster/templates/eval_riot.sbatch` | one heterogeneous job: model servers on `spark-batch`, agents on `cpu` (`scripts/eval_riot_server.sh`, `eval_riot_agents.sh`) | every one |
-| Mynewt | `cluster/templates/eval_mynewt.sbatch` | heterogeneous, as RIOT (`scripts/eval_mynewt_server.sh`, `eval_mynewt_agents.sh`) | 63, all x86_64 |
+| Mynewt | `cluster/templates/eval_mynewt.sbatch` | heterogeneous, as RIOT (`scripts/eval_mynewt_server.sh`, `eval_mynewt_agents.sh`) | 61, all x86_64 |
 | NuttX, aarch64 | `cluster/templates/eval_nuttx.sbatch` | `spark-batch` nodes, as Zephyr (`scripts/eval_nuttx_node.sh`) | 18 |
 | NuttX, x86_64 | `cluster/templates/eval_nuttx_x86.sbatch` | heterogeneous, as RIOT (`scripts/eval_nuttx_x86_server.sh`, `eval_nuttx_x86_agents.sh`) | 11 |
 | Contiki-NG | `cluster/templates/eval_contiki_ng.sbatch` | heterogeneous, as RIOT (`scripts/eval_contiki_ng_server.sh`, `eval_contiki_ng_agents.sh`) | 38, all x86_64 |
@@ -945,7 +945,7 @@ RIOT images are pulled from the registry instead.
 Each of these instances is built for one architecture and is taken only by a
 job of that architecture; the others stay "to do" in the table until a job of
 theirs has run (`python harness/eval_set.py summary --project nuttx --model
-qwen38-nvfp4` lists the counts). Mynewt (63) and Contiki-NG (38) are
+qwen38-nvfp4` lists the counts). Mynewt (61) and Contiki-NG (38) are
 all x86_64. NuttX has 18 aarch64 and 11 x86_64 instances, so **a NuttX
 evaluation is two submissions**, `eval_nuttx.sbatch` for the aarch64 ones and
 `eval_nuttx_x86.sbatch` for the x86_64 ones, with the same `EVAL_MODEL`. They

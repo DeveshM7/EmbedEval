@@ -23,7 +23,7 @@ and the tests actually run.
   [NuttX in Apptainer](#nuttx-in-apptainer)), each validated with a leak
   check, no network and 5 deterministic before runs.
 - **RIOT** instances are **Docker** images in `docker/instances/`.
-- **Mynewt** has 63 validated Apptainer instances under
+- **Mynewt** has 61 validated Apptainer instances under
   `apptainer/instances/mynewt/`, built and run on Linux x86_64 with
   `hw/bsp/native` and `compiler/sim`; see [Apache Mynewt](#apache-mynewt).
 - **Contiki-NG** instances run the upstream native unit tests or Cooja
@@ -32,7 +32,7 @@ and the tests actually run.
 
 **Instances:** 203 Zephyr and 190 RIOT (`apptainer/instances/`), 29 NuttX (in
 `apptainer/instances/nuttx/`: 18 ARM64, 11 x86_64 hosts; and 6 Docker ones in
-`docker/instances/`), 63 Apache Mynewt (`apptainer/instances/mynewt/`), and 38
+`docker/instances/`), 61 Apache Mynewt (`apptainer/instances/mynewt/`), and 38
 Contiki-NG (`apptainer/instances/contiki-ng/`).
 
 ---
@@ -274,7 +274,7 @@ together: [docs/pipeline_internals.md](docs/pipeline_internals.md).
 
 ## Apache Mynewt
 
-The 63 promoted instances (`apptainer/instances/mynewt/`) build and run on Linux
+The 61 promoted instances (`apptainer/instances/mynewt/`) build and run on Linux
 x86_64 (historical native builds need multilib). The image holds mynewt-core at
 the base commit with the PR's tests committed (history: that one commit,
 fetched `--depth 1`); an agent run gets that repository with the PR's tests
@@ -295,7 +295,7 @@ python harness/evaluate_patches.py --instance mynewt__mynewt-3680 --model <model
 On Scholar, campaigns and revalidations run through `cluster/` (triage on
 Spark, validation on the x86 `cpu` partition):
 [docs/running_on_scholar.md, section 11](docs/running_on_scholar.md#11-mynewt-runs).
-Evaluating a model on the 63 instances is one `sbatch`
+Evaluating a model on the 61 instances is one `sbatch`
 of `cluster/templates/eval_mynewt.sbatch` (a model server on Spark, the agents
 on `cpu`; [section 13](docs/running_on_scholar.md#13-evaluating-on-the-cluster)):
 
