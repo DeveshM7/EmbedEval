@@ -129,6 +129,50 @@ FORMAT_ERROR_TEMPLATE = "{% if finish_reason is defined and (finish_reason == \"
 
 OBSERVATION_TEMPLATE = "{% if output.exception_info -%}\n<exception>{{output.exception_info}}</exception>\n{% endif -%}\n<returncode>{{output.returncode}}</returncode>\n{% if output.output | length < 10000 -%}\n<output>\n{{ output.output -}}\n</output>\n{%- else -%}\n<warning>\nThe output of your last command was too long.\nPlease try a different command that produces less output.\nIf you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.\nIf you're using grep or find and it produced too much output, you can use a more selective search pattern.\nIf you really need to see something from the full command's output, you can redirect output to a file and then search in that file.\n</warning>\n{%- set elided_chars = output.output | length - 10000 -%}\n<output_head>\n{{ output.output[:5000] }}\n</output_head>\n<elided_chars>\n{{ elided_chars }} characters elided\n</elided_chars>\n<output_tail>\n{{ output.output[-5000:] }}\n</output_tail>\n{%- endif -%}\n"
 
+# A narrow repair of tool-call arguments, for profiles with "repair_tool_args":
+# gpt-oss-120b, trained on a shell tool that takes a list ({"cmd": ["bash", ...]}),
+# often closes our {"command": "..."} as if it were a list: '..."]}'. Only arguments
+# that are invalid JSON, end that way, and become a valid {"command": <string>} once
+# the stray ']' is removed are changed; the command itself never is.
+_STRAY_LIST_END = re.compile(r'"\]\}\s*$')
+
+
+def repair_tool_args(arguments: str) -> str:
+    try:
+        json.loads(arguments)
+        return arguments
+    except (ValueError, TypeError):
+        pass
+    if not isinstance(arguments, str) or not _STRAY_LIST_END.search(arguments):
+        return arguments
+    fixed = _STRAY_LIST_END.sub('"}', arguments)
+    try:
+        obj = json.loads(fixed)
+    except ValueError:
+        return arguments
+    return fixed if isinstance(obj, dict) and isinstance(obj.get("command"), str) else arguments
+
+
+def add_tool_arg_repair(model, full_model: str) -> None:
+    """Apply repair_tool_args to every tool call before mini-swe-agent parses it,
+    for a local profile that asks for it; counts the repairs on the model."""
+    profile = LOCAL_MODELS.get(full_model)
+    if not profile or not json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile].get("repair_tool_args"):
+        return
+    parse = model._parse_actions
+    model.tool_arg_repairs = 0
+
+    def _parse_actions(response):
+        for call in response.choices[0].message.tool_calls or []:
+            fixed = repair_tool_args(call.function.arguments)
+            if fixed is not call.function.arguments:
+                model.tool_arg_repairs += 1
+                call.function.arguments = fixed
+        return parse(response)
+
+    model._parse_actions = _parse_actions
+
+
 # Which environment variable each provider needs, for a pre-flight check that
 # fails at launch instead of 40 steps in.
 PROVIDER_KEYS = {
@@ -537,6 +581,8 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         record["elapsed_seconds"] = round(time.time() - start, 1)
         if agent is not None:
             record["steps"] = agent.n_calls
+            if hasattr(agent.model, "tool_arg_repairs"):
+                record["tool_arg_repairs"] = agent.model.tool_arg_repairs
         paths.write_json(paths.run_record_path(instance_id, full_model), record)
 
     try:
@@ -547,6 +593,7 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         model = get_model(input_model_name=full_model, config=model_config(full_model))
         model.config.format_error_template = FORMAT_ERROR_TEMPLATE
         model.config.observation_template = OBSERVATION_TEMPLATE
+        add_tool_arg_repair(model, full_model)
 
         agent_class = make_verbose_agent_class(DefaultAgent) if args.verbose else DefaultAgent
         agent = agent_class(
