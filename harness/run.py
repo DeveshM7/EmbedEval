@@ -117,11 +117,17 @@ Other useful commands:
 </system_information>
 """
 
-FORMAT_ERROR_TEMPLATE = (
-    "ERROR: No tool call found in your response. Do not apologize or explain "
-    "yourself -- execute actions by calling the `bash` tool. If you are finished, "
-    "call the `bash` tool with the command: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
-)
+# The two model templates of mini-swe-agent 2.4.6's benchmarks/swebench.yaml, the
+# config of the SWE-bench bash-only runs we compare with (copied, so an upgrade of
+# mini-swe-agent cannot change them). The format error states the actual error
+# (invalid JSON arguments, unknown tool, a reply cut off at the token limit); an
+# output over 10,000 characters is cut to its first and last 5,000 with a warning.
+# Before 2026-11-14 the harness used a fixed "No tool call found" message, wrong
+# for every other error, and mini-swe-agent's default, untruncated observation:
+# one `ls -R` of Zephyr overflowed a 131k context.
+FORMAT_ERROR_TEMPLATE = "{% if finish_reason is defined and (finish_reason == \"length\" or (finish_reason == \"tool_calls\" and not has_tool_calls)) -%}\nYour previous response reached the output token limit (finish_reason={{ finish_reason }}) before you produced a tool call, so it was cut off. Respond more concisely and finish with exactly one bash tool call. If you need to think more, do so briefly.\n{%- else -%}\nTool call error:\n\n<error>\n{{error}}\n</error>\n\nHere is general guidance on how to submit correct toolcalls:\n\nEvery response needs to use the 'bash' tool at least once to execute commands.\n\nCall the bash tool with your command as the argument:\n- Tool: bash\n- Arguments: {\"command\": \"your_command_here\"}\n\nIf you have completed your assignment, please consult the first message about how to\nsubmit your solution (you will not be able to continue working on this task after that).\n{%- endif %}\n"
+
+OBSERVATION_TEMPLATE = "{% if output.exception_info -%}\n<exception>{{output.exception_info}}</exception>\n{% endif -%}\n<returncode>{{output.returncode}}</returncode>\n{% if output.output | length < 10000 -%}\n<output>\n{{ output.output -}}\n</output>\n{%- else -%}\n<warning>\nThe output of your last command was too long.\nPlease try a different command that produces less output.\nIf you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.\nIf you're using grep or find and it produced too much output, you can use a more selective search pattern.\nIf you really need to see something from the full command's output, you can redirect output to a file and then search in that file.\n</warning>\n{%- set elided_chars = output.output | length - 10000 -%}\n<output_head>\n{{ output.output[:5000] }}\n</output_head>\n<elided_chars>\n{{ elided_chars }} characters elided\n</elided_chars>\n<output_tail>\n{{ output.output[-5000:] }}\n</output_tail>\n{%- endif -%}\n"
 
 # Which environment variable each provider needs, for a pre-flight check that
 # fails at launch instead of 40 steps in.
@@ -540,6 +546,7 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         _CURRENT.update(save=save_patch, env=env)
         model = get_model(input_model_name=full_model, config=model_config(full_model))
         model.config.format_error_template = FORMAT_ERROR_TEMPLATE
+        model.config.observation_template = OBSERVATION_TEMPLATE
 
         agent_class = make_verbose_agent_class(DefaultAgent) if args.verbose else DefaultAgent
         agent = agent_class(
