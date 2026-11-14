@@ -17,9 +17,12 @@ the image as built, with the tests and the original run_tests:
      deleted.
   3. run_tests: it requires every changed test's banner in ostest's output
      (BANNERS, the hidden tests' names). The agent's copy has no banners: it
-     builds nothing, boots the board, runs ostest and passes on a clean exit,
-     as before. ostest runs every test compiled into it, so tests the agent adds
-     to apps/testing/ostest run with the rest.
+     boots the board, runs ostest and passes on a clean exit, as before.
+     ostest runs every test compiled into it, so tests the agent adds to
+     apps/testing/ostest run with the rest. It also relinks /testbed/nuttx
+     first when a library in staging/ is newer than it: an incremental make
+     recompiles a changed library but does not relink the binary (seen on
+     sim:nsh), so without this the agent's changes never reach run_tests.
 
 On by default; EMBEDEVAL_HIDE_TESTS=0 turns it off.
 """
@@ -52,6 +55,19 @@ rm -f "$P"
 # The agent's run_tests: the image's own, without the changed tests' banners.
 sed -i 's/^BANNERS=(.*)$/BANNERS=()/' /usr/local/bin/run_tests
 grep -qx 'BANNERS=()' /usr/local/bin/run_tests || { echo "run_tests: no BANNERS line to clear"; exit 1; }
+# ... and it relinks a stale binary first: an incremental make recompiles a
+# changed library but does not relink /testbed/nuttx (the sim's link rule does
+# not depend on the libraries), so the agent's changes would never be tested.
+cat > /tmp/relink <<'RELINK'
+if [ -e nuttx ] && [ -n "$(find staging -name '*.a' -newer nuttx 2>/dev/null)" ]; then
+    echo "run_tests: libraries are newer than /testbed/nuttx; relinking it"
+    rm -f nuttx
+    make -j"$(nproc)" >/tmp/relink.log 2>&1 || { tail -30 /tmp/relink.log; echo "run_tests: relink failed"; exit 1; }
+fi
+RELINK
+sed -i '/^cd \/testbed || exit 1$/r /tmp/relink' /usr/local/bin/run_tests
+rm -f /tmp/relink
+grep -q 'relinking it' /usr/local/bin/run_tests || { echo "run_tests: could not add the relink step"; exit 1; }
 # Nothing of the PR's tests left: the apps tree clean, the diff gone.
 left=$(git -C "$A" status --porcelain)
 [ -z "$left" ] || { echo "left in apps after hiding the tests:"; echo "$left" | head -20; exit 1; }
@@ -85,7 +101,9 @@ RUNNING_TESTS = (
     "the board, runs the whole ostest suite in /testbed/apps/testing/ostest and waits for\n"
     "results: every test compiled into ostest runs, including tests you add to it (for\n"
     "example a new test function in its own file, called from ostest_main.c and listed in\n"
-    "ostest's Makefile and CMakeLists.txt). ostest stops at the first test that crashes or\n"
+    "ostest's Makefile and CMakeLists.txt). If a library is newer than /testbed/nuttx (an\n"
+    "incremental make does not always relink it), run_tests relinks it first, so it always\n"
+    "tests your current code. ostest stops at the first test that crashes or\n"
     "fails an assertion, so call a new test early -- at the start of user_main() in\n"
     "ostest_main.c -- so that it runs even if a later test crashes. Exit codes: 0 = ostest\n"
     "finished cleanly with no ERROR in its output, 1 = any other completed run (a test failed\n"
