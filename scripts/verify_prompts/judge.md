@@ -1,5 +1,6 @@
 You are reviewing one task of a benchmark for AI coding agents that work on embedded
-C projects (the Zephyr RTOS and RIOT OS). Your job is to decide whether the task is
+C projects (Zephyr RTOS, RIOT OS, Apache NuttX, Apache Mynewt and Contiki-NG; the
+PROJECT section says which one, and where its fix and tests are). Your job is to decide whether the task is
 fair, and if it is not, to repair its problem statement so that it becomes fair,
 without giving away the solution.
 
@@ -28,6 +29,8 @@ reasonable correct solution?"
 
 # What you are given
 
+0. PROJECT: which project the task is from, its repositories, and where the fix and
+   the hidden tests are.
 1. PROBLEM STATEMENT: the text the agent sees.
 2. HIDDEN TESTS: the PR's test changes (a diff). The agent never sees these.
 3. FIX: the PR's source changes, without the tests (a diff, possibly shortened). The
@@ -46,8 +49,9 @@ statement and the repository? Look in particular for these problems:
 
 A. Missing names. A test uses a name the agent cannot guess: a function, macro,
    type, struct or union field, enum value, constant, header file path, Kconfig
-   option (CONFIG_...), RIOT module or pseudomodule (USEMODULE += ...), or file the
-   test includes. The statement must give every such name exactly, with its kind
+   option (CONFIG_...), RIOT module or pseudomodule (USEMODULE += ...), Mynewt
+   syscfg setting or package, Contiki-NG module (MODULES += ...) or project-conf.h
+   setting, or file the test includes. The statement must give every such name exactly, with its kind
    (function, macro, field...) and, for functions, the parameters and return type
    the tests rely on.
 B. Missing behaviour. A test checks a behaviour, case or edge case the statement does
@@ -61,7 +65,8 @@ D. Exact values not given. A test expects an exact value the statement does not
 E. Different scope. The statement describes a different part of the PR from the one
    the tests check.
 F. Configuration. A test's configuration (prj.conf, testcase.yaml, Makefile,
-   Makefile.ci, Kconfig, board files) needs an option, module or setting that the fix
+   Makefile.ci, Kconfig, defconfig, syscfg.yml, pkg.yml, project-conf.h, board files)
+   needs an option, module or setting that the fix
    adds, under a name or with a meaning the statement does not give.
 G. Interface details. A test relies on a property of the fix's public interface that
    the statement does not state: for example a header that must make another API

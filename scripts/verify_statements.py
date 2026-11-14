@@ -6,7 +6,6 @@ hidden tests without seeing them? If not, add what is missing, without giving aw
 the fix.
 
     python scripts/verify_statements.py prepare [--only <id>...]   # name check + task files
-        [--project zephyr riot mynewt nuttx contiki-ng]            # default: zephyr riot
     python scripts/verify_statements.py review --api-base URL      # judges + leak checks (a node)
     python scripts/verify_statements.py combine                    # verdicts, report
     python scripts/verify_statements.py apply                      # write into metadata.json
@@ -33,11 +32,6 @@ Steps (docs: the plan's "Statement verification and cleaning"):
      reason, problems, missing names, leak check) and, when accepted,
      "problem_statement_fixed". The original "problem_statement" is never changed.
 
-Mynewt, NuttX (Apptainer) and Contiki-NG instances are covered the same way, selected with
-`prepare --project`; what is particular to them (where their instances and clones are, what
-their fix is) is in scripts/verify_ports.py. Give them a work folder of their own when
-Zephyr and RIOT have been verified already: `prepare` rewrites <work>/tasks.txt.
-
 The work folder is <EMBEDEVAL_VERIFY_DIR> (default /scratch/scholar/$USER/embedeval/verify).
 """
 
@@ -56,9 +50,6 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import verify_ports  # noqa: E402
-
 REPO = Path(__file__).resolve().parent.parent
 INSTANCES = REPO / "apptainer" / "instances"
 PROMPTS = Path(__file__).resolve().parent / "verify_prompts"
@@ -66,7 +57,11 @@ WORK = Path(os.environ.get("EMBEDEVAL_VERIFY_DIR",
                            f"/scratch/scholar/{os.environ.get('USER', 'user')}/embedeval/verify"))
 SHARED = Path(os.environ.get("EMBEDEVAL_SHARED",
                              f"/scratch/scholar/{os.environ.get('USER', 'user')}/embedeval/shared"))
-CLONES = {"zephyr": SHARED / "zephyr.git", "riot": SHARED / "riot" / "riot.git"}
+# Local clones the fix diffs come from (NuttX: the kernel, where its fixes are).
+CLONES = {"zephyr": SHARED / "zephyr.git", "riot": SHARED / "riot" / "riot.git",
+          "nuttx": SHARED / "nuttx.git", "mynewt": SHARED / "mynewt-core.git",
+          "contiki-ng": SHARED / "contiki-ng.git"}
+GITHUB_PR_FILES_CAP = 3000   # GitHub lists at most this many files of a PR
 PROFILE = "qwen38-nvfp4"
 JUDGES = 3
 # Characters of each diff given to the model (about 3.5 characters per token): well
@@ -95,10 +90,68 @@ def git(project: str, *args: str) -> str:
 
 def fix_diff(meta: dict) -> str:
     project = meta["project"]
-    if project in verify_ports.PORTS:
-        return verify_ports.fix_diff(meta, SHARED)
+    if project == "nuttx":
+        # The kernel PR (kernel_base_commit..kernel_merge_commit, limited to its files, as
+        # the NuttX branch's validate_instance.gold_patch does) and any follow-up kernel
+        # PRs it needs (extra_fix_prs). The tests are a change to the apps repository.
+        files = meta.get("files_changed_by_fix") or []
+        parts = [git(project, "diff", f"{meta['kernel_base_commit']}..{meta['kernel_merge_commit']}",
+                     "--", *(files if 0 < len(files) < GITHUB_PR_FILES_CAP else ["."]))]
+        for e in meta.get("extra_fix_prs") or []:
+            ef = e.get("files_changed") or []
+            parts.append(git(project, "diff", f"{e['base_commit']}..{e['head_commit']}", "--",
+                             *(ef if 0 < len(ef) < GITHUB_PR_FILES_CAP else ["."])))
+        return "\n".join(parts)
+    if project == "mynewt":
+        # As the Mynewt branch's validate_instance.gold_patch: from gold_base_commit when
+        # the PR's test commit precedes its fix, limited to the fix's files.
+        base = meta.get("gold_base_commit") or meta["base_commit"]
+        files = meta.get("files_changed_by_fix") or []
+        excl = [f":(exclude){p}" for p in (meta.get("protected_paths") or ["test/"])]
+        return git(project, "diff", f"{base}..{meta['fix_commit']}", "--",
+                   *(files if 0 < len(files) < GITHUB_PR_FILES_CAP else [".", *excl]))
+    if project == "contiki-ng":
+        # As the Contiki-NG branch's gold_patch: base..fix, limited to the fix's files.
+        files = meta.get("files_changed_by_fix") or []
+        excl = [":(exclude)tests/", ":(exclude)regression-tests/", ":(exclude)tools/cooja/"]
+        return git(project, "diff", f"{meta['base_commit']}..{meta['fix_commit']}", "--",
+                   *(files if 0 < len(files) < GITHUB_PR_FILES_CAP else [".", *excl]))
     return git(project, "diff", meta["base_commit"], meta["fix_commit"], "--", ".",
                ":(exclude)tests/")
+
+
+def project_facts(meta: dict) -> str:
+    """The facts about the instance's project given to the model with each task (the
+    instructions themselves are the same for every project)."""
+    project = meta["project"]
+    if project == "nuttx":
+        cfg = meta.get("config_overrides") or {}
+        return ("Project: Apache NuttX. Two repositories: the kernel and the applications (apps). "
+                "The fix changes the kernel; the hidden tests are a change to the apps repository "
+                f"(under apps/testing/), run through the test application {meta.get('test_app', '?')} "
+                f"on the {meta.get('sim_config', '?')} configuration."
+                + (f" The agent's build tree is already configured with {json.dumps(cfg)}, which "
+                   "the agent can see." if cfg else ""))
+    if project == "mynewt":
+        prot = ", ".join(meta.get("protected_paths") or ["test/"])
+        return ("Project: Apache Mynewt (mynewt-core). One repository; the hidden tests are unit-test "
+                f"packages under {prot} (here {meta.get('test_path', '?')}), built and run with newt on "
+                f"the {meta.get('platform', 'native')} platform. Configuration settings are declared in "
+                "syscfg.yml files (read in C as MYNEWT_VAL(NAME)) and packages and their dependencies "
+                "in pkg.yml files.")
+    if project == "contiki-ng":
+        kind = ("Cooja network simulations, .csc scenarios" if meta.get("oracle") == "runtime"
+                else "native builds and unit tests")
+        return ("Project: Contiki-NG. One repository; the hidden tests are under tests/ (here "
+                f"{kind}), run on the instance's fixed target. Build configuration is given by "
+                "Makefile variables such as MODULES and by project-conf.h settings.")
+    if project == "zephyr":
+        return ("Project: Zephyr RTOS. One repository; the hidden tests are under tests/, built and "
+                f"run with twister for {meta.get('platform', '?')}.")
+    if project == "riot":
+        return ("Project: RIOT OS. One repository; the hidden tests are under tests/, built and run "
+                "on RIOT's native board.")
+    return f"Project: {project}."
 
 
 def added(diff: str) -> list[tuple[str, str]]:
@@ -139,10 +192,20 @@ def defined_names(diff: str) -> dict[str, str]:
                 names["CONFIG_" + m.group(1)] = "Kconfig option"
             continue
         if f.endswith(("Makefile", ".mk", "Makefile.dep", "Makefile.include")) or "/Makefile" in f:
-            for m in re.finditer(r"(?:PSEUDOMODULES|USEMODULE|DEFAULT_MODULE)\s*\+?=\s*(.+)", s):
+            for m in re.finditer(r"(?:PSEUDOMODULES|USEMODULE|DEFAULT_MODULE|MODULES)\s*\+?=\s*(.+)", s):
                 for w in m.group(1).split():
                     if re.fullmatch(r"[A-Za-z_][\w-]*", w):
                         names[w] = "build module"
+            continue
+        if f.endswith("syscfg.yml"):        # Mynewt settings: keys under syscfg.defs
+            m = re.match(r"\s{2,6}([A-Z][A-Z0-9_]{2,}):\s*$", line)
+            if m:
+                names[m.group(1)] = "syscfg setting"
+            continue
+        if f.endswith("pkg.yml"):           # Mynewt packages
+            m = re.match(r"pkg\.name:\s*[\"']?([\w./-]+)", s)
+            if m:
+                names[m.group(1)] = "package"
             continue
         if not f.endswith((".c", ".h")):
             continue
@@ -186,6 +249,8 @@ def test_uses(diff: str) -> set[str]:
             words.add(m.group(1))
         for m in re.finditer(r"USEMODULE\s*\+?=\s*(.+)", line):
             words |= set(m.group(1).split())
+        for m in re.finditer(r"[\w-]+(?:/[\w.-]+)+", line):     # package paths in pkg.yml deps
+            words.add(m.group().lstrip("@").split("/", 1)[-1] if m.group().startswith("@") else m.group())
     return words
 
 
@@ -210,24 +275,17 @@ def shorten(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit] + f"\n[... {len(text) - limit} more characters not shown ...]\n", True
 
 
-def instance_dir(iid: str) -> Path:
-    """An instance's folder: apptainer/instances/<id>, or, for a port, its project's folder."""
-    for root in (INSTANCES, *verify_ports.instance_roots().values()):
-        if (root / iid / "metadata.json").exists():
-            return root / iid
-    return INSTANCES / iid
-
-
-def prepare(only: list[str] | None, projects: tuple[str, ...] = tuple(CLONES)) -> None:
+def prepare(only: list[str] | None, source: Path) -> None:
+    """`source`: the folder holding the instance folders (default apptainer/instances; for
+    another project's branch, that branch's folder, e.g. in a git worktree)."""
     (WORK / "tasks").mkdir(parents=True, exist_ok=True)
-    roots = {**{p: INSTANCES for p in CLONES}, **verify_ports.instance_roots()}
-    ids = sorted(d.name for p in projects for d in roots[p].iterdir()
-                 if (d / "metadata.json").exists() and d.name.split("__")[0] == p)
+    ids = sorted(d.name for d in source.iterdir()
+                 if (d / "metadata.json").exists() and d.name.split("__")[0] in CLONES)
     if only:
         ids = [i for i in ids if i in only]
     bad = []
     for n, iid in enumerate(ids, 1):
-        d = instance_dir(iid)
+        d = source / iid
         meta = json.loads((d / "metadata.json").read_text())
         tests = (d / "test_patch.diff").read_text(errors="replace")
         try:
@@ -237,7 +295,8 @@ def prepare(only: list[str] | None, projects: tuple[str, ...] = tuple(CLONES)) -
             continue
         t, t_cut = shorten(tests, TEST_CHARS)
         f, f_cut = shorten(fix, FIX_CHARS)
-        task = {"instance_id": iid, "project": meta["project"],
+        task = {"instance_id": iid, "project": meta["project"], "folder": str(d.resolve()),
+                "facts": project_facts(meta),
                 "statement": meta["problem_statement"], "tests": t, "fix": f,
                 "tests_shortened": t_cut, "fix_shortened": f_cut,
                 "missing_names": name_check(meta["problem_statement"], tests, fix)}
@@ -259,7 +318,8 @@ def prepare(only: list[str] | None, projects: tuple[str, ...] = tuple(CLONES)) -
 
 def judge_message(task: dict) -> str:
     names = "\n".join(f"- {m['name']} ({m['kind']})" for m in task["missing_names"]) or "(none found)"
-    return (f"# PROBLEM STATEMENT\n\n{task['statement']}\n\n"
+    return (f"# PROJECT\n\n{task.get('facts', '')}\n\n"
+            f"# PROBLEM STATEMENT\n\n{task['statement']}\n\n"
             f"# HIDDEN TESTS (diff){' (shortened)' if task['tests_shortened'] else ''}\n\n"
             f"```diff\n{task['tests']}\n```\n\n"
             f"# FIX (diff, without tests){' (shortened)' if task['fix_shortened'] else ''}\n\n"
@@ -268,7 +328,8 @@ def judge_message(task: dict) -> str:
 
 
 def leak_message(task: dict, new: str) -> str:
-    return (f"# ORIGINAL STATEMENT\n\n{task['statement']}\n\n# NEW STATEMENT\n\n{new}\n\n"
+    return (f"# PROJECT\n\n{task.get('facts', '')}\n\n"
+            f"# ORIGINAL STATEMENT\n\n{task['statement']}\n\n# NEW STATEMENT\n\n{new}\n\n"
             f"# HIDDEN TESTS (diff)\n\n```diff\n{task['tests']}\n```\n\n"
             f"# FIX (diff, without tests)\n\n```diff\n{task['fix']}\n```\n")
 
@@ -463,13 +524,19 @@ def combine() -> dict:
                 p = out / f"leak{k}.json"
                 lk = (json.loads(p.read_text())["result"] if p.exists() else None) or {}
                 new = r["new_statement"]
+                fragment = False
                 if lk.get("leak") == "minor" and lk.get("suggested_statement"):
-                    new = lk["suggested_statement"]
+                    # The leak checker's cleaned statement, if it is a whole statement: one far
+                    # shorter than the rewrite is only the sentence it changed (seen: Mynewt 1174).
+                    if len(lk["suggested_statement"]) >= 0.5 * len(new):
+                        new = lk["suggested_statement"]
+                    else:
+                        fragment = True
                 mech, notes = mechanical_issues(new, task)
                 cand = {"judge": k, "new_statement": new, "leak_check": lk, "mechanical": mech,
                         "notes": notes, "added": r.get("added") or []}
                 good = lk.get("decision") == "accept" and lk.get("accurate") is True \
-                    and lk.get("leak") in ("none", "minor") and not mech
+                    and lk.get("leak") in ("none", "minor") and not mech and not fragment
                 score = (good, lk.get("complete") or 0, -len(new))
                 if best is None or score > best[0]:
                     best = (score, cand)
@@ -488,8 +555,7 @@ def report(final: dict) -> None:
     lines = ["# Statement verification", "",
              f"{len(final)} tasks: " + ", ".join(f"{k} {v}" for k, v in sorted(by.items())), "",
              "| project | fine | fixed | unfair | review |", "|---|---|---|---|---|"]
-    shown = ("zephyr", "riot") + tuple(sorted({r["project"] for r in final.values()} - {"zephyr", "riot"}))
-    for p in shown:
+    for p in sorted({r["project"] for r in final.values()}):
         c = Counter(r["status"].split(":")[0] for r in final.values() if r["project"] == p)
         lines.append(f"| {p} | {c['fine']} | {c['fixed']} | {c['unfair']} | {c['review']} |")
     order = lambda r: (not r["status"].startswith("review"), r["status"], r["instance_id"])  # noqa: E731
@@ -516,8 +582,16 @@ def report(final: dict) -> None:
     print(f"report: {WORK / 'report.md'}")
 
 
+def folder_of(iid: str) -> Path:
+    """The instance's folder: where `prepare` found it (recorded in its task file)."""
+    t = json.loads((WORK / "tasks" / f"{iid}.json").read_text())
+    return Path(t["folder"]) if t.get("folder") else INSTANCES / iid
+
+
 def r_orig(iid: str) -> str:
-    return json.loads((instance_dir(iid) / "metadata.json").read_text())["problem_statement"]
+    """The original statement, as `prepare` recorded it (the instance's folder may be gone:
+    a removed worktree)."""
+    return json.loads((WORK / "tasks" / f"{iid}.json").read_text())["statement"]
 
 
 # -- step 4: apply -------------------------------------------------------------
@@ -541,7 +615,7 @@ def apply() -> None:
     stamp = time.strftime("%Y-%m-%d")
     n = Counter()
     for iid, r in final.items():
-        p = instance_dir(iid) / "metadata.json"
+        p = folder_of(iid) / "metadata.json"
         text = p.read_text()
         meta = json.loads(text)
         # keep the file's own layout, so the diff shows only what was added
@@ -569,8 +643,8 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("prepare")
     p.add_argument("--only", nargs="+")
-    p.add_argument("--project", nargs="+", default=list(CLONES),
-                   choices=[*CLONES, *verify_ports.PORTS], help="default: zephyr riot")
+    p.add_argument("--source", type=Path, default=INSTANCES,
+                   help="folder of instance folders (default apptainer/instances)")
     p = sub.add_parser("review")
     p.add_argument("--api-base", default="http://127.0.0.1:8000/v1")
     p.add_argument("--share", default="0/1", help="I/N: tasks with index %% N == I")
@@ -579,7 +653,7 @@ def main() -> None:
     sub.add_parser("apply")
     a = ap.parse_args()
     if a.cmd == "prepare":
-        prepare(a.only, tuple(a.project))
+        prepare(a.only, a.source)
     elif a.cmd == "review":
         review(a.api_base, a.share, a.parallel)
     elif a.cmd == "combine":
