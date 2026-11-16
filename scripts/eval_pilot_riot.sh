@@ -16,7 +16,7 @@ ERA=$(ls "$EMBEDEVAL_SHARED"/images/riotbuild-*.sif | tail -1)
 PIDS=()
 while read -r MODEL NODES ZW RW; do
     [ -n "${MODEL:-}" ] && [ "${RW:-0}" -gt 0 ] || continue
-    for _ in $(seq 1 200); do [ -f "$S/$MODEL.url" ] || [ -f "$S/$MODEL.failed" ] && break; sleep 15; done
+    for _ in $(seq 1 $(( ${EVAL_SERVER_WAIT_MIN:-40} * 4 + 40 ))); do [ -f "$S/$MODEL.url" ] || [ -f "$S/$MODEL.failed" ] && break; sleep 15; done
     if [ ! -f "$S/$MODEL.url" ]; then log "$MODEL: no server ($(cat "$S/$MODEL.failed" 2>/dev/null))"; continue; fi
     URL=$(cat "$S/$MODEL.url"); HP=${URL#http://}; HP=${HP%%/*}
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$URL/models")

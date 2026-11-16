@@ -36,7 +36,7 @@ if [ "$RANK" -gt 0 ]; then
     log "stopping (rank 0 finished)"; exit 0
 fi
 ready() { curl -sf -H "Authorization: Bearer $VLLM_API_KEY" 127.0.0.1:$PORT/v1/models >/dev/null; }
-for _ in $(seq 1 160); do ready && break; kill -0 $SERVER 2>/dev/null || break; sleep 15; done
+for _ in $(seq 1 $(( ${EVAL_SERVER_WAIT_MIN:-40} * 4 ))); do ready && break; kill -0 $SERVER 2>/dev/null || break; sleep 15; done
 ready || { touch "$S/$MODEL.finished"; fail "model server did not start: $(tail -3 "$LOGS/server-$MODEL-r$RANK.log" | tr '\n' ' ' | cut -c1-300)"; }
 URL=http://$(hostname -f):$PORT/v1
 echo "$URL" > "$S/$MODEL.url"
