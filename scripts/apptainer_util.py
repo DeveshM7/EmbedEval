@@ -24,6 +24,7 @@ default work root, where the shared images have always been.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import subprocess
@@ -319,6 +320,26 @@ def remove(target: Path) -> bool:
         raise ValueError(f"refusing to delete {t}: not inside {root}")
     if not t.exists():
         return False
+    # Scratch is NFS: a file some process still holds open cannot be deleted
+    # there ("[Errno 16] Device or resource busy" on its .nfs* stand-in, or
+    # "[Errno 39] Directory not empty" on the folder that holds it),
+    # e.g. a container process left running by a command's timeout. Stop this
+    # user's processes that hold something inside, wait, and try again.
+    for attempt in range(1, 5):
+        try:
+            _remove_now(t)
+            return True
+        except OSError as e:
+            if e.errno not in (errno.EBUSY, errno.ENOTEMPTY) or attempt == 4:
+                raise
+            _stop(_holders(t))        # holders of this file or of anything inside this folder
+            time.sleep(5 * attempt)
+    return True
+
+
+def _remove_now(t: Path) -> None:
+    if not t.exists():
+        return
     if t.is_dir():
         # Overlay work/ directories are created without permissions; restore
         # them so the tree can be removed.
@@ -331,4 +352,21 @@ def remove(target: Path) -> bool:
         shutil.rmtree(t)
     else:
         t.unlink()
-    return True
+
+
+def pull_env(tmp: Path) -> dict:
+    """The environment for `apptainer pull`: its temporary files in `tmp` under
+    the work root, not in the node's small /tmp (a pull unpacks a few GB there)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("APPTAINER_DOCKER_")}
+    tmp.mkdir(parents=True, exist_ok=True)
+    env["APPTAINER_TMPDIR"] = str(tmp)
+    return env
+
+
+def remove_quietly(target: Path) -> None:
+    """remove(), for clean-up after an error: a failure here is printed, never
+    raised, so it cannot hide the error that led to the clean-up."""
+    try:
+        remove(target)
+    except Exception as e:
+        print(f"  could not remove {target}: {type(e).__name__}: {e}", flush=True)

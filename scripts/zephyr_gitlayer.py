@@ -215,7 +215,8 @@ def pull(instance_id: str, timeout: int = 1800) -> Path:
     part = out.with_name(f".{out.name}.pull-{os.getpid()}")
     # --disable-cache: Apptainer would also keep a copy in ~/.apptainer/cache, in the
     # 25 GB home quota (15 nodes pulling filled it in minutes); the file is kept here.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("APPTAINER_DOCKER_")}
+    tmp = au.path("tmp", f"pull-{out.stem}-{os.getpid()}", "x").parent
+    env = au.pull_env(tmp)
     try:
         r = subprocess.run(["apptainer", "pull", "--force", "--disable-cache", str(part), rec["ref"]], env=env,
                            capture_output=True, text=True, timeout=timeout)
@@ -227,7 +228,8 @@ def pull(instance_id: str, timeout: int = 1800) -> Path:
         part.replace(out)
     finally:
         if part.exists():
-            au.remove(part)
+            au.remove_quietly(part)
+        au.remove_quietly(tmp)
     return out
 
 

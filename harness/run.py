@@ -33,6 +33,7 @@ import signal
 import socket
 import sys
 import time
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -635,11 +636,16 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         raise
     except Exception as e:
         record["error"] = f"{type(e).__name__}: {e}"
+        # Where it went wrong, for an infrastructure error that one line does
+        # not explain (the last lines of the traceback).
+        record["traceback"] = traceback.format_exc()[-3000:]
         if _context_overflow(e):
             record["exit_status"] = "ContextWindowExceededError"
         else:
             record["infra_error"] = record["error"][:500]
         print(f"  ERROR: {record['error'][:300]}")
+        if record["infra_error"]:
+            print(record["traceback"], flush=True)
     finally:
         _CURRENT.clear()
         if env is not None and not captured:
@@ -651,8 +657,9 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         if env is not None:
             try:
                 env.cleanup()
-            except Exception:
-                pass
+            except Exception as e:
+                # Left on disk; said, so that leftovers do not pile up unseen.
+                print(f"  could not clean up the environment: {type(e).__name__}: {e}")
     if record["exit_status"] is not None and record["exit_status"] not in MODEL_ENDINGS:
         # An ending this list does not know (mini-swe-agent's own exception
         # names, say): ours to look at, not the model's fail.
