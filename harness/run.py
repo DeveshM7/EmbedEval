@@ -153,6 +153,20 @@ def repair_tool_args(arguments: str) -> str:
     return fixed if isinstance(obj, dict) and isinstance(obj.get("command"), str) else arguments
 
 
+SUBMIT_COMMAND = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+
+def _submit_text(content) -> bool:
+    text = (content or "").strip() if isinstance(content, str) else ""
+    if text == SUBMIT_COMMAND:
+        return True
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(obj, dict) and set(obj) == {"command"} and str(obj["command"]).strip() == SUBMIT_COMMAND
+
+
 def add_tool_arg_repair(model, full_model: str) -> None:
     """Apply repair_tool_args to every tool call before mini-swe-agent parses it,
     for a local profile that asks for it; counts the repairs on the model."""
@@ -163,11 +177,18 @@ def add_tool_arg_repair(model, full_model: str) -> None:
     model.tool_arg_repairs = 0
 
     def _parse_actions(response):
-        for call in response.choices[0].message.tool_calls or []:
+        message = response.choices[0].message
+        for call in message.tool_calls or []:
             fixed = repair_tool_args(call.function.arguments)
             if fixed is not call.function.arguments:
                 model.tool_arg_repairs += 1
                 call.function.arguments = fixed
+        # gpt-oss also writes its submission as text (its final-answer channel), not as
+        # a tool call: a reply with no call whose whole text is the submit command, bare
+        # or as {"command": ...}, is taken as that call. No other text is.
+        if not message.tool_calls and _submit_text(message.content):
+            model.tool_arg_repairs += 1
+            return [{"command": SUBMIT_COMMAND, "tool_call_id": f"submit-{model.tool_arg_repairs}"}]
         return parse(response)
 
     model._parse_actions = _parse_actions
