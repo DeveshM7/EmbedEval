@@ -70,7 +70,7 @@ about 625 GB together; download one, run it, delete it, if space is short (scrat
   These two matter most for a fair comparison: the published runs had both. Results from before this change are
   not comparable.
 - **Limits:** 250 steps, 2-hour cap per run, 900 s per command (the published runs used 60 s; our builds need
-  more). Same as in `docs/handover_branch_owners.md`.
+  more).
 
 ## 3. Tool-call repairs, for gpt-oss-120b only
 
@@ -153,5 +153,17 @@ command repeated tens of times (we saw this with Devstral, dropped for it).
 | 2df4815 | NFS clean-up fix, tracebacks |
 | 038cee7 | GLM 4.6 and MiniMax M2 profiles, weight revisions |
 
-Earlier commits on `main` are about hidden tests, verified statements and limits: see
-`docs/handover_branch_owners.md`.
+## Also needed: the evaluation rules already on `main`
+
+These came before the model work; your branch needs them too for results that compare:
+
+1. **Hide the PR's tests from the agent.** At the start of each run (in the run's overlay only): undo the test
+   diff, delete `/opt/embedeval/test_patch.diff`, strip test names from the runner's settings, remove leftovers
+   that reveal the tests (prebuilt output, indexes), and replace `run_tests` with one that runs the tests the agent
+   names. Grading stays as is. See `harness/hidden_tests.py` and `harness/agent_run_tests/`.
+2. **Prompt:** say the tests are hidden; tell the agent to write its own tests and to submit once its change and
+   tests pass; add "time is limited". The text is in `harness/hidden_tests.py`.
+3. **Use the verified statements:** use an instance's `problem_statement_fixed` when present (`statement_of` in
+   `harness/run.py`).
+4. **Limits:** 250 steps and a 2-hour cap per run (section 2).
+5. **Grade only submitted runs,** and retry an infrastructure error once before counting the run "not run".
