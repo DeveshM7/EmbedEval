@@ -456,10 +456,20 @@ def make_environment(meta: dict):
             setup = [*history, one_commit]
         else:
             setup = [*history, one_commit, commit_tests]
+        # A 32-bit Contiki-NG image (the older CI eras) runs from a writable
+        # sandbox of its own, not under an overlay: it cannot run from its SIF
+        # (apptainer_util.runnable_image), and over a sandbox directory
+        # Apptainer mounts kernel overlayfs (not fuse-overlayfs, as over a SIF)
+        # in a user namespace without `userxattr`: it can mark no directory
+        # opaque, so removing a directory of the image that has files
+        # (one_root's .git/refs, git clean, make clean) fails with an I/O
+        # error.
         return ApptainerEnvironment(image=image, layer=layer,
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
                                     local_overlay=meta["project"] == "contiki-ng",
+                                    sandbox=(meta["project"] == "contiki-ng"
+                                             and apptainer_util.is_i386_sif(image)),
                                     setup_commands=setup)
 
     # NuttX, RIOT: Docker.

@@ -61,7 +61,9 @@ class ApptainerEnvironment:
         self.network_fixture = network_fixture
         self.isolate_network = isolate_network or network_fixture is not None
         # Mynewt's native builds are much faster in a writable sandbox than in a .sif.
-        self.sandbox = au.unpack_sandbox(self.image) if sandbox else None
+        # (Contiki-NG's 32-bit images run from one too, on node-local /tmp: harness/run.py.)
+        self.sandbox = (au.unpack_sandbox(self.image, Path("/tmp") if local_overlay else None)
+                        if sandbox else None)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = au.path("runs", f"agent-{name}-{stamp}", "x").parent
         self.local_overlay = tempfile.TemporaryDirectory(prefix="embedeval-contiki-agent-", dir="/tmp") if local_overlay else None
@@ -88,8 +90,9 @@ class ApptainerEnvironment:
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         command = action.get("command", "")
         # A sandbox (Mynewt) has no network either: isolate_network runs it in
-        # a namespace of its own (scripts/mynewt_network.py).
-        cmd = (au.sandbox_exec_args(self.sandbox) if self.sandbox
+        # a namespace of its own (scripts/mynewt_network.py); without that
+        # (Contiki-NG), Apptainer gives it none.
+        cmd = (au.sandbox_exec_args(self.sandbox, network=self.isolate_network) if self.sandbox
                else au.exec_args(self.image, overlay=self.overlay, layer=self.layer, network=False))
         cmd[2:2] = ["--pwd", cwd or self.cwd]
         cmd += ["bash", "-c", command]

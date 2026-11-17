@@ -105,10 +105,20 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     overlay.mkdir(parents=True)
     (run_dir / "agent.patch").write_bytes(patch_bytes)
     base, layer = au.instance_container(meta, image)
-    # No network, as in the agent's run: the tests build and run offline.
-    container = au.exec_args(base, binds={run_dir: "/embedeval-run"}, overlay=overlay,
-                             layer=layer, network=False)
+    sandbox = None
     try:
+        if meta["project"] == "contiki-ng" and au.is_i386_sif(base):
+            # As in the agent's run (harness/run.py): a writable sandbox, not an overlay.
+            try:
+                sandbox = au.unpack_sandbox(base, Path("/tmp"))
+            except RuntimeError as e:  # the container could not be set up
+                result.update(error=str(e), infra_error=f"container: {e}")
+                return result
+        # No network, as in the agent's run: the tests build and run offline.
+        container = (au.sandbox_exec_args(sandbox, binds={run_dir: "/embedeval-run"}, network=False)
+                     if sandbox else
+                     au.exec_args(base, binds={run_dir: "/embedeval-run"}, overlay=overlay,
+                                  layer=layer, network=False))
         print("  applying patch ...")
         ap = subprocess.run(container + ["git", "-C", "/testbed", "apply",
                                          "/embedeval-run/agent.patch"],
@@ -173,6 +183,8 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
         result["elapsed_seconds"] = round(time.time() - start, 1)
         if local_overlay:
             local_overlay.cleanup()
+        if sandbox:
+            au.remove_sandbox(sandbox)
         au.remove(run_dir)
     return result
 

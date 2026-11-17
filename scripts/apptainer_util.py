@@ -274,6 +274,11 @@ def unpack_sandbox(image: Path, parent: Path | None = None) -> Path:
         remove_sandbox(root)
         raise RuntimeError(f"could not unpack {image.name}: {r.stderr.strip()[-300:]}")
     (root / "embedeval-run").mkdir(exist_ok=True)
+    # The host's /etc/localtime is bound in: without the file to bind it on
+    # (older Contiki-NG CI images), Apptainer warns on every command.
+    localtime = root / "etc" / "localtime"
+    if not (localtime.exists() or localtime.is_symlink()):
+        localtime.touch()
     return root
 
 
@@ -593,9 +598,11 @@ def exec_args(image: Path, binds: dict[Path, str] | None = None,
 
 
 def sandbox_exec_args(sandbox: Path, binds: dict[Path, str] | None = None,
-                      env: dict | None = None) -> list[str]:
-    """Build exec_args for a writable sandbox."""
+                      env: dict | None = None, network: bool = True) -> list[str]:
+    """Build exec_args for a writable sandbox (network=False: none, as exec_args)."""
     cmd = ["apptainer", "exec", "--containall", "--cleanenv", "--writable"]
+    if not network:
+        cmd += ["--net", "--network", "none"]
     for src, dst in (binds or {}).items():
         cmd += ["--bind", f"{src}:{dst}"]
     for k, v in (env or {}).items():

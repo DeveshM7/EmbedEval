@@ -1,4 +1,5 @@
 """Source contradictions must fail before expensive candidate validation."""
+import importlib.util
 import sys
 import tempfile
 import unittest
@@ -267,6 +268,32 @@ class SandboxPostTests(unittest.TestCase):
 
 
 class LocalSandboxTests(unittest.TestCase):
+    def test_a_sandbox_can_have_no_network(self):
+        import apptainer_util as au
+        self.assertIn('--network', au.sandbox_exec_args(Path('/s'), network=False))
+        self.assertNotIn('--network', au.sandbox_exec_args(Path('/s')))
+
+    @unittest.skipUnless(importlib.util.find_spec('minisweagent'), 'needs mini-swe-agent')
+    def test_an_unisolated_sandbox_environment_has_no_network(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'harness'))
+        import apptainer_env
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / 'i.sif'; img.write_text('')
+            sbx = Path(tmp) / 'embedeval-sbx-x' / 'root'; sbx.mkdir(parents=True)
+            with patch.dict('os.environ', {'EMBEDEVAL_WORK': tmp}), \
+                 patch.object(apptainer_env.au, 'unpack_sandbox', return_value=sbx) as unpack:
+                env = apptainer_env.ApptainerEnvironment(image=img, name='t', sandbox=True,
+                                                         local_overlay=True)
+                self.assertEqual(unpack.call_args.args[1], Path('/tmp'))
+                with patch.object(apptainer_env.subprocess, 'run') as run:
+                    run.return_value.stdout, run.return_value.returncode = '', 0
+                    env.execute({'command': 'true'})
+                    cmd = run.call_args.args[0]
+                self.assertEqual(cmd[0], 'apptainer')
+                self.assertIn('--writable', cmd)
+                self.assertIn('--network', cmd)
+                env.cleanup()
+
     def test_amd64_images_run_from_their_sif(self):
         import apptainer_util as au
         from unittest.mock import patch
