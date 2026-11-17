@@ -446,6 +446,8 @@ class RunnersFollowMain(unittest.TestCase):
                 continue
             text = norm(self.read(new))
             for line in norm(self.read(main)).splitlines():
+                if line.strip().startswith('echo "[$(date +%T)] job $ATTEMPT for $MODEL:'):
+                    continue   # a log line only; our runners name servers of several nodes
                 if any(k in line for k in ("srun", "timeout -s TERM", "kill-on-bad-exit", "squeue", "scancel",
                                            "END=", "LIMIT=", "sbatch \\", "-N \"$", "attempt", "ATTEMPT",
                                            "--export=NONE,EVAL_MODEL")):
