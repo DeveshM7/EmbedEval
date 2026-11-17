@@ -80,6 +80,8 @@ export EVAL_LOGS=$EVAL/logs/contiki-ng/job-$SLURM_JOB_ID
 # The servers' addresses and this job's API key, readable by this user only.
 export EVAL_SERVERS=$EVAL_LOGS/servers
 mkdir -p "$EVAL_SERVERS" && chmod 700 "$EVAL_SERVERS"
+# A requeued job keeps its ID and folder: clear what the earlier attempt left (dead servers' addresses, its stop mark).
+rm -f "$EVAL_SERVERS"/node*.url "$EVAL_SERVERS"/node*.failed "$EVAL_LOGS/checks-failed"
 ( umask 077; openssl rand -hex 32 > "$EVAL_SERVERS/key" )
 cp "$0" "$EVAL/logs/contiki-ng/eval_contiki_ng.sbatch" 2>/dev/null
 # The node scripts run from this job's own copies: bash reads a script as it runs
