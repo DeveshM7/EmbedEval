@@ -84,9 +84,12 @@ EXTRA=()
 [ -n "${EVAL_INSTANCES:-}" ] && EXTRA+=(--instances "$EVAL_INSTANCES")
 [ "${EVAL_KEEP_IMAGES:-0}" = 1 ] || EXTRA+=(--delete-images)
 PIDS=()
+SBX=${TMPDIR:-/tmp}/embedeval-sandboxes-$USER/$ME     # the unpacked sandboxes of this node's workers (32-bit instances only)
 for k in $MINE; do
     for a in $(seq 1 "$AGENTS"); do
+        mkdir -p "$SBX/s$k-w$a"
         EMBEDEVAL_LOCAL_API_BASE=$(cat "$S/node$k.url") EMBEDEVAL_LOCAL_API_KEY=$KEY \
+            EMBEDEVAL_SANDBOX_DIR="$SBX/s$k-w$a" \
             "$PY" harness/eval_worker.py --project contiki-ng --arch x86_64 --model "$MODEL" \
             --name "$ME-s$k-w$a" --stop-at "$STOP_AT" --margin "${EVAL_MARGIN:-60}" --time-limit "${EVAL_TIME_LIMIT:-120}" "${EXTRA[@]}" \
             > "$LOGS/cpu$I-s$k-w$a.log" 2>&1 &
@@ -98,4 +101,5 @@ done
 # as cut off, for the next job to retry.
 trap 'kill -TERM "${PIDS[@]}" 2>/dev/null; wait' TERM
 wait "${PIDS[@]}"
+chmod -R u+rwX "$SBX" 2>/dev/null; rm -rf "$SBX"     # none is left behind, even by a killed run
 log "workers done: $(cat "$LOGS"/cpu$I-s*-w*.log | grep -c ": pass\|: fail\|: not_run") PRs finished on this node"

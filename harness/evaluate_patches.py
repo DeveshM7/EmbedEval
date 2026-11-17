@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -110,7 +111,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
         if meta["project"] == "contiki-ng" and au.is_i386_sif(base):
             # As in the agent's run (harness/run.py): a writable sandbox, not an overlay.
             try:
-                sandbox = au.unpack_sandbox(base, Path("/tmp"))
+                sandbox = au.unpack_sandbox(base, Path(os.environ.get("EMBEDEVAL_SANDBOX_DIR") or "/tmp"))
             except RuntimeError as e:  # the container could not be set up
                 result.update(error=str(e), infra_error=f"container: {e}")
                 return result

@@ -25,6 +25,7 @@ small node-local /tmp. The overlay holds only what the agent changes.
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -62,7 +63,7 @@ class ApptainerEnvironment:
         self.isolate_network = isolate_network or network_fixture is not None
         # Mynewt's native builds are much faster in a writable sandbox than in a .sif.
         # (Contiki-NG's 32-bit images run from one too, on node-local /tmp: harness/run.py.)
-        self.sandbox = (au.unpack_sandbox(self.image, Path("/tmp") if local_overlay else None)
+        self.sandbox = (au.unpack_sandbox(self.image, Path(os.environ.get("EMBEDEVAL_SANDBOX_DIR") or "/tmp") if local_overlay else None)
                         if sandbox else None)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = au.path("runs", f"agent-{name}-{stamp}", "x").parent
