@@ -72,7 +72,7 @@ class ApptainerEnvironment:
         for c in setup_commands or []:
             r = self.execute({"command": c}, timeout=300)
             if r["returncode"] != 0:
-                self.cleanup()      # nobody else holds this environment yet
+                au.remove_quietly(self.run_dir)   # nobody else holds this environment yet
                 raise RuntimeError(f"environment setup failed: {c}: {r['output'][-300:]}")
 
     # -- mini-swe-agent interface -------------------------------------------

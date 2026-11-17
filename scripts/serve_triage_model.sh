@@ -49,7 +49,8 @@ HOST="${HOST:-127.0.0.1}"
 # EMBEDEVAL_MAX_NUM_SEQS and EMBEDEVAL_MAX_MODEL_LEN.)
 GPU_MEMORY="${GPU_MEMORY:-${EMBEDEVAL_GPU_MEMORY_UTILIZATION:-0.80}}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-${EMBEDEVAL_MAX_NUM_SEQS:-4}}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-${EMBEDEVAL_MAX_MODEL_LEN:-262144}}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-${EMBEDEVAL_MAX_MODEL_LEN:-}}"
+# MAX_MODEL_LEN: the environment, else the profile's max_model_len, else 262144.
 if [ "$HOST" != 127.0.0.1 ] && [ -z "${VLLM_API_KEY:-}" ]; then
     echo "HOST=$HOST needs VLLM_API_KEY: this would open the server to the whole cluster" >&2
     exit 1
@@ -66,13 +67,17 @@ if sys.argv[2] not in profiles or sys.argv[2].startswith("_"):
              + ", ".join(k for k in profiles if not k.startswith("_")))
 p, models = profiles[sys.argv[2]], os.environ["EMBEDEVAL_MODELS"]
 print(f"{models}/{p['weights']}")
+print(f"MAXLEN {p.get('max_model_len', 262144)}")
 for k, v in p.get("env", {}).items():
-    print(f"ENV {k}={v}")
+    print(f"ENV {k}={str(v).replace('{models}', models)}")
 for a in p["vllm_args"]:
-    print(a.replace("{models}", models))
+    print(a.replace("{models}", models).replace("{repo}", os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[1])))))
 PY
 )
 WEIGHTS="${ARGS[0]}"
+PROFILE_MAXLEN="${ARGS[1]#MAXLEN }"
+ARGS=("${ARGS[0]}" "${ARGS[@]:2}")
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-$PROFILE_MAXLEN}"
 SERVE_ARGS=()
 for a in "${ARGS[@]:1}"; do
     if [[ "$a" == ENV\ * ]]; then export "APPTAINERENV_${a#ENV }"; else SERVE_ARGS+=("$a"); fi
@@ -105,6 +110,24 @@ mkdir -p "$SCRATCH_ROOT/cache"
 
 echo "profile=$PROFILE node=$(hostname) port=$PORT start=$(date +%T)"
 echo "weights=$WEIGHTS"
+# One model over several nodes (VLLM_NNODES > 1): pipeline parallel, one stage
+# per node, over the nodes' 10 Gb/s link. Every node runs this script with its
+# VLLM_NODE_RANK; rank 0 (VLLM_MASTER_ADDR) serves the API, the others run
+# headless. VLLM_NCCL_IFNAME names the interface carrying the node addresses.
+NNODES="${VLLM_NNODES:-1}"
+if [ "$NNODES" -gt 1 ]; then
+    : "${VLLM_NODE_RANK:?multi-node needs VLLM_NODE_RANK}" "${VLLM_MASTER_ADDR:?multi-node needs VLLM_MASTER_ADDR}"
+    IFNAME="${VLLM_NCCL_IFNAME:-enp1s0f0np0}"
+    export APPTAINERENV_NCCL_SOCKET_IFNAME="$IFNAME" APPTAINERENV_GLOO_SOCKET_IFNAME="$IFNAME"
+    # NCCL over TCP sockets by default: its RDMA (RoCE) path fails in the container
+    # ("unhandled system error"); VLLM_NCCL_IB=1 tries RDMA. VLLM_NCCL_DEBUG sets NCCL_DEBUG.
+    [ "${VLLM_NCCL_IB:-0}" = 1 ] || export APPTAINERENV_NCCL_IB_DISABLE=1
+    [ -n "${VLLM_NCCL_DEBUG:-}" ] && export APPTAINERENV_NCCL_DEBUG="$VLLM_NCCL_DEBUG"
+    SERVE_ARGS+=(--pipeline-parallel-size "$NNODES" --nnodes "$NNODES" --node-rank "$VLLM_NODE_RANK"
+                 --master-addr "$VLLM_MASTER_ADDR" --master-port "${VLLM_MASTER_PORT:-29501}")
+    [ "$VLLM_NODE_RANK" -gt 0 ] && SERVE_ARGS+=(--headless)
+    echo "multi-node: rank $VLLM_NODE_RANK of $NNODES, master $VLLM_MASTER_ADDR, interface $IFNAME"
+fi
 exec apptainer exec --cleanenv --bind "$(IFS=,; echo "${BINDS[*]}")" "$IMAGE" \
     vllm serve "$WEIGHTS" --served-model-name "$PROFILE" \
         --host "$HOST" --port "$PORT" \

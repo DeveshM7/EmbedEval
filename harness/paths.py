@@ -78,6 +78,12 @@ LOCAL_PROFILES = [name for name in json.loads((REPO_ROOT / "triage" / "models.js
                   if not name.startswith("_")]
 MODEL_DIRS.update({f"openai/{name}": name for name in LOCAL_PROFILES})
 
+# Local open-weights models served by scripts/serve_triage_model.sh (vLLM,
+# OpenAI-compatible): every profile of triage/models.json, as openai/<profile>.
+LOCAL_PROFILES: tuple[str, ...] = tuple(
+    k for k in json.loads((REPO_ROOT / "triage" / "models.json").read_text()) if not k.startswith("_"))
+MODEL_DIRS.update({f"openai/{name}": name for name in LOCAL_PROFILES})
+
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.
 MODEL_ALIASES: dict[str, str] = {short: full for full, short in MODEL_DIRS.items()}
 
