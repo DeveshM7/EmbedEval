@@ -22,7 +22,7 @@ STOP_AT=${2:?usage: eval_mynewt_agents.sh <model> <stop-at> <servers>}
 NSERVERS=${3:?usage: eval_mynewt_agents.sh <model> <stop-at> <servers>}
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"     # the repository (this may be a job's copy)
 I=${SLURM_NODEID:-0} N=${SLURM_NNODES:-1}
-ME=${SLURM_JOB_ID:-local}-cpu$I
+ME=${SLURM_JOB_ID:-local}${SLURM_RESTART_COUNT:+-r$SLURM_RESTART_COUNT}-cpu$I     # a requeued job keeps its ID: new names, so its dead workers' PRs are retaken at once
 LOGS=${EVAL_LOGS:?EVAL_LOGS not set}; S=${EVAL_SERVERS:?EVAL_SERVERS not set}
 AGENTS=${EVAL_AGENTS:-4} WAIT=$(( ${EVAL_SERVER_WAIT_MIN:-40} + 10 ))
 export EMBEDEVAL_SHARED=${EMBEDEVAL_SHARED:-/scratch/scholar/$USER/embedeval/shared}
