@@ -855,6 +855,15 @@ request without it, and cannot be reached from inside an agent's container; a
 failed check stops the job, which then does not resubmit itself
 (`checks-failed` in the job's log folder).
 
+In the Mynewt and Contiki-NG runners a server takes the profile's `nodes`
+Spark nodes (`triage/models.json`; 1 if absent), so the Spark component's `-N`
+is servers x nodes; a `-N` that is not a multiple stops the job at once, and
+it is not resubmitted. The four evaluation models: MiniMax M2.5 2 nodes,
+MiniMax M2 and GLM 4.6 3, gpt-oss-120b 1; agents per server (`EVAL_AGENTS`) 2
+for the two MiniMax models, 3 for GLM 4.6 and gpt-oss-120b, with 4 `cpu` cores
+per agent (one GLM server: `-N 3 : -N 1 -c 12`). A 3-node server takes 25 to 40 minutes
+to load; the agents wait 10 minutes longer than `EVAL_SERVER_WAIT_MIN`.
+
 Settings go in `--export` (repeat them after `:` for a heterogeneous job):
 
 | Setting | Default | Meaning |
@@ -862,7 +871,8 @@ Settings go in `--export` (repeat them after `:` for a heterogeneous job):
 | `EVAL_MODEL` | required | a model `harness/paths.py` knows, served from its profile in `triage/models.json` |
 | `EVAL_AGENTS` | 4 | agents per server |
 | `EVAL_GPU_MEMORY` | 0.80 (heterogeneous runners), 0.70 (`eval_zephyr.sbatch`, `eval_nuttx.sbatch`: the node also builds) | share of GPU memory for the server |
-| `EVAL_MAX_MODEL_LEN` | 262144 | the server's context |
+| `EVAL_MAX_MODEL_LEN` | the profile's `max_model_len`, else 262144 (NuttX: 262144) | the server's context |
+| `EVAL_SERVER_WAIT_MIN` | 40 | minutes a model server may take to start (Mynewt, Contiki-NG) |
 | `EVAL_INSTANCES` | all of the project | a file of instance ids, for a trial |
 | `EVAL_TIME_LIMIT` | 120 | minutes per agent run |
 | `EVAL_MARGIN` | 60 | minutes before the job's end after which no new PR is taken |

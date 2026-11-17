@@ -15,7 +15,7 @@
 # Mynewt instances are built here, not published: the workers build an image
 # before the run if it is not there (harness/eval_images.py), from the shared Mynewt base image.
 # Settings, from the environment: EVAL_AGENTS (4), EVAL_MARGIN (60), EVAL_TIME_LIMIT (120), EVAL_INSTANCES,
-# EVAL_KEEP_IMAGES, EVAL_LOGS, EVAL_SERVERS.
+# EVAL_KEEP_IMAGES, EVAL_SERVER_WAIT_MIN (40: this side waits 10 minutes longer), EVAL_LOGS, EVAL_SERVERS.
 set -u
 MODEL=${1:?usage: eval_mynewt_agents.sh <model> <stop-at> <servers>}
 STOP_AT=${2:?usage: eval_mynewt_agents.sh <model> <stop-at> <servers>}
@@ -24,7 +24,7 @@ cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"     # the repository (this may be a
 I=${SLURM_NODEID:-0} N=${SLURM_NNODES:-1}
 ME=${SLURM_JOB_ID:-local}-cpu$I
 LOGS=${EVAL_LOGS:?EVAL_LOGS not set}; S=${EVAL_SERVERS:?EVAL_SERVERS not set}
-AGENTS=${EVAL_AGENTS:-4}
+AGENTS=${EVAL_AGENTS:-4} WAIT=$(( ${EVAL_SERVER_WAIT_MIN:-40} + 10 ))
 export EMBEDEVAL_SHARED=${EMBEDEVAL_SHARED:-/scratch/scholar/$USER/embedeval/shared}
 # This node's instance images, overlays and build logs; the base images are shared.
 export EMBEDEVAL_WORK=${EMBEDEVAL_WORK:-/scratch/scholar/$USER/embedeval/eval-work/mynewt-cpu$I}
@@ -46,8 +46,9 @@ log "on $(hostname), $(nproc) cores, $(uname -m); servers $(echo $MINE), $AGENTS
 [ -x "$PY" ] || stop "no x86 Python at $PY (cluster/setup_riot.py)"
 KEY=$(cat "$S/key") || stop "no API key in $S/key"
 
-# Wait for this node's servers (they take about 6 minutes to load the model).
-for _ in $(seq 1 160); do
+# Wait for this node's servers (a 1-node server loads the model in about 6 minutes,
+# a 3-node one in 25 to 40), longer than they wait for themselves.
+for _ in $(seq 1 $((WAIT * 4))); do
     left=0
     for k in $MINE; do
         [ -f "$S/node$k.failed" ] && stop "server $k: $(cat "$S/node$k.failed")"
@@ -56,7 +57,7 @@ for _ in $(seq 1 160); do
     [ $left = 0 ] && break
     sleep 15
 done
-for k in $MINE; do [ -f "$S/node$k.url" ] || stop "server $k not ready after 40 minutes"; done
+for k in $MINE; do [ -f "$S/node$k.url" ] || stop "server $k not ready after $WAIT minutes"; done
 
 # The checks.
 PROFILE=$("$PY" -c "
