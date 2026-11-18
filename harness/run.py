@@ -208,6 +208,24 @@ PROVIDER_KEYS = {
 }
 
 
+def add_think_repair(model, full_model: str) -> None:
+    profile = LOCAL_MODELS.get(full_model)
+    if not profile or not json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile].get("repair_think_close"):
+        return
+    parse = model._parse_actions
+    model.think_repairs = 0
+
+    def _parse_actions(response):
+        message = response.choices[0].message
+        content = message.content if isinstance(message.content, str) else ""
+        if message.tool_calls and content.lstrip().startswith("<think>") and "</think>" not in content:
+            message.content = content.rstrip() + "\n</think>"
+            model.think_repairs += 1
+        return parse(response)
+
+    model._parse_actions = _parse_actions
+
+
 # Models served locally by scripts/serve_triage_model.sh: vLLM's
 # OpenAI-compatible API, so LiteLLM's openai/ route with an api_base. The
 # sampling settings come from the same profile triage uses (triage/models.json).
@@ -689,6 +707,8 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
             record["steps"] = agent.n_calls
             if hasattr(agent.model, "tool_arg_repairs"):
                 record["tool_arg_repairs"] = agent.model.tool_arg_repairs
+            if hasattr(agent.model, "think_repairs"):
+                record["think_repairs"] = agent.model.think_repairs
         paths.write_json(paths.run_record_path(instance_id, full_model), record)
 
     try:
@@ -700,6 +720,7 @@ def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
         model.config.format_error_template = FORMAT_ERROR_TEMPLATE
         model.config.observation_template = OBSERVATION_TEMPLATE
         add_tool_arg_repair(model, full_model)
+        add_think_repair(model, full_model)
 
         agent_class = make_verbose_agent_class(DefaultAgent) if args.verbose else DefaultAgent
         agent = agent_class(
