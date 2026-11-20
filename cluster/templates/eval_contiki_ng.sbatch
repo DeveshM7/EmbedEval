@@ -59,7 +59,7 @@
 # which no new PR is taken, 60), EVAL_TIME_LIMIT (minutes per run, 120),
 # EMBEDEVAL_EVAL_DIR (results elsewhere, for a test), EMBEDEVAL_CONTIKI_NG_IMAGE
 # (the current CI image, if not under <shared>/images).
-# A shorter job: -t on both components, also kept on resubmission.
+# A shorter job: -t on both components, also kept on resubmission; a -p for the Spark nodes too.
 #
 # Before any agent starts, the cpu side sends each server one request, checks
 # that a request without the key is refused and that an agent container cannot
@@ -136,6 +136,6 @@ elif [ "$LEFT" -gt 0 ] && [ "$ATTEMPT" -lt "${EVAL_MAX_JOBS:-6}" ]; then
     keep=$(env | grep -E "^(EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|SERVER_WAIT_MIN|INSTANCES|KEEP_IMAGES|MAX_JOBS|MARGIN|TIME_LIMIT)|EMBEDEVAL_EVAL_DIR|EMBEDEVAL_CONTIKI_NG_IMAGE)=" | paste -sd, -)
     exp=NONE,EVAL_MODEL="$MODEL",EVAL_ATTEMPT=$((ATTEMPT + 1))${keep:+,$keep}
     env $(env | grep -E "^(SLURM|SBATCH)_" | cut -d= -f1 | sed "s/^/-u /") sbatch \
-        -N "$N0" -t "$LIMIT" --export="$exp" -o "$EVAL/logs/contiki-ng/%x-%j.out" \
+        -N "$N0" -p "${SLURM_JOB_PARTITION_HET_GROUP_0:-$SLURM_JOB_PARTITION}" -t "$LIMIT" --export="$exp" -o "$EVAL/logs/contiki-ng/%x-%j.out" \
         : -N "$N1" -c "$C1" -t "$LIMIT" --export="$exp" "$EVAL/logs/contiki-ng/eval_contiki_ng.sbatch"
 fi
