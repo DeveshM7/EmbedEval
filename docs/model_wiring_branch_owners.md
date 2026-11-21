@@ -9,11 +9,15 @@ branch and machines. The code is on `main`: copy it, or merge `main` and keep yo
 GB10 nodes (section 5b). The M2 fix and the multi-node job files are not on `main` yet; section 3b gives the fix
 in full, so you can add it now.
 
+**Updated 2026-11-21, after the full RIOT runs:** MiniMax M2.5 now also gets the closing-tag repair: **run M2.5
+with the profile `minimax-m25-nvfp4-thinkfix` only** (section 3b). Our M2.5 results without the repair are set
+aside. Also: agents killed by memory on shared nodes, and more nodes to exclude (section 5b).
+
 **The models** (chosen after pilots on 5 Zephyr/RIOT tasks each):
 
 | Model | Profile (`triage/models.json`) | Weights (Hugging Face, revision) | Precision | Agents per server | Pilot (5) | SWE-bench Verified, bash-only |
 |---|---|---|---|---|---|---|
-| MiniMax M2.5 | `minimax-m25-nvfp4` | `nvidia/MiniMax-M2.5-NVFP4` @ `b6220d658389629b9d507d4b2bb314f41fea7898` | NVFP4 (~126 GB) | 2 | 4/5 | 75.8 |
+| MiniMax M2.5 | `minimax-m25-nvfp4-thinkfix` | `nvidia/MiniMax-M2.5-NVFP4` @ `b6220d658389629b9d507d4b2bb314f41fea7898` | NVFP4 (~126 GB) | 2 | 4/5 | 75.8 |
 | MiniMax M2 | `minimax-m2` | `MiniMaxAI/MiniMax-M2` @ `04312f0cfbdeefb912575595b7c045512a29293c` | FP8 (~215 GB) | 2 | 2/5 (before section 3b's fix) | 61.0 |
 | GLM 4.6 | `glm-46-nvfp4` | `RedHatAI/GLM-4.6-NVFP4` @ `67d1628eac13f95ac8648600d68356390abe1c95` | NVFP4 (~192 GB) | 3 | 4/5 | 55.4 |
 | gpt-oss-120b | `gpt-oss-120b` | `openai/gpt-oss-120b` @ `b5c939de8f754692c1647ca79fbf85e8c1e70f8a` | MXFP4 (~60 GB) | 3 | 4/5 | 26.0 |
@@ -27,7 +31,8 @@ use), so the agent setup must match theirs as closely as possible. That is why s
 
 ## 1. Model profiles: one entry per model in `triage/models.json`
 
-Copy the four entries `minimax-m25-nvfp4`, `minimax-m2`, `glm-46-nvfp4` and `gpt-oss-120b` from `main` as they are.
+Copy the four entries `minimax-m25-nvfp4-thinkfix`, `minimax-m2`, `glm-46-nvfp4` and `gpt-oss-120b` from `main` as
+they are (`minimax-m25-nvfp4`, M2.5 without the repair, stays only for older runs: do not evaluate with it).
 Each holds:
 
 - `weights` (folder under `$EMBEDEVAL_MODELS`, default `/scratch/scholar/$USER/hf/models`) and `revision`;
@@ -44,7 +49,7 @@ Settings that differ from vLLM's defaults, and why (all found the hard way, on G
 | GLM 4.6 | `max_model_len` 131072 (of 203k) | leaves room for the KV cache over 3 nodes |
 | gpt-oss-120b | env `TIKTOKEN_ENCODINGS_BASE={models}/tiktoken-gpt-oss` | its Harmony format downloads two vocabulary files at start, and the server has no network. Put `o200k_base.tiktoken` and `cl100k_base.tiktoken` (from `https://openaipublic.blob.core.windows.net/encodings/`) in that folder |
 | gpt-oss-120b | `"repair_tool_args": true` | see section 3 |
-| MiniMax M2 | `"repair_think_close": true` | see section 3b (not on `main` yet) |
+| MiniMax M2, MiniMax M2.5 (`minimax-m25-nvfp4-thinkfix`) | `"repair_think_close": true` | see section 3b (not on `main` yet) |
 | MiniMax M2.5/M2 | `--trust-remote-code`, `--reasoning-parser minimax_m2_append_think`, `--tool-call-parser minimax_m2` | from the model cards |
 | GLM 4.6 | `--reasoning-parser glm45`, `--tool-call-parser glm45` | from the model card |
 | all | `--enable-auto-tool-choice` with each model's tool-call parser | mini-SWE-agent 2.x uses tool calls |
@@ -93,9 +98,10 @@ two narrow repairs (`run.add_tool_arg_repair`), counted in `run.json` as `tool_a
    of a tool call. A reply with no tool call whose whole text is `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
    (bare, or as `{"command": ...}`) is taken as that call. No other text is.
 
-Without these, gpt-oss lost runs to format errors, not to the task. MiniMax M2.5 and GLM 4.6 need no repairs.
+Without these, gpt-oss lost runs to format errors, not to the task. GLM 4.6 needs no repairs; for MiniMax M2 and
+M2.5, see section 3b.
 
-## 3b. Closing-tag repair, for MiniMax M2 only (added 2026-11-17)
+## 3b. Closing-tag repair, for MiniMax M2 and M2.5 (added 2026-11-17, updated 2026-11-21)
 
 **The problem.** With tool calls, vLLM 0.27.1's MiniMax tool-call parser (`minimax_m2`, with the reasoning parser
 `minimax_m2_append_think`) returns the reply's content as `<think>reasoning...` **without the closing `</think>`**
@@ -104,8 +110,7 @@ turn M2 sees its earlier reasoning as an unclosed block; MiniMax says M2's reaso
 history. M2 then looped (one `sed` repeated 178 times) and ran out of steps on every problem; with the fix it
 submits and passes normally (on a 4-problem test: 0 submitted before, 4 submitted and 2 passed after).
 The published runs did not go through this parser (M2's used mini-swe-agent 1.17 text actions), so this is our
-set-up's problem, not the model's. MiniMax M2.5 goes through the same parser but works well without the repair,
-so it is left as it is, by decision.
+set-up's problem, not the model's.
 
 **The fix** (`harness/run.py`, applied only to profiles with `"repair_think_close": true`, i.e. `minimax-m2`): before
 mini-swe-agent stores the reply, a reply with tool calls whose content starts with `<think>` and has no `</think>`
@@ -133,6 +138,36 @@ def add_think_repair(model, full_model: str) -> None:
 Call it right after `add_tool_arg_repair(model, full_model)` in `run_one`, add `"repair_think_close": true` to the
 `minimax-m2` profile, and record `agent.model.think_repairs` in `run.json` as `tool_arg_repairs` is. Check: in a run's
 `trajectory.json`, every assistant message of M2 should end with `</think>`.
+
+**MiniMax M2.5 needs it too (added 2026-11-21).** M2.5 goes through the same parser and has the same problem:
+on RIOT, all 4,782 of its replies with tool calls had an unclosed `<think>`. Unlike M2 it still worked well without
+the repair, so we first ran it as it was. But it took many more steps than the other models (median about 116 per
+problem on RIOT, against 73-77), and the published M2.5 run never had the problem: it used a hosted API
+(`minimax/minimax-m2.5`), which returns the reasoning in separate `reasoning` / `reasoning_details` fields and
+passes it back intact, with no `<think>` tags in the content at all. So we ran Zephyr and RIOT again with the
+repair: M2.5 took fewer steps and did at least as well. **Only the runs with the repair count**, for every project.
+
+The profile is `minimax-m25-nvfp4-thinkfix`: a copy of `minimax-m25-nvfp4` (same weights, revision, server settings
+and sampling) with `"repair_think_close": true` added. Its results go to their own folder
+(`<eval dir>/minimax-m25-nvfp4-thinkfix/<project>/`). If you already ran M2.5 without the repair, set those
+results aside and run it again with this profile:
+
+  ```json
+  "minimax-m25-nvfp4-thinkfix": {
+      "weights": "MiniMax-M2.5-NVFP4",
+      "revision": "b6220d658389629b9d507d4b2bb314f41fea7898",
+      "nodes": 2,
+      "vllm_args": [... the same as minimax-m25-nvfp4 ...],
+      "env": {},
+      "repair_think_close": true,
+      "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 40},
+      "max_tokens": 32768,
+      "max_model_len": 196608
+  }
+  ```
+
+Same layouts and agents per server as `minimax-m25-nvfp4` (section 4). Check: `think_repairs` in `run.json` should
+equal the run's steps.
 
 ## 4. Serving the models (vLLM, `scripts/serve_triage_model.sh`)
 
@@ -204,13 +239,22 @@ Call it right after `add_tool_arg_repair(model, full_model)` in `run_one`, add `
     marked "not run" after two attempts), or wait for hours on a hung one (`/v1/models` can keep answering while
     generation has stopped).
 - **Some nodes come up short of memory** (k015, l006, k060 on Scholar), so their server cannot start or has little
-  KV room; exclude them (`-x`).
+  KV room; exclude them (`-x`). Nodes that froze in our runs, also worth excluding: k054, k055, k063, k069, k070,
+  k071, k076 (k062 is not available to us).
+- **An agent's command can run a shared node out of memory.** On RIOT's x86 `cpu` nodes (8 agents per node), some
+  MiniMax builds, after the model had edited build files or headers, used up the node's memory. The kernel then
+  killed whole agent processes, the culprit's or a neighbour's, and their runs ended with no record (only
+  `trajectory.json`; Slurm reports the step as `OUT_OF_MEMORY`). Our harness limits each command's time (900 s),
+  not its memory, and we kept it that way (a limit could change the earlier models' results). Our rule: a run whose
+  own commands caused it (for example, the only problem left on the node) counts as a fail; a run that may have been
+  a neighbour's victim is retried. If your agents share nodes, check `sacct` for `OUT_OF_MEMORY` after each job.
 - **Retry, do not count, what the cluster broke:** runs cut off by a dead server or a job's end are infrastructure
   errors; move their folders aside so they restart fresh rather than using up their second attempt.
 - **Resubmission:** our jobs resubmit themselves while problems are left; set `EVAL_MAX_JOBS=1` when you would
   rather decide each follow-up yourself, and size a follow-up to the problems left.
 - Our job files for all of this (`cluster/templates/eval_zephyr_multi.sbatch`, `eval_zephyr_het.sbatch`,
-  `scripts/eval_zephyr_group.sh`) are not on `main` yet.
+  `scripts/eval_zephyr_group.sh`, and for RIOT `cluster/templates/eval_riot_multi.sbatch` with
+  `scripts/eval_riot_remote.sh`) are not on `main` yet.
 
 ## 6. What to expect, to check your set-up
 
