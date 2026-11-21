@@ -33,6 +33,7 @@ default work root, where the shared images have always been.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -231,6 +232,17 @@ def nuttx_base_image(sim_config: str = "sim:nsh") -> Path:
     for name in ("base.def", "sim_tcbinfo_arm64.patch"):
         h.update((NUTTX_TEMPLATES / name).read_bytes())
     return shared_path("images", f"nuttx-sim-{h.hexdigest()[:8]}{host_tag()}.sif")
+def riot_image(tag: str) -> Path:
+    """RIOT's own build image of one release (riot/riotbuild), x86 only."""
+    return shared_path("images", f"riotbuild-{tag}.sif")
+
+
+def instance_container(meta: dict, image: Path) -> tuple[Path, Path | None]:
+    """(what to run, its read-only layer). `image` is the file validated and published
+    for the instance: its own image, or, for RIOT, a layer on the era's shared image."""
+    if meta.get("pipeline") == "riot-layer":
+        return riot_image(meta["base_image"].removeprefix("riotbuild-")), image
+    return image, None
 
 
 def instance_image(instance_id: str) -> Path:
@@ -342,16 +354,21 @@ def nuttx_reconfigure(overrides: dict) -> str:
 
 def exec_args(image: Path, binds: dict[Path, str] | None = None,
               overlay: Path | None = None, env: dict | None = None,
+              home: Path | None = None, layer: Path | None = None,
               network: bool = True) -> list[str]:
     """`apptainer exec` with nothing from the host leaking in: --containall
     gives a fresh home and /tmp, --cleanenv drops the host environment (the
     cluster's LD_LIBRARY_PATH breaks the SDK's QEMU; its Python confuses CMake).
-    network=False: a network namespace of its own with loopback only, so
-    nothing inside can reach GitHub (the fix, the PR page) or any other host;
-    NuttX agent runs, validation and grading all run this way."""
+    network=False gives the container no network at all (--network none, which
+    needs no privileges): evaluation runs it this way, so an agent cannot fetch
+    the fix (the PR page, a later commit); builds need the network and keep it."""
     cmd = ["apptainer", "exec", "--containall", "--cleanenv"]
     if not network:
         cmd += ["--net", "--network", "none"]
+    if home:        # the fresh home is a small tmpfs; Apptainer refuses --env HOME=
+        cmd += ["--home", f"{home}:/home/build"]
+    if layer:       # read-only, below the writable overlay
+        cmd += ["--overlay", f"{layer}:ro"]
     if overlay:
         cmd += ["--overlay", str(overlay)]
     for src, dst in (binds or {}).items():
@@ -423,6 +440,26 @@ def remove(target: Path) -> bool:
         raise ValueError(f"refusing to delete {t}: not inside {root}")
     if not t.exists():
         return False
+    # Scratch is NFS: a file some process still holds open cannot be deleted
+    # there ("[Errno 16] Device or resource busy" on its .nfs* stand-in, or
+    # "[Errno 39] Directory not empty" on the folder that holds it),
+    # e.g. a container process left running by a command's timeout. Stop this
+    # user's processes that hold something inside, wait, and try again.
+    for attempt in range(1, 5):
+        try:
+            _remove_now(t)
+            return True
+        except OSError as e:
+            if e.errno not in (errno.EBUSY, errno.ENOTEMPTY) or attempt == 4:
+                raise
+            _stop(_holders(t))        # holders of this file or of anything inside this folder
+            time.sleep(5 * attempt)
+    return True
+
+
+def _remove_now(t: Path) -> None:
+    if not t.exists():
+        return
     if t.is_dir():
         # Overlay work/ directories are created without permissions; restore
         # them so the tree can be removed.
@@ -435,4 +472,21 @@ def remove(target: Path) -> bool:
         shutil.rmtree(t)
     else:
         t.unlink()
-    return True
+
+
+def pull_env(tmp: Path) -> dict:
+    """The environment for `apptainer pull`: its temporary files in `tmp` under
+    the work root, not in the node's small /tmp (a pull unpacks a few GB there)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("APPTAINER_DOCKER_")}
+    tmp.mkdir(parents=True, exist_ok=True)
+    env["APPTAINER_TMPDIR"] = str(tmp)
+    return env
+
+
+def remove_quietly(target: Path) -> None:
+    """remove(), for clean-up after an error: a failure here is printed, never
+    raised, so it cannot hide the error that led to the clean-up."""
+    try:
+        remove(target)
+    except Exception as e:
+        print(f"  could not remove {target}: {type(e).__name__}: {e}", flush=True)

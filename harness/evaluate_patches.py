@@ -5,8 +5,11 @@ Grade agent patches by applying them in fresh containers.
     python harness/evaluate_patches.py --repo riot --model gpt-5.4 gemini-2.5-pro
     python harness/evaluate_patches.py --instance zephyr__zephyr-65697 --model gpt-5.4
 
-Reads outputs/<repo>/<model>/<PR>/patch.diff, written by run.py. Selection
-flags mirror run.py so the same invocation shape grades what you just ran.
+Reads each run's folder, <eval dir>/<model>/<project>/<PR>/ (harness/paths.py),
+written by run.py, and writes its grade.json there. run.py grades each run as
+soon as it ends; this command grades runs again or late. Only a run the agent
+submitted is tested; any other ending is a fail (grade_run). Selection flags
+mirror run.py so the same invocation shape grades what you just ran.
 
 Evaluation is deliberately decoupled from the agent run: each patch is applied
 in a container started fresh from the instance image, so nothing the agent left
@@ -44,7 +47,7 @@ NUTTX_RUN_TESTS_ERRORS = {1: "tests failed", 2: "tests timed out (possible infin
 
 
 def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: int) -> dict:
-    """Grade a patch on a twister-pipeline instance, in its Apptainer image.
+    """Grade a patch on an instance run in Apptainer (twister-pipeline Zephyr, RIOT).
 
     A fresh writable overlay on the image as built (base commit + the PR's
     tests), the agent's patch applied on top, then `run_tests`: twister builds
@@ -67,18 +70,20 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
               "patch_file": str(paths.show(patch_path)),
               "patch_empty": False, "patch_applied": False, "build_ok": False,
               "tests_passed": False, "grade": "fail", "error": None, "elapsed_seconds": 0}
-    # NuttX grades without a network, as its agent runs and validation do.
-    isolated = meta["project"] == "nuttx"
-    result["network"] = "isolated" if isolated else "host"
+    # Graded without a network, as the agent's runs are.
+    result["network"] = "isolated"
     if not patch_path.exists():
         result.update(grade="missing", error="no patch file (run not found)")
         return result
     if not patch_path.read_bytes().strip():
         result.update(patch_empty=True, error="empty patch — agent made no changes")
         return result
-    image = au.instance_image(instance_id)
-    if not image.exists():
-        result["error"] = f"instance image not built: {image}"
+    import registry       # the validated image: pulled from the registry if published
+    try:
+        image = registry.image_for(instance_id)
+    except (FileNotFoundError, RuntimeError) as e:
+        # Our side, not the patch's: the image could not be had.
+        result.update(error=str(e), infra_error=f"image: {e}")
         return result
 
     start = time.time()
@@ -87,15 +92,20 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
     overlay.mkdir(parents=True)
     # bytes, not text: universal newlines would turn a lone \r into a line break
     (run_dir / "agent.patch").write_bytes(patch_path.read_bytes())
-    container = au.exec_args(image, binds={run_dir: "/embedeval-run"}, overlay=overlay,
-                             network=not isolated)
+    base, layer = au.instance_container(meta, image)
+    # No network, as in the agent's run: the tests build and run offline.
+    container = au.exec_args(base, binds={run_dir: "/embedeval-run"}, overlay=overlay,
+                             layer=layer, network=False)
     try:
         print("  applying patch ...")
         ap = subprocess.run(container + ["git", "-C", "/testbed", "apply",
                                          "/embedeval-run/agent.patch"],
                             capture_output=True, text=True, timeout=120)
         if ap.returncode != 0:
-            result["error"] = f"git apply failed: {(ap.stdout + ap.stderr).strip()[:300]}"
+            text = (ap.stdout + ap.stderr).strip()
+            result["error"] = f"git apply failed: {text[:300]}"
+            if "FATAL:" in text:          # Apptainer itself did not start the container
+                result["infra_error"] = f"container: {text[:300]}"
             return result
         result["patch_applied"] = True
         if meta["project"] == "nuttx":
@@ -155,7 +165,7 @@ def evaluate_apptainer(instance_id: str, model_name: str, meta: dict, timeout: i
 
 def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dict:
     meta = paths.load_metadata(instance_id)
-    if meta.get("pipeline") == "twister" or meta.get("runtime") == "apptainer":
+    if meta.get("pipeline") in ("twister", "riot-layer") or meta.get("runtime") == "apptainer":
         return evaluate_apptainer(instance_id, model_name, meta, timeout)
     if meta["project"] == "zephyr":
         return {"instance_id": instance_id, "model": paths.resolve_model(model_name),
@@ -284,6 +294,47 @@ def evaluate_patch(instance_id: str, model_name: str, timeout: int = 300) -> dic
     return result
 
 
+def grade_run(instance_id: str, model_name: str, timeout: int = 1800) -> dict | None:
+    """Grade one finished agent run and write its grade.json; return the grade.
+
+    As on SWE-bench (mini-swe-agent), only an explicit submission is graded: a run
+    that ended any other way -- the step limit, the time cap, the model's context
+    overflowing, repeated format errors -- is a fail without running the tests.
+    Its patch.diff is still kept, for reading.
+
+    Returns None, and writes nothing, when there is nothing to grade yet: no
+    run.json, or a run that ended in an infrastructure error (the runner retries
+    those). An infrastructure error while grading (the image could not be had,
+    the container did not start) is retried once; if it happens again the run is
+    recorded as "not_run", not as a fail.
+    """
+    rec_path = paths.run_record_path(instance_id, model_name)
+    if not rec_path.exists():
+        return None
+    run = json.loads(rec_path.read_text())
+    if run.get("infra_error"):
+        return None
+    grade = {"instance_id": instance_id, "model": paths.resolve_model(model_name),
+             "graded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+             "exit_status": run.get("exit_status")}
+    if run.get("exit_status") != "Submitted":
+        grade.update(grade="fail", tests_run=False,
+                     error=f"not submitted (run ended: {run.get('exit_status')})")
+        print(f"  FAIL — {grade['error']}")
+    else:
+        for attempt in (1, 2):
+            result = evaluate_patch(instance_id, model_name, timeout=timeout)
+            if not result.get("infra_error"):
+                break
+            print(f"  grading attempt {attempt}: infrastructure error: {result['infra_error']}")
+        result.pop("model", None)
+        grade.update(result, tests_run=result.get("patch_applied", False))
+        if result.get("infra_error"):
+            grade["grade"] = "not_run"
+    paths.write_json(paths.grade_path(instance_id, model_name), grade)
+    return grade
+
+
 def select_instances(args) -> list[str]:
     if args.instance:
         known = set(paths.discover_instances())
@@ -303,12 +354,15 @@ def main() -> None:
     sel.add_argument("--repo", choices=paths.PROJECTS)
     sel.add_argument("--all", action="store_true")
     p.add_argument("--model", nargs="+", required=True)
-    p.add_argument("--timeout", type=int, default=300,
-                   help="seconds for the test run (default: 300)")
-    p.add_argument("--output", default="outputs/results.json",
-                   help="where to write the results file (default: outputs/results.json)")
+    p.add_argument("--timeout", type=int, default=1800,
+                   help="seconds for the test run (default: 1800)")
+    p.add_argument("--regrade", action="store_true",
+                   help="grade again runs that already have a grade.json")
+    p.add_argument("--output",
+                   help="also write a summary of this grading here (default: "
+                        "<eval dir>/results-<time>.json)")
     p.add_argument("--dry-run", action="store_true",
-                   help="list the patches that would be graded and exit")
+                   help="list the runs that would be graded and exit")
     args = p.parse_args()
 
     try:
@@ -318,40 +372,43 @@ def main() -> None:
     instances = select_instances(args)
 
     pairs = [(i, m) for m in models for i in instances]
-    present = [(i, m) for i, m in pairs if paths.patch_path(i, m).exists()]
+    todo = [(i, m) for i, m in pairs if paths.run_record_path(i, m).exists()
+            and (args.regrade or not paths.grade_path(i, m).exists())]
     print(f"Instances : {len(instances)}")
     print(f"Models    : {', '.join(models)}")
-    print(f"Pairs     : {len(pairs)} ({len(present)} with a patch on disk)\n")
+    print(f"Pairs     : {len(pairs)} ({len(todo)} to grade)\n")
 
     if args.dry_run:
-        for i, m in pairs:
-            pp = paths.patch_path(i, m)
-            mark = "ok     " if pp.exists() else "MISSING"
-            print(f"  [{mark}] {paths.show(pp)}")
+        for i, m in todo:
+            print(f"  {paths.show(paths.run_dir(i, m))}")
         return
 
     results = []
-    for n, (instance_id, model_name) in enumerate(pairs, 1):
-        print(f"[{n}/{len(pairs)}] {instance_id}  x  {model_name}")
-        results.append(evaluate_patch(instance_id, model_name, timeout=args.timeout))
+    for n, (instance_id, model_name) in enumerate(todo, 1):
+        print(f"[{n}/{len(todo)}] {instance_id}  x  {model_name}")
+        g = grade_run(instance_id, model_name, timeout=args.timeout)
+        if g is None:
+            print("  not graded: the run ended in an infrastructure error")
+        else:
+            results.append(g)
         print()
 
     print("=" * 74)
     print("RESULTS")
     print("=" * 74)
     for r in results:
-        icon = {"pass": "PASS", "missing": "----"}.get(r["grade"], "FAIL")
-        err = f"  ({r['error']})" if r["error"] else ""
+        icon = {"pass": "PASS", "not_run": "----"}.get(r["grade"], "FAIL")
+        err = f"  ({r['error']})" if r.get("error") else ""
         print(f"  [{icon}] {r['model']:34s} {r['instance_id']:24s} "
-              f"{r['elapsed_seconds']:>6.1f}s{err}")
+              f"{r.get('elapsed_seconds', 0):>6.1f}s{err}")
 
-    graded = [r for r in results if r["grade"] != "missing"]
+    graded = [r for r in results if r["grade"] != "not_run"]
     passed = sum(1 for r in graded if r["grade"] == "pass")
-    missing = len(results) - len(graded)
-    print(f"\n  {passed}/{len(graded)} graded patches pass"
-          + (f"   ({missing} not run)" if missing else ""))
+    print(f"\n  {passed}/{len(graded)} graded runs pass"
+          + (f"   ({len(results) - len(graded)} not run)" if len(graded) < len(results) else ""))
 
-    out = paths.layout.base() / args.output
+    out = (paths.layout.base() / args.output if args.output else
+           paths.OUTPUTS_DIR / f"results-{time.strftime('%Y%m%d-%H%M%S')}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

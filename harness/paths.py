@@ -1,7 +1,7 @@
 """
 Shared path and naming conventions for EmbedEval.
 
-Every script that reads or writes under outputs/ must import from here.
+Every script that reads or writes agent runs or grades must import from here.
 Two independent implementations of these rules is how the repo ended up with
 three incompatible output layouts and two spellings of "DeepSeek-V3"; worse,
 a path mismatch between the runner and the evaluator does not crash -- the
@@ -35,14 +35,31 @@ INSTANCE_ROOTS = ([Path(_override) if Path(_override).is_absolute() else REPO_RO
                   if _override else [layout.generated()] if layout.run_dir()
                   else [REPO_ROOT / "apptainer" / "instances", REPO_ROOT / "apptainer" / "instances" / "nuttx",
                         REPO_ROOT / "docker" / "instances"])
-OUTPUTS_DIR = layout.outputs()
+#
+# Agent runs and their grades go to one folder per run,
+# <eval dir>/<model>/<project>/<PR>/, never overwritten by another run. The eval
+# dir is EMBEDEVAL_EVAL_DIR; else, with --run-dir, the run's outputs/; else
+# $SCRATCH/embedeval/eval on the cluster; else outputs/ in the repository.
+def _eval_dir() -> Path:
+    if os.environ.get("EMBEDEVAL_EVAL_DIR"):
+        return Path(os.environ["EMBEDEVAL_EVAL_DIR"]).expanduser().resolve()
+    if layout.run_dir():
+        return layout.outputs()
+    if os.environ.get("SCRATCH"):
+        return Path(os.environ["SCRATCH"]) / "embedeval" / "eval"
+    return layout.outputs()
+
+
+OUTPUTS_DIR = _eval_dir()
 
 PATCH_NAME = "patch.diff"
 TRAJECTORY_NAME = "trajectory.json"
+RUN_NAME = "run.json"        # how the agent's run ended (harness/run.py)
+GRADE_NAME = "grade.json"    # its grade; the run is finished once this exists
 
 PROJECTS = ("zephyr", "nuttx", "riot")
 
-# LiteLLM model name -> directory name under outputs/<repo>/.
+# LiteLLM model name -> directory name under the eval dir.
 # Unknown models raise rather than silently creating a new directory.
 MODEL_DIRS: dict[str, str] = {
     "anthropic/claude-opus-4-6": "claude-opus-4-6",
@@ -56,6 +73,12 @@ MODEL_DIRS: dict[str, str] = {
 # see LOCAL_MODELS in harness/run.py. Adding a model is adding its profile.
 LOCAL_PROFILES = [name for name in json.loads((REPO_ROOT / "triage" / "models.json").read_text())
                   if not name.startswith("_")]
+MODEL_DIRS.update({f"openai/{name}": name for name in LOCAL_PROFILES})
+
+# Local open-weights models served by scripts/serve_triage_model.sh (vLLM,
+# OpenAI-compatible): every profile of triage/models.json, as openai/<profile>.
+LOCAL_PROFILES: tuple[str, ...] = tuple(
+    k for k in json.loads((REPO_ROOT / "triage" / "models.json").read_text()) if not k.startswith("_"))
 MODEL_DIRS.update({f"openai/{name}": name for name in LOCAL_PROFILES})
 
 # Accepted shorthands, so --model gpt-5.4 works as well as --model openai/gpt-5.4.
@@ -92,14 +115,14 @@ def resolve_model(name: str) -> str:
 
 
 def model_dir(model_name: str) -> str:
-    """Full LiteLLM name (or shorthand) -> the directory name used under outputs/."""
+    """Full LiteLLM name (or shorthand) -> the directory name used under the eval dir."""
     return MODEL_DIRS[resolve_model(model_name)]
 
 
 def run_dir(instance_id: str, model_name: str) -> Path:
-    """outputs/<repo>/<model>/<PR>/ for one (instance, model) pair."""
+    """<eval dir>/<model>/<project>/<PR>/ for one (instance, model) pair."""
     project, pr = split_instance(instance_id)
-    return OUTPUTS_DIR / project / model_dir(model_name) / pr
+    return OUTPUTS_DIR / model_dir(model_name) / project / pr
 
 
 def patch_path(instance_id: str, model_name: str) -> Path:
@@ -108,6 +131,23 @@ def patch_path(instance_id: str, model_name: str) -> Path:
 
 def trajectory_path(instance_id: str, model_name: str) -> Path:
     return run_dir(instance_id, model_name) / TRAJECTORY_NAME
+
+
+def run_record_path(instance_id: str, model_name: str) -> Path:
+    return run_dir(instance_id, model_name) / RUN_NAME
+
+
+def grade_path(instance_id: str, model_name: str) -> Path:
+    return run_dir(instance_id, model_name) / GRADE_NAME
+
+
+def write_json(path: Path, data: dict) -> None:
+    """Write through a temporary file, so a reader (or a job killed mid-write)
+    never sees half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(path)
 
 
 def instance_dir(instance_id: str) -> Path:

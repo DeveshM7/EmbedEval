@@ -57,10 +57,24 @@ _EXTRA_WARNINGS = {
     "zephyr": (
         "`run_tests` exit codes on this instance: 0 = all tests passed, "
         "1 = a test, the build or the configuration failed, 2 = the test "
-        "runner did not start, 3 = nothing ran. A run takes one to a few "
-        "minutes; tests under QEMU include the emulator's boot."
+        "runner did not start, 3 = nothing ran. It passes only when every test "
+        "case in the scenario passes, not just the ones listed in the task: "
+        "that is what grading checks. A run takes one to several minutes; "
+        "tests under QEMU include the emulator's boot."
     ),
 }
+
+# RIOT instances built as a layer (scripts/riot_instance.py).
+_RIOT_LAYER = (
+    "Builds use GNU Make and RIOT's native board, which compiles RIOT into an ordinary "
+    "Linux process: there is no emulator. The tests are unit-test groups under "
+    "tests/unittests or test programs under tests/. `run_tests` builds them "
+    "incrementally and runs them; do not construct make invocations by hand."
+)
+_RIOT_LAYER_WARNINGS = (
+    "`run_tests` exit codes on this instance: 0 = all expected tests passed, 1 = a test "
+    "or a build failed, 3 = nothing ran."
+)
 
 PROJECTS: dict[str, dict] = {
     "zephyr": {
@@ -82,6 +96,8 @@ PROJECTS: dict[str, dict] = {
         # times out ends its container and every process in it, so QEMU cannot
         # be left running (it was under docker exec).
         "command_timeout": 900,
+        # The image has a ctags index at /testbed/tags; the prompt points to it.
+        "ctags": True,
     },
     "nuttx": {
         "label": "NuttX RTOS",
@@ -92,7 +108,8 @@ PROJECTS: dict[str, dict] = {
         "docker_platform": "linux/amd64",
         # Generated images are configured but not prebuilt; a cold native
         # compile plus ostest took up to five minutes in local validation.
-        "command_timeout": 600,
+        # 900 s, as for Zephyr and RIOT in the full evaluation (2026-11-21).
+        "command_timeout": 900,
         "build_command": "make -j$(nproc)",
         "rebuild_command": "make -j$(nproc)",
         "run_command": "printf 'ostest\\npoweroff\\n' | timeout 300 ./nuttx",
@@ -118,6 +135,9 @@ def config_for(meta: dict) -> dict:
     """The project configuration for one instance. A Zephyr instance must come
     from the twister pipeline; the Docker ones in docker/instances/ are kept as
     reference metadata only and cannot be run."""
+    if meta.get("pipeline") == "riot-layer":
+        return {**config("riot"), "runtime": "apptainer", "orientation": _RIOT_LAYER,
+                "extra_warnings": _RIOT_LAYER_WARNINGS}
     if meta["project"] == "zephyr" and meta.get("pipeline") != "twister":
         raise ValueError(f"{meta.get('instance_id')}: not a twister-pipeline instance. "
                          "Zephyr instances are run from generated/ "

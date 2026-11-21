@@ -14,6 +14,8 @@ directory, so:
     - nothing outlives a command: --containall gives each its own PID
       namespace, so a timed-out command takes its QEMU with it. (Under Docker
       the orphaned QEMU kept qemu.pid locked and broke every later run.)
+    - there is no network (--network none): the agent cannot fetch the PR,
+      a later commit or a package; the instances build and test offline.
 
 mini-swe-agent ships a SingularityEnvironment, but it unpacks the whole image
 into a sandbox directory in /tmp for every run -- several GB per run, into a
@@ -41,10 +43,12 @@ SUBMIT = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 class ApptainerEnvironment:
     def __init__(self, *, image: str | Path, name: str, cwd: str = "/testbed",
+                 layer: str | Path | None = None,
                  timeout: int = 900, setup_commands: list[str] | None = None,
-                 network: bool = True, logger: logging.Logger | None = None):
+                 network: bool = False, logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger("embedeval.apptainer")
         self.image = Path(image)
+        self.layer = Path(layer) if layer else None
         if not self.image.exists():
             raise FileNotFoundError(f"instance image not built: {self.image}")
         self.cwd, self.timeout = cwd, timeout
@@ -60,7 +64,7 @@ class ApptainerEnvironment:
         for c in setup_commands or []:
             r = self.execute({"command": c}, timeout=300)
             if r["returncode"] != 0:
-                self.cleanup()      # nobody else holds this environment yet
+                au.remove_quietly(self.run_dir)   # nobody else holds this environment yet
                 raise RuntimeError(f"environment setup failed: {c}: {r['output'][-300:]}")
 
     # -- mini-swe-agent interface -------------------------------------------
@@ -75,7 +79,7 @@ class ApptainerEnvironment:
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         command = action.get("command", "")
-        cmd = au.exec_args(self.image, overlay=self.overlay, network=self.network)
+        cmd = au.exec_args(self.image, overlay=self.overlay, layer=self.layer, network=self.network)
         cmd[2:2] = ["--pwd", cwd or self.cwd]
         cmd += ["bash", "-c", command]
         try:

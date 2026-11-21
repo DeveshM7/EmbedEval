@@ -11,7 +11,12 @@ an Apptainer environment instead of Docker, e.g. with the local Qwen server:
     EMBEDEVAL_INSTANCES_DIR=generated python harness/run.py \
         --instance zephyr__zephyr-65697 --model qwen38-nvfp4
 
-So do NuttX instances whose metadata says "runtime": "apptainer".
+Each run goes to its own folder, <eval dir>/<model>/<project>/<PR>/ (see
+harness/paths.py): patch.diff, trajectory.json, run.json (how the run ended),
+and grade.json, written as soon as the run ends. As on SWE-bench, only a run
+the agent submitted is tested; any other ending is a fail. A pair with a
+grade.json is skipped, so the same command picks up where a stopped job left
+off. An infrastructure error is retried once (harness/run.py, run_and_grade).
 
 Replaces run_instance.py, run_nuttx_instance.py, run_riot_instance.py and
 run_all.py, which were ~50% duplicated and disagreed on prompt format, .env
@@ -25,8 +30,10 @@ import json
 import os
 import re
 import signal
+import socket
 import sys
 import time
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,35 +68,41 @@ then call the tool.
 
 CRITICAL RULES:
 - Never reply with text alone -- every response must call the `bash` tool.
-- NEVER use heredoc syntax (<<'EOF' or <<'PY'). It breaks inside docker exec.
-  Use python3 -c "..." with a one-liner instead.
 - After a successful build you MUST still run `run_tests` before submitting.
   A passing build does NOT mean tests pass.
 """
 
 INSTANCE_TEMPLATE = """\
-Please solve this issue:
+Please solve this task:
 
 {{{{task}}}}
 
 ## Important Rules
 
 1. Every response must contain exactly one `bash` tool call.
-2. Do NOT modify any files under {protected}.
+2. Do NOT modify any files under {protected}: changes there are discarded
+   before your work is graded.
 3. Environment variable and directory changes are NOT persistent between
    commands -- every action runs in a new subshell. Use absolute paths or
    prefix commands with `cd /testbed &&`.
+4. There is no network access. Nothing can be downloaded (no pip install,
+   git fetch, package downloads); everything the build needs is already here.
+5. The git history holds only the starting point of this task. Use
+   `git status` and `git diff` to see your own changes.
+6. Your work is graded only if you submit it (step 4 below).
 
 ## Running Tests
 
-{test_help}
+Use the `run_tests` command to build and run the tests. It handles all setup and
+teardown, waits for results, and exits as soon as pass/fail is known. A test
+that hangs is stopped and reported as failed.
 {extra_warnings}
 Mandatory workflow:
-1. Explore the code and understand the bug
-2. Edit the source file(s) to fix it
+1. Explore the code and understand the task
+2. Edit the source file(s) to make the change
 3. Build and test: `{build_and_test}`
    - If the build fails: fix the error and repeat
-   - If run_tests shows tests FAILING: fix the bug and go back to step 3
+   - If run_tests shows tests FAILING: fix your change and go back to step 3
    - If run_tests shows all target tests PASSING: go to step 4
 4. Submit by calling the `bash` tool with exactly this command:
 
@@ -99,18 +112,116 @@ Mandatory workflow:
 
 Other useful commands:
 - Find code:   grep -rn "name" --include="*.c" --include="*.h" /testbed
-- ctags index: grep "function_name" /testbed/tags
-
+{tags_line}
 <system_information>
 {{{{system}}}} {{{{release}}}} {{{{machine}}}}
 </system_information>
 """
 
-FORMAT_ERROR_TEMPLATE = (
-    "ERROR: No tool call found in your response. Do not apologize or explain "
-    "yourself -- execute actions by calling the `bash` tool. If you are finished, "
-    "call the `bash` tool with the command: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
-)
+# The two model templates of mini-swe-agent 2.4.6's benchmarks/swebench.yaml, the
+# config of the SWE-bench bash-only runs we compare with (copied, so an upgrade of
+# mini-swe-agent cannot change them). The format error states the actual error
+# (invalid JSON arguments, unknown tool, a reply cut off at the token limit); an
+# output over 10,000 characters is cut to its first and last 5,000 with a warning.
+# Before 2026-11-14 the harness used a fixed "No tool call found" message, wrong
+# for every other error, and mini-swe-agent's default, untruncated observation:
+# one `ls -R` of Zephyr overflowed a 131k context.
+FORMAT_ERROR_TEMPLATE = "{% if finish_reason is defined and (finish_reason == \"length\" or (finish_reason == \"tool_calls\" and not has_tool_calls)) -%}\nYour previous response reached the output token limit (finish_reason={{ finish_reason }}) before you produced a tool call, so it was cut off. Respond more concisely and finish with exactly one bash tool call. If you need to think more, do so briefly.\n{%- else -%}\nTool call error:\n\n<error>\n{{error}}\n</error>\n\nHere is general guidance on how to submit correct toolcalls:\n\nEvery response needs to use the 'bash' tool at least once to execute commands.\n\nCall the bash tool with your command as the argument:\n- Tool: bash\n- Arguments: {\"command\": \"your_command_here\"}\n\nIf you have completed your assignment, please consult the first message about how to\nsubmit your solution (you will not be able to continue working on this task after that).\n{%- endif %}\n"
+
+OBSERVATION_TEMPLATE = "{% if output.exception_info -%}\n<exception>{{output.exception_info}}</exception>\n{% endif -%}\n<returncode>{{output.returncode}}</returncode>\n{% if output.output | length < 10000 -%}\n<output>\n{{ output.output -}}\n</output>\n{%- else -%}\n<warning>\nThe output of your last command was too long.\nPlease try a different command that produces less output.\nIf you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.\nIf you're using grep or find and it produced too much output, you can use a more selective search pattern.\nIf you really need to see something from the full command's output, you can redirect output to a file and then search in that file.\n</warning>\n{%- set elided_chars = output.output | length - 10000 -%}\n<output_head>\n{{ output.output[:5000] }}\n</output_head>\n<elided_chars>\n{{ elided_chars }} characters elided\n</elided_chars>\n<output_tail>\n{{ output.output[-5000:] }}\n</output_tail>\n{%- endif -%}\n"
+
+# A narrow repair of tool-call arguments, for profiles with "repair_tool_args":
+# gpt-oss-120b, trained on a shell tool that takes a list ({"cmd": ["bash", ...]}),
+# often closes our {"command": "..."} as if it were a list: '..."]}'. Only arguments
+# that are invalid JSON, end that way, and become a valid {"command": <string>} once
+# the stray ']' is removed are changed; the command itself never is.
+_STRAY_LIST_END = re.compile(r'"\]\}\s*$')
+
+
+def repair_tool_args(arguments: str) -> str:
+    try:
+        json.loads(arguments)
+        return arguments
+    except (ValueError, TypeError):
+        pass
+    if not isinstance(arguments, str) or not _STRAY_LIST_END.search(arguments):
+        return arguments
+    fixed = _STRAY_LIST_END.sub('"}', arguments)
+    try:
+        obj = json.loads(fixed)
+    except ValueError:
+        return arguments
+    return fixed if isinstance(obj, dict) and isinstance(obj.get("command"), str) else arguments
+
+
+SUBMIT_COMMAND = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+
+def _submit_text(content) -> bool:
+    text = (content or "").strip() if isinstance(content, str) else ""
+    if text == SUBMIT_COMMAND:
+        return True
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(obj, dict) and set(obj) == {"command"} and str(obj["command"]).strip() == SUBMIT_COMMAND
+
+
+def add_think_repair(model, full_model: str) -> None:
+    """For a local profile with "repair_think_close" (MiniMax M2 and M2.5): put back the closing
+    </think> that vLLM's MiniMax tool-call parser drops from a reply with a tool call.
+
+    vLLM returns "<think>reasoning</think>answer" for a plain reply, but for a reply with a
+    tool call the content comes back as "<think>reasoning" with no closing tag (vLLM 0.27.1,
+    reasoning parser minimax_m2_append_think, tool-call parser minimax_m2; checked
+    2026-11-17). The agent keeps that content in the conversation, so the model would see
+    its earlier reasoning as an unclosed block; MiniMax says M2's reasoning must be kept
+    intact in the history. A reply that starts with <think>, has no </think> and has tool
+    calls gets "</think>" at its end; no other reply is touched. Counted on the model."""
+    profile = LOCAL_MODELS.get(full_model)
+    if not profile or not json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile].get("repair_think_close"):
+        return
+    parse = model._parse_actions
+    model.think_repairs = 0
+
+    def _parse_actions(response):
+        message = response.choices[0].message
+        content = message.content if isinstance(message.content, str) else ""
+        if message.tool_calls and content.lstrip().startswith("<think>") and "</think>" not in content:
+            message.content = content.rstrip() + "\n</think>"
+            model.think_repairs += 1
+        return parse(response)
+
+    model._parse_actions = _parse_actions
+
+
+def add_tool_arg_repair(model, full_model: str) -> None:
+    """Apply repair_tool_args to every tool call before mini-swe-agent parses it,
+    for a local profile that asks for it; counts the repairs on the model."""
+    profile = LOCAL_MODELS.get(full_model)
+    if not profile or not json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile].get("repair_tool_args"):
+        return
+    parse = model._parse_actions
+    model.tool_arg_repairs = 0
+
+    def _parse_actions(response):
+        message = response.choices[0].message
+        for call in message.tool_calls or []:
+            fixed = repair_tool_args(call.function.arguments)
+            if fixed is not call.function.arguments:
+                model.tool_arg_repairs += 1
+                call.function.arguments = fixed
+        # gpt-oss also writes its submission as text (its final-answer channel), not as
+        # a tool call: a reply with no call whose whole text is the submit command, bare
+        # or as {"command": ...}, is taken as that call. No other text is.
+        if not message.tool_calls and _submit_text(message.content):
+            model.tool_arg_repairs += 1
+            return [{"command": SUBMIT_COMMAND, "tool_call_id": f"submit-{model.tool_arg_repairs}"}]
+        return parse(response)
+
+    model._parse_actions = _parse_actions
+
 
 # Which environment variable each provider needs, for a pre-flight check that
 # fails at launch instead of 40 steps in.
@@ -125,8 +236,9 @@ PROVIDER_KEYS = {
 # Models served locally by scripts/serve_triage_model.sh: vLLM's
 # OpenAI-compatible API, so LiteLLM's openai/ route with an api_base. The
 # sampling settings come from the same profile triage uses (triage/models.json).
-# EMBEDEVAL_LOCAL_API_BASE overrides the address; the server listens on
-# 127.0.0.1, so the harness must run on the server's node.
+# EMBEDEVAL_LOCAL_API_BASE overrides the address, and EMBEDEVAL_LOCAL_API_KEY the key,
+# for a server on another node. By default the server listens on 127.0.0.1, so the
+# harness must run on its node.
 LOCAL_MODELS = {f"openai/{name}": name for name in paths.LOCAL_PROFILES}
 REQUEST_TIMEOUT = 3600  # long generations; LiteLLM's 600 s default silently retried them
 
@@ -138,9 +250,10 @@ def model_config(full_model: str) -> dict:
         return {}
     prof = json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile]
     sampling = dict(prof.get("sampling", {}))
-    extra = {k: sampling.pop(k) for k in ("top_k", "min_p") if k in sampling}
+    extra = {k: sampling.pop(k) for k in ("top_k", "min_p", "repetition_penalty") if k in sampling}
     kwargs = dict(api_base=os.environ.get("EMBEDEVAL_LOCAL_API_BASE", "http://127.0.0.1:8000/v1"),
-                  api_key="local", timeout=REQUEST_TIMEOUT, num_retries=0,
+                  api_key=os.environ.get("EMBEDEVAL_LOCAL_API_KEY", "local"),
+                  timeout=REQUEST_TIMEOUT, num_retries=0,
                   max_tokens=prof.get("max_tokens", 32768), **sampling)
     if extra:
         kwargs["extra_body"] = extra
@@ -167,34 +280,41 @@ def check_api_key(model_name: str) -> None:
 
 def build_prompts(meta: dict) -> tuple[str, str]:
     cfg = projects.config_for(meta)
+    hide = hidden_tests.ENABLED
+    if hide:      # harness/hidden_tests.py: the PR's tests are not given
+        project = hidden_tests.project_of(meta)
+        # NuttX keeps its own orientation (projects.py; None here)
+        cfg = {**cfg, "orientation": hidden_tests.ORIENTATION[project] or cfg["orientation"],
+               "extra_warnings": hidden_tests.WARNINGS[project]}
     protected = " or ".join(f"`{p}`" for p in cfg["protected_paths"])
     warn = cfg["extra_warnings"]
     system = SYSTEM_TEMPLATE.format(
         label=cfg["label"], orientation=_orientation(meta, cfg["orientation"])
     )
-    hide = hidden_tests.applies(meta)
+    # Only images built with a ctags index have /testbed/tags (Zephyr's twister
+    # pipeline); RIOT's do not.
+    tags = ('- ctags index: grep "function_name" /testbed/tags\n'
+            if cfg.get("ctags") else "")
     instance = INSTANCE_TEMPLATE.format(
         protected=protected,
         extra_warnings=f"\n{warn}\n" if warn else "",
         build_and_test=_build_and_test(meta),
-        test_help=(hidden_tests.RUNNING_TESTS + "\n\n" + _HANG.format(code=" (exit code 2)")) if hide
-        else TEST_HELP.get(meta["project"], TEST_HELP["default"]),
+        tags_line=tags,
     )
-    if hide:      # the PR's tests are hidden (harness/hidden_tests.py)
+    if hide:
         system = _swap(system, _SYSTEM_RULE, hidden_tests.SYSTEM_RULE)
         instance = _swap(instance, _PROTECTED_RULE.format(protected=protected),
                          hidden_tests.PROTECTED_RULE.format(protected=protected))
-        instance = _swap(instance, _RULE_3_END, _RULE_3_END + "\n" + hidden_tests.SUBMIT_RULE)
+        instance = _swap(instance, _RUNNING_TESTS, hidden_tests.RUNNING_TESTS[project])
         instance = _swap(instance, _WORKFLOW_STEP3.format(build_and_test=_build_and_test(meta)),
-                         hidden_tests.WORKFLOW)
+                         hidden_tests.workflow(project))
+        instance = _swap(instance, _SUBMIT_RULE, hidden_tests.SUBMIT_RULE)
         instance = _swap(instance, "Mandatory workflow:",
-                         hidden_tests.TESTING_AND_SUBMITTING + "Mandatory workflow:")
-    if meta["project"] == "nuttx":    # NuttX images build no ctags index
-        instance = _swap(instance, _CTAGS_LINE, "")
+                         hidden_tests.TESTING_AND_SUBMITTING.format(
+                             hint=hidden_tests.TEST_HINT[project]) + "Mandatory workflow:")
     return system, instance
 
 
-_CTAGS_LINE = '- ctags index: grep "function_name" /testbed/tags\n'
 _NUTTX_SIM = ("configured for sim:nsh, which produces "
               "a native binary at /testbed/nuttx.")
 
@@ -210,18 +330,24 @@ def _orientation(meta: dict, text: str) -> str:
                  "which `run_tests` boots in QEMU (it cannot be run directly).")
 
 
-# The parts of the prompt that assume the PR's tests are visible; replaced when
-# they are hidden (harness/hidden_tests.py).
+# The parts of the prompt that assume the PR's tests are there; replaced when
+# they are hidden.
 _SYSTEM_RULE = """\
 - After a successful build you MUST still run `run_tests` before submitting.
   A passing build does NOT mean tests pass.
 """
-_PROTECTED_RULE = "2. Do NOT modify any files under {protected}."
-_RULE_3_END = "   prefix commands with `cd /testbed &&`."
+_PROTECTED_RULE = """\
+Do NOT modify any files under {protected}: changes there are discarded
+   before your work is graded."""
+_RUNNING_TESTS = """\
+Use the `run_tests` command to build and run the tests. It handles all setup and
+teardown, waits for results, and exits as soon as pass/fail is known. A test
+that hangs is stopped and reported as failed."""
+_SUBMIT_RULE = "6. Your work is graded only if you submit it (step 4 below)."
 _WORKFLOW_STEP3 = """\
 3. Build and test: `{build_and_test}`
    - If the build fails: fix the error and repeat
-   - If run_tests shows tests FAILING: fix the bug and go back to step 3
+   - If run_tests shows tests FAILING: fix your change and go back to step 3
    - If run_tests shows all target tests PASSING: go to step 4
 """
 
@@ -230,32 +356,6 @@ def _swap(text: str, old: str, new: str) -> str:
     if text.count(old) != 1:
         raise RuntimeError(f"prompt: expected one copy of {old[:60]!r}")
     return text.replace(old, new)
-
-
-_HANG = ("If `run_tests` times out{code} with no test results, your change has\n"
-         "introduced a hang or an infinite loop. Do NOT submit -- investigate further.")
-
-# What run_tests' exit codes mean, per project; they must match the runner.
-# Zephyr's codes are in its extra warning (projects.py), and a Zephyr timeout
-# is the environment's command limit, not an exit code.
-TEST_HELP = {
-    "nuttx": (
-        "Use `run_tests` after building. It runs the whole ostest suite and "
-        "waits for results. Exit codes: 0 = ostest finished cleanly and every "
-        "changed test ran, 1 = any other completed run (a test failed, or a "
-        "changed test did not run), 2 = timed out.\n\n" + _HANG.format(code=" (exit code 2)")
-    ),
-    "zephyr": (
-        "Use the `run_tests` command to build and run the tests. It handles "
-        "all setup and teardown and waits for results.\n\n" + _HANG.format(code="")
-    ),
-    "default": (
-        "Use the `run_tests` command to build and run the tests. It handles "
-        "all setup and teardown, waits for results, and exits as soon as "
-        "pass/fail is known. Exit codes: 0 = all tests passed, "
-        "1 = tests failed, 2 = timed out.\n\n" + _HANG.format(code=" (exit code 2)")
-    ),
-}
 
 
 def _build_and_test(meta: dict) -> str:
@@ -270,64 +370,44 @@ def _build_and_test(meta: dict) -> str:
     return f"cd /testbed && {rebuild} && run_tests" if rebuild else "cd /testbed && run_tests"
 
 
-# Which problem statement the agent gets: the verified one
-# (problem_statement_fixed, written by scripts/verify_statements.py on main)
-# where a statement was repaired, else the original. EMBEDEVAL_STATEMENT=original
-# forces the originals.
+# The problem statement given to the agent: the verified one (scripts/verify_statements.py,
+# "problem_statement_fixed") when there is one, unless EMBEDEVAL_STATEMENT=original.
 STATEMENT = os.environ.get("EMBEDEVAL_STATEMENT", "fixed")
 
 
 def statement_of(meta: dict) -> tuple[str, str]:
     """(the statement, which one: "fixed" or "original")."""
-    if STATEMENT != "original" and (meta.get("problem_statement_fixed") or "").strip():
+    if STATEMENT != "original" and meta.get("problem_statement_fixed"):
         return meta["problem_statement_fixed"], "fixed"
     return meta["problem_statement"], "original"
 
 
-# How a run may end that is the model's doing, not ours (as on main). Only
-# Submitted is graded by running the tests; the others are fails
-# (cluster/node_worker.py). No exit_status at all is a harness error: run again.
-MODEL_ENDINGS = {"Submitted", "LimitsExceeded", "TimeExceeded", "RepeatedFormatError",
-                 "ContextWindowExceededError"}
-
-
-def _context_overflow(e: Exception) -> bool:
-    """The conversation outgrew the model's context: the model's doing, a fail,
-    as on SWE-bench. LiteLLM usually raises ContextWindowExceededError; a bare
-    400 from vLLM that says so counts too."""
-    if type(e).__name__ == "ContextWindowExceededError":
-        return True
-    text = str(e).lower()
-    return type(e).__name__ == "BadRequestError" and (
-        "maximum context length" in text or "context window" in text)
-
-
 def build_task(meta: dict) -> str:
-    """The first user message: the problem statement.
+    """The first user message: the problem plus its test context.
 
-    Nothing derived from the fix or the grading, for every project: not the
-    files the upstream fix changed (files_changed_by_fix; SWE-bench's
-    "oracle" retrieval setting, which tells the agent where the answer is),
-    nor the fail_to_pass / pass_to_pass lists. The tests themselves are in
-    the repository, and `run_tests` runs them."""
-    if not (meta.get("problem_statement") or "").strip():
-        sys.exit(f"ERROR: {meta['instance_id']} has no problem statement; write one first")
-    statement = statement_of(meta)[0]
-    if hidden_tests.applies(meta):    # the tests are hidden: the statement alone
-        return f"""\
-## Bug Description
+    Not the files the PR's fix changed: SWE-bench does not give them, and
+    knowing where to change the code is part of the task."""
+    def bullets(items):
+        return "\n".join(f"  - {i}" for i in items)
 
-{statement}
+    if hidden_tests.ENABLED:      # the problem statement only, as in SWE-bench
+        return f"## Task\n\n{statement_of(meta)[0]}\n"
+    task = f"""\
+## Task
+
+{statement_of(meta)[0]}
+
+## Failing Tests (must pass after your change)
+
+{bullets(meta.get("fail_to_pass", [])) or "  (none)"}
 """
-    return f"""\
-## Bug Description
+    if meta.get("pass_to_pass"):
+        task += f"""
+## Tests That Must Continue Passing
 
-{statement}
-
-## Tests
-
-`run_tests` builds and runs the tests your fix is graded on.
+{bullets(meta["pass_to_pass"])}
 """
+    return task
 
 
 # --------------------------------------------------------------------------
@@ -337,13 +417,13 @@ def build_task(meta: dict) -> str:
 
 def make_environment(meta: dict):
     cfg = projects.config_for(meta)
-    if projects.setting(meta, "runtime") == "apptainer":
-        # Zephyr, and NuttX instances rendered for Apptainer: an Apptainer
-        # image built by scripts/build_instances.py.
+    if cfg.get("runtime") == "apptainer":
+        # Zephyr: an Apptainer image built by scripts/build_instances.py.
         sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
         import apptainer_util
         from apptainer_env import ApptainerEnvironment
 
+        # NuttX: an instance that validates on one architecture runs there only.
         apptainer_util.require_host_arch(meta)
 
         # The image carries the PR's test changes as uncommitted edits.
@@ -351,24 +431,32 @@ def make_environment(meta: dict):
         # `git diff` show the agent's changes alone, so capture_patch's check
         # for edits to protected paths means what it says. Graded patches still
         # apply to the image as built: the same files, the same content.
-        # NuttX needs no such commit: its test changes are in apps/, a
-        # repository of its own that the image keeps out of the kernel's git.
         commit_tests = ("cd /testbed && git add -A -- tests/ && git -c user.name=EmbedEval "
                         "-c user.email=embedeval@localhost commit -q -m "
                         "'The PR test changes, without its fix'")
-        return ApptainerEnvironment(image=apptainer_util.instance_image(meta["instance_id"]),
+        # No history beyond the starting point, or the agent could read the fix
+        # in later commits: checked before the tests commit above adds one. A
+        # failure stops the run as an infrastructure error, never a silent leak.
+        # Commits made by the image build itself (EmbedEval's, e.g. NuttX's ARM64 sim
+        # backport, part of the base) do not count.
+        one_commit = ('cd /testbed && n=$(git log --all --format=%ae | grep -vcx embedeval@localhost) '
+                      '&& [ "$n" = 1 ] || { echo "git history has $n commits, expected 1"; exit 1; }')
+        import registry   # the validated image: pulled from the registry if published
+        image, layer = apptainer_util.instance_container(
+            meta, registry.image_for(meta["instance_id"]))
+        if meta.get("pipeline") == "twister":
+            # Zephyr's image holds the whole Zephyr history; its git layer hides
+            # it behind a one-commit .git (scripts/zephyr_gitlayer.py).
+            import zephyr_gitlayer
+            layer = zephyr_gitlayer.pull(meta["instance_id"])
+        return ApptainerEnvironment(image=image, layer=layer,
                                     name=meta["instance_id"], cwd="/testbed",
                                     timeout=cfg.get("command_timeout", 900),
-                                    # NuttX: the PR's tests hidden (harness/hidden_tests.py)
-                                    setup_commands=[commit_tests] if meta["project"] == "zephyr"
-                                    else [hidden_tests.setup_command(meta)]
-                                    if hidden_tests.applies(meta) else [],
-                                    # NuttX: no network for the agent
-                                    network=meta["project"] != "nuttx")
+                                    setup_commands=[one_commit, hidden_tests.setup_command(meta)]
+                                    if hidden_tests.ENABLED else [one_commit, commit_tests])
 
     # NuttX, RIOT: Docker.
-    kwargs = dict(image=meta["docker_image"], cwd="/testbed",
-                  timeout=projects.setting(meta, "command_timeout", 180))
+    kwargs = dict(image=meta["docker_image"], cwd="/testbed", timeout=180)
     platform = projects.setting(meta, "docker_platform")
     if platform:
         kwargs["run_args"] = ["--rm", "--platform", platform]
@@ -468,16 +556,39 @@ def decode_patch(output: str) -> str:
     return base64.b64decode(encoded).decode("utf-8", errors="surrogateescape") if encoded else ""
 
 
-# The run in progress, for the SIGTERM handler: {"save": callable, "env": env}.
+# The run in progress, for the SIGTERM handler:
+# {"save": callable, "env": env, "record": callable writing run.json}.
 _CURRENT: dict = {}
+
+# An infrastructure error (our side, not the model's) is retried once: two
+# attempts in all, counted across jobs through run.json. After that the run is
+# recorded as "not_run", not as a fail.
+MAX_ATTEMPTS = 2
+
+# How a run may end that is the model's doing, not ours: graded as a fail.
+# Submitted is the only ending that is tested (evaluate_patches.grade_run).
+MODEL_ENDINGS = {"Submitted", "LimitsExceeded", "TimeExceeded", "RepeatedFormatError",
+                 "ContextWindowExceededError"}
+
+
+def _context_overflow(e: Exception) -> bool:
+    """The conversation outgrew the model's context: the model's doing, a fail,
+    as on SWE-bench. LiteLLM usually raises ContextWindowExceededError; a bare
+    400 from vLLM that says so counts too."""
+    if type(e).__name__ == "ContextWindowExceededError":
+        return True
+    text = str(e).lower()
+    return type(e).__name__ == "BadRequestError" and (
+        "maximum context length" in text or "context window" in text)
 
 
 def _stop_on_sigterm(signum, frame):
-    """`timeout`, scancel and Slurm stop a run with SIGTERM, then SIGKILL a
-    little later. Save what the agent did and remove the overlay right here,
-    then exit. Raising an exception instead is not enough: SIGTERM usually
-    lands while the agent waits for the model, and the model client's retry
-    wrapper catches the exception and retries the call."""
+    """`timeout`, scancel and Slurm (a job at its time limit) stop a run with
+    SIGTERM, then SIGKILL a little later. Save what the agent did, record the
+    run as stopped -- an infrastructure error, so a later job retries it -- and
+    remove the overlay right here, then exit. Raising an exception instead is
+    not enough: SIGTERM usually lands while the agent waits for the model, and
+    the model client's retry wrapper catches the exception and retries the call."""
     print(f"\n  stopped by signal {signum}: saving the patch", flush=True)
     try:
         if _CURRENT.get("save"):
@@ -486,6 +597,11 @@ def _stop_on_sigterm(signum, frame):
     except BaseException as e:
         print(f"  could not save the patch: {type(e).__name__}: {e}", flush=True)
     try:
+        if _CURRENT.get("record"):
+            _CURRENT["record"](f"stopped by signal {signum}")
+    except BaseException as e:
+        print(f"  could not write run.json: {type(e).__name__}: {e}", flush=True)
+    try:
         if _CURRENT.get("env") is not None:
             _CURRENT["env"].cleanup()
     except BaseException:
@@ -493,7 +609,15 @@ def _stop_on_sigterm(signum, frame):
     os._exit(128 + signum)
 
 
-def run_one(instance_id: str, model_name: str, args) -> dict:
+def run_one(instance_id: str, model_name: str, args, attempt: int = 1) -> dict:
+    """One attempt at one (instance, model) run. Writes patch.diff,
+    trajectory.json and run.json to the run's folder and returns run.json.
+
+    run.json says how the run ended. `exit_status` is the agent's ending
+    (Submitted, LimitsExceeded, TimeExceeded, RepeatedFormatError,
+    ContextWindowExceededError): the model's doing, graded. `infra_error` is set
+    instead when our side failed -- the container or the model server, or the
+    job stopping the run -- and the run is retried, not graded."""
     from minisweagent.agents.default import DefaultAgent
     from minisweagent.models import get_model
 
@@ -509,36 +633,60 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
     print(f"  model    : {full_model}")
     print(f"  image    : {meta.get('docker_image') or meta.get('apptainer_image')}")
     print(f"  output   : {paths.show(out_dir)}")
+    print(f"  attempt  : {attempt} of {MAX_ATTEMPTS}")
 
-    result = {
+    record = {
         "instance_id": instance_id,
         "model": full_model,
-        "status": "error",
+        "attempt": attempt,
+        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "node": socket.gethostname(),
+        "limits": {"steps": args.step_limit, "minutes": args.time_limit,
+                   "command_seconds": projects.config_for(meta).get("command_timeout", 900)},
         "exit_status": None,
         "steps": None,
-        "cost": None,
+        "elapsed_seconds": 0.0,
+        "hit_time_cap": False,
+        "hit_step_limit": False,
+        "infra_error": None,
+        "error": None,
         "patch_empty": True,
         "protected_touched": [],
-        "elapsed_seconds": 0.0,
-        "error": None,
-        "tests_hidden": hidden_tests.applies(meta),
+        "tests_hidden": hidden_tests.ENABLED,
         "statement": statement_of(meta)[1],
     }
     start = time.time()
-    env, captured, base = None, False, "HEAD"
+    env, agent, captured, base = None, None, False, "HEAD"
 
     def save_patch() -> None:
         patch, touched = capture_patch(env, meta, base)
+        # bytes: the patch exactly as captured (decode_patch keeps invalid UTF-8)
         paths.patch_path(instance_id, full_model).write_bytes(patch.encode("utf-8", errors="surrogateescape"))
-        result["patch_empty"] = not patch.strip()
-        result["protected_touched"] = touched
+        record["patch_empty"] = not patch.strip()
+        record["protected_touched"] = touched
+
+    def write_record(infra_error: str | None = None) -> None:
+        if infra_error:
+            record["infra_error"] = infra_error
+        record["elapsed_seconds"] = round(time.time() - start, 1)
+        if agent is not None:
+            record["steps"] = agent.n_calls
+            if hasattr(agent.model, "tool_arg_repairs"):
+                record["tool_arg_repairs"] = agent.model.tool_arg_repairs
+            if hasattr(agent.model, "think_repairs"):
+                record["think_repairs"] = agent.model.think_repairs
+        paths.write_json(paths.run_record_path(instance_id, full_model), record)
 
     try:
+        _CURRENT.update(record=write_record)
         env = make_environment(meta)
         base = start_commit(env)
         _CURRENT.update(save=save_patch, env=env)
         model = get_model(input_model_name=full_model, config=model_config(full_model))
         model.config.format_error_template = FORMAT_ERROR_TEMPLATE
+        model.config.observation_template = OBSERVATION_TEMPLATE
+        add_tool_arg_repair(model, full_model)
+        add_think_repair(model, full_model)
 
         agent_class = make_verbose_agent_class(DefaultAgent) if args.verbose else DefaultAgent
         agent = agent_class(
@@ -552,57 +700,88 @@ def run_one(instance_id: str, model_name: str, args) -> dict:
             output_path=paths.trajectory_path(instance_id, full_model),
         )
         run_info = agent.run(task)
-        result["exit_status"] = run_info.get("exit_status")
-
+        record["exit_status"] = run_info.get("exit_status")
         save_patch()
         captured = True
-        touched = result["protected_touched"]
-        result["status"] = "success"
-        if touched:
-            print(f"  WARNING: agent modified protected paths: {', '.join(touched)}")
-        if result["patch_empty"]:
-            print("  WARNING: agent made no changes (empty diff)")
     except KeyboardInterrupt:
         raise
     except Exception as e:
-        result["error"] = f"{type(e).__name__}: {e}"
-        if _context_overflow(e):       # the model's doing: a fail, as on SWE-bench
-            result["exit_status"] = "ContextWindowExceededError"
-        print(f"  ERROR: {result['error']}")
+        record["error"] = f"{type(e).__name__}: {e}"
+        # Where it went wrong, for an infrastructure error that one line does
+        # not explain (the last lines of the traceback).
+        record["traceback"] = traceback.format_exc()[-3000:]
+        if _context_overflow(e):
+            record["exit_status"] = "ContextWindowExceededError"
+        else:
+            record["infra_error"] = record["error"][:500]
+        print(f"  ERROR: {record['error'][:300]}")
+        if record["infra_error"]:
+            print(record["traceback"], flush=True)
     finally:
         _CURRENT.clear()
         if env is not None and not captured:
-            # Stopped early by an error:
-            # keep whatever the agent had done, so it can still be graded.
+            # Stopped early: keep whatever the agent had done, for reading.
             try:
                 save_patch()
-                result["patch_captured"] = "after interruption"
             except BaseException as e:
                 print(f"  could not save the patch: {type(e).__name__}: {e}")
-        result["elapsed_seconds"] = round(time.time() - start, 1)
-        traj = paths.trajectory_path(instance_id, full_model)
-        if traj.exists():
-            try:
-                stats = json.loads(traj.read_text())["info"]["model_stats"]
-                result["steps"] = stats.get("api_calls")
-                result["cost"] = round(stats.get("instance_cost", 0), 4)
-            except Exception:
-                pass
         if env is not None:
             try:
                 env.cleanup()
-            except Exception:
-                pass
-        # The run's record beside its patch, with the limits it ran under
-        # (cluster/node_worker.py's evaluate phase reads it).
-        result["limits"] = {"steps": args.step_limit, "minutes": args.time_limit,
-                            "cost": args.cost_limit}
-        try:
-            (paths.run_dir(instance_id, full_model) / "result.json").write_text(
-                json.dumps(result, indent=2) + "\n")
-        except OSError:
-            pass
-    return result
+            except Exception as e:
+                # Left on disk; said, so that leftovers do not pile up unseen.
+                print(f"  could not clean up the environment: {type(e).__name__}: {e}")
+    if record["exit_status"] is not None and record["exit_status"] not in MODEL_ENDINGS:
+        # An ending this list does not know (mini-swe-agent's own exception
+        # names, say): ours to look at, not the model's fail.
+        record["infra_error"] = record["infra_error"] or f"unexpected ending {record['exit_status']}"
+    record["hit_time_cap"] = record["exit_status"] == "TimeExceeded"
+    record["hit_step_limit"] = (record["exit_status"] == "LimitsExceeded"
+                                and agent is not None and agent.n_calls >= args.step_limit)
+    write_record()
+    if record["protected_touched"]:
+        print(f"  WARNING: agent modified protected paths: {', '.join(record['protected_touched'])}")
+    if record["patch_empty"] and not record["infra_error"]:
+        print("  WARNING: agent made no changes (empty diff)")
+    print(f"  ended    : {record['infra_error'] and 'INFRA: ' + record['infra_error'][:200] or record['exit_status']}"
+          f" after {record['steps']} steps, {record['elapsed_seconds']:.0f} s")
+    return record
+
+
+def run_and_grade(instance_id: str, model_name: str, args) -> dict:
+    """Run one (instance, model) pair to the end and grade it; return grade.json.
+
+    A pair with a grade.json is finished and skipped (--force runs it again).
+    A run that ended in an infrastructure error is tried again, up to
+    MAX_ATTEMPTS attempts in all, also across jobs: the count is kept in run.json.
+    After that the pair is recorded as "not_run"."""
+    import evaluate_patches
+
+    full_model = paths.resolve_model(model_name)
+    grade_file = paths.grade_path(instance_id, full_model)
+    rec_file = paths.run_record_path(instance_id, full_model)
+    if grade_file.exists() and not args.force:
+        print("  already graded: skipped")
+        return json.loads(grade_file.read_text())
+    prev = json.loads(rec_file.read_text()) if rec_file.exists() and not args.force else None
+    if prev and not prev.get("infra_error"):
+        print("  run finished earlier, not graded yet: grading")
+        return evaluate_patches.grade_run(instance_id, full_model)
+    attempt = prev["attempt"] if prev else 0
+    record = prev
+    while attempt < MAX_ATTEMPTS:
+        attempt += 1
+        record = run_one(instance_id, full_model, args, attempt)
+        if not record["infra_error"]:
+            print("  grading ...")
+            return evaluate_patches.grade_run(instance_id, full_model)
+    grade = {"instance_id": instance_id, "model": full_model,
+             "graded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+             "grade": "not_run", "tests_run": False,
+             "error": f"infrastructure error in {attempt} attempts: {record['infra_error']}"}
+    paths.write_json(grade_file, grade)
+    print(f"  NOT RUN: {grade['error'][:300]}")
+    return grade
 
 
 # --------------------------------------------------------------------------
@@ -627,19 +806,24 @@ def select_instances(args) -> list[str]:
 
 def main() -> None:
     signal.signal(signal.SIGTERM, _stop_on_sigterm)
-    p = argparse.ArgumentParser(description="Run an agent on EmbedEval instances.")
+    p = argparse.ArgumentParser(description="Run an agent on EmbedEval instances and grade each run.")
     sel = p.add_mutually_exclusive_group(required=True)
     sel.add_argument("--instance", nargs="+", help="one or more instance ids")
     sel.add_argument("--repo", choices=paths.PROJECTS, help="every instance for one project")
     sel.add_argument("--all", action="store_true", help="every instance, all projects")
     p.add_argument("--model", nargs="+", required=True,
                    help="one or more models (full LiteLLM name or shorthand)")
+    # The limits: 250 steps as in mini-swe-agent's SWE-bench config, a 1-hour cap
+    # per run (a job lasts 4 hours here), 900 s per command (projects.py). The
+    # agent is not told them, as on SWE-bench.
     p.add_argument("--step-limit", type=int, default=250)
-    p.add_argument("--cost-limit", type=float, default=3.0)
+    p.add_argument("--cost-limit", type=float, default=3.0,
+                   help="dollars per run, for hosted models (local models cost nothing)")
     p.add_argument("--time-limit", type=float, default=120,
                    help="minutes of wall-clock time per run, checked before each model "
-                        "call; the patch is captured as usual (default 120, as on main; "
-                        "0: no limit)")
+                        "call (default 120; 0: no limit)")
+    p.add_argument("--force", action="store_true",
+                   help="run again pairs that already have a run or a grade")
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="print the planned runs and exit without starting containers")
@@ -654,12 +838,14 @@ def main() -> None:
     print(f"Instances : {len(instances)}")
     print(f"Models    : {', '.join(models)}")
     print(f"Total runs: {len(instances) * len(models)}")
-    print(f"Limits    : {args.step_limit} steps, ${args.cost_limit}\n")
+    print(f"Limits    : {args.step_limit} steps, {args.time_limit:g} min per run")
+    print(f"Output    : {paths.OUTPUTS_DIR}\n")
 
     if args.dry_run:
         for m in models:
             for i in instances:
-                print(f"  {m:46s} {i:24s} -> {paths.show(paths.run_dir(i, m))}")
+                done = " (graded)" if paths.grade_path(i, m).exists() else ""
+                print(f"  {m:46s} {i:24s} -> {paths.show(paths.run_dir(i, m))}{done}")
         return
 
     for m in models:
@@ -672,21 +858,17 @@ def main() -> None:
         for instance_id in instances:
             n += 1
             print(f"\n{'=' * 70}\n[{n}/{total}] {instance_id}  x  {model_name}\n{'=' * 70}")
-            results.append(run_one(instance_id, model_name, args))
+            results.append(run_and_grade(instance_id, model_name, args))
 
     print(f"\n{'=' * 70}\nSUMMARY\n{'=' * 70}")
-    for r in results:
-        flag = "ok  " if r["status"] == "success" and not r["patch_empty"] else "WARN"
-        print(
-            f"  [{flag}] {r['model']:34s} {r['instance_id']:24s} "
-            f"{str(r['exit_status'] or r['error'] or ''):22.22s} "
-            f"steps={str(r['steps']):>4s} ${str(r['cost']):>7s} {r['elapsed_seconds']:>7.1f}s"
-        )
-    ok = sum(1 for r in results if r["status"] == "success" and not r["patch_empty"])
-    print(f"\n  {ok}/{len(results)} runs produced a non-empty patch")
-    tampered = [r for r in results if r["protected_touched"]]
-    if tampered:
-        print(f"  {len(tampered)} run(s) modified protected paths -- see warnings above")
+    for g in results:
+        icon = {"pass": "PASS", "not_run": "----"}.get(g["grade"], "FAIL")
+        err = f"  ({g['error'][:80]})" if g.get("error") else ""
+        print(f"  [{icon}] {g['model']:34s} {g['instance_id']:24s}{err}")
+    graded = [g for g in results if g["grade"] != "not_run"]
+    passed = sum(1 for g in graded if g["grade"] == "pass")
+    print(f"\n  {passed}/{len(graded)} pass"
+          + (f"   ({len(results) - len(graded)} not run)" if len(graded) < len(results) else ""))
 
 
 if __name__ == "__main__":
