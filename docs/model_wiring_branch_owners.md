@@ -6,8 +6,7 @@ branch and machines. The code is on `main`: copy it, or merge `main` and keep yo
 
 **Updated 2026-11-18, after the full Zephyr runs of all four models:** one more model fix
 (MiniMax M2, section 3b), the memory and node settings that worked (section 4), and how to run reliably on the
-GB10 nodes (section 5b). The M2 fix and the multi-node job files are not on `main` yet; section 3b gives the fix
-in full, so you can add it now.
+GB10 nodes (section 5b). The M2 fix and the multi-node job files are now on `main` too (2026-11-21).
 
 **Updated 2026-11-21, after the full RIOT runs:** MiniMax M2.5 now also gets the closing-tag repair: **run M2.5
 with the profile `minimax-m25-nvfp4-thinkfix` only** (section 3b). Our M2.5 results without the repair are set
@@ -49,7 +48,7 @@ Settings that differ from vLLM's defaults, and why (all found the hard way, on G
 | GLM 4.6 | `max_model_len` 131072 (of 203k) | leaves room for the KV cache over 3 nodes |
 | gpt-oss-120b | env `TIKTOKEN_ENCODINGS_BASE={models}/tiktoken-gpt-oss` | its Harmony format downloads two vocabulary files at start, and the server has no network. Put `o200k_base.tiktoken` and `cl100k_base.tiktoken` (from `https://openaipublic.blob.core.windows.net/encodings/`) in that folder |
 | gpt-oss-120b | `"repair_tool_args": true` | see section 3 |
-| MiniMax M2, MiniMax M2.5 (`minimax-m25-nvfp4-thinkfix`) | `"repair_think_close": true` | see section 3b (not on `main` yet) |
+| MiniMax M2, MiniMax M2.5 (`minimax-m25-nvfp4-thinkfix`) | `"repair_think_close": true` | see section 3b |
 | MiniMax M2.5/M2 | `--trust-remote-code`, `--reasoning-parser minimax_m2_append_think`, `--tool-call-parser minimax_m2` | from the model cards |
 | GLM 4.6 | `--reasoning-parser glm45`, `--tool-call-parser glm45` | from the model card |
 | all | `--enable-auto-tool-choice` with each model's tool-call parser | mini-SWE-agent 2.x uses tool calls |
@@ -254,7 +253,7 @@ equal the run's steps.
   rather decide each follow-up yourself, and size a follow-up to the problems left.
 - Our job files for all of this (`cluster/templates/eval_zephyr_multi.sbatch`, `eval_zephyr_het.sbatch`,
   `scripts/eval_zephyr_group.sh`, and for RIOT `cluster/templates/eval_riot_multi.sbatch` with
-  `scripts/eval_riot_remote.sh`) are not on `main` yet.
+  `scripts/eval_riot_remote.sh`) are on `main`.
 
 ## 6. What to expect, to check your set-up
 
@@ -287,6 +286,8 @@ fix: check that its reasoning is closed in the conversation).
 | d6ab341 | gpt-oss submission-as-text repair |
 | 2df4815 | NFS clean-up fix, tracebacks |
 | 038cee7 | GLM 4.6 and MiniMax M2 profiles, weight revisions |
+| 99d640b | closing-tag repair (MiniMax M2 and M2.5), profile `minimax-m25-nvfp4-thinkfix` |
+| 12b1873 | job files for the full runs (multi-node servers, RIOT agents on cpu nodes, watchdog) |
 
 ## Also needed: the evaluation rules already on `main`
 
