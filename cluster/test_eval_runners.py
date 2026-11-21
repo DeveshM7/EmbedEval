@@ -446,6 +446,8 @@ class RunnersFollowMain(unittest.TestCase):
                 continue
             text = norm(self.read(new))
             text = text.replace(' -p "${SLURM_JOB_PARTITION_HET_GROUP_0:-$SLURM_JOB_PARTITION}"', "")   # kept Spark partition (main's Zephyr has a -p too)
+            text = text.replace(' ${XN:+-x "$XN"}', "")   # kept Spark exclusions
+            text = "\n".join(l for l in text.splitlines() if not l.strip().startswith("XN=$(squeue"))
             for line in norm(self.read(main)).splitlines():
                 if line.strip().startswith('echo "[$(date +%T)] job $ATTEMPT for $MODEL:'):
                     continue   # a log line only; our runners name servers of several nodes
