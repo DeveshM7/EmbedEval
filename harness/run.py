@@ -171,6 +171,34 @@ def _submit_text(content) -> bool:
     return isinstance(obj, dict) and set(obj) == {"command"} and str(obj["command"]).strip() == SUBMIT_COMMAND
 
 
+def add_think_repair(model, full_model: str) -> None:
+    """For a local profile with "repair_think_close" (MiniMax M2 and M2.5): put back the closing
+    </think> that vLLM's MiniMax tool-call parser drops from a reply with a tool call.
+
+    vLLM returns "<think>reasoning</think>answer" for a plain reply, but for a reply with a
+    tool call the content comes back as "<think>reasoning" with no closing tag (vLLM 0.27.1,
+    reasoning parser minimax_m2_append_think, tool-call parser minimax_m2; checked
+    2026-11-17). The agent keeps that content in the conversation, so the model would see
+    its earlier reasoning as an unclosed block; MiniMax says M2's reasoning must be kept
+    intact in the history. A reply that starts with <think>, has no </think> and has tool
+    calls gets "</think>" at its end; no other reply is touched. Counted on the model."""
+    profile = LOCAL_MODELS.get(full_model)
+    if not profile or not json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile].get("repair_think_close"):
+        return
+    parse = model._parse_actions
+    model.think_repairs = 0
+
+    def _parse_actions(response):
+        message = response.choices[0].message
+        content = message.content if isinstance(message.content, str) else ""
+        if message.tool_calls and content.lstrip().startswith("<think>") and "</think>" not in content:
+            message.content = content.rstrip() + "\n</think>"
+            model.think_repairs += 1
+        return parse(response)
+
+    model._parse_actions = _parse_actions
+
+
 def add_tool_arg_repair(model, full_model: str) -> None:
     """Apply repair_tool_args to every tool call before mini-swe-agent parses it,
     for a local profile that asks for it; counts the repairs on the model."""
@@ -206,24 +234,6 @@ PROVIDER_KEYS = {
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "together_ai": ("TOGETHER_API_KEY", "TOGETHERAI_API_KEY"),
 }
-
-
-def add_think_repair(model, full_model: str) -> None:
-    profile = LOCAL_MODELS.get(full_model)
-    if not profile or not json.loads((paths.REPO_ROOT / "triage" / "models.json").read_text())[profile].get("repair_think_close"):
-        return
-    parse = model._parse_actions
-    model.think_repairs = 0
-
-    def _parse_actions(response):
-        message = response.choices[0].message
-        content = message.content if isinstance(message.content, str) else ""
-        if message.tool_calls and content.lstrip().startswith("<think>") and "</think>" not in content:
-            message.content = content.rstrip() + "\n</think>"
-            model.think_repairs += 1
-        return parse(response)
-
-    model._parse_actions = _parse_actions
 
 
 # Models served locally by scripts/serve_triage_model.sh: vLLM's
