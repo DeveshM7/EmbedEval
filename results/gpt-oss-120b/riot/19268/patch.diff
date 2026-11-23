@@ -1,0 +1,63 @@
+diff --git a/sys/include/shell_lock.h b/sys/include/shell_lock.h
+index 4b0421ec..1332c1d1 100644
+--- a/sys/include/shell_lock.h
++++ b/sys/include/shell_lock.h
+@@ -60,6 +60,15 @@ extern "C" {
+  * @param[in]   buf_size    Buffer size
+  */
+ void shell_lock_checkpoint(char *line_buf, int buf_size);
++/**
++ * @brief   Lock the shell programmatically.
++ *
++ * This function can be used by other parts of the system (for example the
++ * shell implementation) to lock the shell without requiring user input.
++ * It sets the internal lock flag to @c true.  When the shell is locked the
++ * next interaction with the user will trigger the password prompt.
++ */
++void shell_lock_lock(void);
+ 
+ /**
+  * @brief   Returns true, if the shell is in the locked state.
+diff --git a/sys/shell/shell.c b/sys/shell/shell.c
+index 0d82178a..2b19dd2a 100644
+--- a/sys/shell/shell.c
++++ b/sys/shell/shell.c
+@@ -501,15 +501,11 @@ void shell_run_once(const shell_command_t *shell_commands,
+         switch (res) {
+ 
+             case EOF:
++                if (IS_USED(MODULE_SHELL_LOCK)) {
++                    shell_lock_lock();
++                    continue;
++                }
+                 return;
+-
+-            case -ENOBUFS:
+-                printf("shell: maximum line length exceeded\n");
+-                break;
+-
+-            default:
+-                handle_input_line(shell_commands, line_buf);
+-                break;
+         }
+ 
+         print_prompt();
+diff --git a/sys/shell_lock/shell_lock.c b/sys/shell_lock/shell_lock.c
+index 3b926449..76698a07 100644
+--- a/sys/shell_lock/shell_lock.c
++++ b/sys/shell_lock/shell_lock.c
+@@ -195,3 +195,14 @@ void shell_lock_checkpoint(char *line_buf, int buf_size)
+     shell_lock_auto_lock_refresh();
+ #endif
+ }
++/**
++ * @brief   Public API to lock the shell.
++ *
++ * This simply sets the internal lock flag. The function is declared in the
++ * public header so that other modules (e.g. the native shell implementation)
++ * can trigger a lock when needed – for example when an EOF is received.
++ */
++void shell_lock_lock(void)
++{
++    _shell_is_locked = true;
++}

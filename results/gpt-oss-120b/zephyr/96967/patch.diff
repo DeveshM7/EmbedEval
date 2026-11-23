@@ -1,0 +1,91 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..d5b2f8b9
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,41 @@
++*** Begin Patch
++*** Update File: subsys/mgmt/mcumgr/grp/os_mgmt/src/os_mgmt.c
++@@
++-	if (format_bitmask & OS_MGMT_INFO_FORMAT_HARDWARE_PLATFORM) {
++-		rc = snprintf(&output[output_length], (sizeof(output) - output_length),
++-		          (prior_output == true ? " %s%s%s" : "%s%s%s"), CONFIG_BOARD,
++-		          (sizeof(CONFIG_BOARD_REVISION) > 1 ? "@" : ""),
++-		          CONFIG_BOARD_REVISION);
++-
++-		if (rc < 0 || rc >= (sizeof(output) - output_length)) {
++-			goto fail;
++-		} else {
++-			output_length += (uint16_t)rc;
++-		}
++-
++-		prior_output = true;
++-		format_bitmask &= ~OS_MGMT_INFO_FORMAT_HARDWARE_PLATFORM;
++-	}
+++	/*
+++	 * Historically the hardware platform field only returned the board name
+++	 * (CONFIG_BOARD) and optional revision.  For many scenarios the full board
+++	 * target – which also includes the SoC and variant (e.g. "qemu_x86/qemu_x86/smp") –
+++	 * is required. Zephyr provides CONFIG_BOARD_TARGET that expands to this full
+++	 * string. Replace the old construction with CONFIG_BOARD_TARGET while keeping
+++	 * the surrounding formatting identical (prepend a space if other fields have
+++	 * already been emitted).
+++	 */
+++	if (format_bitmask & OS_MGMT_INFO_FORMAT_HARDWARE_PLATFORM) {
+++		rc = snprintf(&output[output_length], (sizeof(output) - output_length),
+++		          (prior_output == true ? " %s" : "%s"), CONFIG_BOARD_TARGET);
+++
+++		if (rc < 0 || rc >= (sizeof(output) - output_length)) {
+++			goto fail;
+++		} else {
+++			output_length += (uint16_t)rc;
+++		}
+++
+++		prior_output = true;
+++		format_bitmask &= ~OS_MGMT_INFO_FORMAT_HARDWARE_PLATFORM;
+++	}
++*** End Patch
+diff --git a/subsys/mgmt/mcumgr/grp/os_mgmt/src/os_mgmt.c b/subsys/mgmt/mcumgr/grp/os_mgmt/src/os_mgmt.c
+index 360385a1..7ae5214c 100644
+--- a/subsys/mgmt/mcumgr/grp/os_mgmt/src/os_mgmt.c
++++ b/subsys/mgmt/mcumgr/grp/os_mgmt/src/os_mgmt.c
+@@ -829,22 +829,27 @@ static int os_mgmt_info(struct smp_streamer *ctxt)
+ 		format_bitmask &= ~OS_MGMT_INFO_FORMAT_PROCESSOR;
+ 	}
+ 
++	/* Return the full board target string (including SoC and variant) if available */
+ 	if (format_bitmask & OS_MGMT_INFO_FORMAT_HARDWARE_PLATFORM) {
+-		rc = snprintf(&output[output_length], (sizeof(output) - output_length),
+-			      (prior_output == true ? " %s%s%s" : "%s%s%s"), CONFIG_BOARD,
+-			      (sizeof(CONFIG_BOARD_REVISION) > 1 ? "@" : ""),
+-			      CONFIG_BOARD_REVISION);
+-
+-		if (rc < 0 || rc >= (sizeof(output) - output_length)) {
+-			goto fail;
+-		} else {
+-			output_length += (uint16_t)rc;
+-		}
++#if defined(CONFIG_BOARD_TARGET)
++	rc = snprintf(&output[output_length], (sizeof(output) - output_length),
++	          (prior_output == true ? " %s" : "%s"), CONFIG_BOARD_TARGET);
++#else
++	rc = snprintf(&output[output_length], (sizeof(output) - output_length),
++	          (prior_output == true ? " %s%s%s" : "%s%s%s"), CONFIG_BOARD,
++	          (sizeof(CONFIG_BOARD_REVISION) > 1 ? "@" : ""),
++	          CONFIG_BOARD_REVISION);
++#endif
+ 
+-		prior_output = true;
+-		format_bitmask &= ~OS_MGMT_INFO_FORMAT_HARDWARE_PLATFORM;
++	if (rc < 0 || rc >= (sizeof(output) - output_length)) {
++		goto fail;
++	} else {
++		output_length += (uint16_t)rc;
+ 	}
+ 
++	prior_output = true;
++	format_bitmask &= ~OS_MGMT_INFO_FORMAT_HARDWARE_PLATFORM;
++
+ 	/* If custom_os_name is not set (by extension code) then return the default OS name of
+ 	 * Zephyr
+ 	 */

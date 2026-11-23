@@ -1,0 +1,64 @@
+diff --git a/include/zephyr/kvss/zms.h b/include/zephyr/kvss/zms.h
+index f14c2d3a..37ec684a 100644
+--- a/include/zephyr/kvss/zms.h
++++ b/include/zephyr/kvss/zms.h
+@@ -102,6 +102,21 @@ typedef uint32_t zms_id_t;
+  */
+ int zms_mount(struct zms_fs *fs);
+ 
++/**
++ * @brief Force mount a ZMS file system onto the device specified in `fs`.
++ *
++ * If the normal mount fails due to an unsupported ZMS version, this function
++ * will wipe the partition, reinitialize it, and succeed.
++ *
++ * @param fs Pointer to the file system.
++ *
++ * @retval 0 on success.
++ * @retval -EINVAL if `fs` is NULL or any of the flash parameters or the sector layout is invalid.
++ * @retval -ENXIO if there is a device error.
++ * @retval -EIO if there is a memory read/write error.
++ */
++int zms_mount_force(struct zms_fs *fs);
++
+ /**
+  * @brief Clear the ZMS file system from device. The ZMS file system must be re-mounted after this
+  * operation.
+diff --git a/subsys/kvss/zms/zms.c b/subsys/kvss/zms/zms.c
+index 7cc0be3a..66b0da24 100644
+--- a/subsys/kvss/zms/zms.c
++++ b/subsys/kvss/zms/zms.c
+@@ -1533,6 +1533,33 @@ int zms_mount(struct zms_fs *fs)
+ 	return 0;
+ }
+ 
++int zms_mount_force(struct zms_fs *fs)
++{
++	int rc;
++
++	if (!fs) {
++		LOG_ERR("Invalid fs");
++		return -EINVAL;
++	}
++
++	/* Try normal mount first */
++	rc = zms_mount(fs);
++	if (rc != -EPROTONOSUPPORT) {
++		/* Either succeeded or failed for a different reason */
++		return rc;
++	}
++
++	/* Mount failed due to unsupported version - wipe and reinitialize */
++	rc = zms_clear(fs);
++	if (rc != 0) {
++		return rc;
++	}
++
++	/* Now re-mount the freshly initialized filesystem */
++	return zms_mount(fs);
++}
++
++
+ ssize_t zms_write(struct zms_fs *fs, zms_id_t id, const void *data, size_t len)
+ {
+ 	int rc;

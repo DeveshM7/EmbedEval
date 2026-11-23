@@ -1,0 +1,218 @@
+diff --git a/cmake/modules/extensions.cmake b/cmake/modules/extensions.cmake
+index ef3ec4fc6..0bb94ced2 100644
+--- a/cmake/modules/extensions.cmake
++++ b/cmake/modules/extensions.cmake
+@@ -6251,3 +6251,21 @@ if(CMAKE_SCRIPT_MODE_FILE)
+     # This silence the error: 'Unknown CMake command "yaml_context"'
+   endfunction()
+ endif()
++# Generate a C header file containing shell alias definitions.
++# This function copies the user supplied alias file to a generated include file
++# which is then compiled into the application.
++function(generate_shell_aliases_inc_file_for_target
++    target          # The cmake target that depends on the generated file
++    source_file     # The source file containing alias definitions
++    generated_file  # The generated header file to be included
++    )
++  add_custom_command(
++    OUTPUT ${generated_file}
++    COMMAND ${CMAKE_COMMAND} -E copy ${source_file} ${generated_file}
++    DEPENDS ${source_file}
++    COMMENT "Generating shell aliases include ${generated_file}"
++    )
++  generate_unique_target_name_from_filename(${generated_file} generated_target_name)
++  add_custom_target(${generated_target_name} DEPENDS ${generated_file})
++  add_dependencies(${target} ${generated_target_name})
++endfunction()
+diff --git a/subsys/shell/CMakeLists.txt b/subsys/shell/CMakeLists.txt
+index 16e66b624..b8d8df264 100644
+--- a/subsys/shell/CMakeLists.txt
++++ b/subsys/shell/CMakeLists.txt
+@@ -46,3 +46,13 @@ zephyr_sources_ifdef(
+   CONFIG_SHELL_WILDCARD
+   shell_wildcard.c
+   )
++# Alias support: compile the alias handling source and generate the include
++# file containing the user defined alias list.
++zephyr_sources_ifdef(CONFIG_SHELL_ALIASES shell_alias.c)
++
++if(CONFIG_SHELL_ALIASES AND CONFIG_SHELL_ALIASES_FILE)
++  set(_alias_src "${CONFIG_SHELL_ALIASES_FILE}")
++  set(_alias_inc "${CMAKE_CURRENT_BINARY_DIR}/shell_aliases.inc")
++  generate_shell_aliases_inc_file_for_target(app ${_alias_src} ${_alias_inc})
++  zephyr_include_directories(${CMAKE_CURRENT_BINARY_DIR})
++endif()
+diff --git a/subsys/shell/Kconfig b/subsys/shell/Kconfig
+index a3e9bcd34..f920046f5 100644
+--- a/subsys/shell/Kconfig
++++ b/subsys/shell/Kconfig
+@@ -468,3 +468,28 @@ endif
+ source "subsys/shell/modules/Kconfig"
+ 
+ endif # SHELL
++
++config SHELL_ALIASES
++    bool "Shell alias support"
++    depends on SHELL
++    default y
++    help
++      Enable user defined command aliases in the shell. Aliases allow a
++      short token to be expanded to a longer command before execution.
++
++config SHELL_ALIASES_FILE
++    string "Path to a host file containing shell aliases"
++    depends on SHELL_ALIASES
++    default ""
++    help
++      Host side file that defines shell aliases. The file is processed at
++      build time and compiled into the firmware image.
++
++config SHELL_ALIASES_HAS_FILE
++    bool "Shell alias file provided"
++    depends on SHELL_ALIASES
++    default n
++    help
++      Set to "y" when CONFIG_SHELL_ALIASES_FILE is non-empty. This is used
++      as a convenient Kconfig boolean to indicate that an alias file is
++      present.
+diff --git a/subsys/shell/shell.c b/subsys/shell/shell.c
+index 8847f3223..06ddf4d6d 100644
+--- a/subsys/shell/shell.c
++++ b/subsys/shell/shell.c
+@@ -651,6 +651,9 @@ static int execute(const struct shell *sh)
+ 	char quote;
+ 	const char **argvp;
+ 	char *cmd_buf = sh->ctx->cmd_buff;
++    #if IS_ENABLED(CONFIG_SHELL_ALIASES)
++    	shell_alias_handle(sh);
++    #endif
+ 	bool has_last_handler = false;
+ 
+ 	z_shell_op_cursor_end_move(sh);
+diff --git a/subsys/shell/shell_alias.c b/subsys/shell/shell_alias.c
+new file mode 100644
+index 000000000..b1b36b01e
+--- /dev/null
++++ b/subsys/shell/shell_alias.c
+@@ -0,0 +1,121 @@
++/*
++ * Copyright (c) 2024 Embedded Engineering
++#include <zephyr/sys/util.h>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/shell/shell.h>
++#include <string.h>
++
++/* Alias definition structure. The list is generated at build time by the
++ * generate_shell_aliases_inc_file_for_target CMake function which copies the
++ * user provided alias file (plain text) into an include file containing an
++ * array of struct shell_alias entries.
++ */
++struct shell_alias {
++    const char *name;
++    const char *expansion;
++};
++
++/* The generated include file defines "static const struct shell_alias
++ * shell_aliases[]" and "static const size_t shell_aliases_cnt". If the
++ * configuration does not provide an alias file the include will be empty – we
++ * guard the inclusion with the CONFIG_SHELL_ALIASES_HAS_FILE check.
++ */
++#if defined(CONFIG_SHELL_ALIASES_HAS_FILE) && (CONFIG_SHELL_ALIASES_HAS_FILE == 1)
++#include "shell_aliases.inc"
++#endif
++
++/* Helper to expand a possible alias at the beginning of the command buffer.
++ * It performs collision detection against the current command context. If a
++ * collision is detected the alias is ignored and a warning is printed.
++ */
++static void shell_alias_expand(const struct shell *sh)
++{
++    /* No alias support – nothing to do. */
++    if (!IS_ENABLED(CONFIG_SHELL_ALIASES)) {
++        return;
++    }
++
++    /* If there are no generated aliases, simply return. */
++    if (!IS_ENABLED(CONFIG_SHELL_ALIASES_HAS_FILE) || shell_aliases_cnt == 0) {
++        return;
++    }
++
++    char *cmd_buf = sh->ctx->cmd_buff;
++    /* Find the first token (alias candidate). */
++    size_t token_len = strcspn(cmd_buf, " ");
++    if (token_len == 0) {
++        return;
++    }
++
++    for (size_t i = 0; i < shell_aliases_cnt; ++i) {
++        const struct shell_alias *a = &shell_aliases[i];
++        if (strlen(a->name) != token_len) {
++            continue;
++        }
++        if (strncmp(a->name, cmd_buf, token_len) != 0) {
++            continue;
++        }
++
++        /* Collision detection: check if a command with the same name exists
++         * in the current context (selected command subtree or root).
++         */
++        const struct shell_static_entry *parent = selected_cmd_get(sh);
++        struct shell_static_entry dloc;
++        if (z_shell_find_cmd(parent, a->name, &dloc) != NULL) {
++            z_shell_fprintf(sh, SHELL_WARNING,
++                "Alias '%s' ignored because command exists in current context\n",
++                a->name);
++            return;
++        }
++
++        /* Build the expanded command string. */
++        const char *rest = cmd_buf + token_len;
++        while (*rest == ' ') {
++            ++rest;
++        }
++        char new_cmd[CONFIG_SHELL_CMD_BUFF_SIZE];
++        if (*rest) {
++            /* alias + space + remaining args */
++            snprintf(new_cmd, sizeof(new_cmd), "%s %s", a->expansion, rest);
++        } else {
++            snprintf(new_cmd, sizeof(new_cmd), "%s", a->expansion);
++        }
++        /* Copy back to the shell buffer. */
++        strlcpy(sh->ctx->cmd_buff, new_cmd, sizeof(sh->ctx->cmd_buff));
++        sh->ctx->cmd_buff_len = strlen(sh->ctx->cmd_buff);
++        sh->ctx->cmd_buff_pos = sh->ctx->cmd_buff_len;
++        return;
++    }
++}
++
++/* Built‑in command that lists all configured aliases. */
++static int cmd_aliases(const struct shell *sh, size_t argc, char **argv)
++{
++    ARG_UNUSED(argc);
++    ARG_UNUSED(argv);
++
++    if (!IS_ENABLED(CONFIG_SHELL_ALIASES) ||
++        !IS_ENABLED(CONFIG_SHELL_ALIASES_HAS_FILE) ||
++        shell_aliases_cnt == 0) {
++        shell_print(sh, "No aliases configured");
++        return 0;
++    }
++
++    for (size_t i = 0; i < shell_aliases_cnt; ++i) {
++        const struct shell_alias *a = &shell_aliases[i];
++        shell_fprintf(sh, SHELL_INFO, "%s -> %s\n", a->name, a->expansion);
++    }
++    return 0;
++}
++
++SHELL_CMD_REGISTER(aliases, NULL, "List configured shell aliases", cmd_aliases);
++
++/* Hook that should be called at the very beginning of command execution. */
++void shell_alias_handle(const struct shell *sh)
++{
++    shell_alias_expand(sh);
++}
++

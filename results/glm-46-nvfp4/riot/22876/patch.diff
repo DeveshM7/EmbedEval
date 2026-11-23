@@ -1,0 +1,399 @@
+diff --git a/pkg/fatfs/fatfs_vfs/fatfs_vfs.c b/pkg/fatfs/fatfs_vfs/fatfs_vfs.c
+index 26b1c3af..789326d4 100644
+--- a/pkg/fatfs/fatfs_vfs/fatfs_vfs.c
++++ b/pkg/fatfs/fatfs_vfs/fatfs_vfs.c
+@@ -437,7 +437,7 @@ static int _readdir(vfs_DIR *dirp, vfs_dirent_t *entry)
+         }
+         else {
+             entry->d_ino = 0; //TODO: set this properly
+-            strncpy(entry->d_name, fi.fname, VFS_NAME_MAX);
++            snprintf(entry->d_name, VFS_NAME_MAX + 1, "%s", fi.fname);
+             return 1;
+         }
+     }
+diff --git a/pkg/littlefs/fs/littlefs_fs.c b/pkg/littlefs/fs/littlefs_fs.c
+index ae88d516..94939968 100644
+--- a/pkg/littlefs/fs/littlefs_fs.c
++++ b/pkg/littlefs/fs/littlefs_fs.c
+@@ -503,7 +503,7 @@ static int _readdir(vfs_DIR *dirp, vfs_dirent_t *entry)
+     int ret = lfs_dir_read(&fs->fs, dir, &info);
+     if (ret >= 0) {
+         entry->d_ino = info.type;
+-        strncpy(entry->d_name, info.name, VFS_NAME_MAX - 1);
++        snprintf(entry->d_name, VFS_NAME_MAX + 1, "%s", info.name);
+     }
+ 
+     mutex_unlock(&fs->lock);
+diff --git a/pkg/littlefs2/fs/littlefs2_fs.c b/pkg/littlefs2/fs/littlefs2_fs.c
+index 7a978256..8747918f 100644
+--- a/pkg/littlefs2/fs/littlefs2_fs.c
++++ b/pkg/littlefs2/fs/littlefs2_fs.c
+@@ -508,7 +508,7 @@ static int _readdir(vfs_DIR *dirp, vfs_dirent_t *entry)
+     int ret = lfs_dir_read(&fs->fs, dir, &info);
+     if (ret >= 0) {
+         entry->d_ino = info.type;
+-        strncpy(entry->d_name, info.name, VFS_NAME_MAX - 1);
++        snprintf(entry->d_name, VFS_NAME_MAX + 1, "%s", info.name);
+     }
+ 
+     mutex_unlock(&fs->lock);
+diff --git a/pkg/spiffs/fs/spiffs_fs.c b/pkg/spiffs/fs/spiffs_fs.c
+index e3d8a4a2..1584c55f 100644
+--- a/pkg/spiffs/fs/spiffs_fs.c
++++ b/pkg/spiffs/fs/spiffs_fs.c
+@@ -394,7 +394,7 @@ static int _readdir(vfs_DIR *dirp, vfs_dirent_t *entry)
+ 
+     if (ret) {
+         entry->d_ino = e.obj_id;
+-        strncpy(entry->d_name, (char*) e.name, VFS_NAME_MAX);
++        snprintf(entry->d_name, VFS_NAME_MAX + 1, "%s", (char*)e.name);
+         return 1;
+     }
+     else {
+diff --git a/test_max_filename.c b/test_max_filename.c
+new file mode 100644
+index 00000000..3ca24d8e
+--- /dev/null
++++ b/test_max_filename.c
+@@ -0,0 +1,147 @@
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include "vfs.h"
++#include "fs/littlefs.h"
++#include "fs/littlefs_fs.h"
++
++#define TEST_MOUNT_PATH "/test"
++#define VFS_TEST_BUFFSIZE (64)
++
++/* MTD device for testing */
++static mtd_dev_t *_dev = NULL;
++
++static int setup(void) {
++    /* Get MTD device */
++    _dev = mtd_dev_get(0);
++    if (!_dev) {
++        printf("No MTD device found\n");
++        return -1;
++    }
++    
++    /* Set up littlefs */
++    static littlefs_desc_t fs_desc = {
++        .dev = _dev,
++    };
++    
++    static vfs_mount_t mount = {
++        .mount_point = TEST_MOUNT_PATH,
++        .fs = &littlefs_file_system,
++        .private_data = &fs_desc,
++    };
++    
++    /* Format and mount */
++    int res = vfs_format(&mount);
++    if (res < 0) {
++        printf("format failed: %d\n", res);
++        return res;
++    }
++    
++    res = vfs_mount(&mount);
++    if (res < 0) {
++        printf("mount failed: %d\n", res);
++        return res;
++    }
++    
++    return 0;
++}
++
++static int test_max_filename(void) {
++    char max_name[VFS_NAME_MAX + 1];
++    char full_path[VFS_NAME_MAX + 10];
++    
++    /* Create a filename of maximum length */
++    memset(max_name, 'A', VFS_NAME_MAX);
++    max_name[VFS_NAME_MAX] = '\0';  /* Ensure it's null-terminated */
++    
++    printf("Testing with filename of length %d\n", VFS_NAME_MAX);
++    printf("Created filename: '%s' (length: %zu)\n", max_name, strlen(max_name));
++    
++    /* Create full path */
++    snprintf(full_path, sizeof(full_path), "%s/%s", TEST_MOUNT_PATH, max_name);
++    
++    /* Create the file */
++    int fd = vfs_open(full_path, O_CREAT | O_WRONLY, 0644);
++    if (fd < 0) {
++        printf("ERROR: Failed to create file: %d\n", fd);
++        return -1;
++    }
++    
++    /* Write some data */
++    const char *test_data = "Hello World";
++    ssize_t written = vfs_write(fd, test_data, strlen(test_data));
++    if (written < 0) {
++        printf("ERROR: Failed to write to file: %zd\n", written);
++        vfs_close(fd);
++        return -1;
++    }
++    
++    vfs_close(fd);
++    printf("Created file successfully\n");
++    
++    /* Now test readdir */
++    vfs_DIR dir;
++    int res = vfs_opendir(&dir, TEST_MOUNT_PATH);
++    if (res < 0) {
++        printf("ERROR: Failed to open directory: %d\n", res);
++        return -1;
++    }
++    
++    vfs_dirent_t entry;
++    int found_max_file = 0;
++    
++    printf("Reading directory entries:\n");
++    while ((res = vfs_readdir(&dir, &entry)) > 0) {
++        printf("Found entry: '%s' (length: %zu)\n", entry.d_name, strlen(entry.d_name));
++        
++        /* Check if this is our max length file */
++        if (strcmp(entry.d_name, max_name) == 0) {
++            found_max_file = 1;
++            
++            /* Verify null termination */
++            if (strlen(entry.d_name) != VFS_NAME_MAX) {
++                printf("ERROR: Name length mismatch, expected %d, got %zu\n", 
++                       VFS_NAME_MAX, strlen(entry.d_name));
++                vfs_closedir(&dir);
++                return -1;
++            }
++            
++            /* Ensure d_name[VFS_NAME_MAX] is null */
++            if (entry.d_name[VFS_NAME_MAX] != '\0') {
++                printf("ERROR: d_name[VFS_NAME_MAX] is not null-terminated!\n");
++                vfs_closedir(&dir);
++                return -1;
++            }
++            
++            printf("SUCCESS: Max length filename is properly null-terminated\n");
++        }
++    }
++    
++    vfs_closedir(&dir);
++    
++    if (!found_max_file) {
++        printf("ERROR: Did not find max length file in directory\n");
++        return -1;
++    }
++    
++    printf("Test passed!\n");
++    return 0;
++}
++
++int main(void) {
++    printf("Testing VFS max filename null termination...\n");
++    
++    if (setup() < 0) {
++        printf("Setup failed\n");
++        return 1;
++    }
++    
++    if (test_max_filename() < 0) {
++        printf("Test failed\n");
++        return 1;
++    }
++    
++    printf("All tests passed!\n");
++    return 0;
++}
+diff --git a/test_max_name.c b/test_max_name.c
+new file mode 100644
+index 00000000..74e3bab1
+--- /dev/null
++++ b/test_max_name.c
+@@ -0,0 +1,63 @@
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include "vfs.h"
++#include "vfs_util.h"
++
++int main(void) {
++    printf("Testing VFS namelength handling\n");
++    
++    // Create a test directory
++    char *test_dir = "/test";
++    char max_name[VFS_NAME_MAX + 1];
++    
++    // Create a name of maximum length (all 'a' characters)
++    memset(max_name, 'a', VFS_NAME_MAX);
++    max_name[VFS_NAME_MAX] = '\0';
++    
++    printf("Testing with name of length %d: '%s'\n", VFS_NAME_MAX, max_name);
++    printf("Name length: %zu\n", strlen(max_name));
++    
++    // Try to create a file with maximum length name
++    char full_path[VFS_NAME_MAX + 10];
++    snprintf(full_path, sizeof(full_path), "%s/%s", test_dir, max_name);
++    
++    int fd = vfs_open(full_path, O_CREAT | O_WRONLY, 0644);
++    if (fd < 0) {
++        printf("Failed to create file with max length name\n");
++        return 1;
++    }
++    vfs_close(fd);
++    
++    // Now test readdir
++    vfs_DIR dir;
++    int res = vfs_opendir(&dir, test_dir);
++    if (res < 0) {
++        printf("Failed to open directory\n");
++        return 1;
++    }
++    
++    vfs_dirent_t entry;
++    int found_max = 0;
++    
++    while ((res = vfs_readdir(&dir, &entry)) > 0) {
++        printf("Found entry: '%s' (length: %zu)\n", entry.d_name, strlen(entry.d_name));
++        
++        if (strcmp(entry.d_name, max_name) == 0) {
++            found_max = 1;
++            printf("Found max-length entry\n");
++            break;
++        }
++    }
++    
++    vfs_closedir(&dir);
++    
++    if (!found_max) {
++        printf("ERROR: Did not find the max-length entry\n");
++        return 1;
++    }
++    
++    printf("Test passed\n");
++    return 0;
++}
+diff --git a/test_null_termination.c b/test_null_termination.c
+new file mode 100644
+index 00000000..c915f452
+--- /dev/null
++++ b/test_null_termination.c
+@@ -0,0 +1,119 @@
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include "vfs.h"
++
++#define TEST_NAME_MAX 255
++
++/* Mock file system that simulates filesystem with exact max length names */
++static vfs_DIR mock_dir;
++static int mock readdir_count = 0;
++
++static int mock_readdir(vfs_DIR *dirp, vfs_dirent_t *entry) {
++    if (readdir_count == 0) {
++        /* First call - return a name of exactly VFS_NAME_MAX characters */
++        memset(entry->d_name, 'A', VFS_NAME_MAX);
++        /* Do NOT null terminate - this simulates the bug */
++        readdir_count++;
++        return 1;
++    } else if (readdir_count == 1) {
++        /* Second call - return a properly null-terminated name */
++        memset(entry->d_name, 'B', VFS_NAME_MAX);
++        entry->d_name[VFS_NAME_MAX] = '\0'; /* Properly terminated */
++        readdir_count++;
++        return 1;
++    } else {
++        /* No more entries */
++        return 0;
++    }
++}
++
++static int mock_opendir(vfs_DIR *dirp, const char *dirname) {
++    (void)dirname;
++    readdir_count = 0;
++    return 0;
++}
++
++static int mock_closedir(vfs_DIR *dirp) {
++    (void)dirp;
++    return 0;
++}
++
++static const vfs_dir_ops_t mock_dir_ops = {
++    .opendir = mock_opendir,
++    .readdir = mock_readdir,
++    .closedir = mock_closedir,
++};
++
++static vfs_mount_t mock_mount = {
++    .mount_point = "/mock",
++    .fs = &(vfs_file_system_t){
++        .d_op = &mock_dir_ops,
++        .f_op = NULL,
++        .fs_op = NULL,
++    },
++};
++
++int main(void) {
++    printf("Testing VFS readdir null termination...\n");
++    
++    /* Mount the mock file system */
++    if (vfs_mount(&mock_mount) != 0) {
++        printf("ERROR: Failed to mount mock filesystem\n");
++        return 1;
++    }
++    
++    /* Open directory */
++    vfs_DIR dir;
++    if (vfs_opendir(&dir, "/mock") != 0) {
++        printf("ERROR: Failed to open directory\n");
++        return 1;
++    }
++    
++    /* Read first entry - this should be truncated or non-terminated */
++    vfs_dirent_t entry;
++    if (vfs_readdir(&dir, &entry) <= 0) {
++        printf("ERROR: Failed to read first entry\n");
++        return 1;
++    }
++    
++    /* Check if the name is properly null-terminated */
++    size_t first_len = strnlen(entry.d_name, VFS_NAME_MAX + 1);
++    printf("First entry: '%s' (length: %zu)\n", entry.d_name, first_len);
++    
++    if (first_len > VFS_NAME_MAX) {
++        printf("ERROR: First entry name is not null-terminated!\n");
++        vfs_closedir(&dir);
++        return 1;
++    }
++    
++    /* Read second entry */
++    if (vfs_readdir(&dir, &entry) <= 0) {
++        printf("ERROR: Failed to read second entry\n");
++        return 1;
++    }
++    
++    /* Check second entry */
++    size_t second_len = strnlen(entry.d_name, VFS_NAME_MAX + 1);
++    printf("Second entry: '%s' (length: %zu)\n", entry.d_name, second_len);
++    
++    if (second_len != VFS_NAME_MAX) {
++        printf("ERROR: Second entry name should be exactly VFS_NAME_MAX characters\n");
++        vfs_closedir(&dir);
++        return 1;
++    }
++    
++    /* Verify that d_name[VFS_NAME_MAX] is null */
++    if (entry.d_name[VFS_NAME_MAX] != '\0') {
++        printf("ERROR: d_name[VFS_NAME_MAX] is not null-terminated!\n");
++        vfs_closedir(&dir);
++        return 1;
++    }
++    
++    vfs_closedir(&dir);
++    vfs_umount(&mock_mount, false);
++    
++    printf("All tests passed!\n");
++    return 0;
++}

@@ -1,0 +1,862 @@
+diff --git a/sys/psa_crypto/Makefile b/sys/psa_crypto/Makefile
+index 6d61a2db..2481643c 100644
+--- a/sys/psa_crypto/Makefile
++++ b/sys/psa_crypto/Makefile
+@@ -13,3 +13,7 @@ ifneq (,$(filter psa_se_mgmt,$(USEMODULE)))
+ endif
+ 
+ include $(RIOTBASE)/Makefile.base
++# Add CBOR encoder and persistent storage modules
++SRC += psa_crypto_cbor_encoder.c
++USEMODULE += nanocbor
++SRC += psa_persistent_storage.c
+diff --git a/sys/psa_crypto/include/psa_crypto_cbor_encoder.h b/sys/psa_crypto/include/psa_crypto_cbor_encoder.h
+new file mode 100644
+index 00000000..babb57e0
+--- /dev/null
++++ b/sys/psa_crypto/include/psa_crypto_cbor_encoder.h
+@@ -0,0 +1,102 @@
++/*
++ * Copyright (C) 2024 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_psa_crypto
++ * @{
++ *
++ * @file
++ * @brief       PSA Crypto CBOR encoder function declarations
++ *
++ * @author      Your Name <your.email@haw-hamburg.de>
++ */
++
++#ifndef PSA_CRYPTO_CBOR_ENCODER_H
++#define PSA_CRYPTO_CBOR_ENCODER_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include "psa/crypto.h"
++//#include "psa_crypto_slot_management.h"
++#include "nanocbor.h"
++
++/**
++ * @brief   Encode a key slot into CBOR format
++ *
++ * @param   slot            Pointer to the key slot to encode
++ * @param   buffer          Buffer to store the encoded data
++ * @param   buffer_size     Size of the buffer
++ * @param   encoded_length  Output parameter for the actual encoded length
++ *
++ * @return  PSA_SUCCESS on success, error code on failure
++ */
++psa_status_t psa_encode_key_slot(psa_key_slot_t *slot, uint8_t *buffer,
++                                 size_t buffer_size, size_t *encoded_length);
++
++/**
++ * @brief   Decode key attributes from CBOR data
++ *
++ * @param   buffer          Buffer containing the CBOR data
++ * @param   buffer_size     Size of the buffer
++ * @param   attributes      Output structure for the decoded attributes
++ *
++ * @return  PSA_SUCCESS on success, error code on failure
++ */
++psa_status_t psa_decode_key_attributes(const uint8_t *buffer, size_t buffer_size,
++                                      psa_key_attributes_t *attributes);
++
++/**
++ * @brief   Decode key material from CBOR data into a slot
++ *
++ * @param   buffer          Buffer containing the CBOR data
++ * @param   buffer_size     Size of the buffer
++ * @param   slot            Slot to decode the key material into
++ *
++ * @return  PSA_SUCCESS on success, error code on failure
++ */
++psa_status_t psa_decode_key_slot_data(const uint8_t *buffer, size_t buffer_size,
++                                     psa_key_slot_t *slot);
++
++/* Forward declarations for slot types that tests may need */
++#if PSA_PROTECTED_KEY_COUNT
++typedef struct {
++    clist_node_t node;
++    size_t lock_count;
++    psa_key_attributes_t attr;
++    struct prot_key_data {
++        psa_key_slot_number_t slot_number;
++#if IS_USED(MODULE_PSA_ASYMMETRIC)
++        uint8_t pubkey_data[PSA_EXPORT_PUBLIC_KEY_MAX_SIZE];
++        size_t pubkey_data_len;
++#endif
++    } key;
++} psa_prot_key_slot_t;
++#endif /* PSA_PROTECTED_KEY_COUNT */
++
++#if PSA_ASYMMETRIC_KEYPAIR_COUNT
++typedef struct {
++    clist_node_t node;
++    size_t lock_count;
++    psa_key_attributes_t attr;
++    struct key_pair_data {
++        uint8_t privkey_data[PSA_BITS_TO_BYTES(PSA_MAX_PRIV_KEY_SIZE)];
++        size_t privkey_data_len;
++        uint8_t pubkey_data[PSA_EXPORT_PUBLIC_KEY_MAX_SIZE];
++        size_t pubkey_data_len;
++    } key;
++} psa_key_pair_slot_t;
++#endif /* PSA_ASYMMETRIC_KEYPAIR_COUNT */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PSA_CRYPTO_CBOR_ENCODER_H */
++/** @} */
+diff --git a/sys/psa_crypto/include/psa_persistent_storage.h b/sys/psa_crypto/include/psa_persistent_storage.h
+new file mode 100644
+index 00000000..008444c5
+--- /dev/null
++++ b/sys/psa_crypto/include/psa_persistent_storage.h
+@@ -0,0 +1,73 @@
++/*
++ * Copyright (C) 2024 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_psa_crypto
++ * @{
++ *
++ * @file
++ * @brief       PSA Crypto persistent storage function declarations
++ *
++ * @author      Your Name <your.email@haw-hamburg.de>
++ */
++
++#ifndef PSA_PERSISTENT_STORAGE_H
++#define PSA_PERSISTENT_STORAGE_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include "psa/crypto.h"
++
++/* Forward declaration for opaque slot structure */
++typedef struct psa_key_slot_s psa_key_slot_t;
++
++/**
++ * @brief   Store a key persistently
++ *
++ * @param   slot    Pointer to the key slot to store
++ *
++ * @return  PSA_SUCCESS on success, error code on failure
++ */
++psa_status_t psa_store_persistent_key(psa_key_slot_t *slot);
++
++/**
++ * @brief   Load a key from persistent storage
++ *
++ * @param   key_id  ID of the key to load
++ * @param   slot    Output slot to load the key into
++ *
++ * @return  PSA_SUCCESS on success, error code on failure
++ */
++psa_status_t psa_load_persistent_key(psa_key_id_t key_id, psa_key_slot_t *slot);
++
++/**
++ * @brief   Remove a key from persistent storage
++ *
++ * @param   key_id  ID of the key to remove
++ *
++ * @return  PSA_SUCCESS on success, error code on failure
++ */
++psa_status_t psa_remove_persistent_key(psa_key_id_t key_id);
++
++/**
++ * @brief   Check if a key exists in persistent storage
++ *
++ * @param   key_id  ID of the key to check
++ *
++ * @return  1 if key exists, 0 if not
++ */
++int psa_persistent_key_exists(psa_key_id_t key_id);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PSA_PERSISTENT_STORAGE_H */
++/** @} */
+diff --git a/sys/psa_crypto/psa_crypto_cbor_encoder.c b/sys/psa_crypto/psa_crypto_cbor_encoder.c
+new file mode 100644
+index 00000000..02d73ed4
+--- /dev/null
++++ b/sys/psa_crypto/psa_crypto_cbor_encoder.c
+@@ -0,0 +1,380 @@
++/*
++ * Copyright (C) 2024 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_psa_crypto
++ * @{
++ *
++ * @file
++ * @brief       PSA Crypto CBOR encoder implementation
++ *
++ * @author      Your Name <your.email@haw-hamburg.de>
++ */
++
++#include <string.h>
++#include "psa_crypto_cbor_encoder.h"
++#include "psa_crypto_slot_management.h"
++#include "nanocbor/nanocbor.h"
++
++#define ENABLE_DEBUG 0
++#include "debug.h"
++
++/* Forward declarations for structures defined in the slot management file */
++#if PSA_PROTECTED_KEY_COUNT
++typedef struct {
++    clist_node_t node;
++    size_t lock_count;
++    psa_key_attributes_t attr;
++    struct prot_key_data {
++        psa_key_slot_number_t slot_number;
++#if IS_USED(MODULE_PSA_ASYMMETRIC)
++        uint8_t pubkey_data[PSA_EXPORT_PUBLIC_KEY_MAX_SIZE];
++        size_t pubkey_data_len;
++#endif
++    } key;
++} psa_prot_key_slot_t;
++#endif /* PSA_PROTECTED_KEY_COUNT */
++
++#if PSA_ASYMMETRIC_KEYPAIR_COUNT
++typedef struct {
++    clist_node_t node;
++    size_t lock_count;
++    psa_key_attributes_t attr;
++    struct key_pair_data {
++        uint8_t privkey_data[PSA_BITS_TO_BYTES(PSA_MAX_PRIV_KEY_SIZE)];
++        size_t privkey_data_len;
++        uint8_t pubkey_data[PSA_EXPORT_PUBLIC_KEY_MAX_SIZE];
++        size_t pubkey_data_len;
++    } key;
++} psa_key_pair_slot_t;
++#endif /* PSA_ASYMMETRIC_KEYPAIR_COUNT */
++
++psa_status_t psa_encode_key_slot(psa_key_slot_t *slot, uint8_t *buffer, 
++                                 size_t buffer_size, size_t *encoded_length)
++{
++    if (!slot || !buffer || !encoded_length) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    nanocbor_encoder_t enc;
++    nanocbor_encoder_init(&enc, buffer, buffer_size);
++
++    /* Root array with 2 elements: [attributes, key_material] */
++    int res = nanocbor_fmt_array(&enc, 2);
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    /* Encode attributes array */
++    res = nanocbor_fmt_array(&enc, 5); /* id, type, bits, lifetime, usage/algorithm pair */
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    /* Encode key ID */
++    res = nanocbor_fmt_uint(&enc, slot->attr.core.id);
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    /* Encode key type */
++    res = nanocbor_fmt_uint(&enc, slot->attr.core.type);
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    /* Encode key bits */
++    res = nanocbor_fmt_uint(&enc, slot->attr.core.bits);
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    /* Encode lifetime */
++    res = nanocbor_fmt_uint(&enc, slot->attr.core.lifetime);
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    /* Encode usage and algorithm as an array */
++    res = nanocbor_fmt_array(&enc, 2);
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    res = nanocbor_fmt_uint(&enc, slot->attr.core.policy.usage);
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    res = nanocbor_fmt_uint(&enc, slot->attr.core.policy.alg);
++    if (res < 0) {
++        return PSA_ERROR_INSUFFICIENT_STORAGE;
++    }
++
++    /* Encode key material */
++    psa_key_attributes_t attr = slot->attr;
++
++    if (psa_key_lifetime_is_external(attr.lifetime)) {
++#if PSA_PROTECTED_KEY_COUNT
++        /* Protected key: array of [slot_number, optional pubkey] */
++        psa_prot_key_slot_t *prot_slot = (psa_prot_key_slot_t *)slot;
++        if (PSA_KEY_TYPE_IS_ASYMMETRIC(attr.type)) {
++            /* Array with slot number and public key */
++            res = nanocbor_fmt_array(&enc, 2);
++            if (res < 0) {
++                return PSA_ERROR_INSUFFICIENT_STORAGE;
++            }
++            res = nanocbor_fmt_uint(&enc, prot_slot->key.slot_number);
++            if (res < 0) {
++                return PSA_ERROR_INSUFFICIENT_STORAGE;
++            }
++            res = nanocbor_put_bstr(&enc, prot_slot->key.pubkey_data, 
++                                   prot_slot->key.pubkey_data_len);
++            if (res < 0) {
++                return PSA_ERROR_INSUFFICIENT_STORAGE;
++            }
++        } else {
++            /* Array with just slot number */
++            res = nanocbor_fmt_array(&enc, 1);
++            if (res < 0) {
++                return PSA_ERROR_INSUFFICIENT_STORAGE;
++            }
++            res = nanocbor_fmt_uint(&enc, prot_slot->key.slot_number);
++            if (res < 0) {
++                return PSA_ERROR_INSUFFICIENT_STORAGE;
++            }
++        }
++#else
++        return PSA_ERROR_NOT_SUPPORTED;
++#endif /* PSA_PROTECTED_KEY_COUNT */
++    } else if (PSA_KEY_TYPE_IS_KEY_PAIR(attr.type)) {
++#if PSA_ASYMMETRIC_KEYPAIR_COUNT
++        /* Asymmetric key pair: array of [privkey, pubkey] */
++        psa_key_pair_slot_t *pair_slot = (psa_key_pair_slot_t *)slot;
++        res = nanocbor_fmt_array(&enc, 2);
++        if (res < 0) {
++            return PSA_ERROR_INSUFFICIENT_STORAGE;
++        }
++        res = nanocbor_put_bstr(&enc, pair_slot->key.privkey_data, 
++                               pair_slot->key.privkey_data_len);
++        if (res < 0) {
++            return PSA_ERROR_INSUFFICIENT_STORAGE;
++        }
++        res = nanocbor_put_bstr(&enc, pair_slot->key.pubkey_data, 
++                               pair_slot->key.pubkey_data_len);
++        if (res < 0) {
++            return PSA_ERROR_INSUFFICIENT_STORAGE;
++        }
++#else
++        return PSA_ERROR_NOT_SUPPORTED;
++#endif /* PSA_ASYMMETRIC_KEYPAIR_COUNT */
++    } else {
++        /* Single key: bytestring */
++        res = nanocbor_put_bstr(&enc, slot->key.data, slot->key.data_len);
++        if (res < 0) {
++            return PSA_ERROR_INSUFFICIENT_STORAGE;
++        }
++    }
++
++    *encoded_length = enc.len;
++    return PSA_SUCCESS;
++}
++
++psa_status_t psa_decode_key_attributes(const uint8_t *buffer, size_t buffer_size,
++                                      psa_key_attributes_t *attributes)
++{
++    if (!buffer || !attributes) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    nanocbor_value_t decoder;
++    nanocbor_decoder_init(&decoder, buffer, buffer_size);
++
++    /* Root array should have 2 elements */
++    nanocbor_value_t root_array;
++    int res = nanocbor_enter_array(&decoder, &root_array);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Decode attributes array */
++    nanocbor_value_t attr_array;
++    res = nanocbor_enter_array(&root_array, &attr_array);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Decode key ID */
++    uint64_t value;
++    res = nanocbor_get_uint64(&attr_array, &value);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++    attributes->core.id = (psa_key_id_t)value;
++
++    /* Decode key type */
++    res = nanocbor_get_uint64(&attr_array, &value);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++    attributes->core.type = (psa_key_type_t)value;
++
++    /* Decode key bits */
++    res = nanocbor_get_uint64(&attr_array, &value);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++    attributes->core.bits = (size_t)value;
++
++    /* Decode lifetime */
++    res = nanocbor_get_uint64(&attr_array, &value);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++    attributes->core.lifetime = (psa_key_lifetime_t)value;
++
++    /* Decode usage/algorithm array */
++    nanocbor_value_t policy_array;
++    res = nanocbor_enter_array(&attr_array, &policy_array);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Decode usage */
++    res = nanocbor_get_uint64(&policy_array, &value);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++    attributes->core.policy.usage = (psa_key_usage_t)value;
++
++    /* Decode algorithm */
++    res = nanocbor_get_uint64(&policy_array, &value);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++    attributes->core.policy.alg = (psa_algorithm_t)value;
++
++    return PSA_SUCCESS;
++}
++
++psa_status_t psa_decode_key_slot_data(const uint8_t *buffer, size_t buffer_size,
++                                     psa_key_slot_t *slot)
++{
++    if (!buffer || !slot) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    nanocbor_value_t decoder;
++    nanocbor_decoder_init(&decoder, buffer, buffer_size);
++
++    /* Root array should have 2 elements */
++    nanocbor_value_t root_array;
++    int res = nanocbor_enter_array(&decoder, &root_array);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Skip attributes array */
++    nanocbor_value_t attr_array;
++    res = nanocbor_enter_array(&root_array, &attr_array);
++    if (res < 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++    nanocbor_skip(&attr_array);
++
++    /* Decode key material */
++    psa_key_attributes_t attr = slot->attr;
++
++    if (psa_key_lifetime_is_external(attr.lifetime)) {
++#if PSA_PROTECTED_KEY_COUNT
++        psa_prot_key_slot_t *prot_slot = (psa_prot_key_slot_t *)slot;
++        nanocbor_value_t key_material;
++        res = nanocbor_enter_array(&root_array, &key_material);
++        if (res < 0) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++
++        /* Decode slot number */
++        uint64_t value;
++        res = nanocbor_get_uint64(&key_material, &value);
++        if (res < 0) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++        prot_slot->key.slot_number = (psa_key_slot_number_t)value;
++
++        /* If asymmetric, decode public key */
++        if (PSA_KEY_TYPE_IS_ASYMMETRIC(attr.type)) {
++            const uint8_t *pubkey_data;
++            size_t pubkey_len;
++            res = nanocbor_get_bstr(&key_material, &pubkey_data, &pubkey_len);
++            if (res < 0) {
++                return PSA_ERROR_INVALID_ARGUMENT;
++            }
++            if (pubkey_len > PSA_EXPORT_PUBLIC_KEY_MAX_SIZE) {
++                return PSA_ERROR_INVALID_ARGUMENT;
++            }
++            memcpy(prot_slot->key.pubkey_data, pubkey_data, pubkey_len);
++            prot_slot->key.pubkey_data_len = pubkey_len;
++        }
++#else
++        return PSA_ERROR_NOT_SUPPORTED;
++#endif /* PSA_PROTECTED_KEY_COUNT */
++    } else if (PSA_KEY_TYPE_IS_KEY_PAIR(attr.type)) {
++#if PSA_ASYMMETRIC_KEYPAIR_COUNT
++        psa_key_pair_slot_t *pair_slot = (psa_key_pair_slot_t *)slot;
++        nanocbor_value_t key_material;
++        res = nanocbor_enter_array(&root_array, &key_material);
++        if (res < 0) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++
++        /* Decode private key */
++        const uint8_t *privkey_data;
++        size_t privkey_len;
++        res = nanocbor_get_bstr(&key_material, &privkey_data, &privkey_len);
++        if (res < 0) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++        if (privkey_len > PSA_BITS_TO_BYTES(PSA_MAX_PRIV_KEY_SIZE)) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++        memcpy(pair_slot->key.privkey_data, privkey_data, privkey_len);
++        pair_slot->key.privkey_data_len = privkey_len;
++
++        /* Decode public key */
++        const uint8_t *pubkey_data;
++        size_t pubkey_len;
++        res = nanocbor_get_bstr(&key_material, &pubkey_data, &pubkey_len);
++        if (res < 0) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++        if (pubkey_len > PSA_EXPORT_PUBLIC_KEY_MAX_SIZE) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++        memcpy(pair_slot->key.pubkey_data, pubkey_data, pubkey_len);
++        pair_slot->key.pubkey_data_len = pubkey_len;
++#else
++        return PSA_ERROR_NOT_SUPPORTED;
++#endif /* PSA_ASYMMETRIC_KEYPAIR_COUNT */
++    } else {
++        /* Single key: bytestring */
++        const uint8_t *key_data;
++        size_t key_len;
++        res = nanocbor_get_bstr(&root_array, &key_data, &key_len);
++        if (res < 0) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++        if (key_len > PSA_MAX_KEY_DATA_SIZE) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
++        memcpy(slot->key.data, key_data, key_len);
++        slot->key.data_len = key_len;
++    }
++
++    return PSA_SUCCESS;
++}
+diff --git a/sys/psa_crypto/psa_key_slot_mgmt/psa_crypto_slot_management.c b/sys/psa_crypto/psa_key_slot_mgmt/psa_crypto_slot_management.c
+index 48ef1cf8..9803412a 100644
+--- a/sys/psa_crypto/psa_key_slot_mgmt/psa_crypto_slot_management.c
++++ b/sys/psa_crypto/psa_key_slot_mgmt/psa_crypto_slot_management.c
+@@ -21,6 +21,7 @@
+ #include "clist.h"
+ #include "psa_crypto_slot_management.h"
+ #include "architecture.h"
++#include "psa_persistent_storage.h"
+ 
+ #define ENABLE_DEBUG    0
+ #include "debug.h"
+@@ -230,6 +231,15 @@ psa_status_t psa_wipe_key_slot(psa_key_slot_t *slot)
+ 
+     /* Append node to empty list for later reuse */
+     clist_rpush(empty_list, n);
++    /* Store key attributes and remove from persistent storage if needed */
++    if (PSA_KEY_LIFETIME_IS_PERSISTENT(slot->attr.core.lifetime)) {
++        psa_status_t remove_status = psa_remove_persistent_key(slot->attr.core.id);
++        /* Do not fail the wipe operation if persistent storage removal fails, just log it */
++        if (remove_status != PSA_SUCCESS) {
++            DEBUG("Failed to remove persistent key %lu: %ld\n", 
++                  (unsigned long)slot->attr.core.id, (long)remove_status);
++        }
++    }
+     return PSA_SUCCESS;
+ }
+ 
+@@ -321,9 +331,38 @@ psa_status_t psa_get_and_lock_key_slot(psa_key_id_t id, psa_key_slot_t **p_slot)
+         return status;
+     }
+ 
+-    /* TODO: get persistent key from storage and load into slot */
++    /* Key not found in memory, try persistent storage */
++    if (psa_is_valid_key_id(id, 1)) { /* vendor = 1 for any valid ID */
++        if (psa_persistent_key_exists(id)) {
++            /* Find an empty slot first */
++            psa_key_attributes_t temp_attr = psa_key_attributes_init();
++            psa_set_key_id(&temp_attr, id);
+ 
+-    return status;
++            status = psa_allocate_empty_key_slot(&id, &temp_attr, p_slot);
++            if (status != PSA_SUCCESS) {
++                return status;
++            }
++
++            /* Load the persistent key */
++            status = psa_load_persistent_key(id, *p_slot);
++            if (status != PSA_SUCCESS) {
++                /* Load failed, wipe the slot */
++                psa_wipe_key_slot(*p_slot);
++                return status;
++            }
++
++            /* Lock the loaded slot */
++            status = psa_lock_key_slot(*p_slot);
++            if (status != PSA_SUCCESS) {
++                psa_wipe_key_slot(*p_slot);
++                return status;
++            }
++
++            return PSA_SUCCESS;
++        }
++    }
++
++    return PSA_ERROR_DOES_NOT_EXIST;
+ }
+ 
+ /**
+@@ -545,3 +584,17 @@ void psa_get_public_key_data_from_key_slot(const psa_key_slot_t *slot, uint8_t *
+     *pubkey_data_len = &((psa_prot_key_slot_t *)slot)->key.pubkey_data_len;
+ #endif
+ }
++
++psa_status_t psa_store_key_to_persistent(psa_key_slot_t *slot)
++{
++    if (!slot) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Only store persistent keys */
++    if (PSA_KEY_LIFETIME_IS_PERSISTENT(slot->attr.core.lifetime)) {
++        return psa_store_persistent_key(slot);
++    }
++
++    return PSA_SUCCESS; /* Not an error, just don't store volatile keys */
++}
+diff --git a/sys/psa_crypto/psa_persistent_storage.c b/sys/psa_crypto/psa_persistent_storage.c
+new file mode 100644
+index 00000000..0d5cf62b
+--- /dev/null
++++ b/sys/psa_crypto/psa_persistent_storage.c
+@@ -0,0 +1,184 @@
++/*
++ * Copyright (C) 2024 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_psa_crypto
++ * @{
++ *
++ * @file
++ * @brief       PSA Crypto persistent storage implementation
++ *
++ * @author      Your Name <your.email@haw-hamburg.de>
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include "psa_persistent_storage.h"
++#include "psa_crypto_slot_management.h"
++#include "psa_crypto_cbor_encoder.h"
++#include "xfa.h"
++
++#define ENABLE_DEBUG 0
++#include "debug.h"
++
++#define PSA_PERSISTENT_KEY_DIR "/tmp/psa_keys"
++#define MAX_KEY_FILENAME 64
++
++static int _storage_initialized = 0;
++
++static void _init_storage(void)
++{
++    if (_storage_initialized) {
++        return;
++    }
++    
++    /* Create the persistent storage directory */
++    system("mkdir -p " PSA_PERSISTENT_KEY_DIR);
++    _storage_initialized = 1;
++}
++
++static void _get_key_filename(psa_key_id_t key_id, char *filename, size_t size)
++{
++    snprintf(filename, size, "%s/key_%lu", PSA_PERSISTENT_KEY_DIR, (unsigned long)key_id);
++}
++
++psa_status_t psa_store_persistent_key(psa_key_slot_t *slot)
++{
++    if (!slot) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Only store persistent keys */
++    if (!PSA_KEY_LIFETIME_IS_PERSISTENT(slot->attr.core.lifetime)) {
++        return PSA_SUCCESS; /* Not an error, just don't store it */
++    }
++
++    _init_storage();
++
++    char filename[MAX_KEY_FILENAME];
++    _get_key_filename(slot->attr.core.id, filename, sizeof(filename));
++
++    /* Check if key already exists */
++    if (access(filename, F_OK) == 0) {
++        return PSA_ERROR_ALREADY_EXISTS;
++    }
++
++    /* Encode the key slot */
++    uint8_t buffer[PSA_MAX_KEY_DATA_SIZE * 2]; /* Should be enough for CBOR encoding */
++    size_t encoded_length;
++    psa_status_t status = psa_encode_key_slot(slot, buffer, sizeof(buffer), &encoded_length);
++    if (status != PSA_SUCCESS) {
++        return status;
++    }
++
++    /* Write to file */
++    FILE *file = fopen(filename, "wb");
++    if (!file) {
++        return PSA_ERROR_STORAGE_FAILURE;
++    }
++
++    size_t written = fwrite(buffer, 1, encoded_length, file);
++    fclose(file);
++
++    if (written != encoded_length) {
++        unlink(filename); /* Remove partial file */
++        return PSA_ERROR_STORAGE_FAILURE;
++    }
++
++    DEBUG("Stored persistent key %lu to %s\\n", (unsigned long)slot->attr.core.id, filename);
++    return PSA_SUCCESS;
++}
++
++psa_status_t psa_load_persistent_key(psa_key_id_t key_id, psa_key_slot_t *slot)
++{
++    if (!slot) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    _init_storage();
++
++    char filename[MAX_KEY_FILENAME];
++    _get_key_filename(key_id, filename, sizeof(filename));
++
++    /* Check if file exists */
++    if (access(filename, F_OK) != 0) {
++        return PSA_ERROR_DOES_NOT_EXIST;
++    }
++
++    /* Read the file */
++    FILE *file = fopen(filename, "rb");
++    if (!file) {
++        return PSA_ERROR_STORAGE_FAILURE;
++    }
++
++    /* Get file size */
++    fseek(file, 0, SEEK_END);
++    long file_size = ftell(file);
++    fseek(file, 0, SEEK_SET);
++
++    if (file_size <= 0 || file_size > PSA_MAX_KEY_DATA_SIZE * 2) {
++        fclose(file);
++        return PSA_ERROR_STORAGE_FAILURE;
++    }
++
++    /* Read file into buffer */
++    uint8_t buffer[file_size];
++    size_t read = fread(buffer, 1, file_size, file);
++    fclose(file);
++
++    if (read != (size_t)file_size) {
++        return PSA_ERROR_STORAGE_FAILURE;
++    }
++
++    /* Decode attributes first */
++    psa_status_t status = psa_decode_key_attributes(buffer, read, &slot->attr);
++    if (status != PSA_SUCCESS) {
++        return status;
++    }
++
++    /* Decode key material */
++    status = psa_decode_key_slot_data(buffer, read, slot);
++    if (status != PSA_SUCCESS) {
++        return status;
++    }
++
++    DEBUG("Loaded persistent key %lu from %s\\n", (unsigned long)key_id, filename);
++    return PSA_SUCCESS;
++}
++
++psa_status_t psa_remove_persistent_key(psa_key_id_t key_id)
++{
++    _init_storage();
++
++    char filename[MAX_KEY_FILENAME];
++    _get_key_filename(key_id, filename, sizeof(filename));
++
++    if (unlink(filename) == 0) {
++        DEBUG("Removed persistent key %lu from %s\\n", (unsigned long)key_id, filename);
++        return PSA_SUCCESS;
++    }
++
++    if (errno == ENOENT) {
++        return PSA_ERROR_DOES_NOT_EXIST;
++    }
++
++    return PSA_ERROR_STORAGE_FAILURE;
++}
++
++int psa_persistent_key_exists(psa_key_id_t key_id)
++{
++    _init_storage();
++
++    char filename[MAX_KEY_FILENAME];
++    _get_key_filename(key_id, filename, sizeof(filename));
++
++    return (access(filename, F_OK) == 0) ? 1 : 0;
++}

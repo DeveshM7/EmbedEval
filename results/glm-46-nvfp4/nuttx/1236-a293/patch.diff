@@ -1,0 +1,3137 @@
+diff --git a/add_simple_test.py b/add_simple_test.py
+new file mode 100644
+index 0000000..7b7d65d
+--- /dev/null
++++ b/add_simple_test.py
+@@ -0,0 +1,19 @@
++with open("/testbed/apps/testing/ostest/ostest_main.c", "r") as f:
++    lines = f.readlines()
++
++# Find the user_main function
++for i, line in enumerate(lines):
++    if "static int user_main(int argc, char *argv[])" in line:
++        # Find the opening brace
++        for j in range(i, len(lines)):
++            if lines[j].strip() == "{":
++                # Add the call right after the opening brace
++                lines.insert(j + 1, "  mallinfo_test();\n")
++                break
++        break
++
++# Write the file back
++with open("/testbed/apps/testing/ostest/ostest_main.c", "w") as f:
++    f.writelines(lines)
++
++print("Added mallinfo_test call to user_main")
+diff --git a/add_test.py b/add_test.py
+new file mode 100644
+index 0000000..02b493d
+--- /dev/null
++++ b/add_test.py
+@@ -0,0 +1,49 @@
++with open("/testbed/apps/testing/ostest/ostest_main.c", "r") as f:
++    content = f.read()
++
++# Find the position after the closing brace
++insert_point = content.find("static int user_main(int argc, char *argv[])") - 1
++
++if insert_point != -1:
++    # Prepare the text to insert
++    insert_text = """/****************************************************************************
++ * External declarations for malloc.h test
++ ****************************************************************************/
++
++#ifdef CONFIG_BUILD_KERNEL
++extern void mallinfo_test(void);
++#endif
++
++"""
++
++    # Insert the text
++    new_content = content[:insert_point] + insert_text + content[insert_point:]
++    
++    with open("/testbed/apps/testing/ostest/ostest_main.c", "w") as f:
++        f.write(new_content)
++    
++    print("Added extern declaration before user_main function")
++    
++    # Now add the call after the opening brace
++    content = new_content
++    func_start = content.find("static int user_main(int argc, char *argv[])")
++    if func_start != -1:
++        # Find the opening brace
++        brace_pos = content.find('{', func_start)
++        if brace_pos != -1:
++            # Find the end of the line with the brace
++            end_brace_line = content.find('\n', brace_pos)
++            if end_brace_line != -1:
++                call_text = """
++#ifdef CONFIG_BUILD_KERNEL
++  mallinfo_test();
++#endif
++"""
++                final_content = content[:end_brace_line+1] + call_text + content[end_brace_line+1:]
++                
++                with open("/testbed/apps/testing/ostest/ostest_main.c", "w") as f:
++                    f.write(final_content)
++                
++                print("Added function call at start of user_main")
++else:
++    print("Could not find user_main function")
+diff --git a/clean_ostest.py b/clean_ostest.py
+new file mode 100644
+index 0000000..5d5cb5b
+--- /dev/null
++++ b/clean_ostest.py
+@@ -0,0 +1,30 @@
++with open("/testbed/apps/testing/ostest/ostest_main.c", "r") as f:
++    lines = f.readlines()
++
++# Find user_main function properly
++user_main_line = None
++for i, line in enumerate(lines):
++    if "static int user_main(int argc, char *argv[])" in line:
++        user_main_line = i
++        break
++
++if user_main_line:
++    # Find opening brace
++    brace_line = None
++    for j in range(user_main_line, len(lines)):
++        if lines[j].strip() == "{":
++            brace_line = j
++            break
++    
++    if brace_line:
++        # Insert call right after opening brace
++        lines.insert(brace_line + 1, "  mallinfo_test();\n")
++        
++        with open("/testbed/apps/testing/ostest/ostest_main.c", "w") as f:
++            f.writelines(lines)
++        
++        print("Successfully added mallinfo_test call")
++    else:
++        print("Could not find opening brace")
++else:
++    print("Could not find user_main function")
+diff --git a/final_fix.py b/final_fix.py
+new file mode 100644
+index 0000000..8a29f51
+--- /dev/null
++++ b/final_fix.py
+@@ -0,0 +1,23 @@
++with open("/testbed/apps/testing/ostest/ostest_main.c", "r") as f:
++    content = f.read()
++
++# Find user_main and add extern decl before it
++lines = content.split('\n')
++for i, line in enumerate(lines):
++    if "static int user_main(int argc, char *argv[])" in line:
++        # Insert extern decl before function
++        lines.insert(i, "extern void mallinfo_test(void);")
++        break
++
++# Find the opening brace after "int i" and add the call
++for i, line in enumerate(lines):
++    if "int i;" in line:
++        # Add call after this line
++        lines.insert(i + 1, "  mallinfo_test();")
++        break
++
++# Write back
++with open("/testbed/apps/testing/ostest/ostest_main.c", "w") as f:
++    f.write('\n'.join(lines))
++
++print("Fixed ostest_main.c")
+diff --git a/final_solution.c b/final_solution.c
+new file mode 100644
+index 0000000..c2e4a0f
+--- /dev/null
++++ b/final_solution.c
+@@ -0,0 +1,34 @@
++import shutil
++
++# Read the original file
++with open("/testbed/apps/testing/ostest/ostest_main.c", "r") as f:
++    content = f.read()
++
++# First, let's replace the entire user_main function start manually
++lines = content.split('\n')
++
++# Find the user_main function and opening brace
++user_main_line = None
++opening_brace_line = None
++
++for i, line in enumerate(lines):
++    if "static int user_main(int argc, char *argv[])" in line:
++        user_main_line = i
++        # Look for the opening brace after this
++        for j in range(i, len(lines)):
++            if lines[j].strip() == "{":
++                opening_brace_line = j
++                break
++        break
++
++if user_main_line is not None and opening_brace_line is not None:
++    # Insert extern declaration before function
++    lines.insert(user_main_line, "extern void mallinfo_test(void);\n")
++    
++    # Insert call right after opening brace
++    lines.insert(opening_brace_line + 1, "  mallinfo_test();\n")
++
++with open("/testbed/apps/testing/ostest/ostest_main.c", "w") as f:
++    f.write('\n'.join(lines))
++
++print("Successfully added mallinfo_test call")
+diff --git a/fix_ostest.sh b/fix_ostest.sh
+new file mode 100755
+index 0000000..22ba614
+--- /dev/null
++++ b/fix_ostest.sh
+@@ -0,0 +1,21 @@
++#!/bin/bash
++
++# Add extern declaration after function prototype section
++sed -i '/^static int user_main/i\
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#ifdef CONFIG_BUILD_KERNEL
++extern void mallinfo_test(void);
++#endif
++' /testbed/apps/testing/ostest/ostest_main.c
++
++# Add function call at the start of user_main
++sed -i '/^static int user_main(int argc, char \*argv\[$/,/^{$/{
++/^{$/i\
++#ifdef CONFIG_BUILD_KERNEL\
++  mallinfo_test();\
++#endif
++}' /testbed/apps/testing/ostest/ostest_main.c
++
+diff --git a/include/malloc.h b/include/malloc.h
+new file mode 100644
+index 0000000..ccdbd66
+--- /dev/null
++++ b/include/malloc.h
+@@ -0,0 +1,75 @@
++/****************************************************************************
++ * include/malloc.h
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++#ifndef __INCLUDE_MALLOC_H
++#define __INCLUDE_MALLOC_H
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <stdlib.h>
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++/* M_MXFAST is a GNU extension.
++ *
++ * For small chunks, malloc_fastbin provides fast but less secure memory
++ * allocation.  Setting the M_MXFAST parameter to 0 disables malloc_fastbin.
++ */
++
++#define M_MXFAST 1
++
++/****************************************************************************
++ * Public Function Prototypes
++ ****************************************************************************/
++
++/* mallinfo() and mallopt() provide glibc compatibility functions */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#if defined(__GNUC__) && defined(__GNUC_MINOR__)
++#if (__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 6))
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wmissing-prototypes"
++#endif
++#endif
++
++/* The mallopt() function has no effect in the NuttX implementation but is
++ * provided for glibc compatibility.
++ */
++
++int mallopt(int param, int value);
++
++#if defined(__GNUC__) && defined(__GNUC_MINOR__)
++#if (__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 6))
++#pragma GCC diagnostic pop
++#endif
++#endif
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __INCLUDE_MALLOC_H */
+diff --git a/mallinfo_add.patch b/mallinfo_add.patch
+new file mode 100644
+index 0000000..a562559
+--- /dev/null
++++ b/mallinfo_add.patch
+@@ -0,0 +1,17 @@
++--- a/ostest_main.c
+++++ b/ostest_main.c
++@@ -206,6 +206,13 @@
++ static int user_main(int argc, char *argv[])
++ {
++   int i;
++ 
+++#ifdef CONFIG_BUILD_KERNEL
+++  extern void mallinfo_test(void);
+++#endif
+++
+++#ifdef CONFIG_BUILD_KERNEL
+++  mallinfo_test();
+++#endif
++ 
++   /* Sample the memory usage now */
++ 
+diff --git a/manual_fix.c b/manual_fix.c
+new file mode 100644
+index 0000000..9c2e57c
+--- /dev/null
++++ b/manual_fix.c
+@@ -0,0 +1,23 @@
++#include <stdio.h>
++#include <stdlib.h>
++
++int main(void) {
++  FILE *f = fopen("/testbed/apps/testing/ostest/ostest_main.c", "r");
++  if (!f) return 1;
++  
++  char line[1024];
++  int line_num = 1;
++  int found_function = 0;
++  
++  while (fgets(line, sizeof(line), f)) {
++    printf("%d:%s", line_num, line);
++    if (strstr(line, "static int user_main") && !found_function) {
++      found_function = 1;
++      printf("Found function at line %d\n", line_num);
++    }
++    line_num++;
++  }
++  
++  fclose(f);
++  return 0;
++}
+diff --git a/remove_broken.py b/remove_broken.py
+new file mode 100644
+index 0000000..f63d921
+--- /dev/null
++++ b/remove_broken.py
+@@ -0,0 +1,29 @@
++with open("/testbed/apps/testing/ostest/ostest_main.c", "r") as f:
++    content = f.read()
++
++# Remove the broken additions
++lines = content.split('\n')
++new_lines = []
++skip = False
++in_broken_section = False
++
++for line in lines:
++    if "External declarations for malloc.h test" in line:
++        # Start skipping from here
++        skip = True
++        in_broken_section = True
++        continue
++    elif "call_test_memory_usage();" in line and skip:
++        # Found the call, stop skipping but don't include this line
++        skip = False
++        continue
++    elif skip:
++        # Skip this line
++        continue
++    else:
++        new_lines.append(line)
++
++with open("/testbed/apps/testing/ostest/ostest_main.c", "w") as f:
++    f.write('\n'.join(new_lines))
++
++print("Cleaned up broken additions")
+diff --git a/simple_add.py b/simple_add.py
+new file mode 100644
+index 0000000..2f93d8a
+--- /dev/null
++++ b/simple_add.py
+@@ -0,0 +1,34 @@
++with open("/testbed/apps/testing/ostest/ostest_main.c", "r") as f:
++    lines = f.readlines()
++
++# Find the line with the function definition
++for i, line in enumerate(lines):
++    if "static int user_main(int argc, char *argv[])" in line:
++        # Add extern declaration before this line
++        extern_text = """
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#ifdef CONFIG_BUILD_KERNEL
++extern void mallinfo_test(void);
++#endif
++"""
++        lines.insert(i, extern_text)
++        # Find the opening brace that starts the function body
++        j = i + 10  # Start searching a few lines ahead
++        for k in range(j, len(lines)):
++            if lines[k].strip() == "{":
++                call_text = """
++#ifdef CONFIG_BUILD_KERNEL
++  mallinfo_test();
++#endif
++"""
++                lines.insert(k + 1, call_text)
++                break
++        break
++
++with open("/testbed/apps/testing/ostest/ostest_main.c", "w") as f:
++    f.writelines(lines)
++
++print("File updated successfully")
+diff --git a/simple_test.py b/simple_test.py
+new file mode 100644
+index 0000000..eeba9e7
+--- /dev/null
++++ b/simple_test.py
+@@ -0,0 +1,18 @@
++with open("/testbed/apps/testing/ostest/ostest_main.c", "r") as f:
++    content = f.read()
++
++# Find user_main function line and make sure it exists
++lines = content.split('\n')
++user_main_found = False
++
++for i, line in enumerate(lines):
++    if "static int user_main(int argc, char *argv[])" in line:
++        user_main_found = True
++        print(f"Found user_main at line {i+1}")
++        break
++
++if not user_main_found:
++    print("ERROR: Could not find user_main function")
++    exit(1)
++
++print("user_main function found successfully")
+diff --git a/temp.txt b/temp.txt
+new file mode 100644
+index 0000000..3fa32f5
+--- /dev/null
++++ b/temp.txt
+@@ -0,0 +1,677 @@
++/****************************************************************************
++ * apps/testing/ostest/ostest_main.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/wait.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <signal.h>
++#include <string.h>
++#include <sched.h>
++#include <errno.h>
++
++#ifdef CONFIG_TESTING_OSTEST_POWEROFF
++#include <sys/boardctl.h>
++#endif
++
++#include <nuttx/init.h>
++
++#include "ostest.h"
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#define PRIORITY         100
++#define NARGS              4
++#define HALF_SECOND_USEC 500000L
++
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++static const char arg1[] = "Arg1";
++static const char arg2[] = "Arg2";
++static const char arg3[] = "Arg3";
++static const char arg4[] = "Arg4";
++
++static const char write_data1[] = "stdio_test: write fd=1\n";
++static const char write_data2[] = "stdio_test: write fd=2\n";
++
++#ifdef SDCC
++/* I am not yet certain why SDCC does not like the following
++ * initializer.  It involves some issues with 2- vs 3-byte
++ * pointer types.
++ */
++
++static const char *g_argv[NARGS + 1];
++#else
++static const char *g_argv[NARGS + 1] =
++{
++  arg1, arg2, arg3, arg4, NULL
++};
++#endif
++
++static struct mallinfo g_mmbefore;
++static struct mallinfo g_mmprevious;
++static struct mallinfo g_mmafter;
++
++#ifndef CONFIG_DISABLE_ENVIRON
++static const char g_var1_name[]    = "Variable1";
++static const char g_var1_value[]   = "GoodValue1";
++static const char g_var2_name[]    = "Variable2";
++static const char g_var2_value[]   = "GoodValue2";
++static const char g_var3_name[]    = "Variable3";
++static const char g_var3_value[]   = "GoodValue3";
++
++static const char g_bad_value1[]   = "BadValue1";
++static const char g_bad_value2[]   = "BadValue2";
++
++static const char g_putenv_value[] = "Variable1=BadValue3";
++#endif
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: show_memory_usage
++ ****************************************************************************/
++
++static void show_memory_usage(struct mallinfo *mmbefore,
++                              struct mallinfo *mmafter)
++{
++  printf("VARIABLE  BEFORE   AFTER\n");
++  printf("======== ======== ========\n");
++  printf("arena    %8x %8x\n", mmbefore->arena,    mmafter->arena);
++  printf("ordblks  %8d %8d\n", mmbefore->ordblks,  mmafter->ordblks);
++  printf("mxordblk %8x %8x\n", mmbefore->mxordblk, mmafter->mxordblk);
++  printf("uordblks %8x %8x\n", mmbefore->uordblks, mmafter->uordblks);
++  printf("fordblks %8x %8x\n", mmbefore->fordblks, mmafter->fordblks);
++}
++
++/****************************************************************************
++ * Name: check_test_memory_usage
++ ****************************************************************************/
++
++static void check_test_memory_usage(void)
++{
++  /* Wait a little bit to let any threads terminate */
++
++  usleep(HALF_SECOND_USEC);
++
++  /* Get the current memory usage */
++
++  g_mmafter = mallinfo();
++
++  /* Show the change from the previous time */
++
++  printf("\nEnd of test memory usage:\n");
++  show_memory_usage(&g_mmprevious, &g_mmafter);
++
++  /* Set up for the next test */
++
++  g_mmprevious = g_mmafter;
++
++  /* If so enabled, show the use of priority inheritance resources */
++
++  dump_nfreeholders("user_main:");
++}
++
++/****************************************************************************
++ * Name: show_variable
++ ****************************************************************************/
++
++#ifndef CONFIG_DISABLE_ENVIRON
++static void show_variable(const char *var_name, const char *exptd_value,
++                          bool var_valid)
++{
++  char *actual_value = getenv(var_name);
++  if (actual_value)
++    {
++      if (var_valid)
++        {
++          if (strcmp(actual_value, exptd_value) == 0)
++            {
++              printf("show_variable: Variable=%s has value=%s\n",
++                     var_name, exptd_value);
++            }
++          else
++            {
++              printf("show_variable: ERROR Variable=%s has the wrong "
++                     "value\n",
++                     var_name);
++              printf("show_variable:       found=%s expected=%s\n",
++                     actual_value, exptd_value);
++            }
++        }
++      else
++        {
++          printf("show_variable: ERROR Variable=%s has a value when it "
++                 "should not\n",
++                 var_name);
++          printf("show_variable:       value=%s\n",
++                 actual_value);
++        }
++    }
++  else if (var_valid)
++    {
++      printf("show_variable: ERROR Variable=%s has no value\n",
++             var_name);
++      printf("show_variable:       Should have had value=%s\n",
++             exptd_value);
++    }
++  else
++    {
++      printf("show_variable: Variable=%s has no value\n", var_name);
++    }
++}
++
++static void show_environment(bool var1_valid, bool var2_valid,
++                             bool var3_valid)
++{
++  show_variable(g_var1_name, g_var1_value, var1_valid);
++  show_variable(g_var2_name, g_var2_value, var2_valid);
++  show_variable(g_var3_name, g_var3_value, var3_valid);
++}
++#else
++# define show_environment()
++#endif
++
++/****************************************************************************
++ * Name: user_main
++ ****************************************************************************/
++
++static int user_main(int argc, char *argv[])
++extern void mallinfo_test(void);
++
++/****************************************************************************
++{ mallinfo_test();
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#ifdef CONFIG_BUILD_KERNEL
++extern void mallinfo_test(void);
++#endif
++
++
++#ifdef CONFIG_BUILD_KERNEL
++  mallinfo_test();
++  check_test_memory_usage();
++#endif
++
++{
++  int i;
++
++  /* Sample the memory usage now */
++
++  usleep(HALF_SECOND_USEC);
++
++  g_mmbefore = mallinfo();
++  g_mmprevious = g_mmbefore;
++
++  printf("\nuser_main: Begin argument test\n");
++  printf("user_main: Started with argc=%d\n", argc);
++
++  /* Verify passed arguments */
++
++  if (argc != NARGS + 1)
++    {
++      printf("user_main: Error expected argc=%d got argc=%d\n",
++             NARGS + 1, argc);
++    }
++
++  for (i = 0; i <= NARGS; i++)
++    {
++      printf("user_main: argv[%d]=\"%s\"\n", i, argv[i]);
++    }
++
++  for (i = 1; i <= NARGS; i++)
++    {
++      if (strcmp(argv[i], g_argv[i - 1]) != 0)
++        {
++          printf("user_main: ERROR argv[%d]:  "
++                 "Expected \"%s\" found \"%s\"\n",
++                 i, g_argv[i - 1], argv[i]);
++        }
++    }
++
++  check_test_memory_usage();
++
++  /* If retention of child status is enable, then suppress it for this task.
++   * This task may produce many, many children (especially if
++   * CONFIG_TESTING_OSTEST_LOOPS) and it does not harvest their exit status.
++   * As a result, the test may fail inappropriately unless retention of
++   * child exit status is disabled.
++   *
++   * So basically, this tests that child status can be disabled, but cannot
++   * verify that status is retained correctly.
++   */
++
++#if defined(CONFIG_SCHED_HAVE_PARENT) && defined(CONFIG_SCHED_CHILD_STATUS)
++    {
++      struct sigaction sa;
++      int ret;
++
++      sa.sa_handler = SIG_IGN;
++      sa.sa_flags = SA_NOCLDWAIT;
++      ret = sigaction(SIGCHLD, &sa, NULL);
++      if (ret < 0)
++        {
++          printf("user_main: ERROR: sigaction failed: %d\n", errno);
++        }
++    }
++#endif
++
++#ifndef CONFIG_DISABLE_ENVIRON
++  /* Check environment variables */
++
++  show_environment(true, true, true);
++
++  unsetenv(g_var1_name);
++  show_environment(false, true, true);
++  check_test_memory_usage();
++
++  clearenv();
++  show_environment(false, false, false);
++  check_test_memory_usage();
++#endif
++
++#if CONFIG_TLS_NELEM > 0
++  /* Test TLS */
++
++  tls_test();
++  check_test_memory_usage();
++#endif
++
++  /* Top of test loop */
++
++#if CONFIG_TESTING_OSTEST_LOOPS > 1
++  for (i = 0; i < CONFIG_TESTING_OSTEST_LOOPS; i++)
++#elif CONFIG_TESTING_OSTEST_LOOPS == 0
++  for (; ; )
++#endif
++    {
++#ifndef CONFIG_STDIO_DISABLE_BUFFERING
++      /* Checkout setvbuf */
++
++      printf("\nuser_main: setvbuf test\n");
++      setvbuf_test();
++      check_test_memory_usage();
++#endif
++
++      /* Checkout /dev/null */
++
++      printf("\nuser_main: /dev/null test\n");
++      dev_null();
++      check_test_memory_usage();
++
++#ifdef CONFIG_TESTING_OSTEST_AIO
++      /* Check asynchronous I/O */
++
++      printf("\nuser_main: AIO test\n");
++      aio_test();
++      check_test_memory_usage();
++#endif
++
++#if defined(CONFIG_ARCH_FPU) && !defined(CONFIG_TESTING_OSTEST_FPUTESTDISABLE)
++      /* Check that the FPU is properly supported during context switching */
++
++      printf("\nuser_main: FPU test\n");
++      fpu_test();
++      check_test_memory_usage();
++#endif
++
++      /* Checkout task_restart() */
++
++      printf("\nuser_main: task_restart test\n");
++      restart_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_SCHED_WAITPID
++      /* Check waitpid() and friends */
++
++      printf("\nuser_main: waitpid test\n");
++      waitpid_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and pthread mutex */
++
++      printf("\nuser_main: mutex test\n");
++      mutex_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: timed mutex test\n");
++      timedmutex_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && defined(CONFIG_PTHREAD_MUTEX_TYPES)
++      /* Verify recursive mutexes */
++
++      printf("\nuser_main: recursive mutex test\n");
++      recursive_mutex_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_TLS_NELEM > 0
++      /* Verify pthread-specific data */
++
++      printf("\nuser_main: pthread-specific data test\n");
++      specific_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthread cancellation */
++
++      printf("\nuser_main: cancel test\n");
++      cancel_test();
++      check_test_memory_usage();
++
++#ifndef CONFIG_PTHREAD_MUTEX_UNSAFE
++      printf("\nuser_main: robust test\n");
++      robust_test();
++      check_test_memory_usage();
++#endif
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and semaphores */
++
++      printf("\nuser_main: semaphore test\n");
++      sem_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: timed semaphore test\n");
++      semtimed_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_FS_NAMED_SEMAPHORES
++      printf("\nuser_main: Named semaphore test\n");
++      nsem_test();
++      check_test_memory_usage();
++
++#endif
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and condition variables */
++
++      printf("\nuser_main: condition variable test\n");
++#ifdef CONFIG_PRIORITY_INHERITANCE
++      printf("\n           Skipping, "
++             "Test logic incompatible with priority inheritance\n");
++#else
++      cond_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify pthreads rwlock interfaces */
++
++      printf("\nuser_main: pthread_rwlock test\n");
++      pthread_rwlock_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: pthread_rwlock_cancel test\n");
++      pthread_rwlock_cancel_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_PTHREAD_CLEANUP
++      /* Verify pthread cancellation cleanup handlers */
++
++      printf("\nuser_main: pthread_cleanup test\n");
++      pthread_cleanup_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify pthreads and condition variable timed waits */
++
++      printf("\nuser_main: timed wait test\n");
++      timedwait_test();
++      check_test_memory_usage();
++#endif /* !CONFIG_DISABLE_PTHREAD */
++
++#if !defined(CONFIG_DISABLE_MQUEUE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify pthreads and message queues */
++
++      printf("\nuser_main: message queue test\n");
++      mqueue_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_MQUEUE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify pthreads and message queues */
++
++      printf("\nuser_main: timed message queue test\n");
++      timedmqueue_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify that we can modify the signal mask */
++
++      printf("\nuser_main: sigprocmask test\n");
++      sigprocmask_test();
++      check_test_memory_usage();
++
++      /* Verify signal handlers */
++
++      printf("\nuser_main: signal handler test\n");
++      sighand_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: nested signal handler test\n");
++      signest_test();
++      check_test_memory_usage();
++
++#if defined(CONFIG_SIG_SIGSTOP_ACTION) && defined(CONFIG_SIG_SIGKILL_ACTION)
++      printf("\nuser_main: signal action test\n");
++      suspend_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_POSIX_TIMERS
++      /* Verify posix timers (with SIGEV_SIGNAL) */
++
++      printf("\nuser_main: POSIX timer test\n");
++      timer_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_SIG_EVTHREAD
++      /* Verify posix timers (with SIGEV_THREAD) */
++
++      printf("\nuser_main: SIGEV_THREAD timer test\n");
++      sigev_thread_test();
++      check_test_memory_usage();
++#endif
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_RR_INTERVAL > 0
++      /* Verify round robin scheduling */
++
++      printf("\nuser_main: round-robin scheduler test\n");
++      rr_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && defined(CONFIG_SCHED_SPORADIC)
++      /* Verify sporadic scheduling */
++
++      printf("\nuser_main: sporadic scheduler test\n");
++      sporadic_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthread barriers */
++
++      printf("\nuser_main: barrier test\n");
++      barrier_test();
++      check_test_memory_usage();
++#endif
++
++#if defined(CONFIG_PRIORITY_INHERITANCE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify priority inheritance */
++
++      printf("\nuser_main: priority inheritance test\n");
++      priority_inheritance();
++      check_test_memory_usage();
++#endif /* CONFIG_PRIORITY_INHERITANCE && !CONFIG_DISABLE_PTHREAD */
++
++#if defined(CONFIG_ARCH_HAVE_VFORK) && defined(CONFIG_SCHED_WAITPID)
++      printf("\nuser_main: vfork() test\n");
++      vfork_test();
++#endif
++
++      /* Compare memory usage at time ostest_main started until
++       * user_main exits.  These should not be identical, but should
++       * be similar enough that we can detect any serious OS memory
++       * leaks.
++       */
++
++      usleep(HALF_SECOND_USEC);
++
++      g_mmafter = mallinfo();
++
++      printf("\nFinal memory usage:\n");
++      show_memory_usage(&g_mmbefore, &g_mmafter);
++    }
++
++  printf("user_main: Exiting\n");
++  return 0;
++}
++
++/****************************************************************************
++ * Name: stdio_test
++ ****************************************************************************/
++
++static void stdio_test(void)
++{
++  /* Verify that we can communicate */
++
++  write(1, write_data1, sizeof(write_data1)-1);
++  printf("stdio_test: Standard I/O Check: printf\n");
++
++  write(2, write_data2, sizeof(write_data2)-1);
++#if CONFIG_NFILE_STREAMS > 0
++  fprintf(stderr, "stdio_test: Standard I/O Check: fprintf to stderr\n");
++#endif
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * ostest_main
++ ****************************************************************************/
++
++int main(int argc, FAR char **argv)
++{
++  int result;
++#ifdef CONFIG_TESTING_OSTEST_WAITRESULT
++  int ostest_result = ERROR;
++#else
++  int ostest_result = OK;
++#endif
++
++  /* Verify that stdio works first */
++
++  stdio_test();
++
++#ifdef SDCC
++  /* I am not yet certain why SDCC does not like the following initilizers.
++   * It involves some issues with 2- vs 3-byte pointer types.
++   */
++
++  g_argv[0] = arg1;
++  g_argv[1] = arg2;
++  g_argv[2] = arg3;
++  g_argv[3] = arg4;
++  g_argv[4] = NULL;
++#endif
++
++  /* Set up some environment variables */
++
++#ifndef CONFIG_DISABLE_ENVIRON
++  printf("ostest_main: putenv(%s)\n", g_putenv_value);
++  putenv(g_putenv_value);                   /* Varaible1=BadValue3 */
++  printf("ostest_main: setenv(%s, %s, TRUE)\n", g_var1_name, g_var1_value);
++  setenv(g_var1_name, g_var1_value, TRUE);  /* Variable1=GoodValue1 */
++
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var2_name, g_bad_value1);
++  setenv(g_var2_name, g_bad_value1, FALSE); /* Variable2=BadValue1 */
++  printf("ostest_main: setenv(%s, %s, TRUE)\n", g_var2_name, g_var2_value);
++  setenv(g_var2_name, g_var2_value, TRUE);  /* Variable2=GoodValue2 */
++
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var3_name, g_var3_name);
++  setenv(g_var3_name, g_var3_value, FALSE); /* Variable3=GoodValue3 */
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var3_name, g_var3_name);
++  setenv(g_var3_name, g_bad_value2, FALSE); /* Variable3=GoodValue3 */
++  show_environment(true, true, true);
++#endif
++
++  /* Verify that we can spawn a new task */
++
++  result = task_create("ostest", PRIORITY, STACKSIZE, user_main,
++                       (FAR char * const *)g_argv);
++  if (result == ERROR)
++    {
++      printf("ostest_main: ERROR Failed to start user_main\n");
++      ostest_result = ERROR;
++    }
++  else
++    {
++      printf("ostest_main: Started user_main at PID=%d\n", result);
++
++#ifdef CONFIG_TESTING_OSTEST_WAITRESULT
++      /* Wait for the test to complete to get the test result */
++
++      if (waitpid(result, &ostest_result, 0) != result)
++        {
++          printf("ostest_main: ERROR Failed to wait for user_main to "
++                 "terminate\n");
++          ostest_result = ERROR;
++        }
++#endif
++    }
++
++  printf("ostest_main: Exiting with status %d\n", ostest_result);
++
++#ifdef CONFIG_TESTING_OSTEST_POWEROFF
++  /* Power down, providing the test result.  This is really only an
++   * interesting case when used with the NuttX simulator.  In that case,
++   * test management logic can received the result of the test.
++   */
++
++  boardctl(BOARDIOC_POWEROFF, ostest_result);
++#endif
++
++  return ostest_result;
++}
+diff --git a/temp_main.c b/temp_main.c
+new file mode 100644
+index 0000000..b83dbfe
+--- /dev/null
++++ b/temp_main.c
+@@ -0,0 +1,677 @@
++/****************************************************************************
++ * apps/testing/ostest/ostest_main.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/wait.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <signal.h>
++#include <string.h>
++#include <sched.h>
++#include <errno.h>
++
++#ifdef CONFIG_TESTING_OSTEST_POWEROFF
++#include <sys/boardctl.h>
++#endif
++
++#include <nuttx/init.h>
++
++#include "ostest.h"
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#define PRIORITY         100
++#define NARGS              4
++#define HALF_SECOND_USEC 500000L
++
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++static const char arg1[] = "Arg1";
++static const char arg2[] = "Arg2";
++static const char arg3[] = "Arg3";
++static const char arg4[] = "Arg4";
++
++static const char write_data1[] = "stdio_test: write fd=1\n";
++static const char write_data2[] = "stdio_test: write fd=2\n";
++
++#ifdef SDCC
++/* I am not yet certain why SDCC does not like the following
++ * initializer.  It involves some issues with 2- vs 3-byte
++ * pointer types.
++ */
++
++static const char *g_argv[NARGS + 1];
++#else
++static const char *g_argv[NARGS + 1] =
++{
++  arg1, arg2, arg3, arg4, NULL
++};
++#endif
++
++static struct mallinfo g_mmbefore;
++static struct mallinfo g_mmprevious;
++static struct mallinfo g_mmafter;
++
++#ifndef CONFIG_DISABLE_ENVIRON
++static const char g_var1_name[]    = "Variable1";
++static const char g_var1_value[]   = "GoodValue1";
++static const char g_var2_name[]    = "Variable2";
++static const char g_var2_value[]   = "GoodValue2";
++static const char g_var3_name[]    = "Variable3";
++static const char g_var3_value[]   = "GoodValue3";
++
++static const char g_bad_value1[]   = "BadValue1";
++static const char g_bad_value2[]   = "BadValue2";
++
++static const char g_putenv_value[] = "Variable1=BadValue3";
++#endif
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: show_memory_usage
++ ****************************************************************************/
++
++static void show_memory_usage(struct mallinfo *mmbefore,
++                              struct mallinfo *mmafter)
++{
++  printf("VARIABLE  BEFORE   AFTER\n");
++  printf("======== ======== ========\n");
++  printf("arena    %8x %8x\n", mmbefore->arena,    mmafter->arena);
++  printf("ordblks  %8d %8d\n", mmbefore->ordblks,  mmafter->ordblks);
++  printf("mxordblk %8x %8x\n", mmbefore->mxordblk, mmafter->mxordblk);
++  printf("uordblks %8x %8x\n", mmbefore->uordblks, mmafter->uordblks);
++  printf("fordblks %8x %8x\n", mmbefore->fordblks, mmafter->fordblks);
++}
++
++/****************************************************************************
++ * Name: check_test_memory_usage
++ ****************************************************************************/
++
++static void check_test_memory_usage(void)
++{
++  /* Wait a little bit to let any threads terminate */
++
++  usleep(HALF_SECOND_USEC);
++
++  /* Get the current memory usage */
++
++  g_mmafter = mallinfo();
++
++  /* Show the change from the previous time */
++
++  printf("\nEnd of test memory usage:\n");
++  show_memory_usage(&g_mmprevious, &g_mmafter);
++
++  /* Set up for the next test */
++
++  g_mmprevious = g_mmafter;
++
++  /* If so enabled, show the use of priority inheritance resources */
++
++  dump_nfreeholders("user_main:");
++}
++
++/****************************************************************************
++ * Name: show_variable
++ ****************************************************************************/
++
++#ifndef CONFIG_DISABLE_ENVIRON
++static void show_variable(const char *var_name, const char *exptd_value,
++                          bool var_valid)
++{
++  char *actual_value = getenv(var_name);
++  if (actual_value)
++    {
++      if (var_valid)
++        {
++          if (strcmp(actual_value, exptd_value) == 0)
++            {
++              printf("show_variable: Variable=%s has value=%s\n",
++                     var_name, exptd_value);
++            }
++          else
++            {
++              printf("show_variable: ERROR Variable=%s has the wrong "
++                     "value\n",
++                     var_name);
++              printf("show_variable:       found=%s expected=%s\n",
++                     actual_value, exptd_value);
++            }
++        }
++      else
++        {
++          printf("show_variable: ERROR Variable=%s has a value when it "
++                 "should not\n",
++                 var_name);
++          printf("show_variable:       value=%s\n",
++                 actual_value);
++        }
++    }
++  else if (var_valid)
++    {
++      printf("show_variable: ERROR Variable=%s has no value\n",
++             var_name);
++      printf("show_variable:       Should have had value=%s\n",
++             exptd_value);
++    }
++  else
++    {
++      printf("show_variable: Variable=%s has no value\n", var_name);
++    }
++}
++
++static void show_environment(bool var1_valid, bool var2_valid,
++                             bool var3_valid)
++{
++  show_variable(g_var1_name, g_var1_value, var1_valid);
++  show_variable(g_var2_name, g_var2_value, var2_valid);
++  show_variable(g_var3_name, g_var3_value, var3_valid);
++}
++#else
++# define show_environment()
++#endif
++
++/****************************************************************************
++ * Name: user_main
++ ****************************************************************************/
++
++static int user_main(int argc, char *argv[])
++
++extern void mallinfo_test(void);
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#ifdef CONFIG_BUILD_KERNEL
++extern void mallinfo_test(void);
++#endif
++
++
++#ifdef CONFIG_BUILD_KERNEL
++  mallinfo_test();
++  check_test_memory_usage();
++#endif
++
++{
++  int i;
++
++  /* Sample the memory usage now */
++
++  usleep(HALF_SECOND_USEC);
++
++  g_mmbefore = mallinfo();
++  g_mmprevious = g_mmbefore;
++
++  printf("\nuser_main: Begin argument test\n");
++  printf("user_main: Started with argc=%d\n", argc);
++
++  /* Verify passed arguments */
++
++  if (argc != NARGS + 1)
++    {
++      printf("user_main: Error expected argc=%d got argc=%d\n",
++             NARGS + 1, argc);
++    }
++
++  for (i = 0; i <= NARGS; i++)
++    {
++      printf("user_main: argv[%d]=\"%s\"\n", i, argv[i]);
++    }
++
++  for (i = 1; i <= NARGS; i++)
++    {
++      if (strcmp(argv[i], g_argv[i - 1]) != 0)
++        {
++          printf("user_main: ERROR argv[%d]:  "
++                 "Expected \"%s\" found \"%s\"\n",
++                 i, g_argv[i - 1], argv[i]);
++        }
++    }
++
++  check_test_memory_usage();
++
++  /* If retention of child status is enable, then suppress it for this task.
++   * This task may produce many, many children (especially if
++   * CONFIG_TESTING_OSTEST_LOOPS) and it does not harvest their exit status.
++   * As a result, the test may fail inappropriately unless retention of
++   * child exit status is disabled.
++   *
++   * So basically, this tests that child status can be disabled, but cannot
++   * verify that status is retained correctly.
++   */
++
++#if defined(CONFIG_SCHED_HAVE_PARENT) && defined(CONFIG_SCHED_CHILD_STATUS)
++    {
++      struct sigaction sa;
++      int ret;
++
++      sa.sa_handler = SIG_IGN;
++      sa.sa_flags = SA_NOCLDWAIT;
++      ret = sigaction(SIGCHLD, &sa, NULL);
++      if (ret < 0)
++        {
++          printf("user_main: ERROR: sigaction failed: %d\n", errno);
++        }
++    }
++#endif
++
++#ifndef CONFIG_DISABLE_ENVIRON
++  /* Check environment variables */
++
++  show_environment(true, true, true);
++
++  unsetenv(g_var1_name);
++  show_environment(false, true, true);
++  check_test_memory_usage();
++
++  clearenv();
++  show_environment(false, false, false);
++  check_test_memory_usage();
++#endif
++
++#if CONFIG_TLS_NELEM > 0
++  /* Test TLS */
++
++  tls_test();
++  check_test_memory_usage();
++#endif
++
++  /* Top of test loop */
++
++#if CONFIG_TESTING_OSTEST_LOOPS > 1
++  for (i = 0; i < CONFIG_TESTING_OSTEST_LOOPS; i++)
++#elif CONFIG_TESTING_OSTEST_LOOPS == 0
++  for (; ; )
++#endif
++    {
++#ifndef CONFIG_STDIO_DISABLE_BUFFERING
++      /* Checkout setvbuf */
++
++      printf("\nuser_main: setvbuf test\n");
++      setvbuf_test();
++      check_test_memory_usage();
++#endif
++
++      /* Checkout /dev/null */
++
++      printf("\nuser_main: /dev/null test\n");
++      dev_null();
++      check_test_memory_usage();
++
++#ifdef CONFIG_TESTING_OSTEST_AIO
++      /* Check asynchronous I/O */
++
++      printf("\nuser_main: AIO test\n");
++      aio_test();
++      check_test_memory_usage();
++#endif
++
++#if defined(CONFIG_ARCH_FPU) && !defined(CONFIG_TESTING_OSTEST_FPUTESTDISABLE)
++      /* Check that the FPU is properly supported during context switching */
++
++      printf("\nuser_main: FPU test\n");
++      fpu_test();
++      check_test_memory_usage();
++#endif
++
++      /* Checkout task_restart() */
++
++      printf("\nuser_main: task_restart test\n");
++      restart_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_SCHED_WAITPID
++      /* Check waitpid() and friends */
++
++      printf("\nuser_main: waitpid test\n");
++      waitpid_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and pthread mutex */
++
++      printf("\nuser_main: mutex test\n");
++      mutex_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: timed mutex test\n");
++      timedmutex_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && defined(CONFIG_PTHREAD_MUTEX_TYPES)
++      /* Verify recursive mutexes */
++
++      printf("\nuser_main: recursive mutex test\n");
++      recursive_mutex_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_TLS_NELEM > 0
++      /* Verify pthread-specific data */
++
++      printf("\nuser_main: pthread-specific data test\n");
++      specific_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthread cancellation */
++
++      printf("\nuser_main: cancel test\n");
++      cancel_test();
++      check_test_memory_usage();
++
++#ifndef CONFIG_PTHREAD_MUTEX_UNSAFE
++      printf("\nuser_main: robust test\n");
++      robust_test();
++      check_test_memory_usage();
++#endif
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and semaphores */
++
++      printf("\nuser_main: semaphore test\n");
++      sem_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: timed semaphore test\n");
++      semtimed_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_FS_NAMED_SEMAPHORES
++      printf("\nuser_main: Named semaphore test\n");
++      nsem_test();
++      check_test_memory_usage();
++
++#endif
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and condition variables */
++
++      printf("\nuser_main: condition variable test\n");
++#ifdef CONFIG_PRIORITY_INHERITANCE
++      printf("\n           Skipping, "
++             "Test logic incompatible with priority inheritance\n");
++#else
++      cond_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify pthreads rwlock interfaces */
++
++      printf("\nuser_main: pthread_rwlock test\n");
++      pthread_rwlock_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: pthread_rwlock_cancel test\n");
++      pthread_rwlock_cancel_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_PTHREAD_CLEANUP
++      /* Verify pthread cancellation cleanup handlers */
++
++      printf("\nuser_main: pthread_cleanup test\n");
++      pthread_cleanup_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify pthreads and condition variable timed waits */
++
++      printf("\nuser_main: timed wait test\n");
++      timedwait_test();
++      check_test_memory_usage();
++#endif /* !CONFIG_DISABLE_PTHREAD */
++
++#if !defined(CONFIG_DISABLE_MQUEUE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify pthreads and message queues */
++
++      printf("\nuser_main: message queue test\n");
++      mqueue_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_MQUEUE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify pthreads and message queues */
++
++      printf("\nuser_main: timed message queue test\n");
++      timedmqueue_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify that we can modify the signal mask */
++
++      printf("\nuser_main: sigprocmask test\n");
++      sigprocmask_test();
++      check_test_memory_usage();
++
++      /* Verify signal handlers */
++
++      printf("\nuser_main: signal handler test\n");
++      sighand_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: nested signal handler test\n");
++      signest_test();
++      check_test_memory_usage();
++
++#if defined(CONFIG_SIG_SIGSTOP_ACTION) && defined(CONFIG_SIG_SIGKILL_ACTION)
++      printf("\nuser_main: signal action test\n");
++      suspend_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_POSIX_TIMERS
++      /* Verify posix timers (with SIGEV_SIGNAL) */
++
++      printf("\nuser_main: POSIX timer test\n");
++      timer_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_SIG_EVTHREAD
++      /* Verify posix timers (with SIGEV_THREAD) */
++
++      printf("\nuser_main: SIGEV_THREAD timer test\n");
++      sigev_thread_test();
++      check_test_memory_usage();
++#endif
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_RR_INTERVAL > 0
++      /* Verify round robin scheduling */
++
++      printf("\nuser_main: round-robin scheduler test\n");
++      rr_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && defined(CONFIG_SCHED_SPORADIC)
++      /* Verify sporadic scheduling */
++
++      printf("\nuser_main: sporadic scheduler test\n");
++      sporadic_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthread barriers */
++
++      printf("\nuser_main: barrier test\n");
++      barrier_test();
++      check_test_memory_usage();
++#endif
++
++#if defined(CONFIG_PRIORITY_INHERITANCE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify priority inheritance */
++
++      printf("\nuser_main: priority inheritance test\n");
++      priority_inheritance();
++      check_test_memory_usage();
++#endif /* CONFIG_PRIORITY_INHERITANCE && !CONFIG_DISABLE_PTHREAD */
++
++#if defined(CONFIG_ARCH_HAVE_VFORK) && defined(CONFIG_SCHED_WAITPID)
++      printf("\nuser_main: vfork() test\n");
++      vfork_test();
++#endif
++
++      /* Compare memory usage at time ostest_main started until
++       * user_main exits.  These should not be identical, but should
++       * be similar enough that we can detect any serious OS memory
++       * leaks.
++       */
++
++      usleep(HALF_SECOND_USEC);
++
++      g_mmafter = mallinfo();
++
++      printf("\nFinal memory usage:\n");
++      show_memory_usage(&g_mmbefore, &g_mmafter);
++    }
++
++  printf("user_main: Exiting\n");
++  return 0;
++}
++
++/****************************************************************************
++ * Name: stdio_test
++ ****************************************************************************/
++
++static void stdio_test(void)
++{
++  /* Verify that we can communicate */
++
++  write(1, write_data1, sizeof(write_data1)-1);
++  printf("stdio_test: Standard I/O Check: printf\n");
++
++  write(2, write_data2, sizeof(write_data2)-1);
++#if CONFIG_NFILE_STREAMS > 0
++  fprintf(stderr, "stdio_test: Standard I/O Check: fprintf to stderr\n");
++#endif
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * ostest_main
++ ****************************************************************************/
++
++int main(int argc, FAR char **argv)
++{
++  int result;
++#ifdef CONFIG_TESTING_OSTEST_WAITRESULT
++  int ostest_result = ERROR;
++#else
++  int ostest_result = OK;
++#endif
++
++  /* Verify that stdio works first */
++
++  stdio_test();
++
++#ifdef SDCC
++  /* I am not yet certain why SDCC does not like the following initilizers.
++   * It involves some issues with 2- vs 3-byte pointer types.
++   */
++
++  g_argv[0] = arg1;
++  g_argv[1] = arg2;
++  g_argv[2] = arg3;
++  g_argv[3] = arg4;
++  g_argv[4] = NULL;
++#endif
++
++  /* Set up some environment variables */
++
++#ifndef CONFIG_DISABLE_ENVIRON
++  printf("ostest_main: putenv(%s)\n", g_putenv_value);
++  putenv(g_putenv_value);                   /* Varaible1=BadValue3 */
++  printf("ostest_main: setenv(%s, %s, TRUE)\n", g_var1_name, g_var1_value);
++  setenv(g_var1_name, g_var1_value, TRUE);  /* Variable1=GoodValue1 */
++
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var2_name, g_bad_value1);
++  setenv(g_var2_name, g_bad_value1, FALSE); /* Variable2=BadValue1 */
++  printf("ostest_main: setenv(%s, %s, TRUE)\n", g_var2_name, g_var2_value);
++  setenv(g_var2_name, g_var2_value, TRUE);  /* Variable2=GoodValue2 */
++
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var3_name, g_var3_name);
++  setenv(g_var3_name, g_var3_value, FALSE); /* Variable3=GoodValue3 */
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var3_name, g_var3_name);
++  setenv(g_var3_name, g_bad_value2, FALSE); /* Variable3=GoodValue3 */
++  show_environment(true, true, true);
++#endif
++
++  /* Verify that we can spawn a new task */
++
++  result = task_create("ostest", PRIORITY, STACKSIZE, user_main,
++                       (FAR char * const *)g_argv);
++  if (result == ERROR)
++    {
++      printf("ostest_main: ERROR Failed to start user_main\n");
++      ostest_result = ERROR;
++    }
++  else
++    {
++      printf("ostest_main: Started user_main at PID=%d\n", result);
++
++#ifdef CONFIG_TESTING_OSTEST_WAITRESULT
++      /* Wait for the test to complete to get the test result */
++
++      if (waitpid(result, &ostest_result, 0) != result)
++        {
++          printf("ostest_main: ERROR Failed to wait for user_main to "
++                 "terminate\n");
++          ostest_result = ERROR;
++        }
++#endif
++    }
++
++  printf("ostest_main: Exiting with status %d\n", ostest_result);
++
++#ifdef CONFIG_TESTING_OSTEST_POWEROFF
++  /* Power down, providing the test result.  This is really only an
++   * interesting case when used with the NuttX simulator.  In that case,
++   * test management logic can received the result of the test.
++   */
++
++  boardctl(BOARDIOC_POWEROFF, ostest_result);
++#endif
++
++  return ostest_result;
++}
+diff --git a/temp_part1.c b/temp_part1.c
+new file mode 100644
+index 0000000..a0c8767
+--- /dev/null
++++ b/temp_part1.c
+@@ -0,0 +1,225 @@
++/****************************************************************************
++ * apps/testing/ostest/ostest_main.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/wait.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <signal.h>
++#include <string.h>
++#include <sched.h>
++#include <errno.h>
++
++#ifdef CONFIG_TESTING_OSTEST_POWEROFF
++#include <sys/boardctl.h>
++#endif
++
++#include <nuttx/init.h>
++
++#include "ostest.h"
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#define PRIORITY         100
++#define NARGS              4
++#define HALF_SECOND_USEC 500000L
++
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++static const char arg1[] = "Arg1";
++static const char arg2[] = "Arg2";
++static const char arg3[] = "Arg3";
++static const char arg4[] = "Arg4";
++
++static const char write_data1[] = "stdio_test: write fd=1\n";
++static const char write_data2[] = "stdio_test: write fd=2\n";
++
++#ifdef SDCC
++/* I am not yet certain why SDCC does not like the following
++ * initializer.  It involves some issues with 2- vs 3-byte
++ * pointer types.
++ */
++
++static const char *g_argv[NARGS + 1];
++#else
++static const char *g_argv[NARGS + 1] =
++{
++  arg1, arg2, arg3, arg4, NULL
++};
++#endif
++
++static struct mallinfo g_mmbefore;
++static struct mallinfo g_mmprevious;
++static struct mallinfo g_mmafter;
++
++#ifndef CONFIG_DISABLE_ENVIRON
++static const char g_var1_name[]    = "Variable1";
++static const char g_var1_value[]   = "GoodValue1";
++static const char g_var2_name[]    = "Variable2";
++static const char g_var2_value[]   = "GoodValue2";
++static const char g_var3_name[]    = "Variable3";
++static const char g_var3_value[]   = "GoodValue3";
++
++static const char g_bad_value1[]   = "BadValue1";
++static const char g_bad_value2[]   = "BadValue2";
++
++static const char g_putenv_value[] = "Variable1=BadValue3";
++#endif
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: show_memory_usage
++ ****************************************************************************/
++
++static void show_memory_usage(struct mallinfo *mmbefore,
++                              struct mallinfo *mmafter)
++{
++  printf("VARIABLE  BEFORE   AFTER\n");
++  printf("======== ======== ========\n");
++  printf("arena    %8x %8x\n", mmbefore->arena,    mmafter->arena);
++  printf("ordblks  %8d %8d\n", mmbefore->ordblks,  mmafter->ordblks);
++  printf("mxordblk %8x %8x\n", mmbefore->mxordblk, mmafter->mxordblk);
++  printf("uordblks %8x %8x\n", mmbefore->uordblks, mmafter->uordblks);
++  printf("fordblks %8x %8x\n", mmbefore->fordblks, mmafter->fordblks);
++}
++
++/****************************************************************************
++ * Name: check_test_memory_usage
++ ****************************************************************************/
++
++static void check_test_memory_usage(void)
++{
++  /* Wait a little bit to let any threads terminate */
++
++  usleep(HALF_SECOND_USEC);
++
++  /* Get the current memory usage */
++
++  g_mmafter = mallinfo();
++
++  /* Show the change from the previous time */
++
++  printf("\nEnd of test memory usage:\n");
++  show_memory_usage(&g_mmprevious, &g_mmafter);
++
++  /* Set up for the next test */
++
++  g_mmprevious = g_mmafter;
++
++  /* If so enabled, show the use of priority inheritance resources */
++
++  dump_nfreeholders("user_main:");
++}
++
++/****************************************************************************
++ * Name: show_variable
++ ****************************************************************************/
++
++#ifndef CONFIG_DISABLE_ENVIRON
++static void show_variable(const char *var_name, const char *exptd_value,
++                          bool var_valid)
++{
++  char *actual_value = getenv(var_name);
++  if (actual_value)
++    {
++      if (var_valid)
++        {
++          if (strcmp(actual_value, exptd_value) == 0)
++            {
++              printf("show_variable: Variable=%s has value=%s\n",
++                     var_name, exptd_value);
++            }
++          else
++            {
++              printf("show_variable: ERROR Variable=%s has the wrong "
++                     "value\n",
++                     var_name);
++              printf("show_variable:       found=%s expected=%s\n",
++                     actual_value, exptd_value);
++            }
++        }
++      else
++        {
++          printf("show_variable: ERROR Variable=%s has a value when it "
++                 "should not\n",
++                 var_name);
++          printf("show_variable:       value=%s\n",
++                 actual_value);
++        }
++    }
++  else if (var_valid)
++    {
++      printf("show_variable: ERROR Variable=%s has no value\n",
++             var_name);
++      printf("show_variable:       Should have had value=%s\n",
++             exptd_value);
++    }
++  else
++    {
++      printf("show_variable: Variable=%s has no value\n", var_name);
++    }
++}
++
++static void show_environment(bool var1_valid, bool var2_valid,
++                             bool var3_valid)
++{
++  show_variable(g_var1_name, g_var1_value, var1_valid);
++  show_variable(g_var2_name, g_var2_value, var2_valid);
++  show_variable(g_var3_name, g_var3_value, var3_valid);
++}
++#else
++# define show_environment()
++#endif
++
++/****************************************************************************
++ * Name: user_main
++ ****************************************************************************/
++
++static int user_main(int argc, char *argv[])
++extern void mallinfo_test(void);
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#ifdef CONFIG_BUILD_KERNEL
++extern void mallinfo_test(void);
++#endif
++
++
++#ifdef CONFIG_BUILD_KERNEL
++  mallinfo_test();
++  check_test_memory_usage();
++#endif
++
+diff --git a/temp_part2.c b/temp_part2.c
+new file mode 100644
+index 0000000..819fcfd
+--- /dev/null
++++ b/temp_part2.c
+@@ -0,0 +1 @@
++  mallinfo_test();
+diff --git a/temp_part3.c b/temp_part3.c
+new file mode 100644
+index 0000000..4bc8f1f
+--- /dev/null
++++ b/temp_part3.c
+@@ -0,0 +1,451 @@
++{
++  int i;
++
++  /* Sample the memory usage now */
++
++  usleep(HALF_SECOND_USEC);
++
++  g_mmbefore = mallinfo();
++  g_mmprevious = g_mmbefore;
++
++  printf("\nuser_main: Begin argument test\n");
++  printf("user_main: Started with argc=%d\n", argc);
++
++  /* Verify passed arguments */
++
++  if (argc != NARGS + 1)
++    {
++      printf("user_main: Error expected argc=%d got argc=%d\n",
++             NARGS + 1, argc);
++    }
++
++  for (i = 0; i <= NARGS; i++)
++    {
++      printf("user_main: argv[%d]=\"%s\"\n", i, argv[i]);
++    }
++
++  for (i = 1; i <= NARGS; i++)
++    {
++      if (strcmp(argv[i], g_argv[i - 1]) != 0)
++        {
++          printf("user_main: ERROR argv[%d]:  "
++                 "Expected \"%s\" found \"%s\"\n",
++                 i, g_argv[i - 1], argv[i]);
++        }
++    }
++
++  check_test_memory_usage();
++
++  /* If retention of child status is enable, then suppress it for this task.
++   * This task may produce many, many children (especially if
++   * CONFIG_TESTING_OSTEST_LOOPS) and it does not harvest their exit status.
++   * As a result, the test may fail inappropriately unless retention of
++   * child exit status is disabled.
++   *
++   * So basically, this tests that child status can be disabled, but cannot
++   * verify that status is retained correctly.
++   */
++
++#if defined(CONFIG_SCHED_HAVE_PARENT) && defined(CONFIG_SCHED_CHILD_STATUS)
++    {
++      struct sigaction sa;
++      int ret;
++
++      sa.sa_handler = SIG_IGN;
++      sa.sa_flags = SA_NOCLDWAIT;
++      ret = sigaction(SIGCHLD, &sa, NULL);
++      if (ret < 0)
++        {
++          printf("user_main: ERROR: sigaction failed: %d\n", errno);
++        }
++    }
++#endif
++
++#ifndef CONFIG_DISABLE_ENVIRON
++  /* Check environment variables */
++
++  show_environment(true, true, true);
++
++  unsetenv(g_var1_name);
++  show_environment(false, true, true);
++  check_test_memory_usage();
++
++  clearenv();
++  show_environment(false, false, false);
++  check_test_memory_usage();
++#endif
++
++#if CONFIG_TLS_NELEM > 0
++  /* Test TLS */
++
++  tls_test();
++  check_test_memory_usage();
++#endif
++
++  /* Top of test loop */
++
++#if CONFIG_TESTING_OSTEST_LOOPS > 1
++  for (i = 0; i < CONFIG_TESTING_OSTEST_LOOPS; i++)
++#elif CONFIG_TESTING_OSTEST_LOOPS == 0
++  for (; ; )
++#endif
++    {
++#ifndef CONFIG_STDIO_DISABLE_BUFFERING
++      /* Checkout setvbuf */
++
++      printf("\nuser_main: setvbuf test\n");
++      setvbuf_test();
++      check_test_memory_usage();
++#endif
++
++      /* Checkout /dev/null */
++
++      printf("\nuser_main: /dev/null test\n");
++      dev_null();
++      check_test_memory_usage();
++
++#ifdef CONFIG_TESTING_OSTEST_AIO
++      /* Check asynchronous I/O */
++
++      printf("\nuser_main: AIO test\n");
++      aio_test();
++      check_test_memory_usage();
++#endif
++
++#if defined(CONFIG_ARCH_FPU) && !defined(CONFIG_TESTING_OSTEST_FPUTESTDISABLE)
++      /* Check that the FPU is properly supported during context switching */
++
++      printf("\nuser_main: FPU test\n");
++      fpu_test();
++      check_test_memory_usage();
++#endif
++
++      /* Checkout task_restart() */
++
++      printf("\nuser_main: task_restart test\n");
++      restart_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_SCHED_WAITPID
++      /* Check waitpid() and friends */
++
++      printf("\nuser_main: waitpid test\n");
++      waitpid_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and pthread mutex */
++
++      printf("\nuser_main: mutex test\n");
++      mutex_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: timed mutex test\n");
++      timedmutex_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && defined(CONFIG_PTHREAD_MUTEX_TYPES)
++      /* Verify recursive mutexes */
++
++      printf("\nuser_main: recursive mutex test\n");
++      recursive_mutex_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_TLS_NELEM > 0
++      /* Verify pthread-specific data */
++
++      printf("\nuser_main: pthread-specific data test\n");
++      specific_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthread cancellation */
++
++      printf("\nuser_main: cancel test\n");
++      cancel_test();
++      check_test_memory_usage();
++
++#ifndef CONFIG_PTHREAD_MUTEX_UNSAFE
++      printf("\nuser_main: robust test\n");
++      robust_test();
++      check_test_memory_usage();
++#endif
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and semaphores */
++
++      printf("\nuser_main: semaphore test\n");
++      sem_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: timed semaphore test\n");
++      semtimed_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_FS_NAMED_SEMAPHORES
++      printf("\nuser_main: Named semaphore test\n");
++      nsem_test();
++      check_test_memory_usage();
++
++#endif
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and condition variables */
++
++      printf("\nuser_main: condition variable test\n");
++#ifdef CONFIG_PRIORITY_INHERITANCE
++      printf("\n           Skipping, "
++             "Test logic incompatible with priority inheritance\n");
++#else
++      cond_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify pthreads rwlock interfaces */
++
++      printf("\nuser_main: pthread_rwlock test\n");
++      pthread_rwlock_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: pthread_rwlock_cancel test\n");
++      pthread_rwlock_cancel_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_PTHREAD_CLEANUP
++      /* Verify pthread cancellation cleanup handlers */
++
++      printf("\nuser_main: pthread_cleanup test\n");
++      pthread_cleanup_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify pthreads and condition variable timed waits */
++
++      printf("\nuser_main: timed wait test\n");
++      timedwait_test();
++      check_test_memory_usage();
++#endif /* !CONFIG_DISABLE_PTHREAD */
++
++#if !defined(CONFIG_DISABLE_MQUEUE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify pthreads and message queues */
++
++      printf("\nuser_main: message queue test\n");
++      mqueue_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_MQUEUE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify pthreads and message queues */
++
++      printf("\nuser_main: timed message queue test\n");
++      timedmqueue_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify that we can modify the signal mask */
++
++      printf("\nuser_main: sigprocmask test\n");
++      sigprocmask_test();
++      check_test_memory_usage();
++
++      /* Verify signal handlers */
++
++      printf("\nuser_main: signal handler test\n");
++      sighand_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: nested signal handler test\n");
++      signest_test();
++      check_test_memory_usage();
++
++#if defined(CONFIG_SIG_SIGSTOP_ACTION) && defined(CONFIG_SIG_SIGKILL_ACTION)
++      printf("\nuser_main: signal action test\n");
++      suspend_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_POSIX_TIMERS
++      /* Verify posix timers (with SIGEV_SIGNAL) */
++
++      printf("\nuser_main: POSIX timer test\n");
++      timer_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_SIG_EVTHREAD
++      /* Verify posix timers (with SIGEV_THREAD) */
++
++      printf("\nuser_main: SIGEV_THREAD timer test\n");
++      sigev_thread_test();
++      check_test_memory_usage();
++#endif
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_RR_INTERVAL > 0
++      /* Verify round robin scheduling */
++
++      printf("\nuser_main: round-robin scheduler test\n");
++      rr_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && defined(CONFIG_SCHED_SPORADIC)
++      /* Verify sporadic scheduling */
++
++      printf("\nuser_main: sporadic scheduler test\n");
++      sporadic_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthread barriers */
++
++      printf("\nuser_main: barrier test\n");
++      barrier_test();
++      check_test_memory_usage();
++#endif
++
++#if defined(CONFIG_PRIORITY_INHERITANCE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify priority inheritance */
++
++      printf("\nuser_main: priority inheritance test\n");
++      priority_inheritance();
++      check_test_memory_usage();
++#endif /* CONFIG_PRIORITY_INHERITANCE && !CONFIG_DISABLE_PTHREAD */
++
++#if defined(CONFIG_ARCH_HAVE_VFORK) && defined(CONFIG_SCHED_WAITPID)
++      printf("\nuser_main: vfork() test\n");
++      vfork_test();
++#endif
++
++      /* Compare memory usage at time ostest_main started until
++       * user_main exits.  These should not be identical, but should
++       * be similar enough that we can detect any serious OS memory
++       * leaks.
++       */
++
++      usleep(HALF_SECOND_USEC);
++
++      g_mmafter = mallinfo();
++
++      printf("\nFinal memory usage:\n");
++      show_memory_usage(&g_mmbefore, &g_mmafter);
++    }
++
++  printf("user_main: Exiting\n");
++  return 0;
++}
++
++/****************************************************************************
++ * Name: stdio_test
++ ****************************************************************************/
++
++static void stdio_test(void)
++{
++  /* Verify that we can communicate */
++
++  write(1, write_data1, sizeof(write_data1)-1);
++  printf("stdio_test: Standard I/O Check: printf\n");
++
++  write(2, write_data2, sizeof(write_data2)-1);
++#if CONFIG_NFILE_STREAMS > 0
++  fprintf(stderr, "stdio_test: Standard I/O Check: fprintf to stderr\n");
++#endif
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * ostest_main
++ ****************************************************************************/
++
++int main(int argc, FAR char **argv)
++{
++  int result;
++#ifdef CONFIG_TESTING_OSTEST_WAITRESULT
++  int ostest_result = ERROR;
++#else
++  int ostest_result = OK;
++#endif
++
++  /* Verify that stdio works first */
++
++  stdio_test();
++
++#ifdef SDCC
++  /* I am not yet certain why SDCC does not like the following initilizers.
++   * It involves some issues with 2- vs 3-byte pointer types.
++   */
++
++  g_argv[0] = arg1;
++  g_argv[1] = arg2;
++  g_argv[2] = arg3;
++  g_argv[3] = arg4;
++  g_argv[4] = NULL;
++#endif
++
++  /* Set up some environment variables */
++
++#ifndef CONFIG_DISABLE_ENVIRON
++  printf("ostest_main: putenv(%s)\n", g_putenv_value);
++  putenv(g_putenv_value);                   /* Varaible1=BadValue3 */
++  printf("ostest_main: setenv(%s, %s, TRUE)\n", g_var1_name, g_var1_value);
++  setenv(g_var1_name, g_var1_value, TRUE);  /* Variable1=GoodValue1 */
++
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var2_name, g_bad_value1);
++  setenv(g_var2_name, g_bad_value1, FALSE); /* Variable2=BadValue1 */
++  printf("ostest_main: setenv(%s, %s, TRUE)\n", g_var2_name, g_var2_value);
++  setenv(g_var2_name, g_var2_value, TRUE);  /* Variable2=GoodValue2 */
++
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var3_name, g_var3_name);
++  setenv(g_var3_name, g_var3_value, FALSE); /* Variable3=GoodValue3 */
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var3_name, g_var3_name);
++  setenv(g_var3_name, g_bad_value2, FALSE); /* Variable3=GoodValue3 */
++  show_environment(true, true, true);
++#endif
++
++  /* Verify that we can spawn a new task */
++
++  result = task_create("ostest", PRIORITY, STACKSIZE, user_main,
++                       (FAR char * const *)g_argv);
++  if (result == ERROR)
++    {
++      printf("ostest_main: ERROR Failed to start user_main\n");
++      ostest_result = ERROR;
++    }
++  else
++    {
++      printf("ostest_main: Started user_main at PID=%d\n", result);
++
++#ifdef CONFIG_TESTING_OSTEST_WAITRESULT
++      /* Wait for the test to complete to get the test result */
++
++      if (waitpid(result, &ostest_result, 0) != result)
++        {
++          printf("ostest_main: ERROR Failed to wait for user_main to "
++                 "terminate\n");
++          ostest_result = ERROR;
++        }
++#endif
++    }
++
++  printf("ostest_main: Exiting with status %d\n", ostest_result);
++
++#ifdef CONFIG_TESTING_OSTEST_POWEROFF
++  /* Power down, providing the test result.  This is really only an
++   * interesting case when used with the NuttX simulator.  In that case,
++   * test management logic can received the result of the test.
++   */
++
++  boardctl(BOARDIOC_POWEROFF, ostest_result);
++#endif
++
++  return ostest_result;
++}
+diff --git a/temp_second_part.c b/temp_second_part.c
+new file mode 100644
+index 0000000..3d04373
+--- /dev/null
++++ b/temp_second_part.c
+@@ -0,0 +1,450 @@
++  int i;
++
++  /* Sample the memory usage now */
++
++  usleep(HALF_SECOND_USEC);
++
++  g_mmbefore = mallinfo();
++  g_mmprevious = g_mmbefore;
++
++  printf("\nuser_main: Begin argument test\n");
++  printf("user_main: Started with argc=%d\n", argc);
++
++  /* Verify passed arguments */
++
++  if (argc != NARGS + 1)
++    {
++      printf("user_main: Error expected argc=%d got argc=%d\n",
++             NARGS + 1, argc);
++    }
++
++  for (i = 0; i <= NARGS; i++)
++    {
++      printf("user_main: argv[%d]=\"%s\"\n", i, argv[i]);
++    }
++
++  for (i = 1; i <= NARGS; i++)
++    {
++      if (strcmp(argv[i], g_argv[i - 1]) != 0)
++        {
++          printf("user_main: ERROR argv[%d]:  "
++                 "Expected \"%s\" found \"%s\"\n",
++                 i, g_argv[i - 1], argv[i]);
++        }
++    }
++
++  check_test_memory_usage();
++
++  /* If retention of child status is enable, then suppress it for this task.
++   * This task may produce many, many children (especially if
++   * CONFIG_TESTING_OSTEST_LOOPS) and it does not harvest their exit status.
++   * As a result, the test may fail inappropriately unless retention of
++   * child exit status is disabled.
++   *
++   * So basically, this tests that child status can be disabled, but cannot
++   * verify that status is retained correctly.
++   */
++
++#if defined(CONFIG_SCHED_HAVE_PARENT) && defined(CONFIG_SCHED_CHILD_STATUS)
++    {
++      struct sigaction sa;
++      int ret;
++
++      sa.sa_handler = SIG_IGN;
++      sa.sa_flags = SA_NOCLDWAIT;
++      ret = sigaction(SIGCHLD, &sa, NULL);
++      if (ret < 0)
++        {
++          printf("user_main: ERROR: sigaction failed: %d\n", errno);
++        }
++    }
++#endif
++
++#ifndef CONFIG_DISABLE_ENVIRON
++  /* Check environment variables */
++
++  show_environment(true, true, true);
++
++  unsetenv(g_var1_name);
++  show_environment(false, true, true);
++  check_test_memory_usage();
++
++  clearenv();
++  show_environment(false, false, false);
++  check_test_memory_usage();
++#endif
++
++#if CONFIG_TLS_NELEM > 0
++  /* Test TLS */
++
++  tls_test();
++  check_test_memory_usage();
++#endif
++
++  /* Top of test loop */
++
++#if CONFIG_TESTING_OSTEST_LOOPS > 1
++  for (i = 0; i < CONFIG_TESTING_OSTEST_LOOPS; i++)
++#elif CONFIG_TESTING_OSTEST_LOOPS == 0
++  for (; ; )
++#endif
++    {
++#ifndef CONFIG_STDIO_DISABLE_BUFFERING
++      /* Checkout setvbuf */
++
++      printf("\nuser_main: setvbuf test\n");
++      setvbuf_test();
++      check_test_memory_usage();
++#endif
++
++      /* Checkout /dev/null */
++
++      printf("\nuser_main: /dev/null test\n");
++      dev_null();
++      check_test_memory_usage();
++
++#ifdef CONFIG_TESTING_OSTEST_AIO
++      /* Check asynchronous I/O */
++
++      printf("\nuser_main: AIO test\n");
++      aio_test();
++      check_test_memory_usage();
++#endif
++
++#if defined(CONFIG_ARCH_FPU) && !defined(CONFIG_TESTING_OSTEST_FPUTESTDISABLE)
++      /* Check that the FPU is properly supported during context switching */
++
++      printf("\nuser_main: FPU test\n");
++      fpu_test();
++      check_test_memory_usage();
++#endif
++
++      /* Checkout task_restart() */
++
++      printf("\nuser_main: task_restart test\n");
++      restart_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_SCHED_WAITPID
++      /* Check waitpid() and friends */
++
++      printf("\nuser_main: waitpid test\n");
++      waitpid_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and pthread mutex */
++
++      printf("\nuser_main: mutex test\n");
++      mutex_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: timed mutex test\n");
++      timedmutex_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && defined(CONFIG_PTHREAD_MUTEX_TYPES)
++      /* Verify recursive mutexes */
++
++      printf("\nuser_main: recursive mutex test\n");
++      recursive_mutex_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_TLS_NELEM > 0
++      /* Verify pthread-specific data */
++
++      printf("\nuser_main: pthread-specific data test\n");
++      specific_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthread cancellation */
++
++      printf("\nuser_main: cancel test\n");
++      cancel_test();
++      check_test_memory_usage();
++
++#ifndef CONFIG_PTHREAD_MUTEX_UNSAFE
++      printf("\nuser_main: robust test\n");
++      robust_test();
++      check_test_memory_usage();
++#endif
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and semaphores */
++
++      printf("\nuser_main: semaphore test\n");
++      sem_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: timed semaphore test\n");
++      semtimed_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_FS_NAMED_SEMAPHORES
++      printf("\nuser_main: Named semaphore test\n");
++      nsem_test();
++      check_test_memory_usage();
++
++#endif
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthreads and condition variables */
++
++      printf("\nuser_main: condition variable test\n");
++#ifdef CONFIG_PRIORITY_INHERITANCE
++      printf("\n           Skipping, "
++             "Test logic incompatible with priority inheritance\n");
++#else
++      cond_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify pthreads rwlock interfaces */
++
++      printf("\nuser_main: pthread_rwlock test\n");
++      pthread_rwlock_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: pthread_rwlock_cancel test\n");
++      pthread_rwlock_cancel_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_PTHREAD_CLEANUP
++      /* Verify pthread cancellation cleanup handlers */
++
++      printf("\nuser_main: pthread_cleanup test\n");
++      pthread_cleanup_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify pthreads and condition variable timed waits */
++
++      printf("\nuser_main: timed wait test\n");
++      timedwait_test();
++      check_test_memory_usage();
++#endif /* !CONFIG_DISABLE_PTHREAD */
++
++#if !defined(CONFIG_DISABLE_MQUEUE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify pthreads and message queues */
++
++      printf("\nuser_main: message queue test\n");
++      mqueue_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_MQUEUE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify pthreads and message queues */
++
++      printf("\nuser_main: timed message queue test\n");
++      timedmqueue_test();
++      check_test_memory_usage();
++#endif
++
++      /* Verify that we can modify the signal mask */
++
++      printf("\nuser_main: sigprocmask test\n");
++      sigprocmask_test();
++      check_test_memory_usage();
++
++      /* Verify signal handlers */
++
++      printf("\nuser_main: signal handler test\n");
++      sighand_test();
++      check_test_memory_usage();
++
++      printf("\nuser_main: nested signal handler test\n");
++      signest_test();
++      check_test_memory_usage();
++
++#if defined(CONFIG_SIG_SIGSTOP_ACTION) && defined(CONFIG_SIG_SIGKILL_ACTION)
++      printf("\nuser_main: signal action test\n");
++      suspend_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_POSIX_TIMERS
++      /* Verify posix timers (with SIGEV_SIGNAL) */
++
++      printf("\nuser_main: POSIX timer test\n");
++      timer_test();
++      check_test_memory_usage();
++
++#ifdef CONFIG_SIG_EVTHREAD
++      /* Verify posix timers (with SIGEV_THREAD) */
++
++      printf("\nuser_main: SIGEV_THREAD timer test\n");
++      sigev_thread_test();
++      check_test_memory_usage();
++#endif
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && CONFIG_RR_INTERVAL > 0
++      /* Verify round robin scheduling */
++
++      printf("\nuser_main: round-robin scheduler test\n");
++      rr_test();
++      check_test_memory_usage();
++#endif
++
++#if !defined(CONFIG_DISABLE_PTHREAD) && defined(CONFIG_SCHED_SPORADIC)
++      /* Verify sporadic scheduling */
++
++      printf("\nuser_main: sporadic scheduler test\n");
++      sporadic_test();
++      check_test_memory_usage();
++#endif
++
++#ifndef CONFIG_DISABLE_PTHREAD
++      /* Verify pthread barriers */
++
++      printf("\nuser_main: barrier test\n");
++      barrier_test();
++      check_test_memory_usage();
++#endif
++
++#if defined(CONFIG_PRIORITY_INHERITANCE) && !defined(CONFIG_DISABLE_PTHREAD)
++      /* Verify priority inheritance */
++
++      printf("\nuser_main: priority inheritance test\n");
++      priority_inheritance();
++      check_test_memory_usage();
++#endif /* CONFIG_PRIORITY_INHERITANCE && !CONFIG_DISABLE_PTHREAD */
++
++#if defined(CONFIG_ARCH_HAVE_VFORK) && defined(CONFIG_SCHED_WAITPID)
++      printf("\nuser_main: vfork() test\n");
++      vfork_test();
++#endif
++
++      /* Compare memory usage at time ostest_main started until
++       * user_main exits.  These should not be identical, but should
++       * be similar enough that we can detect any serious OS memory
++       * leaks.
++       */
++
++      usleep(HALF_SECOND_USEC);
++
++      g_mmafter = mallinfo();
++
++      printf("\nFinal memory usage:\n");
++      show_memory_usage(&g_mmbefore, &g_mmafter);
++    }
++
++  printf("user_main: Exiting\n");
++  return 0;
++}
++
++/****************************************************************************
++ * Name: stdio_test
++ ****************************************************************************/
++
++static void stdio_test(void)
++{
++  /* Verify that we can communicate */
++
++  write(1, write_data1, sizeof(write_data1)-1);
++  printf("stdio_test: Standard I/O Check: printf\n");
++
++  write(2, write_data2, sizeof(write_data2)-1);
++#if CONFIG_NFILE_STREAMS > 0
++  fprintf(stderr, "stdio_test: Standard I/O Check: fprintf to stderr\n");
++#endif
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * ostest_main
++ ****************************************************************************/
++
++int main(int argc, FAR char **argv)
++{
++  int result;
++#ifdef CONFIG_TESTING_OSTEST_WAITRESULT
++  int ostest_result = ERROR;
++#else
++  int ostest_result = OK;
++#endif
++
++  /* Verify that stdio works first */
++
++  stdio_test();
++
++#ifdef SDCC
++  /* I am not yet certain why SDCC does not like the following initilizers.
++   * It involves some issues with 2- vs 3-byte pointer types.
++   */
++
++  g_argv[0] = arg1;
++  g_argv[1] = arg2;
++  g_argv[2] = arg3;
++  g_argv[3] = arg4;
++  g_argv[4] = NULL;
++#endif
++
++  /* Set up some environment variables */
++
++#ifndef CONFIG_DISABLE_ENVIRON
++  printf("ostest_main: putenv(%s)\n", g_putenv_value);
++  putenv(g_putenv_value);                   /* Varaible1=BadValue3 */
++  printf("ostest_main: setenv(%s, %s, TRUE)\n", g_var1_name, g_var1_value);
++  setenv(g_var1_name, g_var1_value, TRUE);  /* Variable1=GoodValue1 */
++
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var2_name, g_bad_value1);
++  setenv(g_var2_name, g_bad_value1, FALSE); /* Variable2=BadValue1 */
++  printf("ostest_main: setenv(%s, %s, TRUE)\n", g_var2_name, g_var2_value);
++  setenv(g_var2_name, g_var2_value, TRUE);  /* Variable2=GoodValue2 */
++
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var3_name, g_var3_name);
++  setenv(g_var3_name, g_var3_value, FALSE); /* Variable3=GoodValue3 */
++  printf("ostest_main: setenv(%s, %s, FALSE)\n", g_var3_name, g_var3_name);
++  setenv(g_var3_name, g_bad_value2, FALSE); /* Variable3=GoodValue3 */
++  show_environment(true, true, true);
++#endif
++
++  /* Verify that we can spawn a new task */
++
++  result = task_create("ostest", PRIORITY, STACKSIZE, user_main,
++                       (FAR char * const *)g_argv);
++  if (result == ERROR)
++    {
++      printf("ostest_main: ERROR Failed to start user_main\n");
++      ostest_result = ERROR;
++    }
++  else
++    {
++      printf("ostest_main: Started user_main at PID=%d\n", result);
++
++#ifdef CONFIG_TESTING_OSTEST_WAITRESULT
++      /* Wait for the test to complete to get the test result */
++
++      if (waitpid(result, &ostest_result, 0) != result)
++        {
++          printf("ostest_main: ERROR Failed to wait for user_main to "
++                 "terminate\n");
++          ostest_result = ERROR;
++        }
++#endif
++    }
++
++  printf("ostest_main: Exiting with status %d\n", ostest_result);
++
++#ifdef CONFIG_TESTING_OSTEST_POWEROFF
++  /* Power down, providing the test result.  This is really only an
++   * interesting case when used with the NuttX simulator.  In that case,
++   * test management logic can received the result of the test.
++   */
++
++  boardctl(BOARDIOC_POWEROFF, ostest_result);
++#endif
++
++  return ostest_result;
++}
+diff --git a/test b/test
+new file mode 100755
+index 0000000000000000000000000000000000000000..65eda7d27b34b808d17ef9e7ca43c0d798679acc
+GIT binary patch
+literal 16056
+zcmeHOZEPGz8J@d*ImC&b#G(0s_yh^0RNmN*V<mu_OYC#j$oU{~L@Nr*+Pi0;av$by
+zkJzP@pcI6gqzXa;A%PSSqLDzwhyp<hic3gJkw6K52!bC`)kuzj)`3#Fpk{gB-S^q7
+zx91=#eju?U-97U@^FA}P@6PVc-p+hB)8Cs+BoxvD^`K(wY@^SlrC_#GG6ZS0LoKK8
+zX0=f*CVQdB`Q>RJsMJr_lXJ07_yvTlTg#am_zs^|K=hE2b@Qbu?hqxQlH*|AA}$a+
+zinpZ!Aj*UGQY@yF^1cInRZL)5$6Yzs;yaw{nu{Y6mr+6J*ks*#(VZ6^a7OwGL_9er
+z{MjM#jAAR5aRNqlBch99k1ta|ZiCa|n~wEX+B+z^rj%EWieiUPD<InYFzMvfipRYH
+zr}>byH{W@9Na7Ea@T#r(++b(N*1Xk{&lRg<En_=6TRJ<mN=a+?8s>hb=)+@b@BSl-
+zs+nR=!l;tReH-<0S(B8r|HYrJ+w@BIjUOL=Y|Ar0`rW6uU)cKBi|oVwW)1sr;`%T|
+z*ycQ+JNEJ8@j1%*9OE_nHwDJ|(kd$8Pc#*YNJUAqxt&`6ADoBZHV^+K@hSR5)7OYd
+zMM<(Z(dS(?cx4zB#~eCp42>K$vSuz%1f8lOX3LIIFmpv>hQ>@In=6|6+@rQCn0Y#f
+z*^(M9=Za2Nu{)p0PPMncZ%?<;uC;61gM3Gj+t#6szJYy)WtZ*YT*a}=1N*x3rJ_Ax
+z4(4rYWw=l(O1p;dTGNq^B1v&vK-cF&!i0C7vfWK37^l_sxutvs?-Q;mms`$f|6#G8
+z{nA(HbSKpi*_?1c!F7CmrO!{w{Q`Vi_`0-T4j%UPT|UoaiO)6CjSwFmf72n}AAi1L
+zCd4m6C4{pf9&K~+l<@3}Ylit>hIqankgkS!?>>%#7~=@U5r`uYM<9+s9Dz6jaRmOO
+z2>h*K<3IEhf3DL{F8cjerS#8FIZ5}be&QE(m%Mu1?N1WzZazid4b5rA{v%v+>qXaf
+zvu8Y;Cyuv%d)MX(<E@_uw!8T$QfC{Qdz7blH}^*D2P1ap9J}o=eG}I{u1~zEpLl8J
+z;6SErs_g~+bl0z_6?e^Qa(y+cH8ej#CLO@(uARi_rx&#|?3{Jh(4oDi`G>aDz0uHo
+zoc%5dlK)cAe|wVQ{yX}_jQ-rqyY%N~7wCyA`n5Yw6IF0oDyVaB_{RY~AOG<#E>_hC
+zj_4=4zQtL6;-*utpX~Y$8Pl)daouT)qH$%>H^@$WjI=@ftiN@P3ORFxbaXOOmVR>K
+z<}F@5nc21}{dDGrKJonY4XWs5W_scZ9i6^{TY3IGIjQNNP=S}zPac`I^aq+ev9oCU
+zDJpp35?Ae=<KV2aDo$|(;t0eMh$9e3AdWyBfj9zj1mXz95r`x3{}h1)y;CZTmCDv&
+z{%F@`>ur4Oi46-r!0(CqJxl$J>so~Ugr^7}A^bMsDZ+lj>TTD(K*;YlIVB!Fq!MF|
+zi4FBj>dw&r0?hL}{2k=~9(L$i;=S_PL|J~vd-fIAO%tjWjlC<@eyCyDvAW}G*ZQ6B
+z+qTJj{m1%8=yRU@@UD#AnRn<jNj&!ziQD3S{(##1D3h5LjbBK1FJGKIL_K06PH_a{
+z2*eSHBM?U*jzAoNI0A75;t0eM_}`8I*7spOAJ*#e8bVI>J_HL2Y4M<!UXt~H>%_*o
+z!3|>Lk!ZcxSU<?mQJhfz_d9Nh?MYdzhc$SU3z@}QRHd#<x%VJR{13fSrIrb<6<i|-
+z5ScnB>-@0hP!|V&-s6O|h4=ZU8k0qc;Ll6P(C;bnqs5h8Li-!VhTlJ3|M)1b9z`!s
+zz2hB|`sfX<XCv<Pc<I@el)o-Ejzg;duL0J7M=NZVhvKy0!SF+J)cGDZ)`RZt?tXu2
+z%aOrq(W$1|wrSh6)|SqyXSP4y-l4U2Xl?gP!9A+;){-t%x80}@p9fw6drAV85{K1<
+zwfy-!C25uH)yQ$Nj(H{Hn@lh9`eWvCod~V^D3eg@Rb$#`a2|P;bwa&eVch$rN<Bsy
+zt_Rm0_%C|?Yl8K+;Gd>Ut^Ut<T+ev*G^v>sYPgHF>bc<g->0JE;Ib!M9jv2AE!RE&
+zwZZiS{$<M4TF<?V0+NDL2**91?jGq7N!j-j->B9F@kFUc{Ho+ih5HWp4(4Hm@W4F$
+z;5_^>;<?>uf1V&d6{;86FB88qxlUnxgFnkW_eex?8&lsWzLCbs+B7_U{0#A{sN}4S
+zL+`&VDtcD@F|MGR68{MqpWc5_RCt+q?oZVJ8u2NJL-;4+y+6W29A_8P4RTeI?)s7I
+zLLD9|J8fEtmZzJ8Im0oB6%iGun$2oM>h4l@!zma;yqLX0o>s{i&X)$wykR+|a>X#K
+zV``{W7|q*`ZE3BwJ$QkA&M?bmbKJ0tPI+8q%VxngtZJb!PLhyikf$@p)v+rM^~W%J
+z5AEKUF*5sm3|d0p^YH%N`}(?xrtJ?#Mwe2(=a4e?_8-`@yWcp_+j}@OU<~Zu)1M(l
+zbnSl{OZxxa;(gmP9aDM7K()->QV>+qAzKClf;S3aJHZ^1Vo3G*n*pf4xjO?4t5PyX
+z%%a7+2Ko+=mz66T)rxH?iX43zgO!SCWdj54G(b>z3qs9(1#`DK%<T>bTq&(GUU1Ao
+zLZ|HG2y(O&!Y+?0typqwZMay~M$4s9yX=gIsKIKE_P^vTp?2@-YvJ+axsRBY5v5t<
+zMQXxFr|g$}$}U%OrQ#gJpt7=^H(4OL(Y&KHubUcWwc!$(oT=DDN^|TnGI@ZJcgZ_d
+znmr;zYQ&=2VEJ|UW6M_{PfeMH998DaDa1;nL0zD+8o8F<ipldQx-{uG!cWnCY?wbu
+zvFD3C<Gbm@a~A05+popGoG?%EEv0xnURWR9x5fXjhZF8^;Q042tjF&$Fa<}!sQx3w
+zzeaN&^dIv=Alk<sk!b%-(({}UddwRGly<p~9B1e;f6EcaQwZoW4+Uc0NiJUEI>PCb
+zWbm90dd%a1_^m?!;Rk%2^gKs|jd>z4EsaI{FSI&M8ICFRn70C_#1ZXBkN>Np-y?pQ
+z2Lttxo?{l(f0H<l3F;4iN96Ye&j(VC*H`2jzfPa9J|#L}nw>%kKU2V`sVuDjgcJbb
+zhbmwLCnNe%DFC)YC<q<!rxE>GDFF6x=RyfOP!}l^?my-`Ks<lJKYIP}yp8oZ|0*S(
+zf{|(Mo8td#au4h0+eaz2zDfUwh+da=f!~8r5aS2*P0G*`)L`!xo-47>GU^W-c$>5h
+zAwA~blPyG2f}d~QwZXqZ1w3}~yoGr&_RV5{EMI?|pu>6mE^!<`=<(cnZYz5$^^gz2
+zH}t^8Bo6CUT3lOwL_4SeI@t9jW)AIRKG-Pws6V$APAjE-aSw{1moNrA^kEFfUf`uv
+zS}Hsv9eXF0@x2iJ!TonBap-$UuCDR}7^V71<!IM0^&i`6>HoOh_gEhhL`?NB2@Ew-
+
+literal 0
+HcmV?d00001
+
+diff --git a/test.c b/test.c
+new file mode 100644
+index 0000000..8df5b15
+--- /dev/null
++++ b/test.c
+@@ -0,0 +1,8 @@
++#include <malloc.h>
++#include <stdio.h>
++int main(void)
++{
++    struct mallinfo mi = mallinfo();
++    printf("mxordblk=%d\n", mi.mxordblk);
++    return 0;
++}
+diff --git a/test2.c b/test2.c
+new file mode 100644
+index 0000000..8df5b15
+--- /dev/null
++++ b/test2.c
+@@ -0,0 +1,8 @@
++#include <malloc.h>
++#include <stdio.h>
++int main(void)
++{
++    struct mallinfo mi = mallinfo();
++    printf("mxordblk=%d\n", mi.mxordblk);
++    return 0;
++}
+diff --git a/test_malloc_h b/test_malloc_h
+new file mode 100755
+index 0000000000000000000000000000000000000000..81124fcda6cf956552be97daa0f58deac19c2d4d
+GIT binary patch
+literal 16104
+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
+SoV>b!BmS^KX$?38MDbsq&Xn~4
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_malloc_h.c b/test_malloc_h.c
+new file mode 100644
+index 0000000..8b3b32e
+--- /dev/null
++++ b/test_malloc_h.c
+@@ -0,0 +1,19 @@
++#include <malloc.h>
++#include <stdlib.h>
++#include <stdio.h>
++
++int main(void)
++{
++    struct mallinfo mi;
++    
++    mi = mallinfo();
++    
++    printf("mallinfo test:\n");
++    printf("arena: %d\n", mi.arena);
++    printf("ordblks: %d\n", mi.ordblks);
++    printf("mxordblk: %d\n", mi.mxordblk);
++    printf("uordblks: %d\n", mi.uordblks);
++    printf("fordblks: %d\n", mi.fordblks);
++    
++    return 0;
++}

@@ -1,0 +1,235 @@
+diff --git a/drivers/usb/udc/udc_common.c b/drivers/usb/udc/udc_common.c
+index 499790ab..f31381b2 100644
+--- a/drivers/usb/udc/udc_common.c
++++ b/drivers/usb/udc/udc_common.c
+@@ -195,6 +195,22 @@ int udc_submit_event(const struct device *dev,
+ 	return data->event_cb(dev, &drv_evt);
+ }
+ 
++int udc_ep_flush(const struct device *dev, struct udc_ep_config *const ep_cfg,
++		 const int err)
++{
++	struct net_buf *buf;
++	int ret = 0;
++
++	while (!k_fifo_is_empty(&ep_cfg->fifo)) {
++		buf = udc_buf_get(ep_cfg);
++		if (buf) {
++			ret = udc_submit_ep_event(dev, buf, err);
++		}
++	}
++
++	return ret;
++}
++
+ int udc_submit_ep_event(const struct device *dev,
+ 			struct net_buf *const buf,
+ 			const int err)
+diff --git a/drivers/usb/udc/udc_common.h b/drivers/usb/udc/udc_common.h
+index a490484a..721fe2a6 100644
+--- a/drivers/usb/udc/udc_common.h
++++ b/drivers/usb/udc/udc_common.h
+@@ -149,6 +149,23 @@ int udc_submit_ep_event(const struct device *dev,
+ 			struct net_buf *const buf,
+ 			const int err);
+ 
++/**
++ * @brief Flush all queued requests from endpoint FIFO.
++ *
++ * This function removes all requests from endpoint FIFO and submits
++ * a separate completion event for each request.
++ *
++ * @param[in] dev    Pointer to device struct of the driver instance
++ * @param[in] ep_cfg Pointer to endpoint configuration
++ * @param[in] err    Error code to be reported in each completion event
++ *
++ * @return 0 on success, all other values should be treated as error.
++ * @retval -EPERM controller is not initialized
++ */
++int udc_ep_flush(const struct device *dev,
++		 struct udc_ep_config *const ep_cfg,
++		 const int err);
++
+ /**
+  * @brief Helper function to send UDC SOF event to a higher level.
+  *
+diff --git a/drivers/usb/udc/udc_it82xx2.c b/drivers/usb/udc/udc_it82xx2.c
+index 145ff490..87f27e26 100644
+--- a/drivers/usb/udc/udc_it82xx2.c
++++ b/drivers/usb/udc/udc_it82xx2.c
+@@ -522,10 +522,7 @@ static int it82xx2_ep_dequeue(const struct device *dev, struct udc_ep_config *co
+ 	}
+ 	irq_unlock(lock_key);
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 
+ 	udc_ep_set_busy(cfg, false);
+ 
+diff --git a/drivers/usb/udc/udc_kinetis.c b/drivers/usb/udc/udc_kinetis.c
+index 9f42cb55..8149e384 100644
+--- a/drivers/usb/udc/udc_kinetis.c
++++ b/drivers/usb/udc/udc_kinetis.c
+@@ -573,10 +573,7 @@ static int usbfsotg_ep_dequeue(const struct device *dev,
+ 	irq_unlock(lock_key);
+ 
+ 	cfg->stat.halted = false;
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 
+ 	udc_ep_set_busy(cfg, false);
+ 
+diff --git a/drivers/usb/udc/udc_max32.c b/drivers/usb/udc/udc_max32.c
+index 9b289fc3..4979d7e0 100644
+--- a/drivers/usb/udc/udc_max32.c
++++ b/drivers/usb/udc/udc_max32.c
+@@ -344,10 +344,7 @@ static int udc_max32_ep_dequeue(const struct device *dev, struct udc_ep_config *
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	} else {
++	udc_ep_flush(dev, cfg, -ECONNABORTED); else {
+ 		LOG_INF("ep 0x%02x queue is empty", cfg->addr);
+ 	}
+ 
+diff --git a/drivers/usb/udc/udc_mcux_ehci.c b/drivers/usb/udc/udc_mcux_ehci.c
+index 0b97d023..f4f7272a 100644
+--- a/drivers/usb/udc/udc_mcux_ehci.c
++++ b/drivers/usb/udc/udc_mcux_ehci.c
+@@ -528,10 +528,7 @@ static int udc_mcux_ep_dequeue(const struct device *dev,
+ 	struct net_buf *buf;
+ 
+ 	cfg->stat.halted = false;
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 
+ 	udc_mcux_lock(dev);
+ 	udc_ep_set_busy(cfg, false);
+diff --git a/drivers/usb/udc/udc_mcux_ip3511.c b/drivers/usb/udc/udc_mcux_ip3511.c
+index 273a1375..003262c7 100644
+--- a/drivers/usb/udc/udc_mcux_ip3511.c
++++ b/drivers/usb/udc/udc_mcux_ip3511.c
+@@ -514,10 +514,7 @@ static int udc_mcux_ep_dequeue(const struct device *dev,
+ 	struct net_buf *buf;
+ 
+ 	cfg->stat.halted = false;
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 
+ 	udc_mcux_lock(dev);
+ 	udc_ep_set_busy(cfg, false);
+diff --git a/drivers/usb/udc/udc_nrf.c b/drivers/usb/udc/udc_nrf.c
+index d911106f..9dcc3fd8 100644
+--- a/drivers/usb/udc/udc_nrf.c
++++ b/drivers/usb/udc/udc_nrf.c
+@@ -1507,10 +1507,7 @@ static int udc_nrf_ep_dequeue(const struct device *dev,
+ 
+ 	nrf_usbd_legacy_ep_abort(cfg->addr);
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	} else {
++	udc_ep_flush(dev, cfg, -ECONNABORTED); else {
+ 		LOG_INF("ep 0x%02x queue is empty", cfg->addr);
+ 	}
+ 
+diff --git a/drivers/usb/udc/udc_renesas_ra.c b/drivers/usb/udc/udc_renesas_ra.c
+index 24bd88bd..cd1e8fe6 100644
+--- a/drivers/usb/udc/udc_renesas_ra.c
++++ b/drivers/usb/udc/udc_renesas_ra.c
+@@ -326,10 +326,7 @@ static int udc_renesas_ra_ep_dequeue(const struct device *dev, struct udc_ep_con
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf != NULL) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 
+ 	if (FSP_SUCCESS != R_USBD_XferAbort(&data->udc, cfg->addr)) {
+ 		return -EIO;
+diff --git a/drivers/usb/udc/udc_rpi_pico.c b/drivers/usb/udc/udc_rpi_pico.c
+index 73242816..0827c392 100644
+--- a/drivers/usb/udc/udc_rpi_pico.c
++++ b/drivers/usb/udc/udc_rpi_pico.c
+@@ -739,10 +739,7 @@ static int udc_rpi_pico_ep_dequeue(const struct device *dev,
+ 	lock_key = irq_lock();
+ 
+ 	rpi_pico_ep_cancel(dev, cfg->addr);
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 
+ 	irq_unlock(lock_key);
+ 
+diff --git a/drivers/usb/udc/udc_sam_udp.c b/drivers/usb/udc/udc_sam_udp.c
+index 48e4d6dc..1d92cf51 100644
+--- a/drivers/usb/udc/udc_sam_udp.c
++++ b/drivers/usb/udc/udc_sam_udp.c
+@@ -586,10 +586,7 @@ static int udc_sam_udp_ep_dequeue(const struct device *dev,
+ 	 * rapid queue/cancel cycles (unlink tests).
+ 	 */
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/usb/udc/udc_skeleton.c b/drivers/usb/udc/udc_skeleton.c
+index 5c40cfd5..1be94773 100644
+--- a/drivers/usb/udc/udc_skeleton.c
++++ b/drivers/usb/udc/udc_skeleton.c
+@@ -119,14 +119,10 @@ static int udc_skeleton_ep_dequeue(const struct device *dev,
+ 				   struct udc_ep_config *const cfg)
+ {
+ 	unsigned int lock_key;
+-	struct net_buf *buf;
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 
+ 	irq_unlock(lock_key);
+ 
+diff --git a/drivers/usb/udc/udc_virtual.c b/drivers/usb/udc/udc_virtual.c
+index 0d5e1340..74bbc268 100644
+--- a/drivers/usb/udc/udc_virtual.c
++++ b/drivers/usb/udc/udc_virtual.c
+@@ -310,10 +310,7 @@ static int udc_vrt_ep_dequeue(const struct device *dev,
+ 
+ 	lock_key = irq_lock();
+ 	/* Draft dequeue implementation */
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++udc_ep_flush(dev, cfg, -ECONNABORTED);
+ 	irq_unlock(lock_key);
+ 
+ 	return 0;

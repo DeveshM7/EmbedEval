@@ -1,0 +1,116 @@
+diff --git a/include/zephyr/kvss/zms.h b/include/zephyr/kvss/zms.h
+index f14c2d3a..38645376 100644
+--- a/include/zephyr/kvss/zms.h
++++ b/include/zephyr/kvss/zms.h
+@@ -102,6 +102,23 @@ typedef uint32_t zms_id_t;
+  */
+ int zms_mount(struct zms_fs *fs);
+ 
++/**
++ * @brief Force mount a ZMS file system onto the device specified in `fs`.
++ *
++ * This function attempts a normal mount first. If the normal mount fails because
++ * the stored ZMS version is unsupported, this function will erase the partition,
++ * reinitialize it, and succeed.
++ *
++ * @param fs Pointer to the file system.
++ *
++ * @retval 0 on success (including after successful recovery).
++ * @retval -EINVAL if `fs` is NULL or any of the flash parameters or the sector layout is invalid.
++ * @retval -ENXIO if there is a device error.
++ * @retval -EIO if there is a memory read/write error.
++ * @retval other negative error codes from zms_mount for errors other than unsupported version.
++ */
++int zms_mount_force(struct zms_fs *fs);
++
+ /**
+  * @brief Clear the ZMS file system from device. The ZMS file system must be re-mounted after this
+  * operation.
+diff --git a/subsys/kvss/zms/zms.c b/subsys/kvss/zms/zms.c
+index 7cc0be3a..5636130e 100644
+--- a/subsys/kvss/zms/zms.c
++++ b/subsys/kvss/zms/zms.c
+@@ -1533,6 +1533,83 @@ int zms_mount(struct zms_fs *fs)
+ 	return 0;
+ }
+ 
++
++int zms_mount_force(struct zms_fs *fs)
++{
++	int rc;
++
++	if (!fs) {
++		LOG_ERR("Invalid fs");
++		return -EINVAL;
++	}
++
++	/* First try a normal mount */
++	rc = zms_mount(fs);
++	if (rc == 0) {
++		/* Mount succeeded normally */
++		return 0;
++	}
++
++	/* If the error is not -EPROTONOSUPPORT, return the error */
++	if (rc != -EPROTONOSUPPORT) {
++		return rc;
++	}
++
++	/* Version not supported - need to erase and reinitialize */
++	LOG_INF("ZMS version not supported, recovering by force mount");
++
++	/* Reinitialize the basic flash parameters (they were set by zms_mount) */
++	/* The mutex and flash_parameters should already be initialized from zms_mount call */
++	/* But we need to ensure they are set in case zms_mount failed early */
++
++	k_mutex_init(&fs->zms_lock);
++
++	fs->flash_parameters = flash_get_parameters(fs->flash_device);
++	if (fs->flash_parameters == NULL) {
++		LOG_ERR("Could not obtain flash parameters");
++		return -EINVAL;
++	}
++
++	fs->ate_size = zms_al_size(fs, sizeof(struct zms_ate));
++
++	/* Erase all sectors and add empty ATEs */
++	k_mutex_lock(&fs->zms_lock, K_FOREVER);
++
++	for (uint32_t i = 0; i < fs->sector_count; i++) {
++		uint64_t addr = (uint64_t)i << ADDR_SECT_SHIFT;
++
++		rc = zms_flash_erase_sector(fs, addr);
++		if (rc) {
++			LOG_ERR("Failed to erase sector %u", i);
++			goto end;
++		}
++
++		rc = zms_add_empty_ate(fs, addr);
++		if (rc) {
++			LOG_ERR("Failed to add empty ATE to sector %u", i);
++			goto end;
++		}
++	}
++
++	/* Initialize the write addresses for a fresh file system */
++	fs->ate_wra = 0;
++	fs->data_wra = 0;
++	fs->sector_cycle = 0;
++
++	/* zms is ready for use */
++	fs->ready = true;
++
++	LOG_INF("Force mount: recovered ZMS file system");
++	LOG_INF("%u Sectors of %u bytes", fs->sector_count, fs->sector_size);
++	LOG_INF("alloc wra: %llu, %llx", SECTOR_NUM(fs->ate_wra), SECTOR_OFFSET(fs->ate_wra));
++	LOG_INF("data wra: %llu, %llx", SECTOR_NUM(fs->data_wra), SECTOR_OFFSET(fs->data_wra));
++
++	rc = 0;
++
++end:
++	k_mutex_unlock(&fs->zms_lock);
++	return rc;
++}
+ ssize_t zms_write(struct zms_fs *fs, zms_id_t id, const void *data, size_t len)
+ {
+ 	int rc;

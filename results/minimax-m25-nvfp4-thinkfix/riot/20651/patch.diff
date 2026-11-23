@@ -1,0 +1,254 @@
+diff --git a/sys/include/shell.h b/sys/include/shell.h
+index 7a9dac81..1a37fd19 100644
+--- a/sys/include/shell.h
++++ b/sys/include/shell.h
+@@ -190,6 +190,25 @@ typedef struct {
+  */
+ void shell_run_once(const shell_command_t *commands, char *line_buf, int len);
+ 
++
++/**
++ * @brief           Parse and execute commands from a script file.
++ *
++ *                  Reads a file and executes each line as a shell command.
++ *                  Blank lines and lines beginning with '#' are ignored.
++ *
++ * @param[in]       commands    ptr to array of command structs
++ * @param[in]       script_file path to the script file
++ * @param[out]      err_line    pointer to store the 1-based line number of
++ *                              the failing line (only set on error)
++ *
++ * @return  0 on success
++ * @return  negative of the failing command's return value on failure
++ * @return  -EINVAL if the file cannot be opened
++ * @return  -7 if a line is too long
++ */
++int shell_parse_file(const shell_command_t *commands, const char *script_file,
++                     unsigned *err_line);
+ /**
+  * @brief           Start a shell and restart it if it exits
+  *
+diff --git a/sys/shell/shell.c b/sys/shell/shell.c
+index 945053a0..3d7ffde4 100644
+--- a/sys/shell/shell.c
++++ b/sys/shell/shell.c
+@@ -525,3 +525,219 @@ void shell_run_once(const shell_command_t *shell_commands,
+         print_prompt();
+     }
+ }
++
++/**
++ * @brief   Parse and execute commands from a script file.
++ *
++ * @param[in]   shell_commands  Array of shell commands to use.
++ * @param[in]   script_file     Path to the script file to execute.
++ * @param[out]  err_line        Pointer to store the 1-based line number of the
++ *                              failing line (only set on error).
++ *
++ * @return  0 on success (all commands executed successfully).
++ * @return  Negative of the failing command's return value on failure, and
++ *          *err_line is set to the 1-based line number.
++ * @return  -EINVAL if the file cannot be opened.
++ * @return  -7 if a line is too long to fit in the buffer.
++ */
++int shell_parse_file(const shell_command_t *shell_commands, const char *script_file,
++                     unsigned *err_line)
++{
++#define SHELL_PARSE_FILE_BUFSIZE 128
++    char line_buf[SHELL_PARSE_FILE_BUFSIZE];
++    FILE *fp = fopen(script_file, "r");
++    unsigned line_num = 0;
++
++    if (fp == NULL) {
++        return -EINVAL;
++    }
++
++    while (fgets(line_buf, sizeof(line_buf), fp) != NULL) {
++        line_num++;
++
++        /* Check if line is too long (no newline at end and buffer is full) */
++        size_t len = strlen(line_buf);
++        if (len > 0 && line_buf[len - 1] != '\n') {
++            /* Line too long - consume rest of line and return error */
++            int c;
++            while ((c = fgetc(fp)) != EOF && c != '\n') {
++                /* consume rest of line */
++            }
++            fclose(fp);
++            if (err_line) {
++                *err_line = line_num;
++            }
++            return -7;
++        }
++
++        /* Remove trailing newline */
++        if (len > 0 && line_buf[len - 1] == '\n') {
++            line_buf[len - 1] = '\0';
++        }
++
++        /* Skip blank lines */
++        bool is_blank = true;
++        for (const char *p = line_buf; *p != '\0'; p++) {
++            if (*p != ' ' && *p != '\t' && *p != '\r') {
++                is_blank = false;
++                break;
++            }
++        }
++        if (is_blank) {
++            continue;
++        }
++
++        /* Skip comment lines (starting with #) */
++        if (line_buf[0] == '#') {
++            continue;
++        }
++
++        /* Process the command - we need to call the handler and get its return value */
++        /* We'll use the same logic as handle_input_line but return the result */
++
++        /* first we need to calculate the number of arguments */
++        int argc = 0;
++        char *readpos = line_buf;
++        char *writepos = readpos;
++
++        uint8_t pstate = PARSE_BLANK;
++
++        for (; *readpos != '\0'; readpos++) {
++
++            char wordbreak = SPACE;
++            bool is_wordbreak = false;
++
++            switch (pstate) {
++
++                case PARSE_BLANK:
++                    if (*readpos != SPACE && *readpos != TAB) {
++                        argc++;
++                    }
++
++                    if (*readpos == SQUOTE) {
++                        pstate = PARSE_SINGLEQUOTE;
++                    }
++                    else if (*readpos == DQUOTE) {
++                        pstate = PARSE_DOUBLEQUOTE;
++                    }
++                    else if (*readpos == ESCAPECHAR) {
++                        pstate = PARSE_UNQUOTED_ESC;
++                    }
++                    else if (*readpos != SPACE && *readpos != TAB) {
++                        pstate = PARSE_UNQUOTED;
++                        *writepos++ = *readpos;
++                    }
++                    break;
++
++                case PARSE_UNQUOTED:
++                    if (*readpos == SQUOTE) {
++                        pstate = PARSE_SINGLEQUOTE;
++                    }
++                    else if (*readpos == DQUOTE) {
++                        pstate = PARSE_DOUBLEQUOTE;
++                    }
++                    else if (*readpos == ESCAPECHAR) {
++                        pstate = escape_toggle(pstate);
++                    }
++                    else if (*readpos == SPACE || *readpos == TAB) {
++                        pstate = PARSE_BLANK;
++                        *writepos++ = '\0';
++                    }
++                    else {
++                        *writepos++ = *readpos;
++                    }
++                    break;
++
++                case PARSE_SINGLEQUOTE:
++                    wordbreak = SQUOTE;
++                    is_wordbreak = true;
++                    break;
++
++                case PARSE_DOUBLEQUOTE:
++                    wordbreak = DQUOTE;
++                    is_wordbreak = true;
++                    break;
++
++                default: /* QUOTED state */
++                    pstate = escape_toggle(pstate);
++                    *writepos++ = *readpos;
++                    break;
++            }
++
++            if (is_wordbreak) {
++                if (*readpos == wordbreak) {
++                    if (wordbreak == SQUOTE || wordbreak == DQUOTE) {
++                        pstate = PARSE_UNQUOTED;
++                    }
++                }
++                else if (*readpos == ESCAPECHAR) {
++                    pstate = escape_toggle(pstate);
++                }
++                else {
++                    *writepos++ = *readpos;
++                }
++            }
++        }
++        *writepos = '\0';
++
++        if (pstate != PARSE_BLANK && pstate != PARSE_UNQUOTED) {
++            printf("shell: incorrect quoting\n");
++            continue;
++        }
++
++        if (argc == 0) {
++            continue;
++        }
++
++        /* then we fill the argv array */
++        int collected;
++
++        /* allocate argv on the stack leaving space for NULL termination */
++        char *argv[argc + 1];
++
++        readpos = line_buf;
++        for (collected = 0; collected < argc; collected++) {
++            argv[collected] = readpos;
++            readpos += strlen(readpos) + 1;
++        }
++
++        /* NULL terminate argv. */
++        argv[argc] = NULL;
++
++        /* then we call the appropriate handler */
++        shell_command_handler_t handler = find_handler(shell_commands, argv[0]);
++        int res = 0;
++        if (handler != NULL) {
++            res = handler(argc, argv);
++        }
++        else {
++            if (strcmp("help", argv[0]) == 0) {
++                print_help(shell_commands);
++            }
++            else {
++                printf("shell: command not found: %s\n", argv[0]);
++                res = 1;  /* command not found is treated as error */
++            }
++        }
++
++        if (res != 0) {
++            fclose(fp);
++            if (err_line) {
++                *err_line = line_num;
++            }
++            return -res;
++        }
++    }
++
++    /* Check if we exited due to an error (not EOF) */
++    if (ferror(fp)) {
++        fclose(fp);
++        if (err_line) {
++            *err_line = line_num;
++        }
++        return -EIO;
++    }
++
++    fclose(fp);
++    return 0;
++}

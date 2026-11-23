@@ -1,0 +1,68 @@
+diff --git a/include/zephyr/rtio/rtio.h b/include/zephyr/rtio/rtio.h
+index ea4e6389..928dcfc5 100644
+--- a/include/zephyr/rtio/rtio.h
++++ b/include/zephyr/rtio/rtio.h
+@@ -757,6 +757,29 @@ static inline void rtio_sqe_prep_await(struct rtio_sqe *sqe,
+ 	sqe->userdata = userdata;
+ }
+ 
++/**
++ * @brief Prepare an await submission queue entry for the executor (no iodev)
++ *
++ * A relaxed await pauses only the submission chain containing it until
++ * rtio_sqe_signal() is called on that SQE. While paused, other chains and
++ * unrelated submissions may continue, and the iodev remains free to serve them.
++ * When the SQE is signaled, the await completes successfully and produces a CQE.
++ *
++ * @param sqe Submission queue entry to prepare
++ * @param prio Priority of the operation
++ * @param userdata Userdata to return in the completion queue entry
++ */
++static inline void rtio_sqe_prep_await_executor(struct rtio_sqe *sqe,
++						int8_t prio,
++						void *userdata)
++{
++	memset(sqe, 0, sizeof(struct rtio_sqe));
++	sqe->op = RTIO_OP_AWAIT;
++	sqe->prio = prio;
++	sqe->iodev = NULL;
++	sqe->userdata = userdata;
++}
++
+ static inline void rtio_sqe_prep_delay(struct rtio_sqe *sqe,
+ 				       k_timeout_t timeout,
+ 				       void *userdata)
+diff --git a/subsys/rtio/rtio_executor.c b/subsys/rtio/rtio_executor.c
+index 6a4c8000..41c551ae 100644
+--- a/subsys/rtio/rtio_executor.c
++++ b/subsys/rtio/rtio_executor.c
+@@ -12,6 +12,15 @@
+ #include <zephyr/logging/log.h>
+ LOG_MODULE_REGISTER(rtio_executor, CONFIG_RTIO_LOG_LEVEL);
+ 
++/**
++ * @brief Callback to complete an executor await operation when signaled
++ */
++static void rtio_executor_await_callback(struct rtio_iodev_sqe *iodev_sqe, void *userdata)
++{
++	ARG_UNUSED(userdata);
++	rtio_iodev_sqe_ok(iodev_sqe, 0);
++}
++
+ /**
+  * @brief Executor handled submissions
+  */
+@@ -27,6 +36,13 @@ static void rtio_executor_op(struct rtio_iodev_sqe *iodev_sqe)
+ 	case RTIO_OP_DELAY:
+ 		rtio_sched_alarm(iodev_sqe, sqe->delay.timeout);
+ 		break;
++	case RTIO_OP_AWAIT:
++		/* A relaxed await - no iodev attached, pause chain until signaled.
++		 * Set up callback for when rtio_sqe_signal() is called.
++		 */
++		rtio_iodev_sqe_await_signal(iodev_sqe, rtio_executor_await_callback,
++					   sqe->userdata);
++		break;
+ 	default:
+ 		rtio_iodev_sqe_err(iodev_sqe, -EINVAL);
+ 	}

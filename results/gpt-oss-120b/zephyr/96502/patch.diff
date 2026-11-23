@@ -1,0 +1,180 @@
+diff --git a/include/zephyr/net/mqtt_sn.h b/include/zephyr/net/mqtt_sn.h
+index cc4b042a..c56f7508 100644
+--- a/include/zephyr/net/mqtt_sn.h
++++ b/include/zephyr/net/mqtt_sn.h
+@@ -437,19 +437,7 @@ int mqtt_sn_unsubscribe(struct mqtt_sn_client *client, enum mqtt_sn_qos qos,
+  * @return 0 or a negative error code (errno.h) indicating reason of failure.
+  */
+ int mqtt_sn_publish(struct mqtt_sn_client *client, enum mqtt_sn_qos qos,
+-		    struct mqtt_sn_data *topic_name, bool retain, struct mqtt_sn_data *data);
+-
+-/**
+- * @brief Check the transport for new incoming data.
+- *
+- * Call this function periodically, or if you have good reason to believe there is any data.
+- * If the client's transport struct contains a poll-function, this function is non-blocking.
+- *
+- * @param client            The MQTT-SN client to check for incoming data.
+- *
+- * @return 0 or a negative error code (errno.h) indicating reason of failure.
+- */
+-int mqtt_sn_input(struct mqtt_sn_client *client);
++        struct mqtt_sn_data *topic_name, bool retain, struct mqtt_sn_data *data);
+ 
+ /**
+  * @brief Get topic name by topic ID.
+@@ -470,4 +458,4 @@ int mqtt_sn_get_topic_name(struct mqtt_sn_client *client, uint16_t id,
+ 
+ #endif /* ZEPHYR_INCLUDE_NET_MQTT_SN_H_ */
+ 
+-/**@}  */
++/**@}  */
+\ No newline at end of file
+diff --git a/subsys/net/lib/mqtt_sn/mqtt_sn.c b/subsys/net/lib/mqtt_sn/mqtt_sn.c
+index 570de2a9..09abc73b 100644
+--- a/subsys/net/lib/mqtt_sn/mqtt_sn.c
++++ b/subsys/net/lib/mqtt_sn/mqtt_sn.c
+@@ -1272,30 +1272,30 @@ int mqtt_sn_publish(struct mqtt_sn_client *client, enum mqtt_sn_qos qos,
+ }
+ 
+ static void handle_advertise(struct mqtt_sn_client *client, struct mqtt_sn_param_advertise *p,
+-			     struct mqtt_sn_data rx_addr)
++                             struct mqtt_sn_data rx_addr)
+ {
+-	struct mqtt_sn_evt evt = {.type = MQTT_SN_EVT_ADVERTISE};
+-	struct mqtt_sn_gateway *gw;
++    struct mqtt_sn_evt evt = {.type = MQTT_SN_EVT_ADVERTISE};
++    struct mqtt_sn_gateway *gw;
+ 
+-	gw = mqtt_sn_gw_find_by_id(client, p->gw_id);
++    gw = mqtt_sn_gw_find_by_id(client, p->gw_id);
+ 
+-	if (gw == NULL) {
+-		LOG_DBG("Creating GW 0x%02x with duration %d", p->gw_id, p->duration);
+-		gw = mqtt_sn_gw_create(p->gw_id, p->duration, rx_addr);
+-		if (!gw) {
+-			return;
+-		}
+-		sys_slist_append(&client->gateway, &gw->next);
+-	} else {
+-		LOG_DBG("Updating timer for GW 0x%02x with duration %d", p->gw_id, p->duration);
+-		gw->adv_timer =
+-			k_uptime_get() + (p->duration * CONFIG_MQTT_SN_LIB_N_ADV * MSEC_PER_SEC);
+-	}
++    if (gw == NULL) {
++        LOG_DBG("Creating GW 0x%02x with duration %d", p->gw_id, p->duration);
++        gw = mqtt_sn_gw_create(p->gw_id, p->duration, rx_addr);
++        if (!gw) {
++            return;
++        }
++        sys_slist_append(&client->gateway, &gw->next);
++    } else {
++        LOG_DBG("Updating timer for GW 0x%02x with duration %d", p->gw_id, p->duration);
++        gw->adv_timer =
++            k_uptime_get() + (p->duration * CONFIG_MQTT_SN_LIB_N_ADV * MSEC_PER_SEC);
++    }
+ 
+-	k_work_schedule(&client->process_work, K_NO_WAIT);
+-	if (client->evt_cb) {
+-		client->evt_cb(client, &evt);
+-	}
++    k_work_schedule(&client->process_work, K_NO_WAIT);
++    if (client->evt_cb) {
++        client->evt_cb(client, &evt);
++    }
+ }
+ 
+ static void handle_searchgw(struct mqtt_sn_client *client, struct mqtt_sn_param_searchgw *p)
+@@ -1718,4 +1718,30 @@ int mqtt_sn_get_topic_name(struct mqtt_sn_client *client, uint16_t id,
+ 		}
+ 	}
+ 	return -ENOENT;
++}/* Predefined topic support */
++int mqtt_sn_predefine_topic(struct mqtt_sn_client *client, uint16_t topic_id,
++                            struct mqtt_sn_data *topic_name)
++{
++    struct mqtt_sn_topic *topic;
++    if (!client || !topic_name || !topic_name->data || !topic_name->size) {
++        return -EINVAL;
++    }
++    if (mqtt_sn_topic_find_by_name(client, topic_name)) {
++        return -EALREADY;
++    }
++    struct mqtt_sn_topic *t;
++    SYS_SLIST_FOR_EACH_CONTAINER(&client->topic, t, next) {
++        if (t->topic_id == topic_id) {
++            return -EALREADY;
++        }
++    }
++    topic = mqtt_sn_topic_create(topic_name);
++    if (!topic) {
++        return -ENOMEM;
++    }
++    topic->topic_id = topic_id;
++    topic->type = MQTT_SN_TOPIC_TYPE_PREDEF;
++    topic->state = MQTT_SN_TOPIC_STATE_REGISTERED;
++    sys_slist_append(&client->topic, &topic->next);
++    return 0;
+ }
+diff --git a/tmp/patch.diff b/tmp/patch.diff
+new file mode 100644
+index 00000000..3b8cce21
+--- /dev/null
++++ b/tmp/patch.diff
+@@ -0,0 +1,25 @@
++*** Begin Patch
++*** Update File: include/zephyr/net/mqtt_sn.h
++@@
++ int mqtt_sn_publish(struct mqtt_sn_client *client, enum mqtt_sn_qos qos,
++ 		struct mqtt_sn_data *topic_name, bool retain, struct mqtt_sn_data *data);
+++
+++/**
+++ * @brief Predefine a topic identifier for a given topic name.
+++ *
+++ * This function registers a topic name together with a numeric identifier so
+++ * that subsequent subscribe/publish operations use the identifier directly
+++ * without performing a REGISTER exchange with the gateway. The topic is added
+++ * to the client's internal topic list with type @ref MQTT_SN_TOPIC_TYPE_PREDEF.
+++ *
+++ * @param client     MQTT‑SN client instance.
+++ * @param topic_id   Numeric identifier that will be used for the topic.
+++ * @param topic_name Name of the topic to predefine.
+++ *
+++ * @return 0 on success, -EALREADY if a topic with the same name or identifier
+++ *         is already known, -ENOMEM on allocation failure, or -EINVAL for
+++ *         invalid arguments.
+++ */
+++int mqtt_sn_predefine_topic(struct mqtt_sn_client *client, uint16_t topic_id,
+++                            struct mqtt_sn_data *topic_name);
++*** End Patch
+diff --git a/tmp/predef.diff b/tmp/predef.diff
+new file mode 100644
+index 00000000..6b12cc76
+--- /dev/null
++++ b/tmp/predef.diff
+@@ -0,0 +1,25 @@
++--- a/include/zephyr/net/mqtt_sn.h
+++++ b/include/zephyr/net/mqtt_sn.h
++@@
++ int mqtt_sn_publish(struct mqtt_sn_client *client, enum mqtt_sn_qos qos,
++ 		struct mqtt_sn_data *topic_name, bool retain, struct mqtt_sn_data *data);
+++
+++/**
+++ * @brief Predefine a topic identifier for a given topic name.
+++ *
+++ * This function registers a topic name together with a numeric identifier so
+++ * that subsequent subscribe/publish operations use the identifier directly
+++ * without performing a REGISTER exchange with the gateway. The topic is added
+++ * to the client\'s internal topic list with type @ref MQTT_SN_TOPIC_TYPE_PREDEF.
+++ *
+++ * @param client     MQTT‑SN client instance.
+++ * @param topic_id   Numeric identifier that will be used for the topic.
+++ * @param topic_name Name of the topic to predefine.
+++ *
+++ * @return 0 on success, -EALREADY if a topic with the same name or identifier
+++ *         is already known, -ENOMEM on allocation failure, or -EINVAL for
+++ *         invalid arguments.
+++ */
+++int mqtt_sn_predefine_topic(struct mqtt_sn_client *client, uint16_t topic_id,
+++                            struct mqtt_sn_data *topic_name);
++*** End Patch

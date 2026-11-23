@@ -1,0 +1,78 @@
+diff --git a/sys/include/shell.h b/sys/include/shell.h
+index 7a9dac81..50f432d7 100644
+--- a/sys/include/shell.h
++++ b/sys/include/shell.h
+@@ -273,3 +273,18 @@ static inline void shell_run(const shell_command_t *commands,
+ 
+ #endif /* SHELL_H */
+ /** @} */
++
++/**
++ * @brief   Read commands from a file and execute them.
++ *
++ * Each non-blank, non-comment line from the file is executed as a shell
++ * command. Blank lines and lines starting with `#` are ignored.
++ *
++ * @param[in]  shell_commands   Command list
++ * @param[in]  filename          File to read
++ * @param[out] line             On error, set to 1-based line number of failing line
++ *
++ * @return 0 on success
++ * @return negative error value on failure: -7 if line too long, otherwise negative errno
++ */
++int shell_parse_file(const shell_command_t *shell_commands, const char *filename, unsigned *line);
+diff --git a/sys/shell/shell.c b/sys/shell/shell.c
+index 945053a0..f48a83b9 100644
+--- a/sys/shell/shell.c
++++ b/sys/shell/shell.c
+@@ -525,3 +525,50 @@ void shell_run_once(const shell_command_t *shell_commands,
+         print_prompt();
+     }
+ }
++
++int shell_parse_file(const shell_command_t *shell_commands, const char *filename, unsigned *line)
++{
++    FILE *fp = fopen(filename, "r");
++    if (!fp) {
++        return -errno;
++    }
++
++    char buf[SHELL_DEFAULT_BUFSIZE];
++    unsigned lineno = 0;
++    int ret = 0;
++
++    while (fgets(buf, sizeof(buf), fp)) {
++        lineno++;
++        size_t len = strlen(buf);
++        if (len && buf[len-1] == '\n') {
++            buf[--len] = '\0';
++        }
++
++        /* Skip blank lines and comments */
++        char *trimmed = buf;
++        while (*trimmed == ' ' || *trimmed == '\t') {
++            trimmed++;
++        }
++        if (*trimmed == '\0' || *trimmed == '#') {
++            continue;
++        }
++
++        if (len >= SHELL_DEFAULT_BUFSIZE - 1) {
++            ret = -7;
++            *line = lineno;
++            break;
++        }
++
++        handle_input_line(shell_commands, buf);
++    }
++
++    if (ferror(fp)) {
++        if (ret == 0) {
++            ret = -errno;
++            *line = lineno;
++        }
++    }
++
++    fclose(fp);
++    return ret;
++}

@@ -1,0 +1,136 @@
+diff --git a/cpu/native/irq_cpu.c b/cpu/native/irq_cpu.c
+index ae16a0c..6a0cb0f 100644
+--- a/cpu/native/irq_cpu.c
++++ b/cpu/native/irq_cpu.c
+@@ -37,6 +37,8 @@
+ #include "irq.h"
+ #include "cpu.h"
+ #include "periph/pm.h"
++void isr_thread_yield(void);
++#include <ucontext.h>
+ 
+ #include "native_internal.h"
+ 
+@@ -200,6 +202,19 @@ unsigned irq_enable(void)
+     }
+ 
+     _native_syscall_leave();
++    // Deferred context switch if a higher‑priority thread was requested while IRQs were disabled
++    if (sched_context_switch_request && _native_in_isr == 0) {
++        ucontext_t *ctx = (ucontext_t *)(thread_get_active()->sp);
++        _native_in_isr = 1;
++        native_isr_context.uc_stack.ss_sp = __isr_stack;
++        native_isr_context.uc_stack.ss_size = SIGSTKSZ;
++        native_isr_context.uc_stack.ss_flags = 0;
++        makecontext(&native_isr_context, isr_thread_yield, 0);
++        if (swapcontext(ctx, &native_isr_context) == -1) {
++            err(EXIT_FAILURE, "irq_enable: swapcontext");
++        }
++        // After the context switch the new thread will continue; no further action needed here
++    }
+ 
+     DEBUG("irq_enable(): return\n");
+ 
+@@ -370,10 +385,36 @@ void set_signal_handler(int sig, bool add)
+         _native_syscall_enter();
+         ret = sigdelset(&_native_sig_set, sig);
+         _native_syscall_leave();
++    // Deferred context switch if a higher‑priority thread was requested while IRQs were disabled
++    if (sched_context_switch_request && _native_in_isr == 0) {
++        ucontext_t *ctx = (ucontext_t *)(thread_get_active()->sp);
++        _native_in_isr = 1;
++        native_isr_context.uc_stack.ss_sp = __isr_stack;
++        native_isr_context.uc_stack.ss_size = SIGSTKSZ;
++        native_isr_context.uc_stack.ss_flags = 0;
++        makecontext(&native_isr_context, isr_thread_yield, 0);
++        if (swapcontext(ctx, &native_isr_context) == -1) {
++            err(EXIT_FAILURE, "irq_enable: swapcontext");
++        }
++        // After the context switch the new thread will continue; no further action needed here
++    }
+     } else {
+         _native_syscall_enter();
+         ret = sigaddset(&_native_sig_set, sig);
+         _native_syscall_leave();
++    // Deferred context switch if a higher‑priority thread was requested while IRQs were disabled
++    if (sched_context_switch_request && _native_in_isr == 0) {
++        ucontext_t *ctx = (ucontext_t *)(thread_get_active()->sp);
++        _native_in_isr = 1;
++        native_isr_context.uc_stack.ss_sp = __isr_stack;
++        native_isr_context.uc_stack.ss_size = SIGSTKSZ;
++        native_isr_context.uc_stack.ss_flags = 0;
++        makecontext(&native_isr_context, isr_thread_yield, 0);
++        if (swapcontext(ctx, &native_isr_context) == -1) {
++            err(EXIT_FAILURE, "irq_enable: swapcontext");
++        }
++        // After the context switch the new thread will continue; no further action needed here
++    }
+     }
+ 
+     if (ret == -1) {
+diff --git a/cpu/native/native_cpu.c b/cpu/native/native_cpu.c
+index 136908b..c4e3335 100644
+--- a/cpu/native/native_cpu.c
++++ b/cpu/native/native_cpu.c
+@@ -208,24 +208,36 @@ void isr_thread_yield(void)
+ 
+ void thread_yield_higher(void)
+ {
++    /*
++     * Request a context switch to a higher‑priority thread. When interrupts are
++     * enabled and we are not already inside an ISR, perform the switch
++     * immediately. If interrupts are disabled (or we are already in an ISR), the
++     * request is deferred until interrupts are re‑enabled.
++     */
+     sched_context_switch_request = 1;
+ 
+-    if (_native_in_isr == 0) {
+-        ucontext_t *ctx = (ucontext_t *)(thread_get_active()->sp);
+-        _native_in_isr = 1;
+-        if (!native_interrupts_enabled) {
+-            warnx("thread_yield_higher: interrupts are disabled - this should not be");
+-        }
+-        irq_disable();
+-        native_isr_context.uc_stack.ss_sp = __isr_stack;
+-        native_isr_context.uc_stack.ss_size = SIGSTKSZ;
+-        native_isr_context.uc_stack.ss_flags = 0;
+-        makecontext(&native_isr_context, isr_thread_yield, 0);
+-        if (swapcontext(ctx, &native_isr_context) == -1) {
+-            err(EXIT_FAILURE, "thread_yield_higher: swapcontext");
+-        }
+-        irq_enable();
++    /* Defer if already in ISR context. */
++    if (_native_in_isr != 0) {
++        return;
++    }
++
++    /* Defer if interrupts are currently disabled. */
++    if (!native_interrupts_enabled) {
++        return;
++    }
++
++    /* Interrupts are enabled – perform an immediate context switch. */
++    ucontext_t *ctx = (ucontext_t *)(thread_get_active()->sp);
++    _native_in_isr = 1;
++    irq_disable();
++    native_isr_context.uc_stack.ss_sp = __isr_stack;
++    native_isr_context.uc_stack.ss_size = SIGSTKSZ;
++    native_isr_context.uc_stack.ss_flags = 0;
++    makecontext(&native_isr_context, isr_thread_yield, 0);
++    if (swapcontext(ctx, &native_isr_context) == -1) {
++        err(EXIT_FAILURE, "thread_yield_higher: swapcontext");
+     }
++    irq_enable();
+ }
+ 
+ void native_cpu_init(void)
+diff --git a/cpu/native/thread_yield_higher.patch b/cpu/native/thread_yield_higher.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..421376db9e8aee847e9d774891e73098a7415e94
+GIT binary patch
+literal 6
+NcmYc(&CRXk0ssh}0yh8v
+
+literal 0
+HcmV?d00001
+

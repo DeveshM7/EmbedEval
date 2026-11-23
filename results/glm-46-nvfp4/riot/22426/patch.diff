@@ -1,0 +1,147 @@
+diff --git a/sys/include/isrpipe.h b/sys/include/isrpipe.h
+index 6b43f562..e226a7ef 100644
+--- a/sys/include/isrpipe.h
++++ b/sys/include/isrpipe.h
+@@ -97,3 +97,28 @@ int isrpipe_read(isrpipe_t *isrpipe, uint8_t *buf, size_t count);
+ }
+ #endif
+ /** @} */
++
++/**
++ * @brief   Read one byte from isrpipe (blocking)
++ *
++ * @param[in]   isrpipe     isrpipe object to operate on
++ *
++ * @returns     the next byte from the pipe
++ */
++uint8_t isrpipe_read_one(isrpipe_t *isrpipe);
++
++/**
++ * @brief   Clear all bytes from isrpipe's buffer
++ *
++ * @param[in]   isrpipe     isrpipe object to operate on
++ */
++void isrpipe_clear(isrpipe_t *isrpipe);
++
++/**
++ * @brief   Get number of bytes available for reading from isrpipe
++ *
++ * @param[in]   isrpipe     isrpipe object to operate on
++ *
++ * @returns     number of bytes available to read
++ */
++unsigned int isrpipe_available(isrpipe_t *isrpipe);
+diff --git a/sys/isrpipe/isrpipe.c b/sys/isrpipe/isrpipe.c
+index c9dff751..1293e6ff 100644
+--- a/sys/isrpipe/isrpipe.c
++++ b/sys/isrpipe/isrpipe.c
+@@ -60,3 +60,25 @@ int isrpipe_read(isrpipe_t *isrpipe, uint8_t *buffer, size_t count)
+ 
+     return res;
+ }
++
++uint8_t isrpipe_read_one(isrpipe_t *isrpipe)
++{
++    int result;
++    
++    /* Wait until data is available */
++    while ((result = tsrb_get_one(&isrpipe->tsrb)) == -1) {
++        mutex_lock(&isrpipe->mutex);
++    }
++    
++    return (uint8_t)result;
++}
++
++void isrpipe_clear(isrpipe_t *isrpipe)
++{
++    tsrb_clear(&isrpipe->tsrb);
++}
++
++unsigned int isrpipe_available(isrpipe_t *isrpipe)
++{
++    return tsrb_avail(&isrpipe->tsrb);
++}
+diff --git a/test_isrpipe_new_functions.c b/test_isrpipe_new_functions.c
+new file mode 100644
+index 00000000..e222c554
+--- /dev/null
++++ b/test_isrpipe_new_functions.c
+@@ -0,0 +1,78 @@
++#include <stdio.h>
++#include <assert.h>
++#include "isrpipe.h"
++
++int main(void)
++{
++    /* Test data */
++    uint8_t buffer[8];
++    isrpipe_t pipe;
++    
++    printf("Testing new isrpipe convenience functions...\n");
++    
++    /* Initialize pipe */
++    isrpipe_init(&pipe, buffer, sizeof(buffer));
++    
++    /* Test 1: isrpipe_available on empty pipe */
++    unsigned int avail = isrpipe_available(&pipe);
++    assert(avail == 0);
++    printf("✓ isrpipe_available returns 0 for empty pipe\n");
++    
++    /* Test 2: isrpipe_write_one and isrpipe_available */
++    assert(isrpipe_write_one(&pipe, 0x42) == 0);
++    assert(isrpipe_write_one(&pipe, 0x84) == 0);  /* High bit set */
++    assert(isrpipe_write_one(&pipe, 0xFF) == 0);  /* All bits set */
++    
++    avail = isrpipe_available(&pipe);
++    assert(avail == 3);
++    printf("✓ isrpipe_available returns 3 after writing 3 bytes\n");
++    
++    /* Test 3: isrpipe_read_one preserves high bit */
++    uint8_t byte = isrpipe_read_one(&pipe);
++    assert(byte == 0x42);
++    printf("✓ isrpipe_read_one returns 0x42\n");
++    
++    byte = isrpipe_read_one(&pipe);
++    assert(byte == 0x84);  /* High bit should be preserved */
++    printf("✓ isrpipe_read_one returns 0x84 (high bit preserved)\n");
++    
++    byte = isrpipe_read_one(&pipe);
++    assert(byte == 0xFF);  /* Should not be mistaken for error code */
++    printf("✓ isrpipe_read_one returns 0xFF (not mistaken for error)\n");
++    
++    /* Test 4: pipe is empty again */
++    avail = isrpipe_available(&pipe);
++    assert(avail == 0);
++    printf("✓ pipe is empty after reading all bytes\n");
++    
++    /* Test 5: isrpipe_clear */
++    assert(isrpipe_write_one(&pipe, 0x11) == 0);
++    assert(isrpipe_write_one(&pipe, 0x22) == 0);
++    assert(isrpipe_write_one(&pipe, 0x33) == 0);
++    
++    avail = isrpipe_available(&pipe);
++    assert(avail == 3);
++    
++    isrpipe_clear(&pipe);
++    
++    avail = isrpipe_available(&pipe);
++    assert(avail == 0);
++    printf("✓ isrpipe_clear empties the pipe\n");
++    
++    /* Test 6: pipe is still usable after clear */
++    assert(isrpipe_write_one(&pipe, 0xAA) == 0);
++    assert(isrpipe_write_one(&pipe, 0x55) == 0);
++    
++    avail = isrpipe_available(&pipe);
++    assert(avail == 2);
++    
++    byte = isrpipe_read_one(&pipe);
++    assert(byte == 0xAA);
++    byte = isrpipe_read_one(&pipe);
++    assert(byte == 0x55);
++    
++    printf("✓ pipe remains usable after isrpipe_clear\n");
++    
++    printf("All tests passed! ✓\n");
++    return 0;
++}

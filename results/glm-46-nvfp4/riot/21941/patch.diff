@@ -1,0 +1,101 @@
+diff --git a/sys/event/Makefile.dep b/sys/event/Makefile.dep
+index 0ba5180a..baed418f 100644
+--- a/sys/event/Makefile.dep
++++ b/sys/event/Makefile.dep
+@@ -12,3 +12,76 @@ ifneq (,$(filter event_timeout,$(USEMODULE)))
+   USEMODULE += event_timeout_ztimer
+   USEMODULE += ztimer_usec
+ endif
++
++# Event thread stack size configuration
++# Utility function to get the maximum of a whitespace-separated list of numbers
++# Returns 0 if the list is empty
++define max_number
++$(if $(1),$(shell printf '%s\n' $(1) | sort -n | tail -n 1),0)
++endef
++
++# Collect minimum stack size requirements from modules
++EVENT_THREAD_HIGHEST_STACKSIZE_MIN ?= 
++EVENT_THREAD_MEDIUM_STACKSIZE_MIN ?= 
++EVENT_THREAD_LOWEST_STACKSIZE_MIN ?= 
++
++# Compute the maximum requirement for each priority
++HIGHEST_REQ := $(call max_number,$(EVENT_THREAD_HIGHEST_STACKSIZE_MIN))
++MEDIUM_REQ := $(call max_number,$(EVENT_THREAD_MEDIUM_STACKSIZE_MIN))
++LOWEST_REQ := $(call max_number,$(EVENT_THREAD_LOWEST_STACKSIZE_MIN))
++
++# Special trickle-down logic when only lowest thread is used:
++# If neither event_thread_highest nor event_thread_medium are used,
++# then ALL requirements should flow down to the lowest priority thread
++ifeq ($(filter event_thread_highest event_thread_medium,$(USEMODULE)),)
++  # Only lowest thread is used - all requirements flow down to it
++  FINAL_LOWEST_REQ := $(call max_number,$(LOWEST_REQ) $(MEDIUM_REQ) $(HIGHEST_REQ))
++  FINAL_HIGHEST_REQ := $(HIGHEST_REQ)
++  FINAL_MEDIUM_REQ := $(MEDIUM_REQ)
++else
++  # Some higher priority threads are used, apply normal trickle-down
++  ifneq (,$(filter event_thread_highest,$(USEMODULE)))
++    # Highest has its own thread
++    FINAL_HIGHEST_REQ := $(HIGHEST_REQ)
++    ifneq (,$(filter event_thread_medium,$(USEMODULE)))
++      # Medium also has its own thread
++      FINAL_MEDIUM_REQ := $(MEDIUM_REQ)
++      FINAL_LOWEST_REQ := $(LOWEST_REQ)
++    else
++      # Medium doesn't have thread, its requirements flow to lowest
++      FINAL_MEDIUM_REQ := $(MEDIUM_REQ)
++      FINAL_LOWEST_REQ := $(call max_number,$(LOWEST_REQ) $(MEDIUM_REQ))
++    endif
++  else
++    # Highest doesn't have thread, its requirements flow down
++    ifneq (,$(filter event_thread_medium,$(USEMODULE)))
++      # Medium has its own thread, highest flows to medium
++      FINAL_MEDIUM_REQ := $(call max_number,$(MEDIUM_REQ) $(HIGHEST_REQ))
++      FINAL_LOWEST_REQ := $(LOWEST_REQ)
++      FINAL_HIGHEST_REQ := $(HIGHEST_REQ)
++    else
++      # Neither highest nor medium have threads, all flow to lowest
++      FINAL_LOWEST_REQ := $(call max_number,$(LOWEST_REQ) $(MEDIUM_REQ) $(HIGHEST_REQ))
++      FINAL_HIGHEST_REQ := $(HIGHEST_REQ)
++      FINAL_MEDIUM_REQ := $(MEDIUM_REQ)
++    endif
++  endif
++endif
++
++# Default stack size if no requirements were specified
++DEFAULT_STACKSIZE := 2048
++
++# Helper function to get stack size with default fallback
++define get_stack_size
++$(if $(filter 0,$(1)),$(DEFAULT_STACKSIZE),$(1))
++endef
++
++# Define the final stack size macros with proper defaults
++EVENT_THREAD_HIGHEST_STACKSIZE_FINAL := $(call get_stack_size,$(FINAL_HIGHEST_REQ))
++EVENT_THREAD_MEDIUM_STACKSIZE_FINAL := $(call get_stack_size,$(FINAL_MEDIUM_REQ))
++EVENT_THREAD_LOWEST_STACKSIZE_FINAL := $(call get_stack_size,$(FINAL_LOWEST_REQ))
++
++# Define the final stack size macros with proper values
++CFLAGS += -DEVENT_THREAD_HIGHEST_STACKSIZE=$(EVENT_THREAD_HIGHEST_STACKSIZE_FINAL)
++CFLAGS += -DEVENT_THREAD_MEDIUM_STACKSIZE=$(EVENT_THREAD_MEDIUM_STACKSIZE_FINAL)
++CFLAGS += -DEVENT_THREAD_LOWEST_STACKSIZE=$(EVENT_THREAD_LOWEST_STACKSIZE_FINAL)
+diff --git a/sys/event/Makefile.dep.bak b/sys/event/Makefile.dep.bak
+new file mode 100644
+index 00000000..0ba5180a
+--- /dev/null
++++ b/sys/event/Makefile.dep.bak
+@@ -0,0 +1,14 @@
++USEMODULE += core_thread_flags
++
++ifneq (,$(filter event_thread_%,$(USEMODULE)))
++  USEMODULE += event_thread
++endif
++
++ifneq (,$(filter event_timeout_ztimer,$(USEMODULE)))
++  USEMODULE += ztimer
++endif
++
++ifneq (,$(filter event_timeout,$(USEMODULE)))
++  USEMODULE += event_timeout_ztimer
++  USEMODULE += ztimer_usec
++endif

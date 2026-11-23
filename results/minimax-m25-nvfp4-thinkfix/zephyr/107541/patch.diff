@@ -1,0 +1,309 @@
+diff --git a/boards/native/native_sim/irq_handler.c b/boards/native/native_sim/irq_handler.c
+index 6eb250f84..daabca10c 100644
+--- a/boards/native/native_sim/irq_handler.c
++++ b/boards/native/native_sim/irq_handler.c
+@@ -193,6 +193,12 @@ void posix_irq_unlock(unsigned int key)
+ 	hw_irq_ctrl_change_lock(key);
+ }
+ 
++
++int posix_irqs_are_enabled(void)
++{
++	return hw_irq_ctrl_get_current_lock() == 0;
++}
++
+ void posix_irq_full_unlock(void)
+ {
+ 	hw_irq_ctrl_change_lock(false);
+diff --git a/boards/native/nrf_bsim/irq_handler.c b/boards/native/nrf_bsim/irq_handler.c
+index 502be495d..52277c824 100644
+--- a/boards/native/nrf_bsim/irq_handler.c
++++ b/boards/native/nrf_bsim/irq_handler.c
+@@ -216,6 +216,12 @@ void posix_irq_unlock(unsigned int key)
+ 	hw_irq_ctrl_change_lock(CONFIG_NATIVE_SIMULATOR_MCU_N, key);
+ }
+ 
++
++int posix_irqs_are_enabled(void)
++{
++	return hw_irq_ctrl_get_current_lock(CONFIG_NATIVE_SIMULATOR_MCU_N) == 0;
++}
++
+ void posix_irq_full_unlock(void)
+ {
+ 	hw_irq_ctrl_change_lock(CONFIG_NATIVE_SIMULATOR_MCU_N, false);
+diff --git a/include/zephyr/arch/arc/v2/irq.h b/include/zephyr/arch/arc/v2/irq.h
+index 45b9d1388..01e9c27fa 100644
+--- a/include/zephyr/arch/arc/v2/irq.h
++++ b/include/zephyr/arch/arc/v2/irq.h
+@@ -187,6 +187,15 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return (key & 0x10)  ==  0x10;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	__asm__ volatile ("clri %0; nop; seti %0" : "=r" (key) : : "memory");
++	return (key & 0x10) == 0x10;
++}
++
+ #endif /* _ASMLANGUAGE */
+ 
+ #ifdef __cplusplus
+diff --git a/include/zephyr/arch/arch_interface.h b/include/zephyr/arch/arch_interface.h
+index 1e8c47bf7..21b33e922 100644
+--- a/include/zephyr/arch/arch_interface.h
++++ b/include/zephyr/arch/arch_interface.h
+@@ -280,6 +280,18 @@ static inline void arch_irq_unlock(unsigned int key);
+  */
+ static inline bool arch_irq_unlocked(unsigned int key);
+ 
++/**
++ * @brief Check if current CPU interrupts are enabled
++ *
++ * This function queries the live CPU interrupt state without modifying it.
++ * Unlike arch_irq_unlocked() which inspects a saved key, this probes the
++ * CPU register directly.
++ *
++ * @return true if interrupts are enabled, false otherwise
++ */
++static inline bool arch_cpu_irqs_are_enabled(void);
++
++
+ #ifdef CONFIG_ZERO_LATENCY_IRQS
+ 
+ /**
+diff --git a/include/zephyr/arch/arm/asm_inline_gcc.h b/include/zephyr/arch/arm/asm_inline_gcc.h
+index 1aedaf9c6..cb1f8e574 100644
+--- a/include/zephyr/arch/arm/asm_inline_gcc.h
++++ b/include/zephyr/arch/arm/asm_inline_gcc.h
+@@ -105,6 +105,15 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return key == 0U;
+ }
+ 
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	key = __get_PRIMASK();
++	return key == 0U;
++}
++
++
+ #ifdef CONFIG_ZERO_LATENCY_IRQS
+ 
+ static ALWAYS_INLINE unsigned int arch_zli_lock(void)
+diff --git a/include/zephyr/arch/arm64/asm_inline_gcc.h b/include/zephyr/arch/arm64/asm_inline_gcc.h
+index a1fde4fe9..af6dc9a7e 100644
+--- a/include/zephyr/arch/arm64/asm_inline_gcc.h
++++ b/include/zephyr/arch/arm64/asm_inline_gcc.h
+@@ -48,6 +48,15 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return (key & DAIF_IRQ_BIT) == 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	key = read_daif();
++	return (key & DAIF_IRQ_BIT) == 0;
++}
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/include/zephyr/arch/mips/arch.h b/include/zephyr/arch/mips/arch.h
+index 8ae196353..760949cef 100644
+--- a/include/zephyr/arch/mips/arch.h
++++ b/include/zephyr/arch/mips/arch.h
+@@ -98,6 +98,15 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return key != 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	key = read_c0_status();
++	return (key & 1) != 0; /* Status IE bit */
++}
++
+ static ALWAYS_INLINE void arch_nop(void)
+ {
+ 	__asm__ volatile ("nop");
+diff --git a/include/zephyr/arch/openrisc/irq.h b/include/zephyr/arch/openrisc/irq.h
+index 7841a18d3..8ae42c496 100644
+--- a/include/zephyr/arch/openrisc/irq.h
++++ b/include/zephyr/arch/openrisc/irq.h
+@@ -85,6 +85,15 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return key != 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	uint32_t sr;
++
++	sr = openrisc_read_spr(SPR_SR);
++	return (sr & SPR_SR_IRQ_MASK) == 0;
++}
++
+ /**
+  * @brief Enable interrupt on OpenRISC core.
+  *
+diff --git a/include/zephyr/arch/posix/arch.h b/include/zephyr/arch/posix/arch.h
+index 7e9e01929..dcfc27ff2 100644
+--- a/include/zephyr/arch/posix/arch.h
++++ b/include/zephyr/arch/posix/arch.h
+@@ -63,6 +63,12 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return key == false;
+ }
+ 
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	return posix_irqs_are_enabled();
++}
++
++
+ static ALWAYS_INLINE unsigned int arch_irq_lock(void)
+ {
+ 	return posix_irq_lock();
+diff --git a/include/zephyr/arch/posix/posix_soc_if.h b/include/zephyr/arch/posix/posix_soc_if.h
+index 42f0c6a2b..ddce75371 100644
+--- a/include/zephyr/arch/posix/posix_soc_if.h
++++ b/include/zephyr/arch/posix/posix_soc_if.h
+@@ -29,6 +29,7 @@ void posix_irq_disable(unsigned int irq);
+ int  posix_irq_is_enabled(unsigned int irq);
+ unsigned int posix_irq_lock(void);
+ void posix_irq_unlock(unsigned int key);
++int  posix_irqs_are_enabled(void);
+ void posix_irq_full_unlock(void);
+ int  posix_get_current_irq(void);
+ void posix_sw_set_pending_IRQ(unsigned int IRQn);
+diff --git a/include/zephyr/arch/riscv/arch.h b/include/zephyr/arch/riscv/arch.h
+index 5ce05114d..998b3cc23 100644
+--- a/include/zephyr/arch/riscv/arch.h
++++ b/include/zephyr/arch/riscv/arch.h
+@@ -289,6 +289,15 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ #endif
+ }
+ 
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	__asm__ volatile ("csrr %0, mstatus" : "=r" (key) : : "memory");
++	return (key & MSTATUS_IEN) != 0;
++}
++
++
+ static ALWAYS_INLINE void arch_nop(void)
+ {
+ 	__asm__ volatile("nop");
+diff --git a/include/zephyr/arch/rx/arch.h b/include/zephyr/arch/rx/arch.h
+index 95f82a787..fe4a0ac21 100644
+--- a/include/zephyr/arch/rx/arch.h
++++ b/include/zephyr/arch/rx/arch.h
+@@ -142,6 +142,15 @@ static inline bool arch_irq_unlocked(unsigned int key)
+ 	return key != 0;
+ }
+ 
++
++static inline bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	__asm__ volatile ("mvfc psw, %0" : "=r" (key));
++	return (key & 0x100) != 0; /* PSW_I flag is bit 8 */
++}
++
+ static ALWAYS_INLINE _cpu_t *arch_curr_cpu(void)
+ {
+ 	return &_kernel.cpus[0];
+diff --git a/include/zephyr/arch/sparc/arch.h b/include/zephyr/arch/sparc/arch.h
+index 34929a171..748896244 100644
+--- a/include/zephyr/arch/sparc/arch.h
++++ b/include/zephyr/arch/sparc/arch.h
+@@ -91,6 +91,15 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return key == 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	key = z_sparc_get_pil_inline();
++	return key == 0;
++}
++
+ static ALWAYS_INLINE void arch_nop(void)
+ {
+ 	__asm__ volatile ("nop");
+diff --git a/include/zephyr/arch/x86/arch.h b/include/zephyr/arch/x86/arch.h
+index 29a293234..455ae9218 100644
+--- a/include/zephyr/arch/x86/arch.h
++++ b/include/zephyr/arch/x86/arch.h
+@@ -278,6 +278,16 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return (key & 0x200) != 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	__asm__ volatile ("pushfl; popl %0" : "=g" (key) :: "memory");
++
++	return (key & 0x200) != 0;
++}
++
+ /**
+  * @brief read timestamp register, 32-bits only, unserialized
+  */
+diff --git a/include/zephyr/arch/x86/intel64/arch.h b/include/zephyr/arch/x86/intel64/arch.h
+index 8bf6f95ff..bb201cc24 100644
+--- a/include/zephyr/arch/x86/intel64/arch.h
++++ b/include/zephyr/arch/x86/intel64/arch.h
+@@ -63,6 +63,16 @@ static ALWAYS_INLINE unsigned int arch_irq_lock(void)
+ 	return (unsigned int) key;
+ }
+ 
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned long key;
++
++	__asm__ volatile ("pushfq; popq %0" : "=g" (key) : : "memory");
++
++	return (key & 0x200) != 0;
++}
++
++
+ #define ARCH_EXCEPT(reason_p) do { \
+ 	__asm__ volatile( \
+ 		"movq %[reason], %%rax\n\t" \
+diff --git a/include/zephyr/arch/xtensa/irq.h b/include/zephyr/arch/xtensa/irq.h
+index 9516f86c0..bea7bb58a 100644
+--- a/include/zephyr/arch/xtensa/irq.h
++++ b/include/zephyr/arch/xtensa/irq.h
+@@ -278,6 +278,16 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return (key & 0xf) == 0; /* INTLEVEL field */
+ }
+ 
++/** Implementation of @ref arch_cpu_irqs_are_enabled. */
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int key;
++
++	__asm__ volatile ("rsr.ps" : "=r" (key));
++	return (key & 0xf) == 0; /* INTLEVEL field */
++}
++
++
+ /**
+  * @brief Query if an interrupt is enabled on Xtensa core.
+  *

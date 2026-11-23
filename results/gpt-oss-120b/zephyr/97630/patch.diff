@@ -1,0 +1,89 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..f0cd779b
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,39 @@
++*** Begin Patch
++*** Update File: subsys/net/lib/sockets/sockets_tls.c
++@@
++ static int tls_opt_sec_tag_list_set(struct tls_context *context,
++ 		    const void *optval, socklen_t optlen)
++ {
++@@
++ 	memcpy(context->options.sec_tag_list.sec_tags, optval, optlen);
++ 	context->options.sec_tag_list.sec_tag_count = sec_tag_cnt;
++-
++-	return 0;
+++
+++	/* Validate the newly set credential tags immediately. The original
+++	 * implementation only stored the tags and deferred validation until the
+++	 * TLS context was prepared for a connection (see tls_mbedtls_set_credentials()).
+++	 * This deferred validation caused the socket option to succeed even when the
+++	 * referenced credentials were missing, malformed, or inconsistent (e.g. a PSK
+++	 * without a matching PSK ID). As a result, errors were only reported during the
+++	 * handshake, which is confusing for callers.
+++	 *
+++	 * By invoking tls_mbedtls_set_credentials() here we trigger the same
+++	 * validation logic used during connection setup. The function checks for the
+++	 * existence of each tag, ensures that credentials can be loaded (e.g. malformed
+++	 * certificates result in -EINVAL) and verifies PSK/ID pairs. If any validation
+++	 * fails we return the corresponding error code – the caller will see ENOENT for
+++	 * missing tags or EINVAL for invalid data.
+++	 *
+++	 * The credentials are also configured on the TLS context at this point, which
+++	 * is safe because subsequent connection attempts will simply reuse the already
+++	 * configured credentials.
+++	 */
+++	int err = tls_mbedtls_set_credentials(context);
+++	if (err != 0) {
+++		return err;
+++	}
+++
+++	return 0;
++ }
++*** End Patch
+diff --git a/subsys/net/lib/sockets/sockets_tls.c b/subsys/net/lib/sockets/sockets_tls.c
+index 6f4919dc..ec763357 100644
+--- a/subsys/net/lib/sockets/sockets_tls.c
++++ b/subsys/net/lib/sockets/sockets_tls.c
+@@ -1483,10 +1483,35 @@ static int tls_opt_sec_tag_list_set(struct tls_context *context,
+ 		return -EINVAL;
+ 	}
+ 
+-	memcpy(context->options.sec_tag_list.sec_tags, optval, optlen);
+-	context->options.sec_tag_list.sec_tag_count = sec_tag_cnt;
+-
+-	return 0;
++    memcpy(context->options.sec_tag_list.sec_tags, optval, optlen);
++    context->options.sec_tag_list.sec_tag_count = sec_tag_cnt;
++
++    /* Validate the newly set credential tags immediately. The original
++     * implementation only stored the tags and deferred validation until the
++     * TLS context was prepared for a connection (see tls_mbedtls_set_credentials()).
++     * This deferred validation caused the socket option to succeed even when the
++     * referenced credentials were missing, malformed, or inconsistent (e.g. a PSK
++     * without a matching PSK ID). As a result, errors were only reported during the
++     * handshake, which is confusing for callers.
++     *
++     * By invoking tls_mbedtls_set_credentials() here we trigger the same
++     * validation logic used during connection setup. The function checks for the
++     * existence of each tag, ensures that credentials can be loaded (e.g. malformed
++     * certificates result in -EINVAL) and verifies PSK/ID pairs. If any validation
++     * fails we return the corresponding error code u2013 the caller will see ENOENT for
++     * missing tags or EINVAL for invalid data.
++     *
++     * The credentials are also configured on the TLS context at this point, which
++     * is safe because subsequent connection attempts will simply reuse the already
++     * configured credentials.
++     */
++    struct tls_context tmp_ctx = *context;
++    int err = tls_mbedtls_set_credentials(&tmp_ctx);
++    if (err != 0) {
++        return err;
++    }
++
++    return 0;
+ }
+ 
+ static int sock_opt_protocol_get(struct tls_context *context,

@@ -1,0 +1,150 @@
+diff --git a/subsys/net/lib/dhcpv4/Kconfig b/subsys/net/lib/dhcpv4/Kconfig
+index e78dca260..bc35ad06f 100644
+--- a/subsys/net/lib/dhcpv4/Kconfig
++++ b/subsys/net/lib/dhcpv4/Kconfig
+@@ -109,9 +109,8 @@ config NET_DHCPV4_DNS_SERVER_VIA_INTERFACE
+ 	  Example: We receive DNS server 192.0.2.53 DHCPv4 option from Wi-Fi
+ 	  interface and DNS server 198.51.100.53 from Ethernet interface.
+ 	  When this option is set, the DNS resolver will use DNS server
+-	  192.0.2.53 when sending DNS query to the Wi-Fi interface and DNS
+-	  server 198.51.100.53 when sending DNS query to the Ethernet
+-	  interface.
++	  192.0.2.53 when sending DNS query to the Wi-Fi interface and
++	  198.51.100.53 when sending DNS query to the Ethernet interface.
+ 
+ config NET_DHCPV4_INIT_REBOOT
+ 	bool "Support INIT-REBOOT"
+@@ -129,8 +128,9 @@ config NET_DHCPV4_RESTART_ON_IF_UP
+ 	  Disable when an external software module automatically calls
+ 	  `net_dhcpv4_restart` when the interface is in the correct state to start
+ 	  binding, instead of running it internally on `NET_EVENT_IF_UP`. This prevents
+-	  the DHCP request from being sent before the interface is ready, for interfaces
+-	  where `NET_EVENT_IF_UP` does not mean it is ready to send arbitrary packets.
++	  the DHCP request from being sent before the interface is ready, for
++	  interfaces where `NET_EVENT_IF_UP` does not mean it is ready to send
++	  arbitrary packets.
+ 
+ endif # NET_DHCPV4
+ 
+@@ -179,7 +179,7 @@ config NET_DHCPV4_SERVER_ADDR_DECLINE_TIME
+ 	range 0 $(UINT32_MAX)
+ 	default 86400
+ 	help
+-	  In case IPv4 address becomes blocked (either because of receiving
++	  In case an IPv4 address becomes blocked (either because of receiving
+ 	  Decline message or due to ICMP probe detecting conflict), the address
+ 	  can no longer be assigned. This timeout specifies how long the address
+ 	  remains in the Declined state.
+@@ -228,4 +228,23 @@ config NET_DHCPV4_SERVER_OPTION_ROUTER
+ 	  disabled so that the client does not try to forward traffic to our
+ 	  device.
+ 
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL
++	bool "Set the captive portal URI option in the DHCP server response"
++	help
++	  If enabled, include DHCP option 114 (Captive-Portal URI) in Offer
++	  and Acknowledgment messages when the client requests it via the
++	  Parameter Request List (option 55). The URI is either taken from
++	  CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI if non-empty,
++	  or auto-built as http://<server-IPv4>/generate_204.
++
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI
++	string "Captive Portal URI"
++	depends on NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL
++	default ""
++	help
++	  The URI to include in DHCP option 114 (Captive-Portal URI). If
++	  this is empty, the server will auto-build the URI as
++	  http://<server-IPv4>/generate_204 where <server-IPv4> is the
++	  IPv4 address of the DHCP server interface.
++
+ endif # NET_DHCPV4_SERVER
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_internal.h b/subsys/net/lib/dhcpv4/dhcpv4_internal.h
+index e6aa02d98..7cee9bb19 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_internal.h
++++ b/subsys/net/lib/dhcpv4/dhcpv4_internal.h
+@@ -70,6 +70,7 @@ struct dhcp_msg {
+ #define DHCPV4_OPTIONS_REBINDING	59
+ #define DHCPV4_OPTIONS_VENDOR_CLASS_ID	60
+ #define DHCPV4_OPTIONS_CLIENT_ID	61
++#define DHCPV4_OPTIONS_CAPTIVE_PORTAL	114
+ #define DHCPV4_OPTIONS_END		255
+ 
+ /* Useful size macros */
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_server.c b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+index d4be6a5f5..3e757e036 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_server.c
++++ b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+@@ -440,6 +440,58 @@ static uint8_t *dhcpv4_encode_dns_server_option(uint8_t *buf, size_t *buflen)
+ 
+ 	return buf + DHCPV4_OPTIONS_DNS_SERVER_SIZE;
+ }
++static uint8_t *dhcpv4_encode_captive_portal_option(uint8_t *buf, size_t *buflen,
++						    struct net_in_addr *server_addr)
++{
++#if defined(CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL)
++	char uri[64];
++	size_t uri_len;
++
++	if (buf == NULL || *buflen < 3) {
++		return NULL;
++	}
++
++	/* Build the URI */
++	if (strlen(CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI) > 0) {
++		/* Use the configured URI */
++		uri_len = strlen(CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI);
++		if (uri_len > sizeof(uri) - 1) {
++			uri_len = sizeof(uri) - 1;
++		}
++		strncpy(uri, CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI, uri_len);
++	} else {
++		/* Auto-build the URI as http://<server-IPv4>/generate_204 */
++		char ip_buf[NET_INET_ADDRSTRLEN];
++		const char *ip_str;
++
++		ip_str = net_addr_ntop(NET_AF_INET, server_addr, ip_buf, sizeof(ip_buf));
++		if (ip_str == NULL) {
++			return NULL;
++		}
++		snprintk(uri, sizeof(uri), "http://%s/generate_204", ip_str);
++		uri_len = strlen(uri);
++	}
++
++	/* Check if we have enough space in the buffer */
++	if (*buflen < 2 + uri_len) {
++		return NULL;
++	}
++
++	buf[0] = DHCPV4_OPTIONS_CAPTIVE_PORTAL;
++	buf[1] = uri_len;
++	memcpy(&buf[2], uri, uri_len);
++
++	*buflen -= 2 + uri_len;
++
++	return buf + 2 + uri_len;
++#else
++	ARG_UNUSED(buf);
++	ARG_UNUSED(buflen);
++	ARG_UNUSED(server_addr);
++
++	return buf;
++#endif
++}
+ 
+ static uint8_t *dhcpv4_encode_end_option(uint8_t *buf, size_t *buflen)
+ {
+@@ -556,6 +608,13 @@ static uint8_t *dhcpv4_encode_requested_params(
+ 				goto out;
+ 			}
+ 			break;
++
++		case DHCPV4_OPTIONS_CAPTIVE_PORTAL:
++			buf = dhcpv4_encode_captive_portal_option(buf, buflen, &ctx->server_addr);
++			if (buf == NULL) {
++				goto out;
++			}
++			break;
+ 		/* Others - just ignore. */
+ 		default:
+ 			break;

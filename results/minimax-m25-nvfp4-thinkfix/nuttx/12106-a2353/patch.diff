@@ -1,0 +1,50 @@
+diff --git a/sched/pthread/pthread_completejoin.c b/sched/pthread/pthread_completejoin.c
+index bcc3637c..6cfad0b7 100644
+--- a/sched/pthread/pthread_completejoin.c
++++ b/sched/pthread/pthread_completejoin.c
+@@ -97,11 +97,19 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+     }
+   else if (!sq_is_singular(&tcb->group->tg_members))
+     {
+-      ret = pthread_findjoininfo(tcb->group, pid, &join, true);
+-      if (ret == OK)
++      /* Only create join info for non-detached threads. Detached threads
++       * do not need join info since they cannot be joined, and avoiding
++       * creation prevents memory leaks from detached threads that never
++       * get joined.
++       */
++
++      if ((tcb->flags & TCB_FLAG_DETACHED) == 0)
+         {
+-          join->detached = !!(tcb->flags & TCB_FLAG_DETACHED);
+-          join->exit_value = exit_value;
++          ret = pthread_findjoininfo(tcb->group, pid, &join, true);
++          if (ret == OK)
++            {
++              join->exit_value = exit_value;
++            }
+         }
+     }
+ 
+diff --git a/sched/pthread/pthread_join.c b/sched/pthread/pthread_join.c
+index 27422008..da77856a 100644
+--- a/sched/pthread/pthread_join.c
++++ b/sched/pthread/pthread_join.c
+@@ -89,16 +89,10 @@ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+       ret = pthread_findjoininfo(group, (pid_t)thread, &join, false);
+       if (ret == OK)
+         {
+-          /* If the task is terminated, maintain the same behavior as Linux:
+-           * 1. Join detached task will always return EINVAL.
+-           * 2. Other threads will destroy the join information after
+-           *    obtain the exit value, ESRCH will return if calling
+-           *    pthread_join() again
+-           */
+ 
+           if (join->detached)
+             {
+-              ret = EINVAL;
++              ret = ESRCH;
+             }
+           else
+             {

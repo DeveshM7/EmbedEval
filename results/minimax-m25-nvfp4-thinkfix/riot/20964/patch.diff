@@ -1,0 +1,258 @@
+diff --git a/sys/include/shell.h b/sys/include/shell.h
+index 848c3ecb..af30783c 100644
+--- a/sys/include/shell.h
++++ b/sys/include/shell.h
+@@ -180,6 +180,11 @@ typedef struct {
+     shell_command_handler_t handler; /**< The callback function. */
+ } shell_command_xfa_t;
+ #endif /* __cplusplus */
++/**
++ * @brief Shell commands cross-file array
++ */
++XFA_USE_CONST(shell_command_xfa_t*, shell_commands_xfa);
++
+ 
+ /**
+  * @brief           Start a shell and exit once EOF is reached.
+diff --git a/sys/include/shell_help_json.h b/sys/include/shell_help_json.h
+new file mode 100644
+index 00000000..7bffdca9
+--- /dev/null
++++ b/sys/include/shell_help_json.h
+@@ -0,0 +1,36 @@
++/*
++ * Copyright (C) 2024 RIOT community
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @file
++ * @brief       Shell help_json command
++ *
++ * @author      RIOT community
++ */
++
++#ifndef SHELL_HELP_JSON_H
++#define SHELL_HELP_JSON_H
++
++#include "shell.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Print the list of available shell commands as JSON
++ *
++ * @param command_list  The dynamic command list passed to the shell
++ */
++void shell_help_json_print(const shell_command_t *command_list);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_HELP_JSON_H */
+diff --git a/sys/shell/Makefile b/sys/shell/Makefile
+index 48422e90..dffbdea7 100644
+--- a/sys/shell/Makefile
++++ b/sys/shell/Makefile
+@@ -1 +1,9 @@
++MODULE = shell
++
++ifdef DIRS
++  DIRS += builtin_cmd/help_json
++else
++  DIRS = builtin_cmd/help_json
++endif
++
+ include $(RIOTBASE)/Makefile.base
+diff --git a/sys/shell/Makefile.dep b/sys/shell/Makefile.dep
+index 2a862135..82d9c528 100644
+--- a/sys/shell/Makefile.dep
++++ b/sys/shell/Makefile.dep
+@@ -291,3 +291,7 @@ ifneq (,$(filter shell_democommands,$(USEMODULE)))
+   USEMODULE += rust_riotmodules
+   USEMODULE += shell
+ endif
++
++ifneq (,$(filter shell_builtin_cmd_help_json,$(USEMODULE)))
++  DIRS += builtin_cmd/help_json
++endif
+diff --git a/sys/shell/builtin_cmd/help_json/Makefile b/sys/shell/builtin_cmd/help_json/Makefile
+new file mode 100644
+index 00000000..6d5b9ee1
+--- /dev/null
++++ b/sys/shell/builtin_cmd/help_json/Makefile
+@@ -0,0 +1,3 @@
++MODULE = shell_builtin_cmd_help_json
++
++include $(RIOTBASE)/Makefile.base
+diff --git a/sys/shell/builtin_cmd/help_json/shell_help_json.c b/sys/shell/builtin_cmd/help_json/shell_help_json.c
+new file mode 100644
+index 00000000..4fb8bacd
+--- /dev/null
++++ b/sys/shell/builtin_cmd/help_json/shell_help_json.c
+@@ -0,0 +1,81 @@
++/*
++ * Copyright (C) 2024 RIOT community
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @file
++ * @brief       Shell help_json command implementation
++ *
++ * @author      RIOT community
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdbool.h>
++
++#include "shell.h"
++#include "shell_help_json.h"
++#include "xfa.h"
++#include "flash_utils.h"
++
++static void _print_command_json(FLASH_ATTR const char *name, FLASH_ATTR const char *desc, bool first)
++{
++    if (!first) {
++        printf(",");
++    }
++    /* We need to copy flash strings to RAM for printing */
++    /* For simplicity, we use printf with %s which expects RAM strings */
++    /* This is a limitation - in production, would need to copy to buffer */
++    printf("{\"cmd\":\"");
++
++    /* Print name char by char from flash */
++    while (*name) {
++        printf("%c", *name);
++        name++;
++    }
++    printf("\",\"desc\":\"");
++
++    /* Print desc char by char from flash */
++    while (*desc) {
++        printf("%c", *desc);
++        desc++;
++    }
++    printf("\"}");
++}
++
++void shell_help_json_print(const shell_command_t *command_list)
++{
++    bool first = true;
++    
++    printf("{\"cmds\":[");
++    
++    /* Print commands from the dynamic command_list (RAM) */
++    if (command_list != NULL) {
++        for (const shell_command_t *entry = command_list; entry->name != NULL; entry++) {
++            /* Skip "help" and "help_json" commands */
++            if (strcmp(entry->name, "help") == 0 || strcmp(entry->name, "help_json") == 0) {
++                continue;
++            }
++            _print_command_json(entry->name, entry->desc, first);
++            first = false;
++        }
++    }
++    
++    /* Print commands from XFA (flash) */
++    unsigned n = XFA_LEN(shell_command_xfa_t*, shell_commands_xfa);
++    for (unsigned i = 0; i < n; i++) {
++        const volatile shell_command_xfa_t *entry = shell_commands_xfa[i];
++        /* Skip "help" and "help_json" commands */
++        if (flash_strcmp("help", entry->name) == 0 || flash_strcmp("help_json", entry->name) == 0) {
++            continue;
++        }
++        _print_command_json(entry->name, entry->desc, first);
++        first = false;
++    }
++    
++    printf("]}\n");
++}
+diff --git a/sys/shell/builtin_cmd/help_json/shell_help_json.h b/sys/shell/builtin_cmd/help_json/shell_help_json.h
+new file mode 100644
+index 00000000..7bffdca9
+--- /dev/null
++++ b/sys/shell/builtin_cmd/help_json/shell_help_json.h
+@@ -0,0 +1,36 @@
++/*
++ * Copyright (C) 2024 RIOT community
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @file
++ * @brief       Shell help_json command
++ *
++ * @author      RIOT community
++ */
++
++#ifndef SHELL_HELP_JSON_H
++#define SHELL_HELP_JSON_H
++
++#include "shell.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Print the list of available shell commands as JSON
++ *
++ * @param command_list  The dynamic command list passed to the shell
++ */
++void shell_help_json_print(const shell_command_t *command_list);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_HELP_JSON_H */
+diff --git a/sys/shell/shell.c b/sys/shell/shell.c
+index 90dcaceb..f6f15fc9 100644
+--- a/sys/shell/shell.c
++++ b/sys/shell/shell.c
+@@ -41,6 +41,8 @@
+ #include "shell.h"
+ #include "shell_lock.h"
+ 
++#include "shell_help_json.h"
++
+ #ifdef MODULE_VFS
+ #include <fcntl.h>
+ #include "vfs.h"
+@@ -146,6 +148,11 @@ static void print_commands_xfa(void)
+     }
+ }
+ 
++__attribute__((weak)) void shell_help_json_print(const shell_command_t *command_list)
++{
++    (void)command_list;
++}
++
+ static void print_help(const shell_command_t *command_list)
+ {
+     printf("Command              Description\n"
+@@ -343,6 +350,10 @@ int shell_handle_input_line(const shell_command_t *command_list, char *line)
+             print_help(command_list);
+             return 0;
+         }
++        else if (IS_USED(MODULE_SHELL_BUILTIN_CMD_HELP_JSON) && strcmp("help_json", argv[0]) == 0) {
++            shell_help_json_print(command_list);
++            return 0;
++        }
+         else {
+             printf("shell: command not found: %s\n", argv[0]);
+         }

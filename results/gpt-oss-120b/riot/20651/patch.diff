@@ -1,0 +1,227 @@
+diff --git a/sys/include/shell.h b/sys/include/shell.h
+index 7a9dac81..3a9e5342 100644
+--- a/sys/include/shell.h
++++ b/sys/include/shell.h
+@@ -271,5 +271,32 @@ static inline void shell_run(const shell_command_t *commands,
+ }
+ #endif
+ 
++
++/**
++ * @brief Execute a script file line by line using the provided command table.
++ *
++ * The file at @p filename is read line by line. Empty lines and lines whose
++ * first non\u2011whitespace character is `#` are ignored. All other lines are
++ * executed as a shell command using the same parsing rules as the interactive
++ * shell (quoting, escaping, …). If a command handler returns a non\u2011zero value,
++ * execution stops and the function returns the *negative* of that value. The
++ * 1\u2011based line number of the failing command is stored in the unsigned integer
++ * pointed to by @p line.
++ *
++ * Errors specific to this helper are:
++ *   - `-1` – generic I/O error (cannot open or read the file).
++ *   - `-7` – a line exceeds the internal line buffer (see SHELL_DEFAULT_BUFSIZE).
++ * In those error cases the line number of the offending line is stored in
++ * @p line as well.
++ *
++ * @param[in]  commands  Table of shell commands that can be executed.
++ * @param[in]  filename  Path to the script file.
++ * @param[out] line      Pointer to an unsigned integer that receives the line
++ *                       number (1\u2011based) of the failing command.
++ * @return 0 on success, a negative error code otherwise.
++ */
++int shell_parse_file(const shell_command_t *commands,
++                     const char *filename,
++                     unsigned *line);
+ #endif /* SHELL_H */
+ /** @} */
+diff --git a/sys/shell/shell.c.tmp b/sys/shell/shell.c.tmp
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/sys/shell/shell_parse.c b/sys/shell/shell_parse.c
+new file mode 100644
+index 00000000..002dcb44
+--- /dev/null
++++ b/sys/shell/shell_parse.c
+@@ -0,0 +1,181 @@
++/*
++ * Copyright (C) 2024 Embedded Task
++ *
++ * This file implements a helper that executes a script file line by line
++ * using the RIOT shell command table.  The implementation is a lightweight
++ * copy of the parsing logic used by the interactive shell (see
++ * `handle_input_line` in `shell.c`).  It deliberately avoids pulling the whole
++ * interactive loop in order to keep the function usable from unit tests.
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdbool.h>
++
++#include "shell.h"
++
++/* Re‑declare the parsing state constants that are internal to `shell.c`.  The
++ * values are taken from the original source to guarantee compatible behaviour.
++ */
++enum parse_state {
++    PARSE_BLANK             = 0x0,
++
++    PARSE_UNQUOTED          = 0x1,
++    PARSE_SINGLEQUOTE       = 0x2,
++    PARSE_DOUBLEQUOTE       = 0x3,
++
++    PARSE_UNQUOTED_ESC      = 0x5,
++    PARSE_SINGLEQUOTE_ESC   = 0x6,
++    PARSE_DOUBLEQUOTE_ESC   = 0x7,
++};
++
++/**
++ * @brief Execute a script file line by line.
++ *
++ * The implementation follows the specification given in the task description.
++ * Errors:
++ *   -1  generic I/O error (cannot open or read the file)
++ *   -7  a line exceeds @ref SHELL_DEFAULT_BUFSIZE
++ * The function returns the negative value of a command's return code on failure.
++ */
++int shell_parse_file(const shell_command_t *commands,
++                     const char *filename,
++                     unsigned *line)
++{
++    if (line) {
++        *line = 0;
++    }
++
++    FILE *f = fopen(filename, "r");
++    if (!f) {
++        return -1;
++    }
++
++    char buf[SHELL_DEFAULT_BUFSIZE];
++    unsigned lineno = 0;
++
++    while (1) {
++        if (fgets(buf, sizeof(buf), f) == NULL) {
++            if (feof(f)) {
++                break; /* normal end of file */
++            }
++            fclose(f);
++            if (line) { *line = lineno + 1; }
++            return -1; /* read error */
++        }
++        lineno++;
++
++        size_t len = strlen(buf);
++        /* Detect a line that does not fit into the buffer (no terminating '\n') */
++        if (len == sizeof(buf) - 1 && buf[len - 1] != '\n') {
++            fclose(f);
++            if (line) { *line = lineno; }
++            return -7;
++        }
++        /* Strip trailing newline */
++        if (len && buf[len - 1] == '\n') {
++            buf[--len] = '\0';
++        }
++
++        /* Skip leading whitespace */
++        char *p = buf;
++        while (*p == ' ' || *p == '\t') {
++            p++;
++        }
++        /* Ignore empty or comment lines */
++        if (*p == '\0' || *p == '#') {
++            continue;
++        }
++
++        /* Create a mutable copy for the parser */
++        char linebuf[SHELL_DEFAULT_BUFSIZE];
++        strncpy(linebuf, p, sizeof(linebuf) - 1);
++        linebuf[sizeof(linebuf) - 1] = '\0';
++
++        /* ---- argument counting (same algorithm as `handle_input_line`) ---- */
++        int argc = 0;
++        char *readpos = linebuf;
++        char *writepos = readpos;
++        uint8_t pstate = PARSE_BLANK;
++        for (; *readpos != '\0'; readpos++) {
++            switch (pstate) {
++                case PARSE_BLANK:
++                    if (*readpos != ' ' && *readpos != '\t') {
++                        argc++;
++                    }
++                    if (*readpos == '\'') { pstate = PARSE_SINGLEQUOTE; }
++                    else if (*readpos == '"') { pstate = PARSE_DOUBLEQUOTE; }
++                    else if (*readpos == '\\') { pstate = PARSE_UNQUOTED_ESC; }
++                    else if (*readpos != ' ' && *readpos != '\t') {
++                        pstate = PARSE_UNQUOTED;
++                        *writepos++ = *readpos;
++                    }
++                    break;
++                case PARSE_UNQUOTED:
++                    if (*readpos == '\'') { pstate = PARSE_SINGLEQUOTE; }
++                    else if (*readpos == '"') { pstate = PARSE_DOUBLEQUOTE; }
++                    else if (*readpos == ' ' || *readpos == '\t') { pstate = PARSE_BLANK; }
++                    else if (*readpos == '\\') { pstate = PARSE_UNQUOTED_ESC; }
++                    else { *writepos++ = *readpos; }
++                    break;
++                case PARSE_UNQUOTED_ESC:
++                    *writepos++ = *readpos;
++                    pstate = PARSE_UNQUOTED;
++                    break;
++                case PARSE_SINGLEQUOTE:
++                    if (*readpos == '\'') { pstate = PARSE_UNQUOTED; }
++                    else if (*readpos == '\\') { pstate = PARSE_SINGLEQUOTE_ESC; }
++                    else { *writepos++ = *readpos; }
++                    break;
++                case PARSE_SINGLEQUOTE_ESC:
++                    *writepos++ = *readpos;
++                    pstate = PARSE_SINGLEQUOTE;
++                    break;
++                case PARSE_DOUBLEQUOTE:
++                    if (*readpos == '"') { pstate = PARSE_UNQUOTED; }
++                    else if (*readpos == '\\') { pstate = PARSE_DOUBLEQUOTE_ESC; }
++                    else { *writepos++ = *readpos; }
++                    break;
++                case PARSE_DOUBLEQUOTE_ESC:
++                    *writepos++ = *readpos;
++                    pstate = PARSE_DOUBLEQUOTE;
++                    break;
++                default:
++                    break;
++            }
++        }
++
++        /* Build argv array */
++        char *argv[argc + 1];
++        int i = 0;
++        readpos = linebuf;
++        for (i = 0; i < argc; i++) {
++            argv[i] = readpos;
++            readpos += strlen(readpos) + 1;
++        }
++        argv[argc] = NULL;
++
++        /* Find and execute the command */
++        shell_command_handler_t handler = find_handler(commands, argv[0]);
++        int ret = 0;
++        if (handler) {
++            ret = handler(argc, argv);
++        } else {
++            if (strcmp(argv[0], "help") == 0) {
++                print_help(commands);
++            } else {
++                printf("shell: command not found: %s\n", argv[0]);
++            }
++            ret = 0;
++        }
++        if (ret != 0) {
++            fclose(f);
++            if (line) { *line = lineno; }
++            return -ret;
++        }
++    }
++
++    fclose(f);
++    return 0;
++}
++

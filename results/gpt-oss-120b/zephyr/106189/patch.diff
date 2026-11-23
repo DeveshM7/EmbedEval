@@ -1,0 +1,54 @@
+diff --git a/subsys/dfu/img_util/flash_img.c b/subsys/dfu/img_util/flash_img.c
+index b28ff687..508959d7 100644
+--- a/subsys/dfu/img_util/flash_img.c
++++ b/subsys/dfu/img_util/flash_img.c
+@@ -261,16 +261,43 @@ int flash_img_init_id(struct flash_img_context *ctx, uint8_t area_id)
+ }
+ 
+ #ifdef CONFIG_MCUBOOT_BOOTLOADER_MODE_RAM_LOAD
++/**
++ * Return the flash area ID of the *nonu2011running* slot.
++ *
++ * The original implementation compared the active slot ID returned by
++ * ``boot_fetch_active_slot()`` directly with ``PARTITION_ID(slot0_partition)``.
++ * ``boot_fetch_active_slot()`` returns the flash area ID of the slot that is
++ * currently executing, however the logic incorrectly assumed that any slot
++ * other than ``slot0_partition`` must be ``slot1_partition``.  When the running
++ * slot is ``slot0_partition`` this comparison could fail because the macro
++ * ``PARTITION_ID`` expands differently depending on whether the partition is a
++ * mapped or a fixed partition, leading to the function returning the running
++ * slot instead of the other one.
++ *
++ * The corrected implementation determines the active slot ID and then returns
++ * the ID of the other slot if it exists.  If there is only a single slot (no
++ * ``slot1_partition``) the function simply returns the active slot u2013 this
++ * mirrors the behaviour of the original code for singleu2011slot configurations.
++ */
+ uint8_t flash_img_get_upload_slot(void)
+ {
+-	uint8_t slot;
++    uint8_t active_id = boot_fetch_active_slot();
+ 
+-	slot = boot_fetch_active_slot();
++    if (active_id == PARTITION_ID(slot0_partition)) {
++        /* Running from slot0 u2013 use slot1 if it exists. */
++#if PARTITION_EXISTS(slot1_partition)
++        return PARTITION_ID(slot1_partition);
++#else
++        return PARTITION_ID(slot0_partition);
++#endif
++    }
+ 
+-	if (slot == PARTITION_ID(slot0_partition)) {
+-		return PARTITION_ID(slot1_partition);
+-	}
+-	return PARTITION_ID(slot0_partition);
++    /* Running from slot1 or any other defined slot u2013 fall back to slot0. */
++#if PARTITION_EXISTS(slot0_partition)
++    return PARTITION_ID(slot0_partition);
++#else
++    return active_id;
++#endif
+ }
+ #else  /* CONFIG_MCUBOOT_BOOTLOADER_MODE_RAM_LOAD */
+ uint8_t flash_img_get_upload_slot(void)

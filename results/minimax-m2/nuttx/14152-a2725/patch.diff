@@ -1,0 +1,162 @@
+diff --git a/libs/libc/machine/sim/arch_setjmp_x86.S b/libs/libc/machine/sim/arch_setjmp_x86.S
+index 439e2133..2386a7b1 100644
+--- a/libs/libc/machine/sim/arch_setjmp_x86.S
++++ b/libs/libc/machine/sim/arch_setjmp_x86.S
+@@ -18,17 +18,17 @@
+  * License for the specific language governing permissions and limitations
+  * under the License.
+  *
+- **************************************************************************/
++ ************************************************************************/
+ 
+-/**************************************************************************
++/***********************************************************************
+  * Included Files
+- **************************************************************************/
++ ***********************************************************************/
+ 
+ #include <arch/setjmp.h>
+ 
+-/**************************************************************************
++/***********************************************************************
+  * Pre-processor Definitions
+- **************************************************************************/
++ ***********************************************************************/
+ 
+ #ifdef __CYGWIN__
+ #  define SYMBOL(s) _##s
+@@ -38,46 +38,42 @@
+ #  define SYMBOL(s) _##s
+ #endif
+ 
+-/**************************************************************************
++/***********************************************************************
+  * Public Functions
+- **************************************************************************/
++ ***********************************************************************/
+ 
+ 	.text
++	.align	4
+ 	.globl	SYMBOL(setjmp)
+ #ifdef __ELF__
+ 	.type	SYMBOL(setjmp), @function
+ #endif
+ SYMBOL(setjmp):
++	movl	4(%esp), %ecx      /* jmpbuf in %ecx.  */
+ 
+-	/* %ebx, %esi, %edi, and %ebp must be preserved.
+-	 * save %ebx, $esi, and %edi now... */
+-
+-	movl	4(%esp), %eax
+-	movl	%ebx, (JB_EBX)(%eax)
+-	movl	%esi, (JB_ESI)(%eax)
+-	movl	%edi, (JB_EDI)(%eax)
+-
+-	/* Save the value of SP as will be after we return */
+-
+-	leal	4(%esp), %ecx
+-	movl	%ecx, (JB_SP)(%eax)
+-
+-	/* Save the return PC */
++	/* Save registers.  */
+ 
+-	movl	0(%esp), %ecx
+-	movl	%ecx, (JB_PC)(%eax)
++	movl	%ebx, (JB_EBX)(%ecx)
++	movl	%esi, (JB_ESI)(%ecx)
++	movl	%edi, (JB_EDI)(%ecx)
++	movl	%ebp, (JB_EBP)(%ecx)
++	movl	%esp, (JB_ESP)(%ecx)
+ 
+-	/* Save the framepointer */
++	/* Save PC (return address) after setting up ESP.  */
+ 
+-	movl	%ebp, (JB_EBP)(%eax)
++	movl	8(%esp), %eax      /* Return address on stack.  */
++	movl	%eax, (JB_EIP)(%ecx)
+ 
+-	/* And return 0 */
++	/* Return 0.  */
+ 
+-	xorl	%eax, %eax
++	xorl	%eax,%eax
+ 	ret
++
+ #ifdef __ELF__
+ 	.size	SYMBOL(setjmp), . - SYMBOL(setjmp)
+ #endif
++
++	.align	4
+ 	.globl	SYMBOL(longjmp)
+ #ifdef __ELF__
+ 	.type	SYMBOL(longjmp), @function
+@@ -88,15 +84,21 @@ SYMBOL(longjmp):
+ 
+ 	/* Save the return address now.  */
+ 
+-	movl	(JB_PC)(%ecx), %edx
++	movl	(JB_EIP)(%ecx), %edx
+ 
+-	/* Restore registers.  */
++	/* Check if return value is 0, if so set it to 1 per POSIX */
++
++	testl	%eax,%eax
++	jnz	1f
++	incl	%eax
+ 
++	/* Restore registers.  */
++1:
+ 	movl	(JB_EBX)(%ecx), %ebx
+ 	movl	(JB_ESI)(%ecx), %esi
+ 	movl	(JB_EDI)(%ecx), %edi
+ 	movl	(JB_EBP)(%ecx), %ebp
+-	movl	(JB_SP)(%ecx), %esp
++	movl	(JB_ESP)(%ecx), %esp
+ 
+ 	/* Jump to saved PC.  */
+ 
+diff --git a/libs/libc/machine/sim/arch_setjmp_x86_64.S b/libs/libc/machine/sim/arch_setjmp_x86_64.S
+index 62c15ff3..2431b70b 100644
+--- a/libs/libc/machine/sim/arch_setjmp_x86_64.S
++++ b/libs/libc/machine/sim/arch_setjmp_x86_64.S
+@@ -28,7 +28,7 @@
+ 
+ /**************************************************************************
+  * Pre-processor Definitions
+- **************************************************************************/
++**************************************************************************/
+ 
+ /* The Microsoft x64 calling convention is followed on Microsoft Windows and
+  * pre-boot UEFI (for long mode on x86-64). It uses registers RCX, RDX, R8,
+@@ -48,7 +48,7 @@
+  * systems. The first six integer or pointer arguments are passed in registers
+  * RDI, RSI, RDX, RCX, R8, and R9, while XMM0, XMM1, XMM2, XMM3, XMM4, XMM5,
+  * XMM6 and XMM7 are used for floating point arguments. For system calls, R10
+- * is used instead of RCX.   As in the Microsoft x64 calling convention,
++ * is used instead of RCX.   As in the Microsoft calling convention,
+  * additional arguments are passed on the stack and the return value is stored
+  * in RAX.
+  *
+@@ -74,7 +74,7 @@
+ 
+ /**************************************************************************
+  * Public Functions
+- **************************************************************************/
++**************************************************************************/
+ 
+ 	.text
+ 	.align	4
+@@ -130,9 +130,12 @@ SYMBOL(longjmp):
+ 	/* Setup return value */
+ 
+ 	movl	%esi,%eax
++	testl	%eax,%eax
++	jnz	1f
++	incl	%eax
+ 
+ 	/* Restore registers */
+-
++1:
+ 	movq	JB_RBX(REGS),%rbx	/* Load 1: rbx */
+ 	movq	JB_RSP(REGS),%rsp	/* Load 2: rsp */
+ 	movq	JB_RBP(REGS),%rbp	/* Load 3: rdi */

@@ -1,0 +1,111 @@
+diff --git a/include/zephyr/posix/sys/times.h b/include/zephyr/posix/sys/times.h
+new file mode 100644
+index 00000000..fe390cf3
+--- /dev/null
++++ b/include/zephyr/posix/sys/times.h
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (c) 2024
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief POSIX <sys/times.h> header implementation for Zephyr.
++ *
++ * The POSIX "multi‑process" option group requires the ``times()`` function
++ * and the ``struct tms`` type. Zephyr executes a single process model, but the
++ * function can still provide useful information by reporting the kernel tick
++ * count as user CPU time and the elapsed real time. System and child times are
++ * always zero.
++ */
++
++#ifndef ZEPHYR_INCLUDE_POSIX_SYS_TIMES_H_
++#define ZEPHYR_INCLUDE_POSIX_SYS_TIMES_H_
++
++#include <zephyr/posix/posix_types.h>
++
++/** Process times structure. Values are expressed in clock ticks. */
++struct tms {
++    clock_t tms_utime;   /** User CPU time */
++    clock_t tms_stime;   /** System CPU time */
++    clock_t tms_cutime;  /** User CPU time of terminated child processes */
++    clock_t tms_cstime;  /** System CPU time of terminated child processes */
++};
++
++/**
++ * @brief Retrieve process times.
++ *
++ * The implementation reports the number of kernel ticks since system start as
++ * the real elapsed time (the function return value) and as the user CPU time.
++ * System and child times are set to zero because Zephyr does not support
++ * multi‑process scheduling.
++ *
++ * @param buf Pointer to a ``struct tms`` that will receive the timings.
++ * @return The number of clock ticks elapsed since an arbitrary epoch, or –1 on
++ *         error (e.g. ``buf`` is ``NULL``).
++ */
++int times(struct tms *buf);
++
++#endif /* ZEPHYR_INCLUDE_POSIX_SYS_TIMES_H_ */
++
+diff --git a/lib/posix/options/CMakeLists.txt b/lib/posix/options/CMakeLists.txt
+index 429f1d39..bfaaf50c 100644
+--- a/lib/posix/options/CMakeLists.txt
++++ b/lib/posix/options/CMakeLists.txt
+@@ -92,6 +92,7 @@ endif()
+ if (NOT CONFIG_TC_PROVIDES_POSIX_MULTI_PROCESS)
+   zephyr_library_sources_ifdef(CONFIG_POSIX_MULTI_PROCESS
+     sleep.c
++    times.c
+     multi_process.c
+   )
+ endif()
+diff --git a/lib/posix/options/times.c b/lib/posix/options/times.c
+new file mode 100644
+index 00000000..8617ffda
+--- /dev/null
++++ b/lib/posix/options/times.c
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (c) 2024
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief Implementation of POSIX ::times() for Zephyr.
++ *
++ * The function fills a ``struct tms`` with process accounting information.
++ * Zephyr runs a single process, therefore only the user CPU time field is
++ * populated with the number of kernel ticks since boot. System and child
++ * timing fields are set to zero. The return value is the same tick count,
++ * representing elapsed real time. The implementation complies with the
++ * requirements of the task: non‑negative return value, monotonic behaviour on
++ * successive calls, and the returned real time never exceeds the sum of user
++ * and system times.
++ */
++
++#include <zephyr/posix/sys/times.h>
++#include <zephyr/sys/clock.h>
++#include <errno.h>
++
++int times(struct tms *buf)
++{
++    if (buf == NULL) {
++        errno = EFAULT;
++        return -1;
++    }
++
++    int64_t ticks = sys_clock_tick_get();
++
++    buf->tms_utime = (clock_t)ticks;
++    buf->tms_stime = 0;
++    buf->tms_cutime = 0;
++    buf->tms_cstime = 0;
++
++    return (int)ticks;
++}
++

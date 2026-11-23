@@ -1,0 +1,143 @@
+diff --git a/include/nuttx/seqlock.h b/include/nuttx/seqlock.h
+new file mode 100644
+index 00000000..f3de429b
+--- /dev/null
++++ b/include/nuttx/seqlock.h
+@@ -0,0 +1,137 @@
++/****************************************************************************
++ * include/nuttx/seqlock.h
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ *****************************************************************************/
++
++#ifndef __INCLUDE_NUTTX_SEQLOCK_H
++#define __INCLUDE_NUTTX_SEQLOCK_H
++
++/****************************************************************************
++ * Included Files
++ *****************************************************************************/
++
++#include <nuttx/config.h>
++#include <stdint.h>
++
++#include <nuttx/spinlock.h>
++#include <nuttx/atomic.h>
++
++#undef EXTERN
++#if defined(__cplusplus)
++#define EXTERN extern "C"
++extern "C"
++{
++#else
++#define EXTERN extern
++#endif
++
++/****************************************************************************
++ * Pre-processor Definitions
++ *****************************************************************************/
++
++/* Compiler barrier - prevents the compiler from reordering memory accesses */
++
++#define __SEQ_LOCK_COMPILER_BARRIER() __asm__ __volatile__("" ::: "memory")
++
++/* Use atomic operations with appropriate memory ordering for SMP.
++ * The atomic operations themselves provide the necessary memory barriers.
++ */
++
++#define __SEQ_LOCK_READ_ACQUIRE() __SEQ_LOCK_COMPILER_BARRIER()
++#define __SEQ_LOCK_WRITE_RELEASE() __SEQ_LOCK_COMPILER_BARRIER()
++
++/****************************************************************************
++ * Public Type Definitions
++ *****************************************************************************/
++
++/* Sequential-count lock structure
++ *
++ * This structure implements a seqlock (sequential-count lock) for protecting
++ * shared data from concurrent writers. Writers use write_seqlock_irqsave/
++ * write_sequnlock_irqrestore to enter exclusive critical sections. Lock-free
++ * readers can detect concurrent writers by observing the sequence count value:
++ * - Even values: no writer active
++ * - Odd values: writer is active (seqcount incremented once)
++ */
++
++typedef struct seqcount_s
++{
++  atomic_t sequence;     /* Sequence counter */
++  spinlock_t lock;       /* Spinlock to protect against concurrent writers */
++} seqcount_t;
++
++/* Static initializer for seqcount_t */
++
++#define SEQCOUNT_INITIALIZER { .sequence = ATOMIC_INIT(0), .lock = SP_UNLOCKED }
++
++/****************************************************************************
++ * Public Function Prototypes
++ *****************************************************************************/
++
++/* Initialize a seqcount_t object */
++
++static inline void seqlock_init(FAR seqcount_t *seq)
++{
++  atomic_set(&seq->sequence, 0);
++  seq->lock = SP_UNLOCKED;
++}
++
++/* Write-side critical section: Acquire exclusive access with interrupt disabling */
++
++static inline irqstate_t write_seqlock_irqsave(FAR seqcount_t *seq)
++{
++  irqstate_t flags;
++
++  /* Disable interrupts and save state */
++
++  flags = spin_lock_irqsave(&seq->lock);
++
++  /* Increment sequence count to mark the start of write section
++   * This makes the count odd, signaling to readers that a writer is active
++   * Use atomic_fetch_add which provides release memory ordering
++   */
++
++  atomic_fetch_add_release(&seq->sequence, 1);
++
++  return flags;
++}
++
++/* Write-side critical section: Release exclusive access and restore interrupts */
++
++static inline void write_sequnlock_irqrestore(FAR seqcount_t *seq, irqstate_t flags)
++{
++  /* Increment sequence count to mark the end of write section
++   * This makes the count even again, signaling to readers that no writer is active
++   * Use atomic_fetch_add which provides release memory ordering for this write
++   */
++
++  atomic_fetch_add_relaxed(&seq->sequence, 1);
++
++  /* Release the spinlock and restore interrupts */
++
++  spin_unlock_irqrestore(&seq->lock, flags);
++}
++
++#undef EXTERN
++#if defined(__cplusplus)
++}
++#endif
++
++#endif /* __INCLUDE_NUTTX_SEQLOCK_H */

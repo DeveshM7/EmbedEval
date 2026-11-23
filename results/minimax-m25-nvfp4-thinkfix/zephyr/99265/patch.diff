@@ -1,0 +1,55 @@
+diff --git a/include/zephyr/rtio/rtio.h b/include/zephyr/rtio/rtio.h
+index 74302ccb..02eaff5b 100644
+--- a/include/zephyr/rtio/rtio.h
++++ b/include/zephyr/rtio/rtio.h
+@@ -1112,6 +1112,50 @@ static inline struct rtio_sqe *rtio_sqe_acquire(struct rtio *r)
+ 	return &iodev_sqe->sqe;
+ }
+ 
++/**
++ * @brief Acquire multiple submission queue events in a batch
++ *
++ * @param r RTIO context
++ * @param n Number of submission queue events to acquire
++ * @param sqes Array to store acquired submission queue events (can be NULL)
++ *
++ * @retval 0 On success, the context's SQE pool had at least n free events
++ * @retval -ENOMEM When the pool cannot supply the full request
++ *
++ * @note On failure, no events will be left acquired (all already acquired
++ *       events will be released back to the pool)
++ */
++static inline int rtio_sqe_acquire_array(struct rtio *r, size_t n, struct rtio_sqe **sqes)
++{
++	if (r->sqe_pool->pool_free < n) {
++		return -ENOMEM;
++	}
++
++	for (size_t i = 0; i < n; i++) {
++		struct rtio_iodev_sqe *iodev_sqe = rtio_sqe_pool_alloc(r->sqe_pool);
++
++		if (iodev_sqe == NULL) {
++			/* Release all already acquired back to pool */
++			if (sqes != NULL) {
++				for (size_t j = 0; j < i; j++) {
++					struct rtio_iodev_sqe *as = (struct rtio_iodev_sqe *)sqes[j];
++					rtio_sqe_pool_free(r->sqe_pool, as);
++				}
++			}
++			return -ENOMEM;
++		}
++
++		mpsc_push(&r->sq, &iodev_sqe->q);
++
++		if (sqes != NULL) {
++			sqes[i] = &iodev_sqe->sqe;
++		}
++	}
++
++	return 0;
++}
++
++
+ /**
+  * @brief Drop all previously acquired sqe
+  *

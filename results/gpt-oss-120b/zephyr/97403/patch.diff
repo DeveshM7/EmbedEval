@@ -1,0 +1,88 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..08362c6a
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,39 @@
++*** Begin Patch
++*** Update File: subsys/logging/log_output.c
++@@
++-    if (IS_ENABLED(CONFIG_LOG_THREAD_ID_PREFIX) && thread_on) {
++-        if (IS_ENABLED(CONFIG_THREAD_NAME)) {
++-            total += print_formatted(output, "[%s] ",
++-                tid == NULL ? "irq" : k_thread_name_get(tid));
++-        } else {
++-            total += print_formatted(output, "[%p] ", tid);
++-        }
++-    }
+++    /* Thread ID prefix handling.
+++     *
+++     * When the thread flag is set we need to include the priority of the
+++     * emitting thread together with either its name (if thread naming is
+++     * enabled) or its address. The priority must be formatted as a 3‑character
+++     * wide decimal field ("%3d").  The overall format for a named thread is:
+++     *   "[<prio> <name>] " → e.g. "[  5 main] "
+++     * For unnamed threads the format is:
+++     *   "[<prio> 0x...] " → e.g. "[  5 0x12345678] "
+++     * IRQ context (tid == NULL) must continue to be printed as "[irq] ".
+++     */
+++    if (IS_ENABLED(CONFIG_LOG_THREAD_ID_PREFIX) && thread_on) {
+++        if (tid == NULL) {
+++            /* IRQ context – no thread information available */
+++            total += print_formatted(output, "[irq] ");
+++        } else {
+++            int prio = k_thread_priority_get(tid);
+++
+++            if (IS_ENABLED(CONFIG_THREAD_NAME)) {
+++                const char *name = k_thread_name_get(tid);
+++
+++                total += print_formatted(output, "[%3d %s] ", prio, name);
+++            } else {
+++                total += print_formatted(output, "[%3d %p] ", prio, tid);
+++            }
+++        }
+++    }
++*** End Patch
+diff --git a/subsys/logging/log_output.c b/subsys/logging/log_output.c
+index 6757a57f..94d6f426 100644
+--- a/subsys/logging/log_output.c
++++ b/subsys/logging/log_output.c
+@@ -16,6 +16,7 @@
+ #include <time.h>
+ #include <stdio.h>
+ #include <stdbool.h>
++#include <zephyr/kernel.h>
+ 
+ #define LOG_COLOR_CODE_DEFAULT "\x1B[0m"
+ #define LOG_COLOR_CODE_RED     "\x1B[1;31m"
+@@ -309,15 +310,21 @@ static int ids_print(const struct log_output *output,
+ 		total += print_formatted(output, "<%s> ", severity[level]);
+ 	}
+ 
+-	if (IS_ENABLED(CONFIG_LOG_THREAD_ID_PREFIX) && thread_on) {
+-		if (IS_ENABLED(CONFIG_THREAD_NAME)) {
+-			total += print_formatted(output, "[%s] ",
+-				tid == NULL ? "irq" : k_thread_name_get(tid));
+-		} else {
+-			total += print_formatted(output, "[%p] ", tid);
+-		}
+-	}
+-
++    /* Thread ID prefix handling. */
++    if (IS_ENABLED(CONFIG_LOG_THREAD_ID_PREFIX) && thread_on) {
++        if (tid == NULL) {
++            /* IRQ context – no thread information available */
++            total += print_formatted(output, "[irq] " );
++        } else {
++            int prio = k_thread_priority_get(tid);
++            if (IS_ENABLED(CONFIG_THREAD_NAME)) {
++                const char *name = k_thread_name_get(tid);
++                total += print_formatted(output, "[%3d %s] ", prio, name);
++            } else {
++                total += print_formatted(output, "[%3d %p] ", prio, tid);
++            }
++        }
++    }
+ 	if (domain) {
+ 		total += print_formatted(output, "%s/", domain);
+ 	}

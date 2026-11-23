@@ -1,0 +1,164 @@
+diff --git a/mbox_get_timeout_impl.c b/mbox_get_timeout_impl.c
+new file mode 100644
+index 00000000..ac61a905
+--- /dev/null
++++ b/mbox_get_timeout_impl.c
+@@ -0,0 +1,27 @@
++int ztimer_mbox_get_timeout(ztimer_clock_t *clock, mbox_t *mbox,
++                             msg_t *msg, uint32_t timeout)
++{
++    /* Fast path: message already available */
++    if (mbox_try_get(mbox, msg)) {
++        return 0;
++    }
++
++    if (timeout == 0) {
++        return -ETIMEDOUT;
++    }
++
++    int timed_out = 0;
++    mbox_timeout_ctx_t ctx = { .timed_out = &timed_out,
++                               .pid = thread_getpid() };
++    ztimer_t t = { .callback = _mbox_timeout_cb, .arg = &ctx };
++    ztimer_set(clock, &t, timeout);
++
++    /* Block until a message arrives or the timer wakes the thread */
++    mbox_get(mbox, msg);
++
++    ztimer_remove(clock, &t);
++    if (timed_out) {
++        return -ETIMEDOUT;
++    }
++    return 0;
++}
+diff --git a/sys/include/ztimer.h b/sys/include/ztimer.h
+index 52a8d10d..80e3d08c 100644
+--- a/sys/include/ztimer.h
++++ b/sys/include/ztimer.h
+@@ -268,6 +268,7 @@
+ #include "msg.h"
+ #include "mutex.h"
+ #include "rmutex.h"
++#include "mbox.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -798,6 +799,26 @@ int ztimer_mutex_lock_timeout(ztimer_clock_t *clock, mutex_t *mutex,
+  */
+ int ztimer_rmutex_lock_timeout(ztimer_clock_t *clock, rmutex_t *rmutex,
+                                uint32_t timeout);
++/**
++ * @brief   Retrieve a message from a mailbox with a timeout.
++ *
++ * This function attempts to obtain a message from @p mbox. If a message is
++ * already pending, it returns immediately with success. Otherwise the caller
++ * is blocked until either a message becomes available or the given @p timeout
++ * (specified in ticks of the provided @p clock) expires.
++ *
++ * @param[in]   clock   ztimer clock to operate on (e.g. ZTIMER_USEC)
++ * @param[in]   mbox    pointer to the mailbox to read from
++ * @param[out]  msg     pointer to storage where the received message will be
++ *                      placed
++ * @param[in]   timeout timeout in @p clock ticks. A value of 0 behaves like a
++ *                      non-blocking try-get.
++ *
++ * @retval  0               Success, a message has been stored in @p msg
++ * @retval -ETIMEDOUT      No message was received before the timeout elapsed
++ */
++int ztimer_mbox_get_timeout(ztimer_clock_t *clock, mbox_t *mbox,
++                             msg_t *msg, uint32_t timeout);
+ 
+ /**
+  * @brief   Initialize the board-specific default ztimer configuration
+diff --git a/sys/ztimer/Makefile b/sys/ztimer/Makefile
+index 290e7a41..ed6c9591 100644
+--- a/sys/ztimer/Makefile
++++ b/sys/ztimer/Makefile
+@@ -5,7 +5,7 @@ MODULE := ztimer_core
+ BASE_MODULE := ztimer
+ 
+ # ztimer_core files
+-SRC := core.c util.c periodic.c
++SRC := core.c util.c periodic.c ztimer_mbox.c
+ 
+ # enable submodules
+ SUBMODULES := 1
+diff --git a/sys/ztimer/util.c b/sys/ztimer/util.c
+index 277f4854..3a1d230a 100644
+--- a/sys/ztimer/util.c
++++ b/sys/ztimer/util.c
+@@ -28,6 +28,7 @@
+ #include "mutex.h"
+ #include "rmutex.h"
+ #include "thread.h"
++#include "mbox.h"
+ #include "ztimer.h"
+ 
+ static void _callback_unlock_mutex(void *arg)
+diff --git a/sys/ztimer/ztimer_mbox.c b/sys/ztimer/ztimer_mbox.c
+new file mode 100644
+index 00000000..e3462de4
+--- /dev/null
++++ b/sys/ztimer/ztimer_mbox.c
+@@ -0,0 +1,40 @@
++#include <errno.h>
++#include "ztimer.h"
++#include "mbox.h"
++#include "thread.h"
++
++typedef struct {
++    int *timed_out;
++    kernel_pid_t pid;
++} mbox_timeout_ctx_t;
++
++static void _mbox_timeout_cb(void *arg)
++{
++    mbox_timeout_ctx_t *ctx = (mbox_timeout_ctx_t *)arg;
++    if (ctx && ctx->timed_out) {
++        *(ctx->timed_out) = 1;
++    }
++    thread_wakeup(ctx->pid);
++}
++
++int ztimer_mbox_get_timeout(ztimer_clock_t *clock, mbox_t *mbox,
++                             msg_t *msg, uint32_t timeout)
++{
++    if (mbox_try_get(mbox, msg)) {
++        return 0;
++    }
++    if (timeout == 0) {
++        return -ETIMEDOUT;
++    }
++    int timed_out = 0;
++    mbox_timeout_ctx_t ctx = { .timed_out = &timed_out,
++                               .pid = thread_getpid() };
++    ztimer_t t = { .callback = _mbox_timeout_cb, .arg = &ctx };
++    ztimer_set(clock, &t, timeout);
++    mbox_get(mbox, msg);
++    ztimer_remove(clock, &t);
++    if (timed_out) {
++        return -ETIMEDOUT;
++    }
++    return 0;
++}
+diff --git a/ztimer_mbox.patch b/ztimer_mbox.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..034f9fbc88dd3ed5e4380e3a6e2d15fcf4b60227
+GIT binary patch
+literal 1301
+zcmah}O;g)25WV|X?9dB1!2x<}FX=}*!=a@E;nI)E$nx6WL6$s{oRI!{R+0mTX^RfF
+zzV>PNy*HcZIef&1G<+9cwpq^W+rAPW;R`8z2X5~cq@@}vT>SCWp)J~Mxy(-AjJt5;
+zTZ^J9+M{gt%4S!Z`*4rrfwYGNxUt>f@qVL>yxW8)%;1m5BbhcKkCQo!S3TruHqYRd
+zG4MlgFE$=V<dgT=ESoLzJexrd%hD3o3~`N~XIlgT9Xcl(gxZ=eECngf8+PPdUXCzD
+z2#*l!mK@ZBmY$3T;XQV}ci;_}(hFwx1>&-Y$OBx~lOu8wOsK%+9(vRj>1Gb(!J;3m
+zc0gT+6|ppGpOSHdl$>h;SH4BNBZt5fkU}Z65sot}1A|z>pgk!-E&}c3-4dnYf<bJ#
+zOi?NXV<SpKThzeGjs-`&W7ngkni!7@^Ca&am^$9?t=Uq=2OJW`Isv@z$)bCrYS{}b
+zx}T(fGvo0R|C7?=GO*U84gO;?kFjV9__4nHy1L%n-mE^I#4Mh{1TKRGdc#6<X^ap^
+zIH<<Uz-Sb68q6N!Bs$lG*lDoy#s>9w%v0jiqC_U6dNjt4l!6i?TnvBt>6MUJO`l68
+zk5nEg4ICcWN@N!B0k%R7Tzw5^{6;IbERLc(Hs-(I(?<UqF3!%+quA^l@OGbe8uSzX
+z*-8u#4E=oEBqz-$#%Kk52iXFFkfe8Tu4__RBhu+Ai1YdCcAWsfnJ1PQ;E}o#YetF6
+z97sSVdY4#QWV1;-2#Rhv@7H=kyvLm&{O6q2{|4vHEg<LL9RAV~Lfc#EYHWfJ>Li&2
+
+literal 0
+HcmV?d00001
+

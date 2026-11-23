@@ -1,0 +1,297 @@
+diff --git a/drivers/include/mtd_emulated.h b/drivers/include/mtd_emulated.h
+new file mode 100644
+index 00000000..9ba83c0c
+--- /dev/null
++++ b/drivers/include/mtd_emulated.h
+@@ -0,0 +1,68 @@
++/*
++ * Copyright (C) 2024 ML!PA Consulting GmbH
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    drivers_mtd_emulated MTD emulation driver
++ * @ingroup     drivers_mtd
++ * @{
++ *
++ * @file
++ * @brief       MTD emulation driver header
++ *
++ * @author      Benjamin Valentin <benjamin.valentin@ml-pa.com>
++ *
++ * @}
++ */
++
++#ifndef MTD_EMULATED_H
++#define MTD_EMULATED_H
++
++#include "mtd.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   MTD emulated device structure
++ *
++ * This is the emulated MTD device instance. It should be initialized
++ * with mtd_init(&mtd_emulated_dev0.base) before use.
++ */
++struct mtd_emulated_dev {
++    mtd_dev_t base;              /**< The MTD device */
++};
++
++/**
++ * @brief   MTD emulated device instance
++ */
++extern struct mtd_emulated_dev mtd_emulated_dev0;
++
++/**
++ * @brief   Macro to create an emulated MTD device
++ *
++ * This macro defines an emulated MTD device named mtd_emulated_dev0 with
++ * the specified configuration. The device must be initialized with
++ * mtd_init() before use.
++ *
++ * @param   ignored    Ignored parameter (for compatibility)
++ * @param   sc         Number of sectors
++ * @param   pps        Pages per sector
++ * @param   ps         Page size in bytes
++ */
++#define MTD_EMULATED_DEV(ignored, sc, pps, ps) \
++    extern struct mtd_emulated_dev { \
++        mtd_dev_t base; \
++    } mtd_emulated_dev0
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* MTD_EMULATED_H */
++/** @} */
+diff --git a/drivers/mtd/Kconfig b/drivers/mtd/Kconfig
+index fc18a5c5..c0c6266c 100644
+--- a/drivers/mtd/Kconfig
++++ b/drivers/mtd/Kconfig
+@@ -109,9 +109,15 @@ config MODULE_SAM0_SDHC
+     bool "MTD interface for SAM0 SD Host Controller"
+     depends on CPU_COMMON_SAM0
+ 
++config MODULE_MTD_EMULATED
++    bool "MTD emulation driver"
++    help
++        Emulates an MTD device in RAM for testing purposes.
++
+ endmenu # MTD Interfacs
+ 
+ config MODULE_MTD_WRITE_PAGE
+     bool "MTD write page API"
+ 
+ endif
++rsource "mtd_emulated/Kconfig"
+diff --git a/drivers/mtd/Makefile.dep b/drivers/mtd/Makefile.dep
+index 6c0bce41..40056254 100644
+--- a/drivers/mtd/Makefile.dep
++++ b/drivers/mtd/Makefile.dep
+@@ -13,3 +13,7 @@ endif
+ ifneq (,$(filter mtd_sdcard,$(USEMODULE)))
+   USEMODULE += sdcard_spi
+ endif
++
++ifneq (,$(filter mtd_emulated,$(USEMODULE)))
++  USEMODULE += mtd
++endif
+diff --git a/drivers/mtd_emulated/Kconfig b/drivers/mtd_emulated/Kconfig
+new file mode 100644
+index 00000000..42b282ed
+--- /dev/null
++++ b/drivers/mtd_emulated/Kconfig
+@@ -0,0 +1,31 @@
++# Copyright (C) 2024 ML!PA Consulting GmbH
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++#
++
++config MODULE_MTD_EMULATED
++    bool "MTD emulation driver"
++    default n
++    depends on MODULE_MTD
++
++if MODULE_MTD_EMULATED
++
++config MTD_EMULATED_SECTOR_COUNT
++    int "Number of sectors"
++    default 4
++
++config MTD_EMULATED_PAGES_PER_SECTOR
++    int "Pages per sector"
++    default 4
++
++config MTD_EMULATED_PAGE_SIZE
++    int "Page size in bytes"
++    default 128
++
++config MTD_EMULATED_STORAGE_SIZE
++    int "Total storage size in bytes"
++    default 2048
++
++endif
+diff --git a/drivers/mtd_emulated/Makefile b/drivers/mtd_emulated/Makefile
+new file mode 100644
+index 00000000..1436a5b9
+--- /dev/null
++++ b/drivers/mtd_emulated/Makefile
+@@ -0,0 +1,7 @@
++# Copyright (C) 2024 ML!PA Consulting GmbH
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++
++include $(RIOTBASE)/Makefile.base
+diff --git a/drivers/mtd_emulated/mtd_emulated.c b/drivers/mtd_emulated/mtd_emulated.c
+new file mode 100644
+index 00000000..d24a3095
+--- /dev/null
++++ b/drivers/mtd_emulated/mtd_emulated.c
+@@ -0,0 +1,135 @@
++/*
++ * Copyright (C) 2024 ML!PA Consulting GmbH
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     drivers_mtd_emulated
++ * @{
++ *
++ * @file
++ * @brief       MTD emulation driver implementation
++ *
++ * @author      Benjamin Valentin <benjamin.valentin@ml-pa.com>
++ *
++ * @}
++ */
++
++#include <errno.h>
++#include <stddef.h>
++#include <string.h>
++
++#include "mtd.h"
++#include "mtd_emulated.h"
++
++#ifndef MTD_EMULATED_SECTOR_COUNT
++#define MTD_EMULATED_SECTOR_COUNT 4
++#endif
++
++#ifndef MTD_EMULATED_PAGES_PER_SECTOR
++#define MTD_EMULATED_PAGES_PER_SECTOR 4
++#endif
++
++#ifndef MTD_EMULATED_PAGE_SIZE
++#define MTD_EMULATED_PAGE_SIZE 128
++#endif
++
++#ifndef MTD_EMULATED_WRITE_SIZE
++#define MTD_EMULATED_WRITE_SIZE 1
++#endif
++
++#define MTD_EMULATED_TOTAL_SIZE (MTD_EMULATED_SECTOR_COUNT * MTD_EMULATED_PAGES_PER_SECTOR * MTD_EMULATED_PAGE_SIZE)
++
++static uint8_t mtd_emulated_storage[MTD_EMULATED_TOTAL_SIZE];
++
++/* Pointer to mtd_emulated_dev0 - defined in header/c file */
++extern struct mtd_emulated_dev mtd_emulated_dev0;
++
++/* Get pointer to storage from the mtd_dev_t pointer */
++static inline uint8_t *_get_storage(mtd_dev_t *dev)
++{
++    struct mtd_emulated_dev *emulated = (struct mtd_emulated_dev *)((char *)dev - offsetof(struct mtd_emulated_dev, base));
++    /* Since storage is separate, we return the global storage array */
++    (void)emulated;
++    return mtd_emulated_storage;
++}
++
++static int _init(mtd_dev_t *dev)
++{
++    uint8_t *storage = _get_storage(dev);
++    memset(storage, 0xff, MTD_EMULATED_TOTAL_SIZE);
++    (void)storage;
++    return 0;
++}
++
++static int _read(mtd_dev_t *dev, void *buff, uint32_t addr, uint32_t size)
++{
++    uint8_t *storage = _get_storage(dev);
++
++    if (addr + size > MTD_EMULATED_TOTAL_SIZE) {
++        return -EOVERFLOW;
++    }
++
++    memcpy(buff, storage + addr, size);
++    return 0;
++}
++
++static int _write(mtd_dev_t *dev, const void *buff, uint32_t addr, uint32_t size)
++{
++    uint8_t *storage = _get_storage(dev);
++
++    if (addr + size > MTD_EMULATED_TOTAL_SIZE) {
++        return -EOVERFLOW;
++    }
++
++    /* Write must not cross a page boundary */
++    if (((addr % MTD_EMULATED_PAGE_SIZE) + size) > MTD_EMULATED_PAGE_SIZE) {
++        return -EOVERFLOW;
++    }
++
++    memcpy(storage + addr, buff, size);
++    return 0;
++}
++
++static int _erase(mtd_dev_t *dev, uint32_t addr, uint32_t size)
++{
++    uint8_t *storage = _get_storage(dev);
++    uint32_t sector_size = MTD_EMULATED_PAGES_PER_SECTOR * MTD_EMULATED_PAGE_SIZE;
++
++    /* Address and length must be aligned to sector */
++    if (addr % sector_size) {
++        return -EOVERFLOW;
++    }
++
++    if (size % sector_size) {
++        return -EOVERFLOW;
++    }
++
++    if (addr + size > MTD_EMULATED_TOTAL_SIZE) {
++        return -EOVERFLOW;
++    }
++
++    memset(storage + addr, 0xff, size);
++    (void)storage;
++    return 0;
++}
++
++static const mtd_desc_t _driver = {
++    .init = _init,
++    .read = _read,
++    .write = _write,
++    .erase = _erase,
++};
++
++struct mtd_emulated_dev mtd_emulated_dev0 = {
++    .base = {
++        .driver = &_driver,
++        .sector_count = MTD_EMULATED_SECTOR_COUNT,
++        .pages_per_sector = MTD_EMULATED_PAGES_PER_SECTOR,
++        .page_size = MTD_EMULATED_PAGE_SIZE,
++        .write_size = MTD_EMULATED_WRITE_SIZE,
++    },
++};

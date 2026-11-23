@@ -1,0 +1,136 @@
+diff --git a/subsys/pm/policy/policy_latency.c b/subsys/pm/policy/policy_latency.c
+index 68e6ffcc..5ec1129a 100644
+--- a/subsys/pm/policy/policy_latency.c
++++ b/subsys/pm/policy/policy_latency.c
+@@ -39,9 +39,11 @@ static void update_max_latency(void)
+ 		struct pm_policy_latency_subscription *sreq;
+ 		int32_t new_max_latency_cyc = -1;
+ 
+-		SYS_SLIST_FOR_EACH_CONTAINER(&latency_subs, sreq, node) {
++	SYS_SLIST_FOR_EACH_CONTAINER(&latency_subs, sreq, node) {
++		if (sreq->cb != NULL) {
+ 			sreq->cb(new_max_latency_us);
+ 		}
++	}
+ 
+ 		if (new_max_latency_us != SYS_FOREVER_US) {
+ 			new_max_latency_cyc = (int32_t)k_us_to_cyc_ceil32(new_max_latency_us);
+@@ -91,8 +93,23 @@ void pm_policy_latency_changed_subscribe(struct pm_policy_latency_subscription *
+ {
+ 	k_spinlock_key_t key = k_spin_lock(&latency_lock);
+ 
+-	req->cb = cb;
+-	sys_slist_append(&latency_subs, &req->node);
++	if (cb == NULL) {
++		/* NULL callback means disable notifications for this subscription */
++		(void)sys_slist_find_and_remove(&latency_subs, &req->node);
++		/* Keep req->cb as NULL to indicate this subscription is disabled */
++		req->cb = NULL;
++	} else {
++		/* Check if this subscription is already in the list */
++		if (!sys_slist_find_and_remove(&latency_subs, &req->node)) {
++			/* Not in the list, this is a new subscription */
++			req->cb = cb;
++			sys_slist_append(&latency_subs, &req->node);
++		} else {
++			/* Was already in the list, re-add with new callback */
++			req->cb = cb;
++			sys_slist_append(&latency_subs, &req->node);
++		}
++	}
+ 
+ 	k_spin_unlock(&latency_lock, key);
+ }
+diff --git a/test_null_cb.c b/test_null_cb.c
+new file mode 100644
+index 00000000..46b7bd32
+--- /dev/null
++++ b/test_null_cb.c
+@@ -0,0 +1,87 @@
++#include <stdio.h>
++#include <zephyr/pm/policy.h>
++#include <zephyr/ztest.h>
++
++// Mock implementation for testing
++void pm_state_set(enum pm_state state, uint8_t substate_id) {}
++void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id) {}
++
++static int callback_count = 0;
++static int32_t last_latency = -1;
++
++static void test_callback(int32_t latency) {
++    callback_count++;
++    last_latency = latency;
++    printf("Callback called: latency=%d, count=%d\n", latency, callback_count);
++}
++
++void main() {
++    struct pm_policy_latency_request req;
++    struct pm_policy_latency_subscription sub;
++    
++    printf("Testing NULL callback behavior...\n");
++    
++    // Test 1: Subscribe with NULL callback
++    printf("\nTest 1: Subscribe with NULL callback\n");
++    callback_count = 0;
++    pm_policy_latency_changed_subscribe(&sub, NULL);
++    
++    // Add latency request - should not trigger callback
++    printf("Adding latency request (should not trigger callback)\n");
++    pm_policy_latency_request_add(&req, 10000);
++    if (callback_count == 0) {
++        printf("PASS: Callback not triggered with NULL callback\n");
++    } else {
++        printf("FAIL: Callback was triggered with NULL callback\n");
++    }
++    
++    // Remove request
++    pm_policy_latency_request_remove(&req);
++    
++    // Test 2: Subscribe with valid callback, then disable with NULL
++    printf("\nTest 2: Subscribe with callback, then disable\n");
++    callback_count = 0;
++    pm_policy_latency_changed_subscribe(&sub, test_callback);
++    
++    // Add latency request - should trigger callback
++    printf("Adding latency request (should trigger callback)\n");
++    pm_policy_latency_request_add(&req, 20000);
++    if (callback_count == 1 && last_latency == 20000) {
++        printf("PASS: Callback triggered correctly\n");
++    } else {
++        printf("FAIL: Callback not triggered or wrong value\n");
++    }
++    
++    // Disable with NULL
++    printf("Disabling with NULL callback\n");
++    pm_policy_latency_changed_subscribe(&sub, NULL);
++    
++    // Update request - should not trigger callback
++    printf("Updating latency request (should not trigger callback)\n");
++    callback_count = 0;
++    pm_policy_latency_request_update(&req, 30000);
++    if (callback_count == 0) {
++        printf("PASS: Callback not triggered after disabling\n");
++    } else {
++        printf("FAIL: Callback was triggered after disabling\n");
++    }
++    
++    // Clean up
++    pm_policy_latency_request_remove(&req);
++    
++    // Test 3: Re-enable with non-NULL callback
++    printf("\nTest 3: Re-enable with non-NULL callback\n");
++    pm_policy_latency_changed_subscribe(&sub, test_callback);
++    
++    // Add new request - should trigger callback
++    printf("Adding new latency request (should trigger callback)\n");
++    callback_count = 0;
++    pm_policy_latency_request_add(&req, 40000);
++    if (callback_count == 1 && last_latency == 40000) {
++        printf("PASS: Callback triggered correctly after re-enabling\n");
++    } else {
++        printf("FAIL: Callback not triggered after re-enabling\n");
++    }
++    
++    printf("\nAll tests completed!\n");
++}

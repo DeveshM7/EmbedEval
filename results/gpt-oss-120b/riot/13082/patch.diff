@@ -1,0 +1,285 @@
+diff --git a/makefiles/pseudomodules.inc.mk b/makefiles/pseudomodules.inc.mk
+index db0ad9a..c86ed1b 100644
+--- a/makefiles/pseudomodules.inc.mk
++++ b/makefiles/pseudomodules.inc.mk
+@@ -202,6 +202,8 @@ PSEUDOMODULES += senml_saul
+ PSEUDOMODULES += sha1sum
+ PSEUDOMODULES += sha256sum
+ PSEUDOMODULES += shell_hooks
++PSEUDOMODULES += shell_lock
++PSEUDOMODULES += shell_lock_auto_locking
+ PSEUDOMODULES += slipdev_stdio
+ PSEUDOMODULES += slipdev_l2addr
+ PSEUDOMODULES += sock
+diff --git a/patch1.diff b/patch1.diff
+new file mode 100644
+index 0000000..6b171fa
+--- /dev/null
++++ b/patch1.diff
+@@ -0,0 +1,27 @@
++*** Begin Patch
++*** Update File: sys/shell/shell.c
++@@
++-    if (argc == 0) {
++-        return;
++-    }
+++    if (argc == 0) {
+++        return;
+++    }
+++
+++    /* ------------------------------------------------------------ */
+++    /* Shell lock handling (module "shell_lock")
+++     * If the shell is locked, ignore the current input line and
+++     * interactively ask for the password.  The function will block
+++     * until the shell is unlocked and then return to the main loop so
+++     * that a new line can be read.
+++     */
+++    #if IS_ACTIVE(MODULE_SHELL_LOCK)
+++    if (shell_is_locked()) {
+++        /* Prompt the user until the correct password is entered. */
+++        shell_lock_prompt();
+++        /* After unlocking we ignore the line that triggered the prompt. */
+++        return;
+++    }
+++    #endif
+++    /* ------------------------------------------------------------ */
++*** End Patch
+diff --git a/sys/shell/shell.c b/sys/shell/shell.c
+index 0730f8b..90616f7 100644
+--- a/sys/shell/shell.c
++++ b/sys/shell/shell.c
+@@ -38,7 +38,9 @@
+ #include "kernel_defines.h"
+ #include "xfa.h"
+ #include "shell.h"
+-
++#if IS_ACTIVE(MODULE_SHELL_LOCK)
++#include "../shell_lock/shell_lock.h"
++#endif
+ /* define shell command cross file array */
+ XFA_INIT_CONST(shell_command_t*, shell_commands_xfa);
+ 
+@@ -294,6 +296,22 @@ static void handle_input_line(const shell_command_t *command_list, char *line)
+ 
+     if (argc == 0) {
+         return;
++    /* ------------------------------------------------------------ */
++    /* Shell lock handling (module "shell_lock")
++     * If the shell is locked, ignore the current input line and
++     * interactively ask for the password.  The function will block
++     * until the shell is unlocked and then return to the main loop so
++     * that a new line can be read.
++     */
++    #if IS_ACTIVE(MODULE_SHELL_LOCK)
++    if (shell_is_locked()) {
++        /* Prompt the user until the correct password is entered. */
++        shell_lock_prompt();
++        /* After unlocking we ignore the line that triggered the prompt. */
++        return;
++    }
++    #endif
++    /* ------------------------------------------------------------ */
+     }
+ 
+     /* then we fill the argv array */
+diff --git a/sys/shell_lock/Kconfig b/sys/shell_lock/Kconfig
+new file mode 100644
+index 0000000..5fa575c
+--- /dev/null
++++ b/sys/shell_lock/Kconfig
+@@ -0,0 +1,12 @@
++config MODULE_SHELL_LOCK
++    bool "Shell lock module"
++    depends on MODULE_SHELL
++    default y
++
++if MODULE_SHELL_LOCK
++
++config CONFIG_SHELL_LOCK_PASSWORD
++    string "Shell lock password"
++    default "password"
++
++endif
+diff --git a/sys/shell_lock/Makefile b/sys/shell_lock/Makefile
+new file mode 100644
+index 0000000..48422e9
+--- /dev/null
++++ b/sys/shell_lock/Makefile
+@@ -0,0 +1 @@
++include $(RIOTBASE)/Makefile.base
+diff --git a/sys/shell_lock/shell_lock.c b/sys/shell_lock/shell_lock.c
+new file mode 100644
+index 0000000..0ac9193
+--- /dev/null
++++ b/sys/shell_lock/shell_lock.c
+@@ -0,0 +1,75 @@
++#include <stdio.h>
++#include <string.h>
++#include "shell.h"
++#include "shell_lock.h"
++#include "ztimer.h"
++
++#ifndef CONFIG_SHELL_LOCK_PASSWORD
++#define CONFIG_SHELL_LOCK_PASSWORD "password"
++#endif
++
++static bool locked = true;
++static unsigned fail_cnt = 0;
++static uint64_t last_activity = 0;
++
++bool shell_is_locked(void)
++{
++    return locked;
++}
++
++void shell_lock(void)
++{
++    locked = true;
++    /* no need to reset fail counter */
++}
++
++void shell_unlock(void)
++{
++    locked = false;
++    fail_cnt = 0;
++    last_activity = ztimer_now(ZTIMER_MSEC);
++}
++
++static void _delay_after_fail(void)
++{
++    /* Delay 7 seconds after three failed attempts */
++    ztimer_sleep(ZTIMER_MSEC, 7000);
++    fail_cnt = 0;
++}
++
++void shell_lock_prompt(void)
++{
++    char buf[128];
++    printf("The shell is locked. Enter a valid password to unlock.\n");
++    while (1) {
++        printf("Password: ");
++        fflush(stdout);
++        if (fgets(buf, sizeof(buf), stdin) == NULL) {
++            continue;
++        }
++        /* strip newline */
++        buf[strcspn(buf, "\r\n")] = '\0';
++        if (strcmp(buf, CONFIG_SHELL_LOCK_PASSWORD) == 0) {
++            shell_unlock();
++            puts("Shell was unlocked.");
++            break;
++        } else {
++            puts("Wrong password");
++            fail_cnt++;
++            if (fail_cnt >= 3) {
++                _delay_after_fail();
++            }
++        }
++    }
++}
++
++/* lock command implementation */
++static int _lock_handler(int argc, char **argv)
++{
++    (void)argc; (void)argv;
++    shell_lock();
++    return 0;
++}
++
++SHELL_COMMAND(lock, "Lock the shell", _lock_handler);
++
+diff --git a/sys/shell_lock/shell_lock.h b/sys/shell_lock/shell_lock.h
+new file mode 100644
+index 0000000..060010a
+--- /dev/null
++++ b/sys/shell_lock/shell_lock.h
+@@ -0,0 +1,26 @@
++#ifndef SHELL_LOCK_H
++#define SHELL_LOCK_H
++
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Returns true if the shell is currently locked */
++bool shell_is_locked(void);
++
++/* Force the shell into locked state */
++void shell_lock(void);
++
++/* Unlock the shell (used after correct password) */
++void shell_unlock(void);
++
++/* Prompt the user for password until unlocked */
++void shell_lock_prompt(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_LOCK_H */
+diff --git a/sys/shell_lock_auto_locking/Kconfig b/sys/shell_lock_auto_locking/Kconfig
+new file mode 100644
+index 0000000..0699730
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/Kconfig
+@@ -0,0 +1,12 @@
++config MODULE_SHELL_LOCK_AUTO_LOCKING
++    bool "Shell auto-locking module"
++    depends on MODULE_SHELL_LOCK
++    default n
++
++if MODULE_SHELL_LOCK_AUTO_LOCKING
++
++config CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS
++    int "Shell auto-lock timeout in milliseconds"
++    default 7000
++
++endif
+diff --git a/sys/shell_lock_auto_locking/Makefile b/sys/shell_lock_auto_locking/Makefile
+new file mode 100644
+index 0000000..48422e9
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/Makefile
+@@ -0,0 +1 @@
++include $(RIOTBASE)/Makefile.base
+diff --git a/sys/shell_lock_auto_locking/shell_lock_auto.c b/sys/shell_lock_auto_locking/shell_lock_auto.c
+new file mode 100644
+index 0000000..1cdb871
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/shell_lock_auto.c
+@@ -0,0 +1,32 @@
++#include "shell.h"
++#include "../shell_lock/shell_lock.h"
++#include "ztimer.h"
++#include "kernel_defines.h"
++
++#ifndef CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS
++#define CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS 7000
++#endif
++
++static uint64_t last_activity = 0;
++
++/* Pre-command hook: check for inactivity timeout */
++void shell_pre_command_hook(int argc, char **argv)
++{
++    (void)argc; (void)argv;
++    if (!shell_is_locked()) {
++        uint64_t now = ztimer_now(ZTIMER_MSEC);
++        if ((now - last_activity) >= CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS) {
++            shell_lock();
++            puts("Shell auto-locked due to inactivity.");
++        }
++    }
++}
++
++/* Post-command hook: update activity timestamp */
++void shell_post_command_hook(int ret, int argc, char **argv)
++{
++    (void)ret; (void)argc; (void)argv;
++    if (!shell_is_locked()) {
++        last_activity = ztimer_now(ZTIMER_MSEC);
++    }
++}

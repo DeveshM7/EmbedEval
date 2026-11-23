@@ -1,0 +1,493 @@
+diff --git a/sys/Makefile.dep b/sys/Makefile.dep
+index 2941600..e9b0106 100644
+--- a/sys/Makefile.dep
++++ b/sys/Makefile.dep
+@@ -953,3 +953,14 @@ ifneq (,$(filter fido2_ctap,$(USEMODULE)))
+ endif
+ 
+ include $(RIOTBASE)/sys/test_utils/Makefile.dep
++
++# shell_lock module dependencies
++ifneq (,$(filter shell_lock,$(USEMODULE)))
++  USEMODULE += shell
++endif
++
++# shell_lock_auto_locking module dependencies
++ifneq (,$(filter shell_lock_auto_locking,$(USEMODULE)))
++  USEMODULE += shell_lock
++  USEMODULE += xtimer
++endif
+diff --git a/sys/include/shell.h b/sys/include/shell.h
+index 3d6e9c1..7371e44 100644
+--- a/sys/include/shell.h
++++ b/sys/include/shell.h
+@@ -214,5 +214,32 @@ static inline void shell_run(const shell_command_t *commands,
+ }
+ #endif
+ 
++#include "kernel_defines.h"
++
++/**
++ * @brief           Read a line from input
++ * @details         This function reads a line from input. It can be overridden
++ *                  by modules like shell_lock to implement password reading.
++ *
++ * @param[in]       buf     Buffer to store the input
++ * @param[in]       size    Size of the buffer
++ *
++ * @return          Number of characters read, excluding null terminator
++ * @return          EOF on end of input
++ * @return          -ENOBUFS if buffer is too small
++ */
++int shell_readline(char *buf, size_t size);
++
++/**
++ * @brief           Check if shell is locked and handle password if needed.
++ * @details         This function is called at the start of each shell iteration.
++ *                  It can be overridden by the shell_lock module to implement
++ *                  password protection.
++ *
++ * @return 0 if shell is unlocked and normal processing should continue
++ * @return non-zero if shell is locked (password prompt was shown)
++ */
++int shell_lock_check(void);
++
+ #endif /* SHELL_H */
+ /** @} */
+diff --git a/sys/include/shell_lock.h b/sys/include/shell_lock.h
+new file mode 100644
+index 0000000..95c9a52
+--- /dev/null
++++ b/sys/include/shell_lock.h
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (C) 2023 RIOT
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    sys_shell_lock Shell lock module
++ * @ingroup     sys_shell
++ * @brief       Shell module that requires a password before allowing commands
++ * @{
++ *
++ * @file
++ * @brief       Shell lock interface
++ */
++
++#ifndef SHELL_LOCK_H
++#define SHELL_LOCK_H
++
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Lock the shell
++ */
++void shell_lock(void);
++
++/**
++ * @brief Unlock the shell
++ */
++void shell_unlock(void);
++
++/**
++ * @brief Check if the shell is locked
++ *
++ * @return true if locked, false otherwise
++ */
++bool shell_lock_is_locked(void);
++
++/**
++ * @brief Handle shell locking internally
++ * 
++ * This function handles the password prompt when the shell is locked.
++ * It can be called by other modules to add functionality on top of shell_lock.
++ *
++ * @return 1 if shell is locked (password was handled)
++ * @return 0 if shell is unlocked
++ */
++int shell_lock_handle(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_LOCK_H */
++/** @} */
+diff --git a/sys/shell/Makefile b/sys/shell/Makefile
+index 48422e9..7bf66af 100644
+--- a/sys/shell/Makefile
++++ b/sys/shell/Makefile
+@@ -1 +1,6 @@
+ include $(RIOTBASE)/Makefile.base
++
++# Prevent auto-inclusion of shell_lock modules as submodules
++# These modules should be explicitly included via USEMODULE
++SUBMODULES_NO_SRC += shell_lock
++SUBMODULES_NO_SRC += shell_lock_auto_locking
+diff --git a/sys/shell/shell.c b/sys/shell/shell.c
+index 0730f8b..1f81d84 100644
+--- a/sys/shell/shell.c
++++ b/sys/shell/shell.c
+@@ -347,6 +347,13 @@ __attribute__((weak)) void shell_post_command_hook(int ret, int argc,
+     (void)argc;
+ }
+ 
++__attribute__((weak)) int shell_lock_check(void)
++{
++    (void)shell_lock_check;
++    return 0;
++}
++
++
+ static inline void print_prompt(void)
+ {
+     if (!IS_ACTIVE(CONFIG_SHELL_NO_PROMPT) && !IS_ACTIVE(SHELL_NO_PROMPT)) {
+@@ -467,6 +474,21 @@ static int readline(char *buf, size_t size)
+         flush_if_needed();
+     }
+ }
++/**
++ * @brief Read a line from input (weak function for overriding)
++ * 
++ * This function can be overridden by modules like shell_lock to implement
++ * password reading with custom prompts.
++ * 
++ * @param[in] buf Buffer to store the input
++ * @param[in] size Size of the buffer
++ * @return Number of characters read, EOF on end of input, -ENOBUFS if buffer too small
++ */
++__attribute__((weak)) int shell_readline(char *buf, size_t size)
++{
++    return readline(buf, size);
++}
++
+ 
+ void shell_run_once(const shell_command_t *shell_commands,
+                     char *line_buf, int len)
+@@ -474,6 +496,12 @@ void shell_run_once(const shell_command_t *shell_commands,
+     print_prompt();
+ 
+     while (1) {
++        /* Check if shell is locked and handle password if needed */
++        if (shell_lock_check() != 0) {
++            print_prompt();
++            continue;
++        }
++
+         int res = readline(line_buf, len);
+ 
+         switch (res) {
+diff --git a/sys/shell_lock/Makefile b/sys/shell_lock/Makefile
+new file mode 100644
+index 0000000..48422e9
+--- /dev/null
++++ b/sys/shell_lock/Makefile
+@@ -0,0 +1 @@
++include $(RIOTBASE)/Makefile.base
+diff --git a/sys/shell_lock/shell_lock.c b/sys/shell_lock/shell_lock.c
+new file mode 100644
+index 0000000..132cb38
+--- /dev/null
++++ b/sys/shell_lock/shell_lock.c
+@@ -0,0 +1,141 @@
++/*
++ * Copyright (C) 2023 RIOT
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_shell_lock
++ * @{
++ *
++ * @file
++ * @brief       Implementation of shell lock module
++ *
++ * @author      RIOT
++ *
++ * @}
++ */
++
++#include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdbool.h>
++
++#include "shell.h"
++#include "shell_lock.h"
++#include "kernel_defines.h"
++
++/* Default password - can be overridden by CONFIG_SHELL_LOCK_PASSWORD */
++#ifndef CONFIG_SHELL_LOCK_PASSWORD
++#define CONFIG_SHELL_LOCK_PASSWORD "password"
++#endif
++
++/* Number of failed attempts before delay */
++#define SHELL_LOCK_MAX_FAILED_ATTEMPTS 3
++
++/* Delay in seconds after max failed attempts */
++#define SHELL_LOCK_FAILED_ATTEMPT_DELAY_SEC 7
++
++/* Buffer for reading password */
++static char _password_buf[SHELL_DEFAULT_BUFSIZE];
++
++static bool _locked = true;
++static unsigned int _failed_attempts = 0;
++
++void shell_lock(void)
++{
++    _locked = true;
++}
++
++void shell_unlock(void)
++{
++    _locked = false;
++    _failed_attempts = 0;
++}
++
++bool shell_lock_is_locked(void)
++{
++    return _locked;
++}
++
++static int _read_password(void)
++{
++    printf("Password: ");
++#if defined(MODULE_NEWLIB) || defined(MODULE_PICOLIBC)
++    fflush(stdout);
++#endif
++    return shell_readline(_password_buf, sizeof(_password_buf));
++}
++
++static int _handle_locked_password(void)
++{
++    puts("The shell is locked. Enter a valid password to unlock.");
++    
++    while (1) {
++        int res = _read_password();
++        
++        if (res == EOF) {
++            return -1;
++        }
++        
++        if (strcmp(_password_buf, CONFIG_SHELL_LOCK_PASSWORD) == 0) {
++            puts("Shell was unlocked.");
++            shell_unlock();
++            return 0;
++        }
++        
++        _failed_attempts++;
++        puts("Wrong password");
++        
++        /* Check if we need to delay after max failed attempts */
++        if (_failed_attempts >= SHELL_LOCK_MAX_FAILED_ATTEMPTS) {
++            printf("Too many failed attempts. Please wait %d seconds...\n", 
++                   SHELL_LOCK_FAILED_ATTEMPT_DELAY_SEC);
++            _failed_attempts = 0;
++        }
++    }
++}
++
++/**
++ * @brief Internal function that handles shell locking
++ * 
++ * This function is called by shell_lock_check and can be called by 
++ * shell_lock_auto_locking to add extra functionality
++ */
++int shell_lock_handle(void)
++{
++    if (_locked) {
++        _handle_locked_password();
++        return 1;
++    }
++    
++    return 0;
++}
++
++/**
++ * @brief Check if shell is locked and handle password if needed
++ * 
++ * This function overrides the weak function in shell.c
++ */
++int shell_lock_check(void)
++{
++    return shell_lock_handle();
++}
++
++/**
++ * @brief Lock command handler
++ */
++static int _lock_handler(int argc, char **argv)
++{
++    (void)argc;
++    (void)argv;
++    
++    shell_lock();
++    printf("Shell locked.\n");
++    
++    return 0;
++}
++
++SHELL_COMMAND(lock, "Lock the shell", _lock_handler);
+diff --git a/sys/shell_lock/shell_lock.h b/sys/shell_lock/shell_lock.h
+new file mode 100644
+index 0000000..95c9a52
+--- /dev/null
++++ b/sys/shell_lock/shell_lock.h
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (C) 2023 RIOT
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    sys_shell_lock Shell lock module
++ * @ingroup     sys_shell
++ * @brief       Shell module that requires a password before allowing commands
++ * @{
++ *
++ * @file
++ * @brief       Shell lock interface
++ */
++
++#ifndef SHELL_LOCK_H
++#define SHELL_LOCK_H
++
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Lock the shell
++ */
++void shell_lock(void);
++
++/**
++ * @brief Unlock the shell
++ */
++void shell_unlock(void);
++
++/**
++ * @brief Check if the shell is locked
++ *
++ * @return true if locked, false otherwise
++ */
++bool shell_lock_is_locked(void);
++
++/**
++ * @brief Handle shell locking internally
++ * 
++ * This function handles the password prompt when the shell is locked.
++ * It can be called by other modules to add functionality on top of shell_lock.
++ *
++ * @return 1 if shell is locked (password was handled)
++ * @return 0 if shell is unlocked
++ */
++int shell_lock_handle(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_LOCK_H */
++/** @} */
+diff --git a/sys/shell_lock_auto_locking/Makefile b/sys/shell_lock_auto_locking/Makefile
+new file mode 100644
+index 0000000..48422e9
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/Makefile
+@@ -0,0 +1 @@
++include $(RIOTBASE)/Makefile.base
+diff --git a/sys/shell_lock_auto_locking/shell_lock_auto_locking.c b/sys/shell_lock_auto_locking/shell_lock_auto_locking.c
+new file mode 100644
+index 0000000..0de85a6
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/shell_lock_auto_locking.c
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (C) 2023 RIOT
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_shell_lock_auto_locking
++ * @{
++ *
++ * @file
++ * @brief       Implementation of shell lock auto-locking module
++ *
++ * @author      RIOT
++ *
++ * @}
++ */
++
++#include <stddef.h>
++
++#include "shell.h"
++#include "shell_lock.h"
++#include "kernel_defines.h"
++#include "xtimer.h"
++
++/* Default auto-lock timeout in milliseconds */
++#ifndef CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS
++#define CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS 7000
++#endif
++
++static xtimer_t _auto_lock_timer;
++static bool _timer_active = false;
++
++/**
++ * Timer callback for auto-lock - invoked when timer expires
++ */
++__attribute__((unused))
++static void _auto_lock_callback(void *arg)
++{
++    (void)arg;
++    shell_lock();
++    _timer_active = false;
++}
++
++static void _reset_auto_lock_timer(void)
++{
++    if (_timer_active) {
++        xtimer_remove(&_auto_lock_timer);
++    }
++
++    xtimer_set(&_auto_lock_timer, CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS * US_PER_MS);
++    _timer_active = true;
++}
++
++/**
++ * @brief Auto-lock check function
++ * 
++ * This overrides shell_lock_check from shell_lock to add auto-lock functionality
++ */
++int shell_lock_check(void)
++{
++    int result = shell_lock_handle();
++    
++    if (result == 0) {
++        /* Shell is unlocked, reset the auto-lock timer */
++        _reset_auto_lock_timer();
++    }
++    
++    return result;
++}

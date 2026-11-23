@@ -1,0 +1,70 @@
+diff --git a/drivers/include/mtd_mapper.h b/drivers/include/mtd_mapper.h
+index 025ea95..f94edfd 100644
+--- a/drivers/include/mtd_mapper.h
++++ b/drivers/include/mtd_mapper.h
+@@ -30,6 +30,8 @@
+  *
+  * To define new regions with an existing MTD device the following is required:
+  *
++ * ### With explicit physical properties (original method)
++ *
+  * ```
+  * mtd_mapper_parent_t parent = MTD_PARENT_INIT(MTD_0);
+  *
+@@ -47,8 +49,32 @@
+  *
+  * mtd_dev_t *dev = &region.mtd;
+  * ```
+- * The snippet here defines a region within an existing `MTD_0` device of half
+- * the size of `MTD_0` and starting in the middle of the device.
++ *
++ * ### With omitted physical properties (simplified method)
++ *
++ * When physical properties (page_size, pages_per_sector, write_size) are
++ * omitted (set to 0), they will be automatically copied from the parent device
++ * during initialization. Only sector_count, parent, and sector offset need to
++ * be specified:
++ *
++ * ```
++ * mtd_mapper_parent_t parent = MTD_PARENT_INIT(MTD_0);
++ *
++ * mtd_mapper_region_t region1 = {
++ *     .mtd = {
++ *         .driver = &mtd_mapper_driver,
++ *         .sector_count = SECTOR_COUNT / 2,
++ *         // Physical properties will be copied from parent
++ *     },
++ *     .parent = &parent,
++ *     .sector = SECTOR_COUNT / 2
++ * };
++ *
++ * mtd_dev_t *dev = &region.mtd;
++ * ```
++ *
++ * The simplified method ensures that the region has physical properties
++ * consistent with the backing device without requiring duplication.
+  *
+  * @warning Please ensure that the different configured regions do not overlap.
+  *
+diff --git a/drivers/mtd_mapper/mtd_mapper.c b/drivers/mtd_mapper/mtd_mapper.c
+index 593a74e..2fb2b46 100644
+--- a/drivers/mtd_mapper/mtd_mapper.c
++++ b/drivers/mtd_mapper/mtd_mapper.c
+@@ -74,6 +74,17 @@ static int _init(mtd_dev_t *mtd)
+     mtd_mapper_region_t *region = container_of(mtd, mtd_mapper_region_t, mtd);
+     mtd_dev_t *backing_mtd = region->parent->mtd;
+ 
++    /* If region physical properties are not set (0), copy them from parent */
++    if (region->mtd.page_size == 0) {
++        region->mtd.page_size = backing_mtd->page_size;
++    }
++    if (region->mtd.pages_per_sector == 0) {
++        region->mtd.pages_per_sector = backing_mtd->pages_per_sector;
++    }
++    if (region->mtd.write_size == 0) {
++        region->mtd.write_size = backing_mtd->write_size;
++    }
++
+     /* Configuration sanity checks */
+     assert(backing_mtd->page_size == region->mtd.page_size);
+     assert(backing_mtd->pages_per_sector == region->mtd.pages_per_sector);

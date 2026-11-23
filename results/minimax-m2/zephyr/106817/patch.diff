@@ -1,0 +1,31 @@
+diff --git a/subsys/net/ip/tcp.c b/subsys/net/ip/tcp.c
+index e780dbde..d8432bc9 100644
+--- a/subsys/net/ip/tcp.c
++++ b/subsys/net/ip/tcp.c
+@@ -960,12 +960,26 @@ static int tcp_conn_close_debug(struct tcp *conn, int status,
+ static int tcp_conn_close(struct tcp *conn, int status)
+ #endif
+ {
++	enum tcp_state prev_state;
++
+ #if CONFIG_NET_TCP_LOG_LEVEL >= LOG_LEVEL_DBG
+ 	NET_DBG("[%p] closed by TCP stack (%s():%d)", conn, caller, line);
+ #endif
+ 	k_mutex_lock(&conn->lock, K_FOREVER);
++	
++	/* Save the previous state before changing to TCP_CLOSED */
++	prev_state = conn->state;
+ 	conn_state(conn, TCP_CLOSED);
+ 	keep_alive_timer_stop(conn);
++	
++	/* If closing during handshake (SYN_SENT or SYN_RECEIVED), immediately
++	 * cancel the retransmission timer to prevent further SYN packets
++	 */
++	if (prev_state == TCP_SYN_SENT || prev_state == TCP_SYN_RECEIVED) {
++		k_work_cancel_delayable(&conn->send_data_timer);
++		k_work_cancel_delayable(&conn->establish_timer);
++	}
++	
+ 	k_mutex_unlock(&conn->lock);
+ 
+ 	if (conn->in_connect) {

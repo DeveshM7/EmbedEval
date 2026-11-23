@@ -1,0 +1,104 @@
+diff --git a/Makefile.dep b/Makefile.dep
+index 17b6abba..ebc79018 100644
+--- a/Makefile.dep
++++ b/Makefile.dep
+@@ -137,3 +137,40 @@ ifneq (,$(filter test_utils_interactive_sync,$(USEMODULE)))
+     DEFAULT_MODULE += test_utils_interactive_sync_shell
+   endif
+ endif
++
++# Compute event thread stack sizes from minimum requirements
++include $(RIOTMAKE)/utils/strings.mk
++
++_EVENT_THREAD_HIGHEST_STACKSIZE_MIN := $(call max_number,$(EVENT_THREAD_HIGHEST_STACKSIZE_MIN))
++_EVENT_THREAD_MEDIUM_STACKSIZE_MIN := $(call max_number,$(EVENT_THREAD_MEDIUM_STACKSIZE_MIN))
++_EVENT_THREAD_LOWEST_STACKSIZE_MIN := $(call max_number,$(EVENT_THREAD_LOWEST_STACKSIZE_MIN))
++
++_EVENT_THREAD_HIGHEST_NEEDED := $(filter event_thread_highest,$(USEMODULE))
++_EVENT_THREAD_MEDIUM_NEEDED := $(filter event_thread_medium,$(USEMODULE))
++
++# Trickle-down logic: requirements for a priority without dedicated thread apply to ALL lower priority threads
++# HIGHEST: if no dedicated thread, applies to MEDIUM and LOWEST
++_EVENT_THREAD_FINAL_HIGHEST := $(if $(_EVENT_THREAD_HIGHEST_NEEDED),$(_EVENT_THREAD_HIGHEST_STACKSIZE_MIN),0)
++_EVENT_THREAD_MEDIUM_FROM_HIGHEST := $(if $(_EVENT_THREAD_HIGHEST_NEEDED),0,$(_EVENT_THREAD_HIGHEST_STACKSIZE_MIN))
++_EVENT_THREAD_LOWEST_FROM_HIGHEST := $(if $(_EVENT_THREAD_HIGHEST_NEEDED),0,$(_EVENT_THREAD_HIGHEST_STACKSIZE_MIN))
++
++# MEDIUM: if no dedicated thread (event_thread_medium), applies to LOWEST
++_EVENT_THREAD_FINAL_MEDIUM := $(if $(_EVENT_THREAD_MEDIUM_NEEDED),$(_EVENT_THREAD_MEDIUM_STACKSIZE_MIN),0)
++_EVENT_THREAD_LOWEST_FROM_MEDIUM := $(if $(_EVENT_THREAD_MEDIUM_NEEDED),0,$(_EVENT_THREAD_MEDIUM_STACKSIZE_MIN))
++
++# Combine requirements for each thread
++_EVENT_THREAD_FINAL_MEDIUM := $(call max_number,$(_EVENT_THREAD_FINAL_MEDIUM) $(_EVENT_THREAD_MEDIUM_FROM_HIGHEST))
++_EVENT_THREAD_FINAL_LOWEST := $(call max_number,$(_EVENT_THREAD_LOWEST_STACKSIZE_MIN) $(_EVENT_THREAD_LOWEST_FROM_MEDIUM) $(_EVENT_THREAD_LOWEST_FROM_HIGHEST))
++
++# Set CFLAGS to override default stack sizes if requirements exist
++ifneq ($(_EVENT_THREAD_FINAL_HIGHEST),0)
++  CFLAGS += -DEVENT_THREAD_HIGHEST_STACKSIZE=$(_EVENT_THREAD_FINAL_HIGHEST)
++endif
++
++ifneq ($(_EVENT_THREAD_FINAL_MEDIUM),0)
++  CFLAGS += -DEVENT_THREAD_MEDIUM_STACKSIZE=$(_EVENT_THREAD_FINAL_MEDIUM)
++endif
++
++ifneq ($(_EVENT_THREAD_FINAL_LOWEST),0)
++  CFLAGS += -DEVENT_THREAD_LOWEST_STACKSIZE=$(_EVENT_THREAD_FINAL_LOWEST)
++endif
+diff --git a/Makefile.test_cflags b/Makefile.test_cflags
+new file mode 100644
+index 00000000..c59056f9
+--- /dev/null
++++ b/Makefile.test_cflags
+@@ -0,0 +1,6 @@
++# Simple test to check CFLAGS after building
++-include .makeflags
++include $(RIOTBASE)/Makefile.include
++ifeq ($(MAKECMDGOALS),test_cflags)
++  $(info CFLAGS=$(CFLAGS))
++endif
+diff --git a/makefiles/utils/strings.mk b/makefiles/utils/strings.mk
+index cbc280fc..44a109c9 100644
+--- a/makefiles/utils/strings.mk
++++ b/makefiles/utils/strings.mk
+@@ -46,3 +46,8 @@ _is_equal = $(if $(and $(findstring $(1),$(2)),$(findstring $(2),$(1))),1,)
+ version_is_greater_or_equal = $(or \
+     $(call _is_greater,$(call _padded_version,$1),$(call _padded_version,$2)),\
+     $(call _is_equal,$(call _padded_version,$1),$(call _padded_version,$2)))
++
++# Returns the maximum of a whitespace-separated list of natural numbers
++#   $1: whitespace-separated list of natural numbers
++# Returns the maximum value, or 0 if the list is empty
++max_number = $(if $1,$(lastword $(sort $1)),0)
+diff --git a/makefiles/utils/test-strings.mk b/makefiles/utils/test-strings.mk
+index 56e48c60..c4332cf3 100644
+--- a/makefiles/utils/test-strings.mk
++++ b/makefiles/utils/test-strings.mk
+@@ -35,3 +35,14 @@ test-version_is_greater_or_equal:
+ 	$(Q)test 1 = "$(call version_is_greater_or_equal,$(TEST_VERSION_4),$(TEST_VERSION_3))" || { echo ERROR: "$(TEST_VERSION_3)" \< "$(TEST_VERSION_4)"; exit 1; }
+ 	$(Q)test "" = "$(call version_is_greater_or_equal,$(TEST_VERSION_3),$(TEST_VERSION_4))" || { echo ERROR: Test should fail, "$(TEST_VERSION_4)" is not \< "$(TEST_VERSION_3)"; exit 1; }
+ 	$(Q)test "" = "$(call version_is_greater_or_equal,$(TEST_VERSION_1),$(TEST_VERSION_4))" || { echo ERROR: Test should fail, "$(TEST_VERSION_1)" is not \< "$(TEST_VERSION_4)"; exit 1; }
++
++TEST_MAX_NUMBER_1 = 3 300 567 256
++TEST_MAX_NUMBER_2 =
++TEST_MAX_NUMBER_3 = 42
++TEST_MAX_NUMBER_4 = 10 20 30
++
++test-max_number:
++	$(Q)test 567 = "$(call max_number,$(TEST_MAX_NUMBER_1))" || { echo ERROR: max_number failed for "$(TEST_MAX_NUMBER_1)"; exit 1; }
++	$(Q)test 0 = "$(call max_number,$(TEST_MAX_NUMBER_2))" || { echo ERROR: max_number should return 0 for empty list; exit 1; }
++	$(Q)test 42 = "$(call max_number,$(TEST_MAX_NUMBER_3))" || { echo ERROR: max_number failed for single value; exit 1; }
++	$(Q)test 30 = "$(call max_number,$(TEST_MAX_NUMBER_4))" || { echo ERROR: max_number failed for "$(TEST_MAX_NUMBER_4)"; exit 1; }
+diff --git a/sys/event/Makefile.dep b/sys/event/Makefile.dep
+index 0ba5180a..b6c853b8 100644
+--- a/sys/event/Makefile.dep
++++ b/sys/event/Makefile.dep
+@@ -12,3 +12,10 @@ ifneq (,$(filter event_timeout,$(USEMODULE)))
+   USEMODULE += event_timeout_ztimer
+   USEMODULE += ztimer_usec
+ endif
++
++# Initialize minimum stack size variables for event threads
++# Modules can append values to these using += operator in their Makefile.dep
++# e.g., EVENT_THREAD_HIGHEST_STACKSIZE_MIN += 567
++EVENT_THREAD_HIGHEST_STACKSIZE_MIN ?= 0
++EVENT_THREAD_MEDIUM_STACKSIZE_MIN ?= 0
++EVENT_THREAD_LOWEST_STACKSIZE_MIN ?= 0

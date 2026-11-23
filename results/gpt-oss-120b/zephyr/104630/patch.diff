@@ -1,0 +1,141 @@
+diff --git a/include/zephyr/devicetree/io-channels.h b/include/zephyr/devicetree/io-channels.h
+index f6dc05ab..40f0daf8 100644
+--- a/include/zephyr/devicetree/io-channels.h
++++ b/include/zephyr/devicetree/io-channels.h
+@@ -249,3 +249,30 @@ extern "C" {
+ #endif
+ 
+ #endif  /* ZEPHYR_INCLUDE_DEVICETREE_IO_CHANNELS_H_ */
++/* Output cell helper macros for devices that use an "output" cell in
++ * their io-channel specifiers (e.g. DACs). These are analogous to the input
++ * cell macros defined above.
++ */
++
++/** Get an io-channels specifier "output" cell at an index. */
++#define DT_IO_CHANNELS_OUTPUT_BY_IDX(node_id, idx) \
++    DT_PHA_BY_IDX(node_id, io_channels, idx, output)
++
++/** Get an io-channels specifier "output" cell by name. */
++#define DT_IO_CHANNELS_OUTPUT_BY_NAME(node_id, name) \
++    DT_PHA_BY_NAME(node_id, io_channels, name, output)
++
++/** Equivalent to DT_IO_CHANNELS_OUTPUT_BY_IDX(node_id, 0). */
++#define DT_IO_CHANNELS_OUTPUT(node_id) DT_IO_CHANNELS_OUTPUT_BY_IDX(node_id, 0)
++
++/** Get an "output" cell from the "DT_DRV_INST(inst)" io-channels property at an index. */
++#define DT_INST_IO_CHANNELS_OUTPUT_BY_IDX(inst, idx) \
++    DT_IO_CHANNELS_OUTPUT_BY_IDX(DT_DRV_INST(inst), idx)
++
++/** Get an "output" cell from the "DT_DRV_INST(inst)" io-channels property by name. */
++#define DT_INST_IO_CHANNELS_OUTPUT_BY_NAME(inst, name) \
++    DT_IO_CHANNELS_OUTPUT_BY_NAME(DT_DRV_INST(inst), name)
++
++/** Equivalent to DT_INST_IO_CHANNELS_OUTPUT_BY_IDX(inst, 0). */
++#define DT_INST_IO_CHANNELS_OUTPUT(inst) \
++    DT_INST_IO_CHANNELS_OUTPUT_BY_IDX(inst, 0)
+diff --git a/include/zephyr/drivers/dac.h b/include/zephyr/drivers/dac.h
+index fdb9a611..9400f86c 100644
+--- a/include/zephyr/drivers/dac.h
++++ b/include/zephyr/drivers/dac.h
+@@ -149,5 +149,6 @@ static inline int z_impl_dac_write_value(const struct device *dev,
+ #endif
+ 
+ #include <zephyr/syscalls/dac.h>
++#include <zephyr/drivers/dac_dt.h>
+ 
+ #endif  /* ZEPHYR_INCLUDE_DRIVERS_DAC_H_ */
+diff --git a/include/zephyr/drivers/dac_dt.h b/include/zephyr/drivers/dac_dt.h
+new file mode 100644
+index 00000000..a40ef905
+--- /dev/null
++++ b/include/zephyr/drivers/dac_dt.h
+@@ -0,0 +1,89 @@
++/*
++ * DAC devicetree helper definitions.
++ *
++ * This file provides a set of macros and inline helpers similar to the ADC
++ * devicetree API but for DAC controllers that use an "output" cell in their
++ * io-channels specifier. It is deliberately lightweight and only depends on the
++ * generic io-channels macros defined in <zephyr/devicetree/io-channels.h>.
++ */
++
++#pragma once
++
++#include <zephyr/device.h>
++#include <zephyr/drivers/dac.h>
++
++/**
++ * @brief DAC specification derived from a devicetree io-channels entry.
++ *
++ * The struct contains the controller device pointer, the channel identifier
++ * taken from the io-channel specifier and a pre-initialised @p dac_channel_cfg
++ * structure (only the channel identifier is filled; other fields default to 0).
++ */
++struct dac_dt_spec {
++    const struct device *dev;
++    uint8_t channel_id;
++    struct dac_channel_cfg channel_cfg;
++};
++
++/** Internal macro to build a static initializer for a @p dac_dt_spec. */
++#define DAC_DT_SPEC_STRUCT(ctlr, output) { \
++        .dev = DEVICE_DT_GET(ctlr), \
++        .channel_id = output, \
++        .channel_cfg = { .channel_id = output } \
++    }
++
++/** Get DAC io-channels information from a devicetree node by name. */
++#define DAC_DT_SPEC_GET_BY_NAME(node_id, name) \
++    DAC_DT_SPEC_STRUCT(DT_IO_CHANNELS_CTLR_BY_NAME(node_id, name), \
++                       DT_IO_CHANNELS_OUTPUT_BY_NAME(node_id, name))
++
++/** Get DAC io-channels information from a devicetree node by index. */
++#define DAC_DT_SPEC_GET_BY_IDX(node_id, idx) \
++    DAC_DT_SPEC_STRUCT(DT_IO_CHANNELS_CTLR_BY_IDX(node_id, idx), \
++                       DT_IO_CHANNELS_OUTPUT_BY_IDX(node_id, idx))
++
++/** Fallback variant for name lookup. */
++#define DAC_DT_SPEC_GET_BY_NAME_OR(node_id, name, default_value) \
++    COND_CODE_1(DT_PROP_HAS_NAME(node_id, io_channels, name), \
++                (DAC_DT_SPEC_GET_BY_NAME(node_id, name)), (default_value))
++
++/** Fallback variant for index lookup. */
++#define DAC_DT_SPEC_GET_BY_IDX_OR(node_id, idx, default_value) \
++    COND_CODE_1(DT_PROP_HAS_IDX(node_id, io_channels, idx), \
++                (DAC_DT_SPEC_GET_BY_IDX(node_id, idx)), (default_value))
++
++/** Instance-by-name variant. */
++#define DAC_DT_SPEC_INST_GET_BY_NAME(inst, name) \
++    DAC_DT_SPEC_GET_BY_NAME(DT_DRV_INST(inst), name)
++
++/** Instance-by-name variant with fallback. */
++#define DAC_DT_SPEC_INST_GET_BY_NAME_OR(inst, name, default_value) \
++    DAC_DT_SPEC_GET_BY_NAME_OR(DT_DRV_INST(inst), name, default_value)
++
++/** Instance-by-index variant. */
++#define DAC_DT_SPEC_INST_GET_BY_IDX(inst, idx) \
++    DAC_DT_SPEC_GET_BY_IDX(DT_DRV_INST(inst), idx)
++
++/** Instance-by-index variant with fallback. */
++#define DAC_DT_SPEC_INST_GET_BY_IDX_OR(inst, idx, default_value) \
++    DAC_DT_SPEC_GET_BY_IDX_OR(DT_DRV_INST(inst), idx, default_value)
++
++/** Helper to check if the DAC device is ready. */
++static inline bool dac_is_ready_dt(const struct dac_dt_spec *spec)
++{
++    return device_is_ready(spec->dev);
++}
++
++/** Helper to configure a DAC channel using the dt spec. */
++static inline int dac_channel_setup_dt(const struct dac_dt_spec *spec)
++{
++    return dac_channel_setup(spec->dev, &spec->channel_cfg);
++}
++
++/** Helper to write a value to a DAC channel using the dt spec. */
++static inline int dac_write_value_dt(const struct dac_dt_spec *spec,
++                                     uint32_t value)
++{
++    return dac_write_value(spec->dev, spec->channel_id, value);
++}
++

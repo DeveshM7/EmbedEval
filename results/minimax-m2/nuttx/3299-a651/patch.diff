@@ -1,0 +1,694 @@
+diff --git a/libs/libc/unistd/lib_getopt_common.c b/libs/libc/unistd/lib_getopt_common.c
+index c1a5d6b9..2c57e587 100644
+--- a/libs/libc/unistd/lib_getopt_common.c
++++ b/libs/libc/unistd/lib_getopt_common.c
+@@ -169,6 +169,8 @@ static int getopt_long_option(FAR struct getopt_s *go,
+   /* This option is not in the list of valid options */
+ 
+   go->go_optopt = *go->go_optptr;
++  go->go_optptr = NULL;
++  go->go_optind++;
+   return '?';
+ 
+ errout:
+diff --git a/libs/libc/unistd/lib_getopt_common.c.backup b/libs/libc/unistd/lib_getopt_common.c.backup
+new file mode 100644
+index 00000000..c1a5d6b9
+--- /dev/null
++++ b/libs/libc/unistd/lib_getopt_common.c.backup
+@@ -0,0 +1,520 @@
++/****************************************************************************
++ * libs/libc/unistd/lib_getopt_common.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <stdbool.h>
++#include <string.h>
++
++#include "unistd.h"
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#undef optarg
++#undef opterr
++#undef optind
++#undef optopt
++
++/****************************************************************************
++ * Prive Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: getopt_long_option
++ *
++ * Description:
++ *   Handle one long option
++ *
++ ****************************************************************************/
++
++static int getopt_long_option(FAR struct getopt_s *go,
++                              FAR char * const argv[],
++                              FAR const struct option *longopts,
++                              FAR int *longindex)
++{
++  int ndx;
++  int ret;
++
++  /* The option list may not be NULL in this context */
++
++  if (longopts == NULL)
++    {
++      goto errout;
++    }
++
++  /* Search the list of long options for a matching name.
++   * The last element of the option arry must be filled with zeroes.
++   */
++
++  for (ndx = 0; longopts[ndx].name != NULL; ndx++)
++    {
++      if (strcmp(go->go_optptr, longopts[ndx].name) == 0)
++        {
++          /* Found the option with the matching name.  Does it have an
++           * required argument?  And optional argument?
++           */
++
++          switch (longopts[ndx].has_arg)
++            {
++              FAR char *next;
++
++              case no_argument:
++                /* No, no arguments. Just return the option that we
++                 * found.
++                 */
++
++                go->go_optptr = NULL;
++                go->go_optind++;
++                break;
++
++              case optional_argument:
++                /* Check if there is a following argument and if that
++                 * following argument is another option.
++                 */
++
++                next = argv[go->go_optind + 1];
++                if (next == NULL || next[0] == '-')
++                  {
++                    go->go_optptr = NULL;
++                    go->go_optarg = NULL;
++                    go->go_optind++;
++                    break;
++                  }
++
++                 /* Fall through and treat as a required option */
++
++              case required_argument:
++
++                /* Verify that the required option is present */
++
++                next = argv[go->go_optind + 1];
++                if (next == NULL || next[0] == '-')
++                  {
++                    go->go_optptr = NULL;
++                    go->go_optarg = NULL;
++                    go->go_optind++;
++                    return '?';
++                  }
++
++                /* Return the required option */
++
++                go->go_optptr  = NULL;
++                go->go_optarg  = next;
++                go->go_optind += 2;
++                break;
++
++              default:
++                goto errout;
++                break;
++            }
++
++          /* Setup return value.
++           *
++           * 'val' is the value to return on success, or to load into the
++           * variable pointed to by flag.
++           *
++           * 'flag' specifies how results are returned for a long option. If
++           * flag is NULL, then getopt_long() returns val.  Otherwise,
++           * getopt_long() returns 0, and flag points to a variable which is
++           * set to val if the option is found, but left unchanged if the
++           * option is not found.
++           */
++
++          if (longopts[ndx].flag != NULL)
++            {
++              *(longopts[ndx].flag) = longopts[ndx].val;
++              ret = OK;
++            }
++          else
++            {
++              ret = longopts[ndx].val;
++            }
++
++          /* If longindex is not NULL, it points to a variable which is
++           * set to the index of the long option relative to longopts.
++           */
++
++          if (longindex != NULL)
++            {
++              *longindex = ndx;
++            }
++
++          return ret;
++        }
++    }
++
++  /* This option is not in the list of valid options */
++
++  go->go_optopt = *go->go_optptr;
++  return '?';
++
++errout:
++
++  /* Restore the initial, uninitialized state */
++
++  go->go_binitialized = false;
++  return ERROR;
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: getopt_common
++ *
++ * Description:
++ *
++ *   getopt_common() is the common, internal implementation of getopt(),
++ *   getopt_long(), and getopt_long_only().
++ *
++ *   getopt() parses command-line arguments.  Its arguments argc and argv
++ *   are the argument count and array as passed to the main() function on
++ *   program invocation.  An element of argv that starts with '-' is an
++ *   option element. The characters of this element (aside from the initial
++ *   '-') are option characters. If getopt() is called repeatedly, it
++ *   returns successively each of the option characters from each of the
++ *   option elements.
++ *
++ *   If getopt() finds another option character, it returns that character,
++ *   updating the external variable optind and a static variable nextchar so
++ *   that the next call to getopt() can resume the scan with the following
++ *   option character or argv-element.
++ *
++ *   If there are no more option characters, getopt() returns -1. Then optind
++ *   is the index in argv of the first argv-element that is not an option.
++ *
++ *   The 'optstring' argument is a string containing the legitimate option
++ *   characters. If such a character is followed by a colon, this indicates
++ *   that the option requires an argument.  If an argument is required for an
++ *   option so getopt() places a pointer to the following text in the same
++ *   argv-element, or the text of the following argv-element, in optarg.
++ *
++ *   The getopt_long() function works like getopt() except that it also
++ *   accepts long options, started with two dashes. (If the program accepts
++ *   only long options, then optstring should be specified as an empty
++ *   string (""), not NULL.) Long option names may be abbreviated if the
++ *   abbreviation is unique or is an exact match for some defined option
++ *
++ *   getopt_long_only() is like getopt_long(), but '-' as well as "--" can
++ *   indicate a long option. If an option that starts with '-' (not "--")
++ *   doesn't match a long option, but does match a short option, it is
++ *   parsed as a short option instead.
++ *
++ *   NOTES:
++ *   1. opterr is not supported and this implementation of getopt() never
++ *      printfs error messages.
++ *   2. getopt is NOT threadsafe!
++ *   3. This version of getopt() does not reset global variables until
++ *      -1 is returned.  As a result, your command line parsing loops
++ *      must call getopt() repeatedly and continue to parse if other
++ *      errors are returned ('?' or ':') until getopt() finally returns -1.
++ *     (You can also set optind to -1 to force a reset).
++ *
++ * Returned Value:
++ *   If an option was successfully found, then getopt() returns the option
++ *   character. If all command-line options have been parsed, then getopt()
++ *   returns -1.  If getopt() encounters an option character that was not
++ *   in optstring, then '?' is returned. If getopt() encounters an option
++ *   with a missing argument, then the return value depends on the first
++ *   character in optstring: if it is ':', then ':' is returned; otherwise
++ *   '?' is returned.
++ *
++ ****************************************************************************/
++
++int getopt_common(int argc, FAR char * const argv[],
++                  FAR const char *optstring,
++                  FAR const struct option *longopts,
++                  FAR int *longindex,
++                  enum getopt_mode_e mode)
++{
++  int ret;
++
++  /* Get thread-specific getopt() variables */
++
++  FAR struct getopt_s *go = getoptvars();
++  if (go == NULL)
++    {
++      return '?';
++    }
++
++  /* Verify input parameters. */
++
++  if (argv != NULL)
++    {
++      FAR char *optchar;
++      int noarg_ret = '?';
++
++      /* The initial value of optind is 1.  If getopt() is called again in
++       * the program, optind must be reset to some value <= 1.
++       */
++
++      if (go->go_optind < 1 || !go->go_binitialized)
++        {
++          go->go_optarg       = NULL;
++          go->go_optind       = 1;     /* Skip over the program name */
++          go->go_optopt       = '?';
++          go->go_optptr       = NULL;  /* Start at the beginning of the first argument */
++          go->go_binitialized = true;  /* Now we are initialized */
++        }
++
++      /* Are we resuming in the middle, or at the end of a string of
++       * arguments? optptr == NULL means that we are started at the
++       * beginning of argv[optind]; *optptr == \0 means that we are
++       * starting at the beginning of optind+1
++       */
++
++      while (!go->go_optptr || !*go->go_optptr)
++        {
++          /* We need to start at the beginning of the next argv. Check if we
++           * need to increment optind
++           */
++
++          if (go->go_optptr)
++            {
++              /* Yes.. Increment it and check for the case where where we
++               * have processed everything in the argv[] array.
++               */
++
++              go->go_optind++;
++            }
++
++          /* Check for the end of the argument list */
++
++          go->go_optptr = argv[go->go_optind];
++          if (!go->go_optptr)
++            {
++              /* There are no more arguments, we are finished */
++
++              go->go_binitialized = false;
++              return ERROR;
++            }
++
++          /* We are starting at the beginning of argv[optind].  In this case,
++           * the first character must be '-'
++           */
++
++          if (*go->go_optptr != '-')
++            {
++              /* The argument does not start with '-', we are finished */
++
++              go->go_binitialized = false;
++              return ERROR;
++            }
++
++          /* Skip over the '-' */
++
++          go->go_optptr++;
++        }
++
++      /* Special case handling of "-" and "-:" */
++
++      if (!*go->go_optptr)
++        {
++          /* We'll fix up optptr the next time we are called */
++
++          go->go_optopt = '\0';
++          return '?';
++        }
++
++      /* Handle the case of "-:" */
++
++      if (*go->go_optptr == ':')
++        {
++          go->go_optopt = ':';
++          go->go_optptr++;
++          return '?';
++        }
++
++      /* go->go_optptr now points at the next option and it is not something
++       * crazy.  Possibilities:
++       *
++       *  FORM              APPLICABILITY
++       *  -o                getopt(), getopt_long_only()
++       *  -o reqarg         getopt(), getopt_long_only()
++       *  -o optarg         getopt_long_only()
++       *  -option           getopt_long_only()
++       *  -option reqarg    getopt_long_only()
++       *  -option optarg    getopt_long_only()
++       *  --option          getopt_long(), getopt_long_only()
++       *  --option reqarg   getopt_long(), getopt_long_only()
++       *  --option optarg   getopt_long(), getopt_long_only()
++       *
++       * Where:
++       *  o      - Some short option
++       *  option - Some long option
++       *  reqarg - A required argument
++       *  optarg - An optional argument
++       */
++
++      /* Check for --option forms or -option forms */
++
++      if (GETOPT_HAVE_LONG(mode))
++        {
++          /* Handle -option and --option forms. */
++
++          if (*go->go_optptr == '-')
++            {
++              /* Skip over the second '-' */
++
++              go->go_optptr++;
++
++              /* And parse the long option */
++
++              return getopt_long_option(go, argv, longopts, longindex);
++            }
++
++          /* The -option form is only valid in getop_long_only() mode and
++           * must be distinguished from the -o case forms.
++           */
++
++          else if (GETOPT_HAVE_LONGONLY(mode))
++            {
++              /* A special case is that the option is of a form like
++               * -o but is represented as a single character long option.
++               * In that case, getopt_long_option() will fail with '?' and,
++               * if it is a single character option, we can just fall
++               * through to the short option logic.
++               */
++
++              ret = getopt_long_option(go, argv, longopts, longindex);
++              if (ret != '?' ||  *(go->go_optptr + 1) != '\0')
++                {
++                  return ret;
++                }
++            }
++        }
++
++      /* Check if the option is in the list of valid short options.
++       * In long option modes, opstring may be NULL. However, that is
++       * an error in any case here because we have not found any
++       * long options.
++       */
++
++      if (optstring == NULL)
++        {
++          /* Not an error with getopt_long() */
++
++          if (GETOPT_HAVE_LONG(mode))
++            {
++              /* Return '?'.  optptr is reset to the next argv entry,
++               * discarding everything else that follows in the argv string
++               * (which could be another single character command).
++               */
++
++              go->go_optopt = *go->go_optptr;
++              go->go_optptr = NULL;
++              go->go_optind++;
++              return '?';
++            }
++          else
++            {
++              /* Restore the initial, uninitialized state, and return an
++               * error.
++               */
++
++              go->go_binitialized = false;
++              return ERROR;
++            }
++        }
++
++      /* If the first character of opstring s ':', then ':' is in the event
++       * of a missing argument. Otherwise '?' is returned.
++       */
++
++      if (*optstring == ':')
++        {
++          noarg_ret = ':';
++          optstring++;
++        }
++
++      /* Check if the option appears in 'optstring' */
++
++      optchar = strchr(optstring, *go->go_optptr);
++      if (!optchar)
++        {
++          /* No this character is not in the list of valid options */
++
++          go->go_optopt = *go->go_optptr;
++          go->go_optptr++;
++          return '?';
++        }
++
++      /* Yes, the character is in the list of valid options.  Does it have a
++       * required argument?
++       */
++
++      if (optchar[1] != ':')
++        {
++          /* No, no arguments. Just return the character that we found */
++
++          go->go_optptr++;
++          return *optchar;
++        }
++
++      /* Yes, it may have an argument.  Is the argument immediately after
++       * the command in this same argument?
++       */
++
++      if (go->go_optptr[1] != '\0')
++        {
++          /* Yes, return a pointer into the current argument */
++
++          go->go_optarg = &go->go_optptr[1];
++          go->go_optind++;
++          go->go_optptr = NULL;
++          return *optchar;
++        }
++
++      /* No.. is there an argument in the next value of argv[] ? */
++
++      if (argv[go->go_optind + 1] && *argv[go->go_optind + 1] != '-')
++        {
++          /* Yes.. return that */
++
++          go->go_optarg = argv[go->go_optind + 1];
++          go->go_optind += 2;
++          go->go_optptr = NULL;
++          return *optchar;
++        }
++
++      /* No argument was supplied */
++
++      go->go_optptr = NULL;
++      go->go_optarg = NULL;
++      go->go_optopt = *optchar;
++      go->go_optind++;
++
++      /* Two colons means that the argument is optional. */
++
++      return (optchar[2] == ':') ? *optchar : noarg_ret;
++    }
++
++  /* Restore the initial, uninitialized state, and return an error. */
++
++  go->go_binitialized = false;
++  return ERROR;
++}
+diff --git a/test_bug b/test_bug
+new file mode 100755
+index 0000000000000000000000000000000000000000..e0dfd2d1dd8dd442dde7e1fe11c57a1307f34feb
+GIT binary patch
+literal 16064
+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
+EUlY{ts{jB1
+
+literal 0
+HcmV?d00001
+
+diff --git a/verify_fix.c b/verify_fix.c
+new file mode 100644
+index 00000000..ebef7838
+--- /dev/null
++++ b/verify_fix.c
+@@ -0,0 +1,83 @@
++/* Standalone test to verify getopt_long() fix for unrecognized long options */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* Link against the built libraries */
++extern char *optarg;
++extern int optind;
++extern int optopt;
++
++struct option {
++    const char *name;
++    int has_arg;
++    int *flag;
++    int val;
++};
++
++#define no_argument 0
++#define required_argument 1
++#define optional_argument 2
++
++/* Forward declarations */
++int getopt_long(int argc, char * const argv[],
++                const char *optstring,
++                const struct option *longopts,
++                int *longindex);
++
++int main(void) {
++    struct option long_options[] = {
++        {"valid", no_argument, 0, 'v'},
++        {0, 0, 0, 0}
++    };
++    
++    /* Test case: Unrecognized long option as final argument */
++    char *argv[] = {"program", "--valid", "--invalid"};
++    int argc = 3;
++    
++    printf("Testing getopt_long() fix for unrecognized long option\n");
++    printf("=========================================================\n");
++    printf("Arguments: --valid --invalid\n");
++    printf("Expected: Process 'v', then '?' for invalid, then -1 to terminate\n");
++    printf("\n");
++    
++    int ret;
++    int count = 0;
++    
++    optind = 0; /* Reset */
++    printf("Starting parse:\n");
++    
++    while ((ret = getopt_long(argc, argv, "", long_options, NULL)) != -1) {
++        count++;
++        printf("  Iteration %d: ret=%d ('%c'), optind=%d, optopt='%c'\n", 
++               count, ret, ret > 0 ? ret : '?', optind, optopt);
++        
++        if (count > 5) {
++            printf("  FAILURE: Too many iterations, infinite loop detected!\n");
++            return 1;
++        }
++        
++        if (ret == 'v') {
++            printf("    -> Correctly parsed valid option\n");
++        } else if (ret == '?') {
++            printf("    -> Correctly identified invalid option\n");
++        } else {
++            printf("    -> Unexpected return value\n");
++        }
++    }
++    
++    printf("\n");
++    printf("Parse completed after %d iterations\n", count);
++    printf("Final optind=%d (should be 3 for argv[0..2])\n", optind);
++    
++    if (count == 2 && optind == 3) {
++        printf("\nSUCCESS: The fix works correctly!\n");
++        printf("- Valid option was processed\n");
++        printf("- Invalid option was reported once\n");
++        printf("- Parser terminated correctly\n");
++        return 0;
++    } else {
++        printf("\nFAILURE: The fix did not work as expected\n");
++        return 1;
++    }
++}

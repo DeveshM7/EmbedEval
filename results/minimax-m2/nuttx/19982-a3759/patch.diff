@@ -1,0 +1,859 @@
+diff --git a/fix_delay_validation.patch b/fix_delay_validation.patch
+new file mode 100644
+index 00000000..2b4f6ebc
+--- /dev/null
++++ b/fix_delay_validation.patch
+@@ -0,0 +1,28 @@
++--- a/sched/wqueue/kwork_queue.c
+++++ b/sched/wqueue/kwork_queue.c
++@@ -76,7 +76,8 @@ int work_queue_next_wq(FAR struct kwork_wqueue_s *wqueue,
++                        FAR void *arg, clock_t delay)
++ {
++   irqstate_t flags;
++-
++-  if (wqueue == NULL || work == NULL || worker == NULL ||
+++ 
+++  if (wqueue == NULL || work == NULL || worker == NULL || delay < 0 ||
+++      delay > WDOG_MAX_DELAY)
++     {
++       return -EINVAL;
++     }
++@@ -160,7 +161,8 @@ int work_queue_wq(FAR struct kwork_wqueue_s *wqueue,
++                   FAR void *arg, clock_t delay)
++ {
++   irqstate_t flags;
++   clock_t expected;
++   bool retimer;
++-
++-  if (wqueue == NULL || work == NULL || worker == NULL ||
+++ 
+++  if (wqueue == NULL || work == NULL || worker == NULL || delay < 0 ||
+++      delay > WDOG_MAX_DELAY || wqueue->exit)
++     {
++       return -EINVAL;
++     }
+diff --git a/fix_kwork_queue.patch b/fix_kwork_queue.patch
+new file mode 100644
+index 00000000..c93feb69
+--- /dev/null
++++ b/fix_kwork_queue.patch
+@@ -0,0 +1,63 @@
++--- a/sched/wqueue/kwork_queue.c
+++++ b/sched/wqueue/kwork_queue.c
++@@ -43,7 +43,8 @@ int work_queue_next_wq(FAR struct kwork_wqueue_s *wqueue,
++                        FAR struct work_s *work, worker_t worker,
++                        FAR void *arg, clock_t delay)
++ {
++   irqstate_t flags;
++ 
++-  if (wqueue == NULL || work == NULL || worker == NULL ||
+++  if (wqueue == NULL || work == NULL || worker == NULL || delay < 0 ||
+++      delay > WDOG_MAX_DELAY)
++     {
++       return -EINVAL;
++     }
++@@ -120,7 +121,8 @@ int work_queue(int qid, FAR struct work_s *work, worker_t worker,
++                 FAR void *arg, clock_t delay)
++ {
++   FAR struct kwork_wqueue_s *wq;
++-  if (qid < 0 || qid > 3)
+++  
+++  if (qid < 0 || qid > 3 || work == NULL || worker == NULL || delay < 0 ||
+++      delay > WDOG_MAX_DELAY)
++     {
++       return -EINVAL;
++     }
++@@ -143,7 +145,8 @@ int work_queue_wq(FAR struct kwork_wqueue_s *wqueue,
++                   FAR void *arg, clock_t delay)
++ {
++   irqstate_t flags;
++   clock_t expected;
++   bool retimer;
++ 
++-  if (wqueue == NULL || work == NULL || worker == NULL ||
+++  if (wqueue == NULL || work == NULL || worker == NULL || delay < 0 ||
+++      delay > WDOG_MAX_DELAY || wqueue->exit)
++     {
++       return -EINVAL;
++     }
++@@ -220,6 +223,24 @@ int work_queue(int qid, FAR struct work_s *work, worker_t worker,
++   return work_queue_wq(work_qid2wq(qid), work, worker, arg, delay);
++ }
++ 
+++int work_queue_next(int qid, FAR struct work_s *work, worker_t worker,
+++                    FAR void *arg, clock_t delay)
+++{
+++  FAR struct kwork_wqueue_s *wq;
+++  
+++  if (qid < 0 || qid > 3 || work == NULL || worker == NULL || delay < 0 ||
+++      delay > WDOG_MAX_DELAY)
+++    {
+++      return -EINVAL;
+++    }
+++ 
+++  wq = work_qid2wq(qid);
+++  if (wq == NULL)
+++    {
+++      return -EINVAL;
+++    }
+++ 
+++  return work_queue_next_wq(wq, work, worker, arg, delay);
+++}
+++
++ #endif /* CONFIG_SCHED_WORKQUEUE */
+diff --git a/sched/wqueue/kwork_cancel.c b/sched/wqueue/kwork_cancel.c
+index 8a8bc603..ae38b5ac 100644
+--- a/sched/wqueue/kwork_cancel.c
++++ b/sched/wqueue/kwork_cancel.c
+@@ -47,6 +47,7 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue, bool sync,
+ {
+   irqstate_t flags;
+   FAR sem_t *sync_wait = NULL;
++  bool removed = false;
+ 
+   if (wqueue == NULL || work == NULL)
+     {
+@@ -70,13 +71,15 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue, bool sync,
+         {
+           work_timer_reset(wqueue);
+         }
++      
++      removed = true;
+     }
+ 
+   /* Note that cancel_sync can not be called in the interrupt
+    * context and the idletask context.
+    */
+ 
+-  if (sync)
++  if (sync && removed)
+     {
+       int wndx;
+       pid_t pid = nxsched_gettid();
+diff --git a/sched/wqueue/kwork_queue.c b/sched/wqueue/kwork_queue.c
+index 75b5a7f5..55616f28 100644
+--- a/sched/wqueue/kwork_queue.c
++++ b/sched/wqueue/kwork_queue.c
+@@ -73,7 +73,7 @@ int work_queue_next_wq(FAR struct kwork_wqueue_s *wqueue,
+ {
+   irqstate_t flags;
+ 
+-  if (wqueue == NULL || work == NULL || worker == NULL ||
++  if (wqueue == NULL || work == NULL || worker == NULL || delay < 0 ||
+       delay > WDOG_MAX_DELAY)
+     {
+       return -EINVAL;
+@@ -83,10 +83,17 @@ int work_queue_next_wq(FAR struct kwork_wqueue_s *wqueue,
+ 
+   work->worker = worker; /* Work callback. non-NULL means queued */
+   work->arg    = arg;    /* Callback argument */
+-  work->qtime += delay;  /* Expected time based on last expiration time */
+ 
+   flags = spin_lock_irqsave(&wqueue->lock);
+ 
++  /* If work is already queued, remove it first for pending replacement */
++  if (!work_available(work))
++    {
++      work_remove(wqueue, work);
++    }
++
++  work->qtime += delay;  /* Expected time based on last expiration time */
++
+   if (delay)
+     {
+       /* Insert to the pending list of the wqueue. */
+@@ -121,7 +128,21 @@ int work_queue_next_wq(FAR struct kwork_wqueue_s *wqueue,
+ int work_queue_next(int qid, FAR struct work_s *work, worker_t worker,
+                     FAR void *arg, clock_t delay)
+ {
+-  return work_queue_next_wq(work_qid2wq(qid), work, worker, arg, delay);
++  FAR struct kwork_wqueue_s *wq;
++  
++  if (qid < 0 || qid > 3 || work == NULL || worker == NULL || delay < 0 ||
++      delay > WDOG_MAX_DELAY)
++    {
++      return -EINVAL;
++    }
++ 
++  wq = work_qid2wq(qid);
++  if (wq == NULL)
++    {
++      return -EINVAL;
++    }
++ 
++  return work_queue_next_wq(wq, work, worker, arg, delay);
+ }
+ 
+ /****************************************************************************
+@@ -162,8 +183,8 @@ int work_queue_wq(FAR struct kwork_wqueue_s *wqueue,
+   clock_t expected;
+   bool retimer;
+ 
+-  if (wqueue == NULL || work == NULL || worker == NULL ||
+-      delay > WDOG_MAX_DELAY)
++  if (wqueue == NULL || work == NULL || worker == NULL || delay < 0 ||
++      delay > WDOG_MAX_DELAY || wqueue->exit)
+     {
+       return -EINVAL;
+     }
+@@ -226,7 +247,21 @@ int work_queue_wq(FAR struct kwork_wqueue_s *wqueue,
+ int work_queue(int qid, FAR struct work_s *work, worker_t worker,
+                FAR void *arg, clock_t delay)
+ {
+-  return work_queue_wq(work_qid2wq(qid), work, worker, arg, delay);
++  FAR struct kwork_wqueue_s *wq;
++  
++  if (qid < 0 || qid > 3 || work == NULL || worker == NULL || delay < 0 ||
++      delay > WDOG_MAX_DELAY)
++    {
++      return -EINVAL;
++    }
++ 
++  wq = work_qid2wq(qid);
++  if (wq == NULL)
++    {
++      return -EINVAL;
++    }
++ 
++  return work_queue_wq(wq, work, worker, arg, delay);
+ }
+ 
+ #endif /* CONFIG_SCHED_WORKQUEUE */
+diff --git a/sched/wqueue/kwork_queue.c.bak b/sched/wqueue/kwork_queue.c.bak
+new file mode 100644
+index 00000000..75b5a7f5
+--- /dev/null
++++ b/sched/wqueue/kwork_queue.c.bak
+@@ -0,0 +1,232 @@
++/****************************************************************************
++ * sched/wqueue/kwork_queue.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <stdint.h>
++#include <assert.h>
++#include <errno.h>
++
++#include <nuttx/irq.h>
++#include <nuttx/arch.h>
++#include <nuttx/clock.h>
++#include <nuttx/list.h>
++#include <nuttx/wqueue.h>
++
++#include "wqueue/wqueue.h"
++
++#ifdef CONFIG_SCHED_WORKQUEUE
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: work_queue_next/work_queue_next_wq
++ *
++ * Description:
++ *   Queue work to be performed at a later time based on the last expiration
++ *   time. This function must be called in the workqueue callback.
++ *
++ * Input Parameters:
++ *   qid    - The work queue ID (must be HPWORK or LPWORK)
++ *   wqueue - The work queue handle
++ *   work   - The work structure to queue
++ *   worker - The worker callback to be invoked.  The callback will be
++ *            invoked on the worker thread of execution.
++ *   arg    - The argument that will be passed to the worker callback when
++ *            it is invoked.
++ *   delay  - Delay (in clock ticks) from the time queue until the worker
++ *            is invoked. Zero means to perform the work immediately.
++ *
++ * Returned Value:
++ *   Zero on success, a negated errno on failure
++ *
++ ****************************************************************************/
++
++int work_queue_next_wq(FAR struct kwork_wqueue_s *wqueue,
++                       FAR struct work_s *work, worker_t worker,
++                       FAR void *arg, clock_t delay)
++{
++  irqstate_t flags;
++
++  if (wqueue == NULL || work == NULL || worker == NULL ||
++      delay > WDOG_MAX_DELAY)
++    {
++      return -EINVAL;
++    }
++
++  /* Initialize the work structure. */
++
++  work->worker = worker; /* Work callback. non-NULL means queued */
++  work->arg    = arg;    /* Callback argument */
++  work->qtime += delay;  /* Expected time based on last expiration time */
++
++  flags = spin_lock_irqsave(&wqueue->lock);
++
++  if (delay)
++    {
++      /* Insert to the pending list of the wqueue. */
++
++      if (work_insert_pending(wqueue, work))
++        {
++          /* Start the timer if the work is the earliest expired work. */
++
++          wd_start_abstick(&wqueue->timer, work->qtime,
++                           work_timer_expired, (wdparm_t)wqueue);
++        }
++    }
++  else
++    {
++      /* Insert to the expired list of the wqueue. */
++
++      list_add_tail(&wqueue->expired, &work->node);
++    }
++
++  spin_unlock_irqrestore(&wqueue->lock, flags);
++
++  if (!delay)
++    {
++      /* Immediately wake up the worker thread. */
++
++      nxsem_post(&wqueue->sem);
++    }
++
++  return 0;
++}
++
++int work_queue_next(int qid, FAR struct work_s *work, worker_t worker,
++                    FAR void *arg, clock_t delay)
++{
++  return work_queue_next_wq(work_qid2wq(qid), work, worker, arg, delay);
++}
++
++/****************************************************************************
++ * Name: work_queue/work_queue_wq
++ *
++ * Description:
++ *   Queue work to be performed at a later time.  All queued work will be
++ *   performed on the worker thread of execution (not the caller's).
++ *
++ *   The work structure is allocated and must be initialized to all zero by
++ *   the caller.  Otherwise, the work structure is completely managed by the
++ *   work queue logic.  The caller should never modify the contents of the
++ *   work queue structure directly.  If work_queue() is called before the
++ *   previous work has been performed and removed from the queue, then any
++ *   pending work will be canceled and lost.
++ *
++ * Input Parameters:
++ *   qid    - The work queue ID (must be HPWORK or LPWORK)
++ *   wqueue - The work queue handle
++ *   work   - The work structure to queue
++ *   worker - The worker callback to be invoked.  The callback will be
++ *            invoked on the worker thread of execution.
++ *   arg    - The argument that will be passed to the worker callback when
++ *            it is invoked.
++ *   delay  - Delay (in clock ticks) from the time queue until the worker
++ *            is invoked. Zero means to perform the work immediately.
++ *
++ * Returned Value:
++ *   Zero on success, a negated errno on failure
++ *
++ ****************************************************************************/
++
++int work_queue_wq(FAR struct kwork_wqueue_s *wqueue,
++                  FAR struct work_s *work, worker_t worker,
++                  FAR void *arg, clock_t delay)
++{
++  irqstate_t flags;
++  clock_t expected;
++  bool retimer;
++
++  if (wqueue == NULL || work == NULL || worker == NULL ||
++      delay > WDOG_MAX_DELAY)
++    {
++      return -EINVAL;
++    }
++
++  expected = clock_delay2abstick(delay);
++
++  /* Interrupts are disabled so that this logic can be called from with
++   * task logic or from interrupt handling logic.
++   */
++
++  flags = spin_lock_irqsave(&wqueue->lock);
++
++  /* Ensure the work has been removed. */
++
++  retimer = work_available(work) ? false : work_remove(wqueue, work);
++
++  /* Initialize the work structure. */
++
++  work->worker = worker;   /* Work callback. non-NULL means queued */
++  work->arg    = arg;      /* Callback argument */
++  work->qtime  = expected; /* Expected time */
++
++  if (delay)
++    {
++      /* Insert to the pending list of the wqueue. */
++
++      if (work_insert_pending(wqueue, work))
++        {
++          /* Start the timer if the work is the earliest expired work. */
++
++          retimer = false;
++          wd_start_abstick(&wqueue->timer, work->qtime,
++                           work_timer_expired, (wdparm_t)wqueue);
++        }
++    }
++  else
++    {
++      /* Insert to the expired list of the wqueue. */
++
++      list_add_tail(&wqueue->expired, &work->node);
++    }
++
++  if (retimer)
++    {
++      work_timer_reset(wqueue);
++    }
++
++  spin_unlock_irqrestore(&wqueue->lock, flags);
++
++  if (!delay)
++    {
++      /* Immediately wake up the worker thread. */
++
++      nxsem_post(&wqueue->sem);
++    }
++
++  return 0;
++}
++
++int work_queue(int qid, FAR struct work_s *work, worker_t worker,
++               FAR void *arg, clock_t delay)
++{
++  return work_queue_wq(work_qid2wq(qid), work, worker, arg, delay);
++}
++
++#endif /* CONFIG_SCHED_WORKQUEUE */
+diff --git a/sched/wqueue/kwork_queue.c.orig b/sched/wqueue/kwork_queue.c.orig
+new file mode 100644
+index 00000000..75b5a7f5
+--- /dev/null
++++ b/sched/wqueue/kwork_queue.c.orig
+@@ -0,0 +1,232 @@
++/****************************************************************************
++ * sched/wqueue/kwork_queue.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <stdint.h>
++#include <assert.h>
++#include <errno.h>
++
++#include <nuttx/irq.h>
++#include <nuttx/arch.h>
++#include <nuttx/clock.h>
++#include <nuttx/list.h>
++#include <nuttx/wqueue.h>
++
++#include "wqueue/wqueue.h"
++
++#ifdef CONFIG_SCHED_WORKQUEUE
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: work_queue_next/work_queue_next_wq
++ *
++ * Description:
++ *   Queue work to be performed at a later time based on the last expiration
++ *   time. This function must be called in the workqueue callback.
++ *
++ * Input Parameters:
++ *   qid    - The work queue ID (must be HPWORK or LPWORK)
++ *   wqueue - The work queue handle
++ *   work   - The work structure to queue
++ *   worker - The worker callback to be invoked.  The callback will be
++ *            invoked on the worker thread of execution.
++ *   arg    - The argument that will be passed to the worker callback when
++ *            it is invoked.
++ *   delay  - Delay (in clock ticks) from the time queue until the worker
++ *            is invoked. Zero means to perform the work immediately.
++ *
++ * Returned Value:
++ *   Zero on success, a negated errno on failure
++ *
++ ****************************************************************************/
++
++int work_queue_next_wq(FAR struct kwork_wqueue_s *wqueue,
++                       FAR struct work_s *work, worker_t worker,
++                       FAR void *arg, clock_t delay)
++{
++  irqstate_t flags;
++
++  if (wqueue == NULL || work == NULL || worker == NULL ||
++      delay > WDOG_MAX_DELAY)
++    {
++      return -EINVAL;
++    }
++
++  /* Initialize the work structure. */
++
++  work->worker = worker; /* Work callback. non-NULL means queued */
++  work->arg    = arg;    /* Callback argument */
++  work->qtime += delay;  /* Expected time based on last expiration time */
++
++  flags = spin_lock_irqsave(&wqueue->lock);
++
++  if (delay)
++    {
++      /* Insert to the pending list of the wqueue. */
++
++      if (work_insert_pending(wqueue, work))
++        {
++          /* Start the timer if the work is the earliest expired work. */
++
++          wd_start_abstick(&wqueue->timer, work->qtime,
++                           work_timer_expired, (wdparm_t)wqueue);
++        }
++    }
++  else
++    {
++      /* Insert to the expired list of the wqueue. */
++
++      list_add_tail(&wqueue->expired, &work->node);
++    }
++
++  spin_unlock_irqrestore(&wqueue->lock, flags);
++
++  if (!delay)
++    {
++      /* Immediately wake up the worker thread. */
++
++      nxsem_post(&wqueue->sem);
++    }
++
++  return 0;
++}
++
++int work_queue_next(int qid, FAR struct work_s *work, worker_t worker,
++                    FAR void *arg, clock_t delay)
++{
++  return work_queue_next_wq(work_qid2wq(qid), work, worker, arg, delay);
++}
++
++/****************************************************************************
++ * Name: work_queue/work_queue_wq
++ *
++ * Description:
++ *   Queue work to be performed at a later time.  All queued work will be
++ *   performed on the worker thread of execution (not the caller's).
++ *
++ *   The work structure is allocated and must be initialized to all zero by
++ *   the caller.  Otherwise, the work structure is completely managed by the
++ *   work queue logic.  The caller should never modify the contents of the
++ *   work queue structure directly.  If work_queue() is called before the
++ *   previous work has been performed and removed from the queue, then any
++ *   pending work will be canceled and lost.
++ *
++ * Input Parameters:
++ *   qid    - The work queue ID (must be HPWORK or LPWORK)
++ *   wqueue - The work queue handle
++ *   work   - The work structure to queue
++ *   worker - The worker callback to be invoked.  The callback will be
++ *            invoked on the worker thread of execution.
++ *   arg    - The argument that will be passed to the worker callback when
++ *            it is invoked.
++ *   delay  - Delay (in clock ticks) from the time queue until the worker
++ *            is invoked. Zero means to perform the work immediately.
++ *
++ * Returned Value:
++ *   Zero on success, a negated errno on failure
++ *
++ ****************************************************************************/
++
++int work_queue_wq(FAR struct kwork_wqueue_s *wqueue,
++                  FAR struct work_s *work, worker_t worker,
++                  FAR void *arg, clock_t delay)
++{
++  irqstate_t flags;
++  clock_t expected;
++  bool retimer;
++
++  if (wqueue == NULL || work == NULL || worker == NULL ||
++      delay > WDOG_MAX_DELAY)
++    {
++      return -EINVAL;
++    }
++
++  expected = clock_delay2abstick(delay);
++
++  /* Interrupts are disabled so that this logic can be called from with
++   * task logic or from interrupt handling logic.
++   */
++
++  flags = spin_lock_irqsave(&wqueue->lock);
++
++  /* Ensure the work has been removed. */
++
++  retimer = work_available(work) ? false : work_remove(wqueue, work);
++
++  /* Initialize the work structure. */
++
++  work->worker = worker;   /* Work callback. non-NULL means queued */
++  work->arg    = arg;      /* Callback argument */
++  work->qtime  = expected; /* Expected time */
++
++  if (delay)
++    {
++      /* Insert to the pending list of the wqueue. */
++
++      if (work_insert_pending(wqueue, work))
++        {
++          /* Start the timer if the work is the earliest expired work. */
++
++          retimer = false;
++          wd_start_abstick(&wqueue->timer, work->qtime,
++                           work_timer_expired, (wdparm_t)wqueue);
++        }
++    }
++  else
++    {
++      /* Insert to the expired list of the wqueue. */
++
++      list_add_tail(&wqueue->expired, &work->node);
++    }
++
++  if (retimer)
++    {
++      work_timer_reset(wqueue);
++    }
++
++  spin_unlock_irqrestore(&wqueue->lock, flags);
++
++  if (!delay)
++    {
++      /* Immediately wake up the worker thread. */
++
++      nxsem_post(&wqueue->sem);
++    }
++
++  return 0;
++}
++
++int work_queue(int qid, FAR struct work_s *work, worker_t worker,
++               FAR void *arg, clock_t delay)
++{
++  return work_queue_wq(work_qid2wq(qid), work, worker, arg, delay);
++}
++
++#endif /* CONFIG_SCHED_WORKQUEUE */
+diff --git a/sched/wqueue/kwork_queue.c.rej b/sched/wqueue/kwork_queue.c.rej
+new file mode 100644
+index 00000000..760fb85a
+--- /dev/null
++++ b/sched/wqueue/kwork_queue.c.rej
+@@ -0,0 +1,13 @@
++--- sched/wqueue/kwork_queue.c
+++++ sched/wqueue/kwork_queue.c
++@@ -76,7 +76,8 @@ int work_queue_next_wq(FAR struct kwork_wqueue_s *wqueue,
++                        FAR void *arg, clock_t delay)
++ {
++   irqstate_t flags;
++-
++-  if (wqueue == NULL || work == NULL || worker == NULL ||
+++ 
+++  if (wqueue == NULL || work == NULL || worker == NULL || delay < 0 ||
+++      delay > WDOG_MAX_DELAY)
++     {
++       return -EINVAL;
+diff --git a/sched/wqueue/kwork_thread.c b/sched/wqueue/kwork_thread.c
+index 4cb84ffb..c49936f3 100644
+--- a/sched/wqueue/kwork_thread.c
++++ b/sched/wqueue/kwork_thread.c
+@@ -406,7 +406,9 @@ FAR struct kwork_wqueue_s *work_queue_create(FAR const char *name,
+   FAR struct kwork_wqueue_s *wqueue;
+   int ret;
+ 
+-  if (nthreads < 1)
++  /* Validate parameters */
++  if (name == NULL || nthreads < 1 || stack_size <= 0 ||
++      priority < 0 || priority > 255)
+     {
+       return NULL;
+     }
+@@ -426,6 +428,8 @@ FAR struct kwork_wqueue_s *work_queue_create(FAR const char *name,
+   list_initialize(&wqueue->pending);
+   wqueue->timer.func = NULL;
+   nxsem_init(&wqueue->sem, 0, 0);
++  wqueue->exit = false;
++
+   nxsem_init(&wqueue->exsem, 0, 0);
+   wqueue->nthreads = nthreads;
+   spin_lock_init(&wqueue->lock);
+@@ -461,12 +465,43 @@ FAR struct kwork_wqueue_s *work_queue_create(FAR const char *name,
+ int work_queue_free(FAR struct kwork_wqueue_s *wqueue)
+ {
+   int wndx;
++  FAR struct kworker_s *worker;
+ 
+   if (wqueue == NULL)
+     {
+       return -EINVAL;
+     }
+ 
++  /* Check if this is a predefined queue */
++#ifdef CONFIG_SCHED_HPWORK
++  if (wqueue == (FAR struct kwork_wqueue_s *)&g_hpwork)
++    {
++      return -EINVAL;
++    }
++#endif
++
++#ifdef CONFIG_SCHED_LPWORK
++  if (wqueue == (FAR struct kwork_wqueue_s *)&g_lpwork)
++    {
++      return -EINVAL;
++    }
++#endif
++
++  /* Check if we're being called from a worker callback */
++  worker = wq_get_worker(wqueue);
++  if (worker != NULL)
++    {
++      pid_t pid = nxsched_gettid();
++      
++      for (wndx = 0; wndx < wqueue->nthreads; wndx++)
++        {
++          if (worker[wndx].pid == pid)
++            {
++              return -EDEADLK;
++            }
++        }
++    }
++
+   wd_cancel(&wqueue->timer);
+ 
+   /* Mark the work queue as exiting */
+@@ -533,7 +568,28 @@ int work_queue_priority_wq(FAR struct kwork_wqueue_s *wqueue)
+ 
+ int work_queue_priority(int qid)
+ {
+-  return work_queue_priority_wq(work_qid2wq(qid));
++  FAR struct kwork_wqueue_s *wq;
++  
++  if (qid < 0 || qid > 3)
++    {
++      return -EINVAL;
++    }
++  
++  /* Special case for USRWORK */
++#ifdef CONFIG_LIBC_USRWORK
++  if (qid == USRWORK)
++    {
++      return CONFIG_LIBC_USRWORKPRIORITY;
++    }
++#endif
++  
++  wq = work_qid2wq(qid);
++  if (wq == NULL)
++    {
++      return -EINVAL;
++    }
++  
++  return work_queue_priority_wq(wq);
+ }
+ 
+ /****************************************************************************
+diff --git a/verify_changes.sh b/verify_changes.sh
+new file mode 100755
+index 00000000..303a7920
+--- /dev/null
++++ b/verify_changes.sh
+@@ -0,0 +1,39 @@
++#!/bin/bash
++
++echo "Verifying work queue changes..."
++echo
++
++# Check delay validation in work_queue_next_wq
++echo "1. Checking delay validation in work_queue_next_wq:"
++grep -A 3 "if (wqueue == NULL || work == NULL || worker == NULL || delay < 0" /testbed/sched/wqueue/kwork_queue.c | head -5
++
++echo
++echo "2. Checking delay validation in work_queue_wq:"
++grep -A 3 "if (wqueue == NULL || work == NULL || worker == NULL || delay < 0" /testbed/sched/wqueue/kwork_queue.c | tail -5
++
++echo
++echo "3. Checking work_queue_create validation:"
++grep -A 2 "if (name == NULL || nthreads < 1 || stack_size <= 0" /testbed/sched/wqueue/kwork_thread.c | head -3
++
++echo
++echo "4. Checking work_queue_free predefined queue check:"
++grep -A 5 "Check if this is a predefined queue" /testbed/sched/wqueue/kwork_thread.c | head -7
++
++echo
++echo "5. Checking work_queue_free deadlock check:"
++grep -A 5 "Check if we're being called from a worker callback" /testbed/sched/wqueue/kwork_thread.c | head -7
++
++echo
++echo "6. Checking work_queue_wq exit check:"
++grep -A 3 "delay > WDOG_MAX_DELAY || wqueue->exit" /testbed/sched/wqueue/kwork_queue.c
++
++echo
++echo "7. Checking pending replacement in work_queue_next_wq:"
++grep -A 3 "If work is already queued" /testbed/sched/wqueue/kwork_queue.c
++
++echo
++echo "8. Checking work_queue_next validation:"
++grep -A 8 "int work_queue_next(int qid" /testbed/sched/wqueue/kwork_queue.c | head -10
++
++echo
++echo "All changes verified!"

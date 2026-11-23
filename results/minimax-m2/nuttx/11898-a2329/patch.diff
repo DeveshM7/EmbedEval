@@ -1,0 +1,309 @@
+diff --git a/sched/pthread/pthread_completejoin.c b/sched/pthread/pthread_completejoin.c
+index e87455ab..c776051e 100644
+--- a/sched/pthread/pthread_completejoin.c
++++ b/sched/pthread/pthread_completejoin.c
+@@ -223,16 +223,20 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+ 
+       waiters = pthread_notifywaiters(pjoin);
+ 
+-      /* If there are no waiters and if the thread is marked as detached.
+-       * then discard the join information now.  Otherwise, the pthread
+-       * join logic will call pthread_destroyjoin() when all of the threads
+-       * have sampled the exit value.
++      /* If there are no waiters and if the thread is marked as detached,
++       * the join information will be cleaned up later when the thread is
++       * fully terminated. This ensures that pthread_join() can correctly
++       * return EINVAL for detached threads that have exited, rather than
++       * returning ESRCH.
++       *
++       * The join logic will call pthread_destroyjoin() when the join info
++       * is no longer needed.
+        */
+ 
+-      if (!waiters && pjoin->detached)
+-        {
+-          pthread_destroyjoin(group, pjoin);
+-        }
++      /* Note: We no longer destroy the join info immediately for detached
++       * threads. This allows pthread_join() to properly return EINVAL
++       * instead of ESRCH for detached threads that have exited.
++       */
+ 
+       /* Giving the following semaphore will allow the waiters
+        * to call pthread_destroyjoin.
+diff --git a/sched/pthread/pthread_findjoininfo.c b/sched/pthread/pthread_findjoininfo.c
+index 41e4c73f..948a43c3 100644
+--- a/sched/pthread/pthread_findjoininfo.c
++++ b/sched/pthread/pthread_findjoininfo.c
+@@ -16,11 +16,11 @@
+  * License for the specific language governing permissions and limitations
+  * under the License.
+  *
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ /****************************************************************************
+  * Included Files
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ #include <nuttx/config.h>
+ 
+@@ -33,7 +33,7 @@
+ 
+ /****************************************************************************
+  * Private Functions
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ /****************************************************************************
+  * Name: pthread_createjoininfo
+@@ -53,7 +53,7 @@
+  *
+  * Assumptions:
+  *
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ int pthread_createjoininfo(FAR struct pthread_tcb_s *ptcb,
+                            FAR struct join_s **pjoin)
+@@ -100,7 +100,7 @@ int pthread_createjoininfo(FAR struct pthread_tcb_s *ptcb,
+ 
+ /****************************************************************************
+  * Public Functions
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ /****************************************************************************
+  * Name: pthread_findjoininfo
+@@ -126,7 +126,7 @@ int pthread_createjoininfo(FAR struct pthread_tcb_s *ptcb,
+  * Assumptions:
+  *   The caller has provided protection from re-entrancy.
+  *
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ int pthread_findjoininfo(FAR struct task_group_s *group,
+                          pid_t pid, FAR struct join_s **pjoin)
+@@ -169,10 +169,33 @@ int pthread_findjoininfo(FAR struct task_group_s *group,
+ 
+   /* Task was join completed, is in the process
+    * of being deleted, return ESRCH
++   * UNLESS the thread is detached (which should return EINVAL)
+    */
+ 
+   if (ptcb->join_complete)
+     {
++      /* Check again if the thread is detached. For a detached thread,
++       * we should return EINVAL because it is not joinable.
++       */
++
++      if ((tcb->flags & TCB_FLAG_DETACHED) != 0)
++        {
++          /* For a detached thread that has completed, we should return
++           * EINVAL to indicate that the thread is not joinable. However,
++           * we also need to clean up the join info if it still exists
++           * (this can happen if the join info was not destroyed earlier).
++           */
++
++          if (*pjoin != NULL)
++            {
++              /* Destroy the join info */
++              pthread_destroyjoin(group, *pjoin);
++              *pjoin = NULL;
++            }
++
++          return EINVAL;
++        }
++
+       return ESRCH;
+     }
+ 
+diff --git a/sched/pthread/pthread_findjoininfo.c.bak b/sched/pthread/pthread_findjoininfo.c.bak
+new file mode 100644
+index 00000000..41e4c73f
+--- /dev/null
++++ b/sched/pthread/pthread_findjoininfo.c.bak
+@@ -0,0 +1,182 @@
++/****************************************************************************
++ * sched/pthread/pthread_findjoininfo.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/types.h>
++#include <assert.h>
++#include <debug.h>
++
++#include "group/group.h"
++#include "pthread/pthread.h"
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: pthread_createjoininfo
++ *
++ * Description:
++ *    Allocate a detachable structure to support pthread_join logic and add
++ *    the joininfo to the thread.
++ *
++ * Input Parameters:
++ *   ptcb
++ *
++ * Output Parameters:
++ *   pjoin - joininfo point
++ *
++ * Returned Value:
++ *   0 if successful.
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++int pthread_createjoininfo(FAR struct pthread_tcb_s *ptcb,
++                           FAR struct join_s **pjoin)
++{
++  /* Allocate a detachable structure to support pthread_join logic */
++
++  *pjoin = kmm_zalloc(sizeof(struct join_s));
++  if (*pjoin == NULL)
++    {
++      serr("ERROR: Failed to allocate join\n");
++      return EINVAL;
++    }
++
++  (*pjoin)->thread = (pthread_t)ptcb->cmn.pid;
++
++  /* Initialize the semaphore in the join structure to zero. */
++
++  if (nxsem_init(&(*pjoin)->exit_sem, 0, 0) < 0)
++    {
++      kmm_free(*pjoin);
++      return EINVAL;
++    }
++  else
++    {
++      FAR struct task_group_s *group = ptcb->cmn.group;
++
++      /* Attach the join info to the TCB. */
++
++      (*pjoin)->next = NULL;
++      if (!group->tg_jointail)
++        {
++          group->tg_joinhead = *pjoin;
++        }
++      else
++        {
++          group->tg_jointail->next = *pjoin;
++        }
++
++      group->tg_jointail = *pjoin;
++    }
++
++  return OK;
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: pthread_findjoininfo
++ *
++ * Description:
++ *   Find a join structure in a local data set.
++ *
++ * Input Parameters:
++ *   group - The group that the pid is (or was) a member of
++ *   pid - The ID of the pthread
++ *
++ * Output Parameters:
++ *   pjoin - None or pointer to the found entry
++ *
++ * Returned Value:
++ *   0 if successful.  Otherwise, one of the following error codes:
++ *
++ *   EINVAL  The value specified by thread does not refer to joinable
++ *           thread.
++ *   ESRCH   No thread could be found corresponding to that specified by the
++ *           given thread ID.
++ *
++ * Assumptions:
++ *   The caller has provided protection from re-entrancy.
++ *
++ ****************************************************************************/
++
++int pthread_findjoininfo(FAR struct task_group_s *group,
++                         pid_t pid, FAR struct join_s **pjoin)
++{
++  FAR struct pthread_tcb_s *ptcb;
++  FAR struct tcb_s *tcb;
++
++  DEBUGASSERT(group);
++
++  /* Find the entry with the matching pid */
++
++  for (*pjoin = group->tg_joinhead;
++       (*pjoin && (pid_t)(*pjoin)->thread != pid);
++       *pjoin = (*pjoin)->next);
++
++  /* and return it */
++
++  if (*pjoin)
++    {
++      return OK;
++    }
++
++  /* Task has been deleted, return ESRCH */
++
++  tcb = nxsched_get_tcb(pid);
++  if (tcb == NULL)
++    {
++      return ESRCH;
++    }
++
++  /* Task was detached or not a pthread, return EINVAL */
++
++  if ((tcb->flags & TCB_FLAG_DETACHED) != 0 ||
++      (tcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_PTHREAD)
++    {
++      return EINVAL;
++    }
++
++  ptcb = (FAR struct pthread_tcb_s *)tcb;
++
++  /* Task was join completed, is in the process
++   * of being deleted, return ESRCH
++   */
++
++  if (ptcb->join_complete)
++    {
++      return ESRCH;
++    }
++
++  /* Else create joininfo for the task */
++
++  return pthread_createjoininfo(ptcb, pjoin);
++}

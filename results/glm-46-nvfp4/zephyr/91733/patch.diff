@@ -1,0 +1,1369 @@
+diff --git a/include/zephyr/net/conn_mgr_connectivity.h b/include/zephyr/net/conn_mgr_connectivity.h
+index cb0f63fc..fe970b00 100644
+--- a/include/zephyr/net/conn_mgr_connectivity.h
++++ b/include/zephyr/net/conn_mgr_connectivity.h
+@@ -264,6 +264,32 @@ int conn_mgr_if_get_timeout(struct net_if *iface);
+  */
+ int conn_mgr_if_set_timeout(struct net_if *iface, int timeout);
+ 
++/**
++ * @brief Get the idle timeout for an iface
++ *
++ * If the provided iface is bound to a connectivity implementation, retrieves the idle
++ * timeout setting in seconds for it.
++ *
++ * @param iface - Pointer to the iface to check.
++ * @return int - The idle timeout value (in seconds) if it could be retrieved, otherwise
++ *		 CONN_MGR_IF_NO_TIMEOUT.
++ */
++int conn_mgr_if_get_idle_timeout(struct net_if *iface);
++
++/**
++ * @brief Set the idle timeout for an iface.
++ *
++ * If the provided iface is bound to a connectivity implementation, sets the idle timeout
++ * setting in seconds for it.
++ *
++ * @param iface - Pointer to the network interface to modify.
++ * @param timeout - The idle timeout value to set (in seconds).
++ *		    Pass @ref CONN_MGR_IF_NO_TIMEOUT to disable the timeout.
++ * @retval 0 on success.
++ * @retval -ENOTSUP if the provided iface is not bound to a connectivity implementation.
++ */
++int conn_mgr_if_set_idle_timeout(struct net_if *iface, int timeout);
++
+ /**
+  * @}
+  */
+diff --git a/include/zephyr/net/conn_mgr_connectivity.h.bak b/include/zephyr/net/conn_mgr_connectivity.h.bak
+new file mode 100644
+index 00000000..cb0f63fc
+--- /dev/null
++++ b/include/zephyr/net/conn_mgr_connectivity.h.bak
+@@ -0,0 +1,339 @@
++/*
++ * Copyright (c) 2023 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief API for controlling generic network association routines on network devices that
++ * support it.
++ */
++
++#ifndef ZEPHYR_INCLUDE_CONN_MGR_CONNECTIVITY_H_
++#define ZEPHYR_INCLUDE_CONN_MGR_CONNECTIVITY_H_
++
++#include <zephyr/device.h>
++#include <zephyr/net/net_if.h>
++#include <zephyr/sys/iterable_sections.h>
++#include <zephyr/net/net_mgmt.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Connection Manager Connectivity API
++ * @defgroup conn_mgr_connectivity Connection Manager Connectivity API
++ * @since 3.4
++ * @version 0.8.0
++ * @ingroup networking
++ * @{
++ */
++
++
++/** @cond INTERNAL_HIDDEN */
++
++/* Connectivity Events */
++#define NET_MGMT_CONN_LAYER			NET_MGMT_LAYER(NET_MGMT_LAYER_L2)
++#define NET_MGMT_CONN_CODE			NET_MGMT_LAYER_CODE(NET_MGMT_LAYER_CODE_CONN)
++#define NET_MGMT_CONN_BASE			(NET_MGMT_CONN_LAYER | NET_MGMT_CONN_CODE | \
++						 NET_MGMT_EVENT_BIT)
++#define NET_MGMT_CONN_IF_EVENT			(NET_MGMT_IFACE_BIT | NET_MGMT_CONN_BASE)
++
++enum {
++	NET_EVENT_CONN_CMD_IF_TIMEOUT_VAL,
++	NET_EVENT_CONN_CMD_IF_FATAL_ERROR_VAL,
++
++	NET_EVENT_CONN_CMD_MAX
++};
++
++BUILD_ASSERT(NET_EVENT_CONN_CMD_MAX <= NET_MGMT_MAX_COMMANDS,
++	     "Number of events in net_event_conn_cmd exceeds the limit");
++
++enum net_event_conn_cmd {
++	NET_MGMT_CMD(NET_EVENT_CONN_CMD_IF_TIMEOUT),
++	NET_MGMT_CMD(NET_EVENT_CONN_CMD_IF_FATAL_ERROR),
++};
++
++/** @endcond */
++
++/**
++ * @brief net_mgmt event raised when a connection attempt times out
++ */
++#define NET_EVENT_CONN_IF_TIMEOUT					\
++	(NET_MGMT_CONN_IF_EVENT | NET_EVENT_CONN_CMD_IF_TIMEOUT)
++
++/**
++ * @brief net_mgmt event raised when a non-recoverable connectivity error occurs on an iface
++ */
++#define NET_EVENT_CONN_IF_FATAL_ERROR					\
++	(NET_MGMT_CONN_IF_EVENT | NET_EVENT_CONN_CMD_IF_FATAL_ERROR)
++
++
++/**
++ * @brief Per-iface connectivity flags
++ */
++enum conn_mgr_if_flag {
++	/**
++	 * Persistent
++	 *
++	 * When set, indicates that the connectivity implementation bound to this iface should
++	 * attempt to persist connectivity by automatically reconnecting after connection loss.
++	 */
++	CONN_MGR_IF_PERSISTENT,
++
++	/**
++	 * No auto-connect
++	 *
++	 * When set, conn_mgr will not automatically attempt to connect this iface when it reaches
++	 * admin-up.
++	 */
++	CONN_MGR_IF_NO_AUTO_CONNECT,
++
++	/**
++	 * No auto-down
++	 *
++	 * When set, conn_mgr will not automatically take the iface admin-down when it stops
++	 * trying to connect, even if CONFIG_NET_CONNECTION_MANAGER_AUTO_IF_DOWN is enabled.
++	 */
++	CONN_MGR_IF_NO_AUTO_DOWN,
++
++/** @cond INTERNAL_HIDDEN */
++	/**
++	 * Internal flag indicating that the interface is in active (application initiated)
++	 * disconnect.
++	 */
++	CONN_MGR_IF_DISCONNECTING,
++
++	/* Total number of flags - must be at the end of the enum */
++	CONN_MGR_NUM_IF_FLAGS,
++/** @endcond */
++};
++
++/** Value to use with @ref conn_mgr_if_set_timeout and @ref conn_mgr_conn_binding.timeout to
++ * indicate no timeout
++ */
++#define CONN_MGR_IF_NO_TIMEOUT 0
++
++/**
++ * @brief Connect interface
++ *
++ * If the provided iface has been bound to a connectivity implementation, initiate
++ * network connect/association.
++ *
++ * Automatically takes the iface admin-up (by calling @ref net_if_up) if it isn't already.
++ *
++ * Non-Blocking.
++ *
++ * @param iface Pointer to network interface
++ * @retval 0 on success.
++ * @retval -ESHUTDOWN if the iface is not admin-up.
++ * @retval -ENOTSUP if the iface does not have a connectivity implementation.
++ * @retval implementation-specific status code otherwise.
++ */
++int conn_mgr_if_connect(struct net_if *iface);
++
++/**
++ * @brief Disconnect interface
++ *
++ * If the provided iface has been bound to a connectivity implementation, disconnect/disassociate
++ * it from the network, and cancel any pending attempts to connect/associate.
++ *
++ * Does nothing if the iface is currently admin-down.
++ *
++ * @param iface Pointer to network interface
++ *
++ * @retval 0 on success.
++ * @retval -ENOTSUP if the iface does not have a connectivity implementation.
++ * @retval implementation-specific status code otherwise.
++ */
++int conn_mgr_if_disconnect(struct net_if *iface);
++
++/**
++ * @brief Check whether the provided network interface supports connectivity / has been bound
++ *	  to a connectivity implementation.
++ *
++ * @param iface Pointer to the iface to check.
++ * @retval true if connectivity is supported (a connectivity implementation has been bound).
++ * @retval false otherwise.
++ */
++bool conn_mgr_if_is_bound(struct net_if *iface);
++
++/**
++ * @brief Set implementation-specific connectivity options.
++ *
++ * If the provided iface has been bound to a connectivity implementation that supports it,
++ * implementation-specific connectivity options related to the iface.
++ *
++ * @param iface Pointer to the network interface.
++ * @param optname Integer value representing the option to set.
++ *		  The meaning of values is up to the conn_mgr_conn_api implementation.
++ *		  Some settings may affect multiple ifaces.
++ * @param optval Pointer to the value to be assigned to the option.
++ * @param optlen Length (in bytes) of the value to be assigned to the option.
++ * @retval 0 if successful.
++ * @retval -ENOTSUP if conn_mgr_if_set_opt not implemented by the iface.
++ * @retval -ENOBUFS if optlen is too long.
++ * @retval -EINVAL if NULL optval pointer provided.
++ * @retval -ENOPROTOOPT if the optname is not recognized.
++ * @retval implementation-specific error code otherwise.
++ */
++int conn_mgr_if_set_opt(struct net_if *iface, int optname, const void *optval, size_t optlen);
++
++/**
++ * @brief Get implementation-specific connectivity options.
++ *
++ * If the provided iface has been bound to a connectivity implementation that supports it,
++ * retrieves implementation-specific connectivity options related to the iface.
++ *
++ * @param iface Pointer to the network interface.
++ * @param optname Integer value representing the option to set.
++ *		  The meaning of values is up to the conn_mgr_conn_api implementation.
++ *		  Some settings may be shared by multiple ifaces.
++ * @param optval Pointer to where the retrieved value should be stored.
++ * @param optlen Pointer to length (in bytes) of the destination buffer available for storing the
++ *		 retrieved value. If the available space is less than what is needed, -ENOBUFS
++ *		 is returned. If the available space is invalid, -EINVAL is returned.
++ *
++ *		 optlen will always be set to the total number of bytes written, regardless of
++ *		 whether an error is returned, even if zero bytes were written.
++ *
++ * @retval 0 if successful.
++ * @retval -ENOTSUP if conn_mgr_if_get_opt is not implemented by the iface.
++ * @retval -ENOBUFS if retrieval buffer is too small.
++ * @retval -EINVAL if invalid retrieval buffer length is provided, or if NULL optval or
++ *		   optlen pointer provided.
++ * @retval -ENOPROTOOPT if the optname is not recognized.
++ * @retval implementation-specific error code otherwise.
++ */
++int conn_mgr_if_get_opt(struct net_if *iface, int optname, void *optval, size_t *optlen);
++
++/**
++ * @brief Check the value of connectivity flags
++ *
++ * If the provided iface is bound to a connectivity implementation, retrieves the value of the
++ * specified connectivity flag associated with that iface.
++ *
++ * @param iface - Pointer to the network interface to check.
++ * @param flag - The flag to check.
++ * @return True if the flag is set, otherwise False.
++ *	   Also returns False if the provided iface is not bound to a connectivity implementation,
++ *	   or the requested flag doesn't exist.
++ */
++bool conn_mgr_if_get_flag(struct net_if *iface, enum conn_mgr_if_flag flag);
++
++/**
++ * @brief Set the value of a connectivity flags
++ *
++ * If the provided iface is bound to a connectivity implementation, sets the value of the
++ * specified connectivity flag associated with that iface.
++ *
++ * @param iface - Pointer to the network interface to modify.
++ * @param flag - The flag to set.
++ * @param value - Whether the flag should be enabled or disabled.
++ * @retval 0 on success.
++ * @retval -EINVAL if the flag does not exist.
++ * @retval -ENOTSUP if the provided iface is not bound to a connectivity implementation.
++ */
++int conn_mgr_if_set_flag(struct net_if *iface, enum conn_mgr_if_flag flag, bool value);
++
++/**
++ * @brief Get the connectivity timeout for an iface
++ *
++ * If the provided iface is bound to a connectivity implementation, retrieves the timeout setting
++ * in seconds for it.
++ *
++ * @param iface - Pointer to the iface to check.
++ * @return int - The connectivity timeout value (in seconds) if it could be retrieved, otherwise
++ *		 CONN_MGR_IF_NO_TIMEOUT.
++ */
++int conn_mgr_if_get_timeout(struct net_if *iface);
++
++/**
++ * @brief Set the connectivity timeout for an iface.
++ *
++ * If the provided iface is bound to a connectivity implementation, sets the timeout setting in
++ * seconds for it.
++ *
++ * @param iface - Pointer to the network interface to modify.
++ * @param timeout - The timeout value to set (in seconds).
++ *		    Pass @ref CONN_MGR_IF_NO_TIMEOUT to disable the timeout.
++ * @retval 0 on success.
++ * @retval -ENOTSUP if the provided iface is not bound to a connectivity implementation.
++ */
++int conn_mgr_if_set_timeout(struct net_if *iface, int timeout);
++
++/**
++ * @}
++ */
++
++/**
++ * @brief Connection Manager Bulk API
++ * @defgroup conn_mgr_connectivity_bulk Connection Manager Connectivity Bulk API
++ * @since 3.4
++ * @version 0.1.0
++ * @ingroup conn_mgr_connectivity
++ * @{
++ */
++
++/**
++ * @brief Convenience function that takes all available ifaces into the admin-up state.
++ *
++ * Essentially a wrapper for @ref net_if_up.
++ *
++ * @param skip_ignored - If true, only affect ifaces that aren't ignored by conn_mgr.
++ *			 Otherwise, affect all ifaces.
++ * @return 0 if all net_if_up calls returned 0, otherwise the first nonzero value
++ *         returned by a net_if_up call.
++ */
++int conn_mgr_all_if_up(bool skip_ignored);
++
++
++/**
++ * @brief Convenience function that takes all available ifaces into the admin-down state.
++ *
++ * Essentially a wrapper for @ref net_if_down.
++ *
++ * @param skip_ignored - If true, only affect ifaces that aren't ignored by conn_mgr.
++ *			 Otherwise, affect all ifaces.
++ * @return 0 if all net_if_down calls returned 0, otherwise the first nonzero value
++ *         returned by a net_if_down call.
++ */
++int conn_mgr_all_if_down(bool skip_ignored);
++
++/**
++ * @brief Convenience function that takes all available ifaces into the admin-up state, and
++ * connects those that support connectivity.
++ *
++ * Essentially a wrapper for @ref net_if_up and @ref conn_mgr_if_connect.
++ *
++ * @param skip_ignored - If true, only affect ifaces that aren't ignored by conn_mgr.
++ *			 Otherwise, affect all ifaces.
++ * @return 0 if all net_if_up and conn_mgr_if_connect calls returned 0, otherwise the first nonzero
++ *	   value returned by either net_if_up or conn_mgr_if_connect.
++ */
++int conn_mgr_all_if_connect(bool skip_ignored);
++
++/**
++ * @brief Convenience function that disconnects all available ifaces that support connectivity
++ *        without putting them into admin-down state (unless auto-down is enabled for the iface).
++ *
++ * Essentially a wrapper for @ref net_if_down.
++ *
++ * @param skip_ignored - If true, only affect ifaces that aren't ignored by conn_mgr.
++ *			 Otherwise, affect all ifaces.
++ * @return 0 if all net_if_up and conn_mgr_if_connect calls returned 0, otherwise the first nonzero
++ *	   value returned by either net_if_up or conn_mgr_if_connect.
++ */
++int conn_mgr_all_if_disconnect(bool skip_ignored);
++
++/**
++ * @}
++ */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_INCLUDE_CONN_MGR_CONNECTIVITY_H_ */
+diff --git a/include/zephyr/net/conn_mgr_connectivity_impl.h b/include/zephyr/net/conn_mgr_connectivity_impl.h
+index 0c71c48f..d9ab1e09 100644
+--- a/include/zephyr/net/conn_mgr_connectivity_impl.h
++++ b/include/zephyr/net/conn_mgr_connectivity_impl.h
+@@ -193,6 +193,19 @@ struct conn_mgr_conn_binding {
+ 	 */
+ 	int timeout;
+ 
++	/**
++	 * Idle timeout (seconds)
++	 *
++	 * Indicates how long the interface should remain idle before being automatically
++	 * disconnected due to inactivity.
++	 *
++	 * The interface should refresh this timer on activity to avoid disconnection
++	 * while in use.
++	 *
++	 * Set to @ref CONN_MGR_IF_NO_TIMEOUT to indicate that no idle timeout should be used.
++	 */
++	int idle_timeout;
++
+ 	/** @} */
+ 
+ /** @cond INTERNAL_HIDDEN */
+diff --git a/include/zephyr/net/conn_mgr_connectivity_impl.h.bak b/include/zephyr/net/conn_mgr_connectivity_impl.h.bak
+new file mode 100644
+index 00000000..0c71c48f
+--- /dev/null
++++ b/include/zephyr/net/conn_mgr_connectivity_impl.h.bak
+@@ -0,0 +1,346 @@
++/*
++ * Copyright (c) 2023 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief API for defining conn_mgr connectivity implementations (allowing ifaces to be used with
++ * conn_mgr_connectivity).
++ */
++
++#ifndef ZEPHYR_INCLUDE_CONN_MGR_CONNECTIVITY_IMPL_H_
++#define ZEPHYR_INCLUDE_CONN_MGR_CONNECTIVITY_IMPL_H_
++
++#include <zephyr/device.h>
++#include <zephyr/net/net_if.h>
++#include <zephyr/sys/iterable_sections.h>
++#include <zephyr/net/net_mgmt.h>
++#include <zephyr/net/conn_mgr_connectivity.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Connection Manager Connectivity Implementation API
++ * @defgroup conn_mgr_connectivity_impl Connection Manager Connectivity Implementation API
++ * @since 3.4
++ * @version 0.8.0
++ * @ingroup conn_mgr_connectivity
++ * @{
++ */
++
++/* Forward declaration */
++struct conn_mgr_conn_binding;
++
++/**
++ * @brief Connectivity Manager Connectivity API structure
++ *
++ * Used to provide generic access to network association parameters and procedures
++ */
++struct conn_mgr_conn_api {
++	/**
++	 * @brief When called, the connectivity implementation should start attempting to
++	 * establish connectivity (association with a network) for the bound iface pointed
++	 * to by if_conn->iface.
++	 *
++	 * Must be non-blocking.
++	 *
++	 * Called by @ref conn_mgr_if_connect.
++	 */
++	int (*connect)(struct conn_mgr_conn_binding *const binding);
++
++	/**
++	 * @brief When called, the connectivity implementation should disconnect (disassociate), or
++	 * stop any in-progress attempts to associate to a network, the bound iface pointed to by
++	 * if_conn->iface.
++	 *
++	 * Called by @ref conn_mgr_if_disconnect.
++	 */
++	int (*disconnect)(struct conn_mgr_conn_binding *const binding);
++
++	/**
++	 * @brief Called once for each iface that has been bound to a connectivity implementation
++	 * using this API.
++	 *
++	 * Connectivity implementations should use this callback to perform any required
++	 * per-bound-iface initialization.
++	 *
++	 * Implementations may choose to gracefully handle invalid buffer lengths with partial
++	 * writes, rather than raise errors, if deemed appropriate.
++	 */
++	void (*init)(struct conn_mgr_conn_binding *const binding);
++
++	/**
++	 * @brief Implementation callback for conn_mgr_if_set_opt.
++	 *
++	 * Used to set implementation-specific connectivity settings.
++	 *
++	 * Calls to conn_mgr_if_set_opt on an iface will result in calls to this callback with
++	 * the conn_mgr_conn_binding struct bound to that iface.
++	 *
++	 * It is up to the connectivity implementation to interpret optname. Options can be
++	 * specific to the bound iface (pointed to by if_conn->iface), or can apply to the whole
++	 * connectivity implementation.
++	 *
++	 * See the description of conn_mgr_if_set_opt for more details.
++	 * set_opt implementations should conform to that description.
++	 *
++	 * Implementations may choose to gracefully handle invalid buffer lengths with partial
++	 * reads, rather than raise errors, if deemed appropriate.
++	 */
++	int (*set_opt)(struct conn_mgr_conn_binding *const binding,
++		       int optname, const void *optval, size_t optlen);
++
++	/**
++	 * @brief Implementation callback for conn_mgr_if_get_opt.
++	 *
++	 * Used to retrieve implementation-specific connectivity settings.
++	 *
++	 * Calls to conn_mgr_if_get_opt on an iface will result in calls to this callback with
++	 * the conn_mgr_conn_binding struct bound to that iface.
++	 *
++	 * It is up to the connectivity implementation to interpret optname. Options can be
++	 * specific to the bound iface (pointed to by if_conn->iface), or can apply to the whole
++	 * connectivity implementation.
++	 *
++	 * See the description of conn_mgr_if_get_opt for more details.
++	 * get_opt implementations should conform to that description.
++	 */
++	int (*get_opt)(struct conn_mgr_conn_binding *const binding,
++		       int optname, void *optval, size_t *optlen);
++};
++
++/** @cond INTERNAL_HIDDEN */
++#define CONN_MGR_CONN_IMPL_GET_NAME(conn_id)		__conn_mgr_conn_##conn_id
++#define CONN_MGR_CONN_IMPL_GET_CTX_TYPE(conn_id)	conn_id##_CTX_TYPE
++/** @endcond */
++
++/**
++ * @brief Connectivity Implementation struct
++ *
++ * Declares a conn_mgr connectivity layer implementation with the provided API
++ */
++struct conn_mgr_conn_impl {
++	/** The connectivity API used by the implementation */
++	struct conn_mgr_conn_api *api;
++};
++
++/**
++ * @brief Define a conn_mgr connectivity implementation that can be bound to network devices.
++ *
++ * @param conn_id The name of the new connectivity implementation
++ * @param conn_api A pointer to a conn_mgr_conn_api struct
++ */
++#define CONN_MGR_CONN_DEFINE(conn_id, conn_api)						\
++	const struct conn_mgr_conn_impl CONN_MGR_CONN_IMPL_GET_NAME(conn_id) = {	\
++		.api = conn_api,							\
++	};
++
++/**
++ * @brief Helper macro to make a conn_mgr connectivity implementation publicly available.
++ */
++#define CONN_MGR_CONN_DECLARE_PUBLIC(conn_id)						\
++	extern const struct conn_mgr_conn_impl CONN_MGR_CONN_IMPL_GET_NAME(conn_id)
++
++/** @cond INTERNAL_HIDDEN */
++#define CONN_MGR_CONN_BINDING_GET_NAME(dev_id, sfx)	__conn_mgr_bndg_##dev_id##_##sfx
++#define CONN_MGR_CONN_BINDING_GET_DATA(dev_id, sfx)	__conn_mgr_bndg_data_##dev_id##_##sfx
++#define CONN_MGR_CONN_BINDING_GET_MUTEX(dev_id, sfx)	__conn_mgr_bndg_mutex_##dev_id##_##sfx
++/** @endcond */
++
++/**
++ * @brief Connectivity Manager network interface binding structure
++ *
++ * Binds a conn_mgr connectivity implementation to an iface / network device.
++ * Stores per-iface state for the connectivity implementation.
++ */
++struct conn_mgr_conn_binding {
++	/** The network interface the connectivity implementation is bound to */
++	struct net_if *iface;
++
++	/** The connectivity implementation the network device is bound to */
++	const struct conn_mgr_conn_impl *impl;
++
++	/** Pointer to private, per-iface connectivity context */
++	void *ctx;
++
++	/**
++	 * @name Generic connectivity state
++	 * @{
++	 */
++
++	/**
++	 * Connectivity flags
++	 *
++	 * Public boolean state and configuration values supported by all bindings.
++	 * See conn_mgr_if_flag for options.
++	 */
++	uint32_t flags;
++
++	/**
++	 * Timeout (seconds)
++	 *
++	 * Indicates to the connectivity implementation how long it should attempt to
++	 * establish connectivity for during a connection attempt before giving up.
++	 *
++	 * The connectivity implementation should give up on establishing connectivity after this
++	 * timeout, even if persistence is enabled.
++	 *
++	 * Set to @ref CONN_MGR_IF_NO_TIMEOUT to indicate that no timeout should be used.
++	 */
++	int timeout;
++
++	/** @} */
++
++/** @cond INTERNAL_HIDDEN */
++	/* Internal-use mutex for protecting access to the binding and API functions. */
++	struct k_mutex *mutex;
++/** @endcond */
++};
++
++/**
++ * @brief Associate a connectivity implementation with an existing network device instance
++ *
++ * @param dev_id Network device id.
++ * @param inst Network device instance.
++ * @param conn_id Name of the connectivity implementation to associate.
++ */
++#define CONN_MGR_BIND_CONN_INST(dev_id, inst, conn_id)						\
++	K_MUTEX_DEFINE(CONN_MGR_CONN_BINDING_GET_MUTEX(dev_id, inst));				\
++	static CONN_MGR_CONN_IMPL_GET_CTX_TYPE(conn_id)						\
++					CONN_MGR_CONN_BINDING_GET_DATA(dev_id, inst);		\
++	static STRUCT_SECTION_ITERABLE(conn_mgr_conn_binding,					\
++					CONN_MGR_CONN_BINDING_GET_NAME(dev_id, inst)) = {	\
++		.iface = NET_IF_GET(dev_id, inst),						\
++		.impl = &(CONN_MGR_CONN_IMPL_GET_NAME(conn_id)),				\
++		.ctx = &(CONN_MGR_CONN_BINDING_GET_DATA(dev_id, inst)),				\
++		.mutex = &(CONN_MGR_CONN_BINDING_GET_MUTEX(dev_id, inst))			\
++	};
++
++/**
++ * @brief Associate a connectivity implementation with an existing network device
++ *
++ * @param dev_id Network device id.
++ * @param conn_id Name of the connectivity implementation to associate.
++ */
++#define CONN_MGR_BIND_CONN(dev_id, conn_id)		\
++	CONN_MGR_BIND_CONN_INST(dev_id, 0, conn_id)
++
++/**
++ * @brief Retrieves the conn_mgr binding struct for a provided iface if it exists.
++ *
++ * Bindings for connectivity implementations with missing API structs are ignored.
++ *
++ * For use only by connectivity implementations.
++ *
++ * @param iface - bound network interface to obtain the binding struct for.
++ * @return struct conn_mgr_conn_binding* Pointer to the retrieved binding struct if it exists,
++ *	   NULL otherwise.
++ */
++static inline struct conn_mgr_conn_binding *conn_mgr_if_get_binding(struct net_if *iface)
++{
++	STRUCT_SECTION_FOREACH(conn_mgr_conn_binding, binding) {
++		if (iface == binding->iface) {
++			if (binding->impl->api) {
++				return binding;
++			}
++			return NULL;
++		}
++	}
++	return NULL;
++}
++
++/**
++ * @brief Lock the passed-in binding, making it safe to access.
++ *
++ * Call this whenever accessing binding data, unless inside a conn_mgr_conn_api callback, where it
++ * is called automatically by conn_mgr.
++ *
++ * Reentrant.
++ *
++ * For use only by connectivity implementations.
++ *
++ * @param binding - Binding to lock
++ */
++static inline void conn_mgr_binding_lock(struct conn_mgr_conn_binding *binding)
++{
++	(void)k_mutex_lock(binding->mutex, K_FOREVER);
++}
++
++/**
++ * @brief Unlocks the passed-in binding.
++ *
++ * Call this after any call to @ref conn_mgr_binding_lock once done accessing binding data.
++ *
++ * Reentrant.
++ *
++ * For use only by connectivity implementations.
++ *
++ * @param binding - Binding to unlock
++ */
++static inline void conn_mgr_binding_unlock(struct conn_mgr_conn_binding *binding)
++{
++	(void)k_mutex_unlock(binding->mutex);
++}
++
++/**
++ * @brief Set the value of the specified connectivity flag for the provided binding
++ *
++ * Can be used from any thread or callback without calling @ref conn_mgr_binding_lock.
++ *
++ * For use only by connectivity implementations
++ *
++ * @param binding The binding to check
++ * @param flag The flag to check
++ * @param value New value for the specified flag
++ */
++static inline void conn_mgr_binding_set_flag(struct conn_mgr_conn_binding *binding,
++					     enum conn_mgr_if_flag flag, bool value)
++{
++	conn_mgr_binding_lock(binding);
++
++	binding->flags &= ~BIT(flag);
++	if (value) {
++		binding->flags |= BIT(flag);
++	}
++
++	conn_mgr_binding_unlock(binding);
++}
++
++/**
++ * @brief Check the value of the specified connectivity flag for the provided binding
++ *
++ * Can be used from any thread or callback without calling @ref conn_mgr_binding_lock.
++ *
++ * For use only by connectivity implementations
++ *
++ * @param binding The binding to check
++ * @param flag The flag to check
++ * @return bool The value of the specified flag
++ */
++static inline bool conn_mgr_binding_get_flag(struct conn_mgr_conn_binding *binding,
++					     enum conn_mgr_if_flag flag)
++{
++	bool value = false;
++
++	conn_mgr_binding_lock(binding);
++
++	value = !!(binding->flags & BIT(flag));
++
++	conn_mgr_binding_unlock(binding);
++
++	return value;
++}
++
++/**
++ * @}
++ */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_INCLUDE_CONN_MGR_CONNECTIVITY_IMPL_H_ */
+diff --git a/subsys/net/conn_mgr/conn_mgr_connectivity.c b/subsys/net/conn_mgr/conn_mgr_connectivity.c
+index 905b5b07..040930c8 100644
+--- a/subsys/net/conn_mgr/conn_mgr_connectivity.c
++++ b/subsys/net/conn_mgr/conn_mgr_connectivity.c
+@@ -228,6 +228,43 @@ int conn_mgr_if_set_timeout(struct net_if *iface, int timeout)
+ 
+ /* Automated behavior handling */
+ 
++int conn_mgr_if_get_idle_timeout(struct net_if *iface)
++{
++	struct conn_mgr_conn_binding *binding = conn_mgr_if_get_binding(iface);
++	int value;
++
++	if (!binding) {
++		return CONN_MGR_IF_NO_TIMEOUT;
++	}
++
++	conn_mgr_binding_lock(binding);
++
++	value = binding->idle_timeout;
++
++	conn_mgr_binding_unlock(binding);
++
++	return value;
++}
++
++int conn_mgr_if_set_idle_timeout(struct net_if *iface, int timeout)
++{
++	struct conn_mgr_conn_binding *binding = conn_mgr_if_get_binding(iface);
++
++	if (!binding) {
++		return -ENOTSUP;
++	}
++
++	conn_mgr_binding_lock(binding);
++
++	binding->idle_timeout = timeout;
++
++	conn_mgr_binding_unlock(binding);
++
++	return 0;
++}
++
++/* Automated behavior handling */
++
+ /**
+  * @brief Perform automated behaviors in response to ifaces going admin-up.
+  *
+@@ -375,6 +412,7 @@ void conn_mgr_conn_init(void)
+ 			/* Set initial default values for binding state */
+ 
+ 			binding->timeout = CONN_MGR_IF_NO_TIMEOUT;
++			binding->idle_timeout = CONN_MGR_IF_NO_TIMEOUT;
+ 
+ 			/* Call binding initializer */
+ 
+diff --git a/subsys/net/conn_mgr/conn_mgr_connectivity.c.bak b/subsys/net/conn_mgr/conn_mgr_connectivity.c.bak
+new file mode 100644
+index 00000000..905b5b07
+--- /dev/null
++++ b/subsys/net/conn_mgr/conn_mgr_connectivity.c.bak
+@@ -0,0 +1,549 @@
++/*
++ * Copyright (c) 2023 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/logging/log.h>
++LOG_MODULE_REGISTER(conn_mgr_conn, CONFIG_NET_CONNECTION_MANAGER_LOG_LEVEL);
++
++#include <zephyr/net/net_if.h>
++#include <zephyr/sys/iterable_sections.h>
++#include <zephyr/net/conn_mgr_monitor.h>
++#include <zephyr/net/conn_mgr_connectivity.h>
++#include <zephyr/net/conn_mgr_connectivity_impl.h>
++#include "conn_mgr_private.h"
++
++int conn_mgr_if_connect(struct net_if *iface)
++{
++	struct conn_mgr_conn_binding *binding;
++	struct conn_mgr_conn_api *api;
++	int status;
++
++	LOG_DBG("iface %p connect", iface);
++
++	binding = conn_mgr_if_get_binding(iface);
++	if (!binding) {
++		return -ENOTSUP;
++	}
++
++	api = binding->impl->api;
++	if (!api->connect) {
++		return -ENOTSUP;
++	}
++
++	conn_mgr_binding_lock(binding);
++
++	if (!net_if_is_admin_up(iface)) {
++		status = net_if_up(iface);
++		if (status) {
++			goto out;
++		}
++	}
++
++	conn_mgr_if_set_flag(iface, CONN_MGR_IF_DISCONNECTING, false);
++
++	status = api->connect(binding);
++
++out:
++	conn_mgr_binding_unlock(binding);
++
++	return status;
++}
++
++int conn_mgr_if_disconnect(struct net_if *iface)
++{
++	struct conn_mgr_conn_binding *binding;
++	struct conn_mgr_conn_api *api;
++	int status = 0;
++
++	LOG_DBG("iface %p disconnect", iface);
++
++	binding = conn_mgr_if_get_binding(iface);
++	if (!binding) {
++		return -ENOTSUP;
++	}
++
++	api = binding->impl->api;
++	if (!api->disconnect) {
++		return -ENOTSUP;
++	}
++
++	conn_mgr_binding_lock(binding);
++
++	if (!net_if_is_admin_up(iface)) {
++		goto out;
++	}
++
++	conn_mgr_if_set_flag(iface, CONN_MGR_IF_DISCONNECTING, true);
++
++	status = api->disconnect(binding);
++
++out:
++	conn_mgr_binding_unlock(binding);
++
++	return status;
++}
++
++bool conn_mgr_if_is_bound(struct net_if *iface)
++{
++	struct conn_mgr_conn_binding *binding = conn_mgr_if_get_binding(iface);
++
++	return binding != NULL;
++}
++
++int conn_mgr_if_get_opt(struct net_if *iface, int optname, void *optval, size_t *optlen)
++{
++	struct conn_mgr_conn_binding *binding;
++	struct conn_mgr_conn_api *api;
++	int status;
++
++	if (!optlen) {
++		return -EINVAL;
++	}
++
++	if (!optval) {
++		*optlen = 0;
++		return -EINVAL;
++	}
++
++	binding = conn_mgr_if_get_binding(iface);
++	if (!binding) {
++		*optlen = 0;
++		return -ENOTSUP;
++	}
++
++	api = binding->impl->api;
++	if (!api->get_opt) {
++		*optlen = 0;
++		return -ENOTSUP;
++	}
++
++	conn_mgr_binding_lock(binding);
++
++	status = api->get_opt(binding, optname, optval, optlen);
++
++	conn_mgr_binding_unlock(binding);
++
++	return status;
++}
++
++int conn_mgr_if_set_opt(struct net_if *iface, int optname, const void *optval, size_t optlen)
++{
++	struct conn_mgr_conn_binding *binding;
++	struct conn_mgr_conn_api *api;
++	int status;
++
++	if (!optval) {
++		return -EINVAL;
++	}
++
++	binding = conn_mgr_if_get_binding(iface);
++	if (!binding) {
++		return -ENOTSUP;
++	}
++
++	api = binding->impl->api;
++	if (!api->set_opt) {
++		return -ENOTSUP;
++	}
++
++	conn_mgr_binding_lock(binding);
++
++	status = api->set_opt(binding, optname, optval, optlen);
++
++	conn_mgr_binding_unlock(binding);
++
++	return status;
++}
++
++int conn_mgr_if_set_flag(struct net_if *iface, enum conn_mgr_if_flag flag, bool value)
++{
++	struct conn_mgr_conn_binding *binding;
++
++	if (flag >= CONN_MGR_NUM_IF_FLAGS) {
++		return -EINVAL;
++	}
++
++	binding = conn_mgr_if_get_binding(iface);
++	if (!binding) {
++		return -ENOTSUP;
++	}
++
++	conn_mgr_binding_set_flag(binding, flag, value);
++
++	return 0;
++}
++
++bool conn_mgr_if_get_flag(struct net_if *iface, enum conn_mgr_if_flag flag)
++{
++	struct conn_mgr_conn_binding *binding;
++
++	if (flag >= CONN_MGR_NUM_IF_FLAGS) {
++		return false;
++	}
++
++	binding = conn_mgr_if_get_binding(iface);
++	if (!binding) {
++		return false;
++	}
++
++	return conn_mgr_binding_get_flag(binding, flag);
++}
++
++int conn_mgr_if_get_timeout(struct net_if *iface)
++{
++	struct conn_mgr_conn_binding *binding = conn_mgr_if_get_binding(iface);
++	int value;
++
++	if (!binding) {
++		return false;
++	}
++
++	conn_mgr_binding_lock(binding);
++
++	value = binding->timeout;
++
++	conn_mgr_binding_unlock(binding);
++
++	return value;
++}
++
++int conn_mgr_if_set_timeout(struct net_if *iface, int timeout)
++{
++	struct conn_mgr_conn_binding *binding = conn_mgr_if_get_binding(iface);
++
++	if (!binding) {
++		return -ENOTSUP;
++	}
++
++	conn_mgr_binding_lock(binding);
++
++	binding->timeout = timeout;
++
++	conn_mgr_binding_unlock(binding);
++
++	return 0;
++}
++
++/* Automated behavior handling */
++
++/**
++ * @brief Perform automated behaviors in response to ifaces going admin-up.
++ *
++ * @param iface - The iface which became admin-up.
++ */
++static void conn_mgr_conn_handle_iface_admin_up(struct net_if *iface)
++{
++	int err;
++
++	/* Ignore ifaces that don't have connectivity implementations */
++	if (!conn_mgr_if_is_bound(iface)) {
++		return;
++	}
++
++	/* Ignore ifaces for which auto-connect is disabled */
++	if (conn_mgr_if_get_flag(iface, CONN_MGR_IF_NO_AUTO_CONNECT)) {
++		return;
++	}
++
++	/* Otherwise, automatically instruct the iface to connect */
++	err = conn_mgr_if_connect(iface);
++	if (err < 0) {
++		NET_ERR("iface auto-connect failed: %d", err);
++	}
++}
++
++/**
++ * @brief Take the provided iface admin-down.
++ *
++ * Called automatically by conn_mgr when an iface has lost connection and will not attempt to
++ * regain it.
++ *
++ * @param iface - The iface to take admin-down
++ */
++static void conn_mgr_conn_if_auto_admin_down(struct net_if *iface)
++{
++	/* NOTE: This will be double-fired for ifaces that are both non-persistent
++	 * and are being directly requested to disconnect, since both of these conditions
++	 * separately trigger conn_mgr_conn_if_auto_admin_down.
++	 *
++	 * This is fine, because net_if_down is idempotent, but if you are adding other
++	 * behaviors to this function, bear it in mind.
++	 */
++
++	/* Ignore ifaces that don't have connectivity implementations */
++	if (!conn_mgr_if_is_bound(iface)) {
++		return;
++	}
++
++	/* Take the iface admin-down if AUTO_DOWN is enabled */
++	if (IS_ENABLED(CONFIG_NET_CONNECTION_MANAGER_AUTO_IF_DOWN) &&
++	    !conn_mgr_if_get_flag(iface, CONN_MGR_IF_NO_AUTO_DOWN)) {
++		net_if_down(iface);
++	}
++}
++
++/**
++ * @brief Perform automated behaviors in response to any iface that loses oper-up state.
++ *
++ * This is how conn_mgr_conn automatically takes such ifaces admin-down if they are not persistent.
++ *
++ * @param iface - The iface which lost oper-up state.
++ */
++static void conn_mgr_conn_handle_iface_down(struct net_if *iface)
++{
++	/* Ignore ifaces that don't have connectivity implementations */
++	if (!conn_mgr_if_is_bound(iface)) {
++		return;
++	}
++
++	/* If the iface is persistent, we expect it to try to reconnect, unless
++	 * disconnect was explicitly initiated by the application.
++	 */
++	if (conn_mgr_if_get_flag(iface, CONN_MGR_IF_PERSISTENT) &&
++	    !conn_mgr_if_get_flag(iface, CONN_MGR_IF_DISCONNECTING)) {
++		return;
++	}
++
++	conn_mgr_if_set_flag(iface, CONN_MGR_IF_DISCONNECTING, false);
++
++	/* Otherwise, we do not expect the iface to reconnect, and we should call
++	 * conn_mgr_conn_if_auto_admin_down
++	 */
++	conn_mgr_conn_if_auto_admin_down(iface);
++}
++
++static struct net_mgmt_event_callback conn_mgr_conn_iface_cb;
++static void conn_mgr_conn_iface_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
++					struct net_if *iface)
++{
++	if ((mgmt_event & CONN_MGR_CONN_IFACE_EVENTS_MASK) != mgmt_event) {
++		return;
++	}
++
++	switch (mgmt_event) {
++	case NET_EVENT_IF_DOWN:
++		conn_mgr_conn_handle_iface_down(iface);
++		break;
++	case NET_EVENT_IF_ADMIN_UP:
++		conn_mgr_conn_handle_iface_admin_up(iface);
++		break;
++	}
++}
++
++static struct net_mgmt_event_callback conn_mgr_conn_self_cb;
++static void conn_mgr_conn_self_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
++				       struct net_if *iface)
++{
++	if ((mgmt_event & CONN_MGR_CONN_SELF_EVENTS_MASK) != mgmt_event) {
++		return;
++	}
++
++	switch (NET_MGMT_GET_COMMAND(mgmt_event)) {
++	case NET_EVENT_CONN_CMD_IF_FATAL_ERROR:
++		if (cb->info) {
++			NET_ERR("Fatal connectivity error on iface %d (%p). Reason: %d.",
++				net_if_get_by_iface(iface), iface, *((int *)cb->info)
++			);
++		} else {
++			NET_ERR("Unknown fatal connectivity error on iface %d (%p).",
++				net_if_get_by_iface(iface), iface
++			);
++		}
++	__fallthrough;
++	case NET_EVENT_CONN_CMD_IF_TIMEOUT:
++		/* If a timeout or fatal error occurs, we do not expect the iface to try to
++		 * reconnect, so call conn_mgr_conn_if_auto_admin_down.
++		 */
++		conn_mgr_conn_if_auto_admin_down(iface);
++		break;
++	}
++
++}
++
++void conn_mgr_conn_init(void)
++{
++	/* Initialize connectivity bindings. */
++	STRUCT_SECTION_FOREACH(conn_mgr_conn_binding, binding) {
++		if (!(binding->impl->api)) {
++			LOG_ERR("Connectivity implementation has NULL API, and will be treated as "
++				"non-existent.");
++		} else if (binding->impl->api->init) {
++			conn_mgr_binding_lock(binding);
++
++			/* Set initial default values for binding state */
++
++			binding->timeout = CONN_MGR_IF_NO_TIMEOUT;
++
++			/* Call binding initializer */
++
++			binding->impl->api->init(binding);
++
++			conn_mgr_binding_unlock(binding);
++		}
++	}
++
++	/* Set up event listeners for automated behaviors */
++	net_mgmt_init_event_callback(&conn_mgr_conn_iface_cb, conn_mgr_conn_iface_handler,
++				     CONN_MGR_CONN_IFACE_EVENTS_MASK);
++	net_mgmt_add_event_callback(&conn_mgr_conn_iface_cb);
++
++	net_mgmt_init_event_callback(&conn_mgr_conn_self_cb, conn_mgr_conn_self_handler,
++				     CONN_MGR_CONN_SELF_EVENTS_MASK);
++	net_mgmt_add_event_callback(&conn_mgr_conn_self_cb);
++
++	/* Trigger any initial automated behaviors for ifaces */
++	STRUCT_SECTION_FOREACH(conn_mgr_conn_binding, binding) {
++		if (binding->impl->api) {
++			/* We need to fire conn_mgr_conn_handle_iface_admin_up for any
++			 * (connectivity-enabled) ifaces that went admin-up before we registered
++			 * the event callback that typically handles this.
++			 */
++			if (net_if_is_admin_up(binding->iface)) {
++				conn_mgr_conn_handle_iface_admin_up(binding->iface);
++			}
++		}
++	}
++}
++
++enum conn_mgr_conn_all_if_oper {
++	ALL_IF_UP,
++	ALL_IF_DOWN,
++	ALL_IF_CONNECT,
++	ALL_IF_DISCONNECT
++};
++
++struct conn_mgr_conn_all_if_ctx {
++	bool skip_ignored;
++	enum conn_mgr_conn_all_if_oper operation;
++	int status;
++};
++
++/* Per-iface callback for conn_mgr_conn_all_if_up */
++static void conn_mgr_conn_all_if_cb(struct net_if *iface, void *user_data)
++{
++	int status = 0;
++	struct conn_mgr_conn_all_if_ctx *context = (struct conn_mgr_conn_all_if_ctx *)user_data;
++
++	/* Skip ignored ifaces if so desired */
++	if (context->skip_ignored && conn_mgr_is_iface_ignored(iface)) {
++		return;
++	}
++
++	/* Perform the requested operation */
++	switch (context->operation) {
++	case ALL_IF_UP:
++		/* Do not take iface admin up if it already is. */
++		if (net_if_is_admin_up(iface)) {
++			return;
++		}
++
++		status = net_if_up(iface);
++		break;
++	case ALL_IF_DOWN:
++		/* Do not take iface admin down if it already is. */
++		if (!net_if_is_admin_up(iface)) {
++			return;
++		}
++
++		status = net_if_down(iface);
++		break;
++	case ALL_IF_CONNECT:
++		/* Connect operation only supported if iface is bound */
++		if (!conn_mgr_if_is_bound(iface)) {
++			return;
++		}
++
++		status = conn_mgr_if_connect(iface);
++		break;
++	case ALL_IF_DISCONNECT:
++		/* Disconnect operation only supported if iface is bound */
++		if (!conn_mgr_if_is_bound(iface)) {
++			return;
++		}
++
++		status = conn_mgr_if_disconnect(iface);
++		break;
++	}
++
++	if (status == 0) {
++		return;
++	}
++
++	if (context->status == 0) {
++		context->status = status;
++	}
++
++	NET_ERR("%s failed for iface %d (%p). Error: %d",
++		context->operation == ALL_IF_UP ?	  "net_if_up" :
++		context->operation == ALL_IF_DOWN ?	  "net_if_down" :
++		context->operation == ALL_IF_CONNECT ?	  "conn_mgr_if_connect" :
++		context->operation == ALL_IF_DISCONNECT ? "conn_mgr_if_disconnect" :
++							  "invalid",
++		net_if_get_by_iface(iface), iface, status
++	);
++}
++
++int conn_mgr_all_if_up(bool skip_ignored)
++{
++	struct conn_mgr_conn_all_if_ctx context = {
++		.operation = ALL_IF_UP,
++		.skip_ignored = skip_ignored,
++		.status = 0
++	};
++
++	net_if_foreach(conn_mgr_conn_all_if_cb, &context);
++
++	return context.status;
++}
++
++int conn_mgr_all_if_down(bool skip_ignored)
++{
++	struct conn_mgr_conn_all_if_ctx context = {
++		.operation = ALL_IF_DOWN,
++		.skip_ignored = skip_ignored,
++		.status = 0
++	};
++
++	net_if_foreach(conn_mgr_conn_all_if_cb, &context);
++
++	return context.status;
++}
++
++int conn_mgr_all_if_connect(bool skip_ignored)
++{
++	/* First, take all ifaces up.
++	 * All bound ifaces will do this automatically when connect is called, but non-bound ifaces
++	 * won't, so we must request it explicitly.
++	 */
++	struct conn_mgr_conn_all_if_ctx context = {
++		.operation = ALL_IF_UP,
++		.skip_ignored = skip_ignored,
++		.status = 0
++	};
++
++	net_if_foreach(conn_mgr_conn_all_if_cb, &context);
++
++	/* Now connect all ifaces.
++	 * We are delibarately not resetting context.status between these two calls so that
++	 * the first nonzero status code encountered between the two of them is what is returned.
++	 */
++	context.operation = ALL_IF_CONNECT;
++	net_if_foreach(conn_mgr_conn_all_if_cb, &context);
++
++	return context.status;
++}
++
++int conn_mgr_all_if_disconnect(bool skip_ignored)
++{
++	struct conn_mgr_conn_all_if_ctx context = {
++		.operation = ALL_IF_DISCONNECT,
++		.skip_ignored = skip_ignored,
++		.status = 0
++	};
++
++	net_if_foreach(conn_mgr_conn_all_if_cb, &context);
++
++	return context.status;
++}

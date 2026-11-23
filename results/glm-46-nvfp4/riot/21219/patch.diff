@@ -1,0 +1,162 @@
+diff --git a/sys/event/Makefile b/sys/event/Makefile
+index 5343c5af..cc130b3d 100644
+--- a/sys/event/Makefile
++++ b/sys/event/Makefile
+@@ -1,4 +1,4 @@
+-SRC := event.c
++SRC := event.c deferred_callback.c
+ 
+ SUBMODULES := 1
+ 
+diff --git a/sys/event/Makefile.dep b/sys/event/Makefile.dep
+index 0ba5180a..3404b883 100644
+--- a/sys/event/Makefile.dep
++++ b/sys/event/Makefile.dep
+@@ -12,3 +12,8 @@ ifneq (,$(filter event_timeout,$(USEMODULE)))
+   USEMODULE += event_timeout_ztimer
+   USEMODULE += ztimer_usec
+ endif
++
++ifneq (,$(filter event_deferred_callback,$(USEMODULE)))
++  USEMODULE += event_timeout_ztimer
++  USEMODULE += event_callback
++endif
+diff --git a/sys/event/deferred_callback.c b/sys/event/deferred_callback.c
+new file mode 100644
+index 00000000..db7a569d
+--- /dev/null
++++ b/sys/event/deferred_callback.c
+@@ -0,0 +1,25 @@
++/*
++ * Copyright (C) 2024 RIOT OS contributors
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++#include "event/deferred_callback.h"
++
++void event_deferred_callback_post(event_deferred_callback_t *deferred_callback,
++                                  event_queue_t *queue,
++                                  ztimer_clock_t *clock,
++                                  uint32_t timeout,
++                                  void (*callback)(void *), void *arg)
++{
++    /* Initialize the callback event */
++    event_callback_init(&deferred_callback->callback, callback, arg);
++    
++    /* Initialize the timeout event */
++    event_timeout_ztimer_init(&deferred_callback->timeout, clock, queue, &deferred_callback->callback.super);
++    
++    /* Set the timeout */
++    event_timeout_set(&deferred_callback->timeout, timeout);
++}
+diff --git a/sys/include/event/deferred_callback.h b/sys/include/event/deferred_callback.h
+new file mode 100644
+index 00000000..d6e87856
+--- /dev/null
++++ b/sys/include/event/deferred_callback.h
+@@ -0,0 +1,102 @@
++/*
++ * Copyright (C) 2024 RIOT OS contributors
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_event
++ * @brief       Provides a deferred callback-with-argument event type
++ *
++ * Example:
++ *
++ * ~~~~~~~~~~~~~~~~~~~~~~~~ {.c}
++ * void callback(void *arg)
++ * {
++ *     printf("%s called with arg %p\n", __func__, arg);
++ * }
++ *
++ * [...]
++ * event_deferred_callback_t deferred_callback;
++ * event_deferred_callback_post(&deferred_callback, EVENT_PRIO_MEDIUM, ZTIMER_MSEC, 750, callback, "event D");
++ * ~~~~~~~~~~~~~~~~~~~~~~~~
++ *
++ * @{
++ *
++ * @file
++ * @brief       Event Deferred Callback API
++ *
++ * @author      RIOT OS contributors
++ */
++
++#ifndef EVENT_DEFERRED_CALLBACK_H
++#define EVENT_DEFERRED_CALLBACK_H
++
++#include <assert.h>
++#include "event.h"
++#include "event/timeout.h"
++#include "event/callback.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Deferred Callback Event structure definition
++ */
++typedef struct {
++    event_callback_t callback;  /**< callback event structure           */
++    event_timeout_t timeout;     /**< timeout event structure            */
++} event_deferred_callback_t;
++
++/**
++ * @brief   Queue a deferred callback event (using priority queue)
++ *
++ * The given event callback will be posted on the given priority queue after the specified
++ * @p timeout has elapsed. If the event is already queued when calling this function,
++ * the event will not be touched and remain in the previous position on the queue.
++ * So reposting an event while it is already on the queue will have no effect.
++ *
++ * @pre     queue should be initialized
++ *
++ * @param[in]   deferred_callback   deferred_callback object to use
++ * @param[in]   queue               event queue to queue event in
++ * @param[in]   clock               ztimer clock to use (e.g. ZTIMER_MSEC)
++ * @param[in]   timeout             timeout value in clock units
++ * @param[in]   callback            callback function to call
++ * @param[in]   arg                 callback function argument
++ */
++void event_deferred_callback_post(event_deferred_callback_t *deferred_callback,
++                                  event_queue_t *queue,
++                                  ztimer_clock_t *clock,
++                                  uint32_t timeout,
++                                  void (*callback)(void *), void *arg);
++
++/**
++ * @brief   Queue a deferred callback event (overload for priority-based API)
++ *
++ * This is a convenience wrapper that accepts a priority instead of a queue pointer.
++ *
++ * @param[in]   deferred_callback   deferred_callback object to use
++ * @param[in]   queue               event queue to queue event in
++ * @param[in]   clock               ztimer clock to use (e.g. ZTIMER_MSEC)
++ * @param[in]   timeout             timeout value in clock units
++ * @param[in]   callback            callback function to call
++ * @param[in]   arg                 callback function argument
++ */
++static inline void event_deferred_callback_post_prio(event_deferred_callback_t *deferred_callback,
++                                                     event_queue_t *queue,
++                                                     ztimer_clock_t *clock,
++                                                     uint32_t timeout,
++                                                     void (*callback)(void *), void *arg)
++{
++    event_deferred_callback_post(deferred_callback, queue, clock, timeout, callback, arg);
++}
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* EVENT_DEFERRED_CALLBACK_H */
++/** @} */

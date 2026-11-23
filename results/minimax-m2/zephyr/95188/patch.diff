@@ -1,0 +1,339 @@
+diff --git a/include/zephyr/kernel.h b/include/zephyr/kernel.h
+index 858e0a95..d3d3574a 100644
+--- a/include/zephyr/kernel.h
++++ b/include/zephyr/kernel.h
+@@ -2507,6 +2507,70 @@ __syscall uint32_t k_event_wait(struct k_event *event, uint32_t events,
+ __syscall uint32_t k_event_wait_all(struct k_event *event, uint32_t events,
+ 				    bool reset, k_timeout_t timeout);
+ 
++
++
++/**
++ * @brief Wait for any of the specified events and atomically clear them
++ *
++ * This routine waits on event object @a event until any of the specified
++ * events have been delivered to the event object, or the maximum wait time
++ * @a timeout has expired. A thread may wait on up to 32 distinctly numbered
++ * events that are expressed as bits in a single 32-bit word.
++ *
++ * When the wait condition is satisfied, the events that matched are
++ * atomically cleared from the event object. This prevents "phantom events"
++ * where a subsequent wait would return the same events again.
++ *
++ * @note The caller must be careful when resetting if there are multiple threads
++ * waiting for the event object @a event.
++ *
++ * @note This function may be called from ISR context only when @a timeout is
++ * set to K_NO_WAIT.
++ *
++ * @param event Address of the event object
++ * @param events Set of desired events on which to wait
++ * @param reset If true, clear the set of events tracked by the event object
++ *              before waiting. If false, do not clear the events.
++ * @param timeout Waiting period for the desired set of events or one of the
++ *                special values K_NO_WAIT and K_FOREVER.
++ *
++ * @retval set of matching events upon success
++ * @retval 0 if matching events were not received within the specified time
++ */
++__syscall uint32_t k_event_wait_safe(struct k_event *event, uint32_t events,
++				     bool reset, k_timeout_t timeout);
++
++/**
++ * @brief Wait for all of the specified events and atomically clear them
++ *
++ * This routine waits on event object @a event until all of the specified
++ * events have been delivered to the event object, or the maximum wait time
++ * @a timeout has expired. A thread may wait on up to 32 distinctly numbered
++ * events that are expressed as bits in a single 32-bit word.
++ *
++ * When all the wait conditions are satisfied, the matched events are
++ * atomically cleared from the event object. If not all conditions are met,
++ * no events are cleared and 0 is returned.
++ *
++ * @note The caller must be careful when resetting if there are multiple threads
++ * waiting for the event object @a event.
++ *
++ * @note This function may be called from ISR context only when @a timeout is
++ * set to K_NO_WAIT.
++ *
++ * @param event Address of the event object
++ * @param events Set of desired events on which to wait
++ * @param reset If true, clear the set of events tracked by the event object
++ *              before waiting. If false, do not clear the events.
++ * @param timeout Waiting period for the desired set of events or one of the
++ *                special values K_NO_WAIT and K_FOREVER.
++ *
++ * @retval set of matching events upon success
++ * @retval 0 if matching events were not received within the specified time
++ */
++__syscall uint32_t k_event_wait_all_safe(struct k_event *event, uint32_t events,
++					  bool reset, k_timeout_t timeout);
++
+ /**
+  * @brief Test the events currently tracked in the event object
+  *
+diff --git a/include/zephyr/kernel/thread.h b/include/zephyr/kernel/thread.h
+index ae43d711..eeb8cda9 100644
+--- a/include/zephyr/kernel/thread.h
++++ b/include/zephyr/kernel/thread.h
+@@ -281,6 +281,7 @@ struct k_thread {
+ 
+ 	uint32_t   events;
+ 	uint32_t   event_options;
++	uint32_t   events_to_clear;
+ 
+ 	/** true if timeout should not wake the thread */
+ 	bool no_wake_on_timeout;
+diff --git a/kernel/events.c b/kernel/events.c
+index 038697d9..6356b7bc 100644
+--- a/kernel/events.c
++++ b/kernel/events.c
+@@ -39,12 +39,197 @@
+ #define K_EVENT_WAIT_MASK     0x01
+ 
+ #define K_EVENT_WAIT_RESET    0x02   /* Reset events prior to waiting */
++#define K_EVENT_WAIT_SAFE     0x04   /* Atomically clear matched events on wake */
++
++
+ 
+ struct event_walk_data {
+ 	struct k_thread  *head;
+ 	uint32_t events;
+ };
+ 
++
++
++/**
++ * Wait for any of the specified events and atomically clear them
++ */
++static uint32_t k_event_wait_safe_internal(struct k_event *event, uint32_t events,
++					  unsigned int options, k_timeout_t timeout)
++{
++	uint32_t  rv = 0;
++	struct k_thread  *thread;
++
++	__ASSERT(((arch_is_in_isr() == false) ||
++		  K_TIMEOUT_EQ(timeout, K_NO_WAIT)), "");
++
++	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_event, wait, event, events,
++					options, timeout);
++
++	if (events == 0) {
++		SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_event, wait, event, events, 0);
++		return 0;
++	}
++
++	thread = k_sched_current_thread_query();
++
++	k_spinlock_key_t  key = k_spin_lock(&event->lock);
++
++	if (options & K_EVENT_WAIT_RESET) {
++		event->events = 0;
++	}
++
++	/* Test if the wait conditions have already been met. */
++	uint32_t current_events = event->events;
++	uint32_t matched_events = current_events & events;
++
++	if (matched_events != 0) {
++		/* Conditions met - return requested events and clear them */
++		rv = events;
++		event->events = current_events & ~events;
++
++		k_spin_unlock(&event->lock, key);
++		goto out;
++	}
++
++	/* Match conditions have not been met. */
++
++	if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
++		k_spin_unlock(&event->lock, key);
++		goto out;
++	}
++
++	/*
++	 * The caller must pend to wait for the match. Save the desired
++	 * set of events in the k_thread structure.
++	 */
++
++	thread->events = events;
++	thread->event_options = options | K_EVENT_WAIT_SAFE;
++	thread->events_to_clear = events; /* Events to clear when woken */
++
++	SYS_PORT_TRACING_OBJ_FUNC_BLOCKING(k_event, wait, event, events,
++					   options, timeout);
++
++	if (z_pend_curr(&event->lock, key, &event->wait_q, timeout) == 0) {
++		/* Retrieve the set of events that woke the thread */
++		rv = thread->events;
++	}
++
++out:
++	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_event, wait, event,
++				       events, rv & events);
++
++	return rv & events;
++}
++
++uint32_t z_impl_k_event_wait_safe(struct k_event *event, uint32_t events,
++				   bool reset, k_timeout_t timeout)
++{
++	uint32_t options = reset ? K_EVENT_WAIT_RESET : 0;
++
++	return k_event_wait_safe_internal(event, events, options, timeout);
++}
++#ifdef CONFIG_USERSPACE
++uint32_t z_vrfy_k_event_wait_safe(struct k_event *event, uint32_t events,
++				    bool reset, k_timeout_t timeout)
++{
++	K_OOPS(K_SYSCALL_OBJ(event, K_OBJ_EVENT));
++	return z_impl_k_event_wait_safe(event, events, reset, timeout);
++}
++#include <zephyr/syscalls/k_event_wait_safe_mrsh.c>
++#endif /* CONFIG_USERSPACE */
++
++/**
++ * Wait for all of the specified events and atomically clear them
++ */
++static uint32_t k_event_wait_all_safe_internal(struct k_event *event, uint32_t events,
++					       unsigned int options, k_timeout_t timeout)
++{
++	uint32_t  rv = 0;
++	struct k_thread  *thread;
++
++	__ASSERT(((arch_is_in_isr() == false) ||
++		  K_TIMEOUT_EQ(timeout, K_NO_WAIT)), "");
++
++	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_event, wait, event, events,
++					options, timeout);
++
++	if (events == 0) {
++		SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_event, wait, event, events, 0);
++		return 0;
++	}
++
++	thread = k_sched_current_thread_query();
++
++	k_spinlock_key_t  key = k_spin_lock(&event->lock);
++
++	if (options & K_EVENT_WAIT_RESET) {
++		event->events = 0;
++	}
++
++	/* Test if the wait conditions have already been met. */
++	uint32_t current_events = event->events;
++	uint32_t matched_events = current_events & events;
++
++	if (matched_events == events) {
++		/* All conditions met - return requested events and clear them */
++		rv = events;
++		event->events = current_events & ~events;
++
++		k_spin_unlock(&event->lock, key);
++		goto out;
++	}
++
++	/* Match conditions have not been met. */
++
++	if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
++		k_spin_unlock(&event->lock, key);
++		goto out;
++	}
++
++	/*
++	 * The caller must pend to wait for the match. Save the desired
++	 * set of events in the k_thread structure.
++	 */
++
++	thread->events = events;
++	thread->event_options = options | K_EVENT_WAIT_SAFE | K_EVENT_WAIT_ALL;
++	thread->events_to_clear = events; /* Events to clear when woken */
++
++	SYS_PORT_TRACING_OBJ_FUNC_BLOCKING(k_event, wait, event, events,
++					   options, timeout);
++
++	if (z_pend_curr(&event->lock, key, &event->wait_q, timeout) == 0) {
++		/* Retrieve the set of events that woke the thread */
++		rv = thread->events;
++	}
++
++out:
++	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_event, wait, event,
++				       events, rv & events);
++
++	return rv & events;
++}
++
++uint32_t z_impl_k_event_wait_all_safe(struct k_event *event, uint32_t events,
++				       bool reset, k_timeout_t timeout)
++{
++	uint32_t options = reset ? (K_EVENT_WAIT_RESET | K_EVENT_WAIT_ALL)
++				 : K_EVENT_WAIT_ALL;
++
++	return k_event_wait_all_safe_internal(event, events, options, timeout);
++}
++#ifdef CONFIG_USERSPACE
++uint32_t z_vrfy_k_event_wait_all_safe(struct k_event *event, uint32_t events,
++					bool reset, k_timeout_t timeout)
++{
++	K_OOPS(K_SYSCALL_OBJ(event, K_OBJ_EVENT));
++	return z_impl_k_event_wait_all_safe(event, events, reset, timeout);
++}
++#include <zephyr/syscalls/k_event_wait_all_safe_mrsh.c>
++#endif /* CONFIG_USERSPACE */
++
++
+ #ifdef CONFIG_OBJ_CORE_EVENT
+ static struct k_obj_type obj_type_event;
+ #endif /* CONFIG_OBJ_CORE_EVENT */
+@@ -104,8 +289,10 @@ static int event_walk_op(struct k_thread *thread, void *data)
+ {
+ 	unsigned int      wait_condition;
+ 	struct event_walk_data *event_data = data;
++	bool is_safe_wait;
+ 
+ 	wait_condition = thread->event_options & K_EVENT_WAIT_MASK;
++	is_safe_wait = (thread->event_options & K_EVENT_WAIT_SAFE) != 0;
+ 
+ 	if (are_wait_conditions_met(thread->events, event_data->events,
+ 				    wait_condition)) {
+@@ -118,6 +305,16 @@ static int event_walk_op(struct k_thread *thread, void *data)
+ 		 */
+ 		thread->no_wake_on_timeout = true;
+ 
++		/*
++		 * For safe waits, set the events to clear.
++		 * The thread's events_to_clear field was already set by
++		 * the wait function to the events that were requested.
++		 * We just need to verify the condition is met.
++		 */
++		if (is_safe_wait) {
++			/* events_to_clear is already set by the wait function */
++		}
++
+ 		/*
+ 		 * The wait conditions have been satisfied. Add this
+ 		 * thread to the list of threads to unpend.
+@@ -166,8 +363,20 @@ static uint32_t k_event_post_internal(struct k_event *event, uint32_t events,
+ 		struct k_thread *next;
+ 		do {
+ 			arch_thread_return_value_set(thread, 0);
+-			thread->events = events;
+ 			next = thread->next_event_link;
++
++			/*
++			 * For safe waits, clear the matched events atomically.
++			 * This prevents "phantom events" where the same events
++			 * would be returned again on subsequent waits.
++			 */
++			if ((thread->event_options & K_EVENT_WAIT_SAFE) != 0) {
++				events &= ~thread->events_to_clear;
++				thread->events = thread->events_to_clear;
++			} else {
++				thread->events = events;
++			}
++
+ 			z_sched_wake_thread(thread, false);
+ 			thread = next;
+ 		} while (thread != NULL);

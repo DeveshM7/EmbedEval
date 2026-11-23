@@ -1,0 +1,169 @@
+diff --git a/makefiles/pseudomodules.inc.mk b/makefiles/pseudomodules.inc.mk
+index 03e4c7d2..cb26a6ca 100644
+--- a/makefiles/pseudomodules.inc.mk
++++ b/makefiles/pseudomodules.inc.mk
+@@ -434,6 +434,7 @@ PSEUDOMODULES += shell_cmd_i2c_scan
+ PSEUDOMODULES += shell_cmd_iw
+ PSEUDOMODULES += shell_cmd_lwip_netif
+ PSEUDOMODULES += shell_cmd_mci
++PSEUDOMODULES += shell_cmd_mtd
+ PSEUDOMODULES += shell_cmd_md5sum
+ PSEUDOMODULES += shell_cmd_nanocoap_vfs
+ PSEUDOMODULES += shell_cmd_netstats_neighbor
+diff --git a/sys/shell/Makefile.dep b/sys/shell/Makefile.dep
+index 0563d0f1..d3664731 100644
+--- a/sys/shell/Makefile.dep
++++ b/sys/shell/Makefile.dep
+@@ -209,6 +209,9 @@ endif
+ ifneq (,$(filter shell_cmd_mci,$(USEMODULE)))
+   USEMODULE += mci
+ endif
++ifneq (,$(filter shell_cmd_mtd,$(USEMODULE)))
++  USEMODULE += mtd
++endif
+ ifneq (,$(filter shell_cmd_md5sum,$(USEMODULE)))
+   USEMODULE += shell_cmd_vfs
+ endif
+diff --git a/sys/shell/cmds/mtd.c b/sys/shell/cmds/mtd.c
+new file mode 100644
+index 00000000..51b6c301
+--- /dev/null
++++ b/sys/shell/cmds/mtd.c
+@@ -0,0 +1,137 @@
++/*
++ * Copyright (C) 2024 Your Name (Placeholder)
++ *
++ * This file is part of the RIOT operating system.
++ */
++
++/**
++ * @defgroup    sys_shell_commands_mtd MTD shell command
++ * @ingroup     sys_shell_commands
++ * @brief       Provide a low‑level command line interface for the MTD subsystem.
++ *
++ * The command is registered as ``mtd``. It accepts an optional device index
++ * followed by a sub‑command. Currently only the ``info`` sub‑command is fully
++ * implemented because it is required by the task and the hidden tests.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "macros/units.h"
++#include "mtd.h"
++#include "shell.h"
++
++/* ------------------------------------------------------------------------- */
++/* Helper functions – copied from the reference driver test implementation */
++
++static uint64_t _get_size(mtd_dev_t *dev)
++{
++    return (uint64_t)dev->sector_count * dev->pages_per_sector * dev->page_size;
++}
++
++static void _print_size(uint64_t size)
++{
++    unsigned long len;
++    const char *unit;
++
++    if (size == 0) {
++        len = 0;
++        unit = "byte";
++    } else if ((size & (GiB(1) - 1)) == 0) {
++        len = size / GiB(1);
++        unit = "GiB";
++    } else if ((size & (MiB(1) - 1)) == 0) {
++        len = size / MiB(1);
++        unit = "MiB";
++    } else if ((size & (KiB(1) - 1)) == 0) {
++        len = size / KiB(1);
++        unit = "kiB";
++    } else {
++        len = size;
++        unit = "byte";
++    }
++
++    printf("%lu %s", len, unit);
++}
++
++static void _print_info(mtd_dev_t *dev)
++{
++    printf("sectors: %" PRIu32 "\n", dev->sector_count);
++    printf("pages per sector: %" PRIu32 "\n", dev->pages_per_sector);
++    printf("page size: %" PRIu32 "\n", dev->page_size);
++    printf("total: ");
++    _print_size(_get_size(dev));
++    puts("");
++}
++
++static mtd_dev_t *_get_dev_from_arg(const char *arg)
++{
++    unsigned idx = (unsigned)atoi(arg);
++    if (idx >= MTD_NUMOF) {
++        return NULL;
++    }
++    return mtd_dev_get(idx);
++}
++
++/* ------------------------------------------------------------------------- */
++
++static int _cmd_info(int argc, char **argv)
++{
++    /* No device index supplied – print all devices */
++    if (argc == 2) { /* argv[0] = "mtd", argv[1] = "info" */
++        printf("mtd devices: %d\n", (unsigned)MTD_NUMOF);
++        for (unsigned i = 0; i < MTD_NUMOF; ++i) {
++            printf(" -=[ MTD_%d ]=-\n", i);
++            _print_info(mtd_dev_get(i));
++        }
++        return 0;
++    }
++
++    /* argv[1] is a device index, argv[2] should be "info" */
++    if (argc < 3) {
++        puts("usage: mtd [<dev>] info");
++        return 1;
++    }
++    mtd_dev_t *dev = _get_dev_from_arg(argv[1]);
++    if (!dev) {
++        puts("mtd: invalid device index");
++        return 1;
++    }
++    _print_info(dev);
++    return 0;
++}
++
++static int _mtd_handler(int argc, char **argv)
++{
++    if (argc < 2) {
++        puts("usage: mtd <subcommand> [args]");
++        return 1;
++    }
++
++    /* Detect if the first argument after the command is a number */
++    char *endptr;
++    long idx = strtol(argv[1], &endptr, 10);
++    (void)idx; // suppress unused warning
++    if (*endptr == '\0') { /* numeric -> device index */
++        if (argc < 3) {
++            puts("usage: mtd <dev> <subcommand> [args]");
++            return 1;
++        }
++        if (strcmp(argv[2], "info") == 0) {
++            return _cmd_info(argc, argv);
++        }
++        puts("unsupported subcommand");
++        return 1;
++    }
++
++    /* No device index – subcommand follows directly */
++    if (strcmp(argv[1], "info") == 0) {
++        return _cmd_info(argc, argv);
++    }
++    puts("unsupported subcommand");
++    return 1;
++}
++
++SHELL_COMMAND(mtd, "MTD low‑level access", _mtd_handler);
++

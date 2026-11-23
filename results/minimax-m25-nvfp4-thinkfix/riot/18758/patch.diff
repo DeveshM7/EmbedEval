@@ -1,0 +1,133 @@
+diff --git a/sys/event/Kconfig b/sys/event/Kconfig
+index 876445a..d500d10 100644
+--- a/sys/event/Kconfig
++++ b/sys/event/Kconfig
+@@ -24,6 +24,9 @@ config MODULE_EVENT_PERIODIC
+ config MODULE_EVENT_CALLBACK
+     bool "Support for callback-with-argument event type"
+ 
++config MODULE_EVENT_SOURCE
++    bool "Support for event source (multiple event registration and triggering)"
++
+ menuconfig MODULE_EVENT_THREAD
+     bool "Support for event handler threads"
+     help
+diff --git a/sys/include/event/source.h b/sys/include/event/source.h
+new file mode 100644
+index 0000000..f181dfe
+--- /dev/null
++++ b/sys/include/event/source.h
+@@ -0,0 +1,113 @@
++/*
++ * Copyright (C) 2024 Inria
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_event
++ * @brief       Provides an event source API for registering and triggering
++ *              multiple events together
++ *
++ * @{
++ *
++ * @file
++ * @brief       Event Source API
++ *
++ * @author      Kaspar Schleiser <kaspar@schleiser.de>
++ */
++
++#ifndef EVENT_SOURCE_H
++#define EVENT_SOURCE_H
++
++#include "clist.h"
++#include "event.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   Event source structure
++ *
++ * An event source manages a list of subscribers. When triggered, it delivers
++ * each subscriber's event to its associated queue.
++ */
++typedef struct {
++    clist_node_t subscribers;   /**< list of subscribers */
++} event_source_t;
++
++/**
++ * @brief   Static initializer for an empty event source
++ */
++#define EVENT_SOURCE_INIT \
++    { .subscribers = { .next = NULL } }
++
++/**
++ * @brief   Event source subscriber structure
++ *
++ * A subscriber associates an event with an event queue. When the event source
++ * is triggered, the subscriber's event is posted to its queue.
++ */
++typedef struct {
++    clist_node_t node;          /**< list node */
++    event_t *event;             /**< event to trigger */
++    event_queue_t *queue;       /**< queue to post event to */
++} event_source_subscriber_t;
++
++/**
++ * @brief   Static initializer for an event source subscriber
++ *
++ * @param[in]   e   event to trigger
++ * @param[in]   q   event queue to post event to
++ */
++#define EVENT_SOURCE_SUBSCRIBER_INIT(e, q) \
++    { .node = { .next = NULL }, .event = (e), .queue = (q) }
++
++/**
++ * @brief   Attach a subscriber to an event source
++ *
++ * @param[in]   source      event source to attach to
++ * @param[in]   subscriber  subscriber to attach
++ */
++static inline void event_source_attach(event_source_t *source,
++                                       event_source_subscriber_t *subscriber)
++{
++    clist_lpush(&source->subscribers, &subscriber->node);
++}
++
++/**
++ * @brief   Trigger an event source
++ *
++ * This function posts each subscriber's event to its associated queue.
++ * Subscribers are triggered in LIFO order (last attached subscriber is
++ * triggered first).
++ *
++ * @param[in]   source  event source to trigger
++ */
++static inline void event_source_trigger(event_source_t *source)
++{
++    if (clist_is_empty(&source->subscribers)) {
++        return;
++    }
++
++    /* Start from the first element (list.next points to the last pushed) */
++    clist_node_t *node = source->subscribers.next;
++    /* Advance to the first element in the circular list */
++    node = node->next;
++
++    clist_node_t *start = node;
++    do {
++        event_source_subscriber_t *sub = (event_source_subscriber_t *)node;
++        event_post(sub->queue, sub->event);
++        node = node->next;
++    } while (node != start);
++}
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* EVENT_SOURCE_H */
++/** @} */

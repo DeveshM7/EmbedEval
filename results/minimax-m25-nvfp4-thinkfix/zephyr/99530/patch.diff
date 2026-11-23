@@ -1,0 +1,138 @@
+diff --git a/arch/riscv/core/pmp.c b/arch/riscv/core/pmp.c
+index aba1a763..9bc5ceb2 100644
+--- a/arch/riscv/core/pmp.c
++++ b/arch/riscv/core/pmp.c
+@@ -503,6 +503,14 @@ static unsigned int global_pmp_end_index[MODE_TOTAL];
+ /* Stores the initial pmpaddr values for the memory attribute region. */
+ static unsigned long mem_attr_pmp_addr[CONFIG_PMP_SLOTS];
+ #endif
++#if defined(CONFIG_MEM_ATTR)
++/* Start index of memory attribute PMP entries in the global PMP array. */
++static unsigned int global_pmp_mem_attr_start;
++/* Count of memory attribute PMP entries. */
++static unsigned int global_pmp_mem_attr_cnt;
++/* Stores the PMP address entries for memory attribute regions. */
++static unsigned long mem_attr_pmp_addr_entries[CONFIG_PMP_SLOTS];
++#endif
+ 
+ /**
+  * @Brief Initialize the PMP with global entries on each CPU
+@@ -571,6 +579,23 @@ void z_riscv_pmp_init(void)
+ 	attr_cnt = set_pmp_mem_attr(&index, pmp_addr, pmp_cfg, ARRAY_SIZE(pmp_addr));
+ #endif /* CONFIG_MEM_ATTR */
+ 
++#if defined(CONFIG_MEM_ATTR)
++	/*
++	 * Store the start index of memory attribute PMP entries.
++	 * This is used by z_riscv_pmp_change_permissions() to modify
++	 * permissions at runtime.
++	 */
++	global_pmp_mem_attr_start = index - attr_cnt;
++	global_pmp_mem_attr_cnt = attr_cnt;
++	/*
++	 * Store the PMP address entries for memory attribute regions.
++	 * These are used by z_riscv_pmp_change_permissions() to modify
++	 * permissions at runtime.
++	 */
++	memcpy(mem_attr_pmp_addr_entries, &pmp_addr[global_pmp_mem_attr_start],
++	       attr_cnt * sizeof(pmp_addr[0]));
++#endif /* CONFIG_MEM_ATTR */
++
+ #if defined(CONFIG_MEM_ATTR) || defined(CONFIG_PMP_NO_LOCK_GLOBAL)
+ 	/*
+ 	 * This early, we want to protect unlock PMP entries as soon as
+@@ -1068,3 +1093,65 @@ int arch_buffer_validate(const void *addr, size_t size, int write)
+ }
+ 
+ #endif /* CONFIG_USERSPACE */
++
++#if defined(CONFIG_MEM_ATTR)
++/**
++ * @brief Change the R/W/X permissions of a memory-attribute region.
++ *
++ * This function changes the permissions of an already-programmed PMP region
++ * corresponding to the given memory-attribute region index.
++ *
++ * @param region_idx Index of the memory-attribute region (0-based).
++ * @param perm Permission mask (PMP_R, PMP_W, PMP_X bits).
++ *
++ * @retval 0 on success.
++ * @retval -EINVAL if perm contains bits outside the R/W/X set or region_idx is out of range.
++ * @retval -ENOENT if no programmed PMP entry corresponds to the region.
++ */
++int z_riscv_pmp_change_permissions(size_t region_idx, uint8_t perm)
++{
++	uint8_t *pmp_n_cfg;
++	unsigned int pmp_idx;
++	uint8_t old_perm;
++	uint8_t new_perm;
++
++	/* Validate permission mask: only R/W/X bits allowed (0x07) */
++	if ((perm & ~(PMP_R | PMP_W | PMP_X)) != 0) {
++		return -EINVAL;
++	}
++
++	/* Check if there are any programmed PMP entries */
++	if (global_pmp_mem_attr_cnt == 0) {
++		return -ENOENT;
++	}
++
++	/* Validate region index */
++	if (region_idx >= global_pmp_mem_attr_cnt) {
++		return -EINVAL;
++	}
++
++	/* Calculate the PMP entry index */
++	pmp_idx = global_pmp_mem_attr_start + region_idx;
++
++	/* Get the current configuration from the in-memory copy */
++	pmp_n_cfg = (uint8_t *)global_pmp_cfg;
++
++	/* Check if this entry is configured (not OFF). If not, return -ENOENT */
++	if (global_pmp_mem_attr_cnt > 0 && (pmp_n_cfg[pmp_idx] & PMP_A) == 0) {
++		/* Entry is OFF, meaning no programmed PMP entry corresponds to this region */
++		return -ENOENT;
++	}
++
++	/* Update the permission bits */
++	new_perm = (pmp_n_cfg[pmp_idx] & ~(PMP_R | PMP_W | PMP_X)) | perm;
++	pmp_n_cfg[pmp_idx] = new_perm;
++
++	/* Write the updated PMP entry to the hardware */
++	write_pmp_entries(pmp_idx, pmp_idx + 1, false,
++			  mem_attr_pmp_addr_entries,
++			  global_pmp_cfg,
++			  CONFIG_PMP_SLOTS);
++
++	return 0;
++}
++#endif /* CONFIG_MEM_ATTR */
+diff --git a/include/zephyr/arch/riscv/pmp.h b/include/zephyr/arch/riscv/pmp.h
+index 04efe094..bd23cc6c 100644
+--- a/include/zephyr/arch/riscv/pmp.h
++++ b/include/zephyr/arch/riscv/pmp.h
+@@ -22,6 +22,23 @@
+  */
+ void z_riscv_pmp_clear_all(void);
+ 
+-#endif
++#if defined(CONFIG_MEM_ATTR)
++/**
++ * @brief Change the R/W/X permissions of a memory-attribute region.
++ *
++ * This function changes the permissions of an already-programmed PMP region
++ * corresponding to the given memory-attribute region index.
++ *
++ * @param region_idx Index of the memory-attribute region (0-based).
++ * @param perm Permission mask (PMP_R, PMP_W, PMP_X bits).
++ *
++ * @retval 0 on success.
++ * @retval -EINVAL if perm contains bits outside the R/W/X set or region_idx is out of range.
++ * @retval -ENOENT if no programmed PMP entry corresponds to the region.
++ */
++int z_riscv_pmp_change_permissions(size_t region_idx, uint8_t perm);
++#endif /* CONFIG_MEM_ATTR */
++
++#endif /* CONFIG_RISCV_PMP */
+ 
+ #endif /* ZEPHYR_INCLUDE_RISCV_PMP_H_ */

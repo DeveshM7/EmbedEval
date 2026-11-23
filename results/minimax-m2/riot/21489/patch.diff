@@ -1,0 +1,183 @@
+diff --git a/sys/shell/Makefile.dep b/sys/shell/Makefile.dep
+index 0563d0f1..ac3bffd5 100644
+--- a/sys/shell/Makefile.dep
++++ b/sys/shell/Makefile.dep
+@@ -216,6 +216,11 @@ ifneq (,$(filter shell_cmd_nanocoap_vfs,$(USEMODULE)))
+   USEMODULE += nanocoap_vfs
+   USEMODULE += vfs_util
+   USEMODULE += nanocoap_link_format
++ifneq (,$(filter shell_cmd_mtd,$(USEMODULE)))
++  USEMODULE += mtd
++  USEMODULE += od
++  USEMODULE += fmt
++endif
+ endif
+ ifneq (,$(filter shell_cmd_netstats_neighbor,$(USEMODULE)))
+   USEMODULE += netstats_neighbor
+diff --git a/sys/shell/cmds/mtd.c b/sys/shell/cmds/mtd.c
+new file mode 100644
+index 00000000..fd8a4ff0
+--- /dev/null
++++ b/sys/shell/cmds/mtd.c
+@@ -0,0 +1,161 @@
++/*
++ * Copyright (C) 2025 MTD shell command
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_shell_commands
++ * @{
++ *
++ * @file
++ * @brief       Shell commands for MTD module
++ *
++ * @author      MTD Shell Command Author
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdint.h>
++#include <ctype.h>
++#include <inttypes.h>
++
++#include "shell.h"
++#include "mtd.h"
++#include "fmt.h"
++#include "od.h"
++
++static void _mtd_usage(char **argv)
++{
++    printf("%s [device_id] info\n", argv[0]);
++    printf("%s [device_id] read <addr> <len>\n", argv[0]);
++    printf("%s [device_id] write [-b] <addr> <data>\n", argv[0]);
++    printf("%s [device_id] erase <addr> <len>\n", argv[0]);
++    printf("%s [device_id] power <up|down>\n", argv[0]);
++    puts("info:   Print MTD device information");
++    puts("read:   Read <len> bytes at address <addr>");
++    puts("write:  Write data at address <addr> (use -b for hex bytes)");
++    puts("erase:  Erase <len> bytes at address <addr>");
++    puts("power:  Power up or down the device");
++    puts("device_id is optional (default: all devices)");
++}
++
++static void _print_size(uint32_t size)
++{
++    if ((size & (0x100000 - 1)) == 0) {
++        printf("%" PRIu32 " MiB", size / 0x100000);
++    }
++    else if ((size & (0x400 - 1)) == 0) {
++        printf("%" PRIu32 " KiB", size / 0x400);
++    }
++    else {
++        printf("%" PRIu32 " B", size);
++    }
++}
++
++static int _mtd_info_handler(int argc, char **argv, int device_id)
++{
++    (void)argc;
++    (void)argv;
++
++    if (device_id < 0) {
++        /* Print info for all devices */
++        unsigned num_devices = XFA_LEN(mtd_dev_t *, mtd_dev_xfa);
++        printf("mtd devices: %u\n", num_devices);
++
++        for (unsigned i = 0; i < num_devices; i++) {
++            mtd_dev_t *dev = mtd_dev_xfa[i];
++            uint32_t total_size = dev->sector_count * dev->pages_per_sector * dev->page_size;
++
++            printf(" -=[ MTD_%u ]=-\n", i);
++            printf("sectors: %u\n", dev->sector_count);
++            printf("pages per sector: %u\n", dev->pages_per_sector);
++            printf("page size: %u\n", dev->page_size);
++            printf("total: ");
++            _print_size(total_size);
++            printf("\n");
++        }
++    }
++    else {
++        /* Print info for specific device */
++        if ((unsigned)device_id >= XFA_LEN(mtd_dev_t *, mtd_dev_xfa)) {
++            printf("MTD device %d not found\n", device_id);
++            return 1;
++        }
++
++        mtd_dev_t *dev = mtd_dev_xfa[device_id];
++        uint32_t total_size = dev->sector_count * dev->pages_per_sector * dev->page_size;
++
++        printf(" -=[ MTD_%d ]=-\n", device_id);
++        printf("sectors: %u\n", dev->sector_count);
++        printf("pages per sector: %u\n", dev->pages_per_sector);
++        printf("page size: %u\n", dev->page_size);
++        printf("total: ");
++        _print_size(total_size);
++        printf("\n");
++    }
++
++    return 0;
++}
++
++static int _mtd_handler(int argc, char **argv)
++{
++    if (argc < 2) {
++        _mtd_usage(argv);
++        return 1;
++    }
++
++    /* Check if first argument is a device ID or a subcommand */
++    int device_id = -1;
++    int arg_offset = 1;
++
++    /* Check if first argument is a device index */
++    char *endptr;
++    long idx = strtol(argv[1], &endptr, 10);
++    if (*endptr == '\0' && (unsigned)idx < XFA_LEN(mtd_dev_t *, mtd_dev_xfa)) {
++        device_id = idx;
++        arg_offset = 2;
++
++        if (argc < 3) {
++            _mtd_usage(argv);
++            return 1;
++        }
++    }
++
++    /* Check for subcommand */
++    char *subcmd = argv[arg_offset];
++
++    if (strcmp(subcmd, "info") == 0) {
++        return _mtd_info_handler(argc - arg_offset, &argv[arg_offset], device_id);
++    }
++    else if (strcmp(subcmd, "read") == 0) {
++        printf("Read command not yet implemented\n");
++        return 1;
++    }
++    else if (strcmp(subcmd, "write") == 0) {
++        printf("Write command not yet implemented\n");
++        return 1;
++    }
++    else if (strcmp(subcmd, "erase") == 0) {
++        printf("Erase command not yet implemented\n");
++        return 1;
++    }
++    else if (strcmp(subcmd, "power") == 0) {
++        printf("Power command not yet implemented\n");
++        return 1;
++    }
++    else {
++        printf("Unknown subcommand: %s\n", subcmd);
++        _mtd_usage(argv);
++        return 1;
++    }
++
++    return 0;
++}
++
++SHELL_COMMAND(mtd, "Low-level access to MTD storage", _mtd_handler);

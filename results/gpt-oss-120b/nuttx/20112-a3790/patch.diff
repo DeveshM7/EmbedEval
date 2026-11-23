@@ -1,0 +1,168 @@
+diff --git a/tmp/kwork_cancel_new.c b/tmp/kwork_cancel_new.c
+new file mode 100644
+index 00000000..9e35e294
+--- /dev/null
++++ b/tmp/kwork_cancel_new.c
+@@ -0,0 +1 @@
++...EOF
+diff --git a/tmp/patch.diff b/tmp/patch.diff
+new file mode 100644
+index 00000000..2c6ea357
+--- /dev/null
++++ b/tmp/patch.diff
+@@ -0,0 +1,155 @@
++*** Begin Patch
++*** Update File: sched/wqueue/kwork_cancel.c
++@@
++-int work_cancel(int qid, FAR struct work_s *work)
++-{
++-  return work_qcancel(work_qid2wq(qid), false, work);
++-}
++-
++-int work_cancel_wq(FAR struct kwork_wqueue_s *wqueue,
++-                   FAR struct work_s *work)
++-{
++-  return work_qcancel(wqueue, false, work);
++-}
++-
++-int work_cancel_sync(int qid, FAR struct work_s *work)
++-{
++-  return work_qcancel(work_qid2wq(qid), true, work);
++-}
++-
++-int work_cancel_sync_wq(FAR struct kwork_wqueue_s *wqueue,
++-                        FAR struct work_s *work)
++-{
++-  return work_qcancel(wqueue, true, work);
++-}
+++/* Non‑synchronous cancellation: return OK only if the work was queued.
+++ * If the work is not queued (including the case where it is currently
+++ * running), return -ENOENT.
+++ */
+++int work_cancel(int qid, FAR struct work_s *work)
+++{
+++  FAR struct kwork_wqueue_s *wqueue = work_qid2wq(qid);
+++  if (wqueue == NULL || work == NULL) {
+++    return -EINVAL;
+++  }
+++
+++  if (work_available(work)) {
+++    return -ENOENT;
+++  }
+++  return work_qcancel(wqueue, false, work);
+++}
+++
+++int work_cancel_wq(FAR struct kwork_wqueue_s *wqueue,
+++                   FAR struct work_s *work)
+++{
+++  if (wqueue == NULL || work == NULL) {
+++    return -EINVAL;
+++  }
+++  if (work_available(work)) {
+++    return -ENOENT;
+++  }
+++  return work_qcancel(wqueue, false, work);
+++}
+++
+++/* Synchronous cancellation: wait for a running callback if present.
+++ * Return OK if the work was queued (and removed) or if we waited for a
+++ * running worker. Return -ENOENT when the work is neither queued nor
+++ * running.
+++ */
+++int work_cancel_sync(int qid, FAR struct work_s *work)
+++{
+++  FAR struct kwork_wqueue_s *wqueue = work_qid2wq(qid);
+++  if (wqueue == NULL || work == NULL) {
+++    return -EINVAL;
+++  }
+++
+++  pid_t self = nxsched_gettid();
+++  bool waited = false;
+++  bool removed = false;
+++
+++  /* Check for a running worker first */
+++  irqstate_t flags = spin_lock_irqsave(&wqueue->lock);
+++  if (work_available(work)) {
+++    /* Not queued – check workers */
+++    for (int i = 0; i < wqueue->nthreads; i++) {
+++      FAR struct kworker_s *kw = &wq_get_worker(wqueue)[i];
+++      if (kw->work == work && kw->pid != self) {
+++        kw->wait_count++;
+++        waited = true;
+++        break;
+++      }
+++    }
+++  } else {
+++    removed = true;
+++    if (work_remove(wqueue, work)) {
+++      work_timer_reset(wqueue);
+++    }
+++  }
+++  spin_unlock_irqrestore(&wqueue->lock, flags);
+++
+++  if (waited) {
+++    /* Wait for the worker to finish */
+++    /* Find the worker again to get its semaphore */
+++    flags = spin_lock_irqsave(&wqueue->lock);
+++    for (int i = 0; i < wqueue->nthreads; i++) {
+++      FAR struct kworker_s *kw = &wq_get_worker(wqueue)[i];
+++      if (kw->work == work && kw->pid != self) {
+++        sem_t *sem = &kw->wait;
+++        spin_unlock_irqrestore(&wqueue->lock, flags);
+++        nxsem_wait_uninterruptible(sem);
+++        return OK;
+++      }
+++    }
+++    spin_unlock_irqrestore(&wqueue->lock, flags);
+++    return OK; /* Should not reach here */
+++  }
+++
+++  return removed ? OK : -ENOENT;
+++}
+++
+++int work_cancel_sync_wq(FAR struct kwork_wqueue_s *wqueue,
+++                        FAR struct work_s *work)
+++{
+++  if (wqueue == NULL || work == NULL) {
+++    return -EINVAL;
+++  }
+++  pid_t self = nxsched_gettid();
+++  bool waited = false;
+++  bool removed = false;
+++  irqstate_t flags = spin_lock_irqsave(&wqueue->lock);
+++  if (work_available(work)) {
+++    for (int i = 0; i < wqueue->nthreads; i++) {
+++      FAR struct kworker_s *kw = &wq_get_worker(wqueue)[i];
+++      if (kw->work == work && kw->pid != self) {
+++        kw->wait_count++;
+++        waited = true;
+++        break;
+++      }
+++    }
+++  } else {
+++    removed = true;
+++    if (work_remove(wqueue, work)) {
+++      work_timer_reset(wqueue);
+++    }
+++  }
+++  spin_unlock_irqrestore(&wqueue->lock, flags);
+++
+++  if (waited) {
+++    /* Wait on the worker's semaphore */
+++    flags = spin_lock_irqsave(&wqueue->lock);
+++    for (int i = 0; i < wqueue->nthreads; i++) {
+++      FAR struct kworker_s *kw = &wq_get_worker(wqueue)[i];
+++      if (kw->work == work && kw->pid != self) {
+++        sem_t *sem = &kw->wait;
+++        spin_unlock_irqrestore(&wqueue->lock, flags);
+++        nxsem_wait_uninterruptible(sem);
+++        return OK;
+++      }
+++    }
+++    spin_unlock_irqrestore(&wqueue->lock, flags);
+++    return OK;
+++  }
+++
+++  return removed ? OK : -ENOENT;
+++}
++*** End Patch

@@ -1,0 +1,200 @@
+diff --git a/include/zephyr/posix/sys/times.h b/include/zephyr/posix/sys/times.h
+new file mode 100644
+index 00000000..a73b7f13
+--- /dev/null
++++ b/include/zephyr/posix/sys/times.h
+@@ -0,0 +1,40 @@
++/*
++ * Copyright (c) 2024 The Zephyr Project Contributors
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef ZEPHYR_INCLUDE_ZEPHYR_POSIX_SYS_TIMES_H_
++#define ZEPHYR_INCLUDE_ZEPHYR_POSIX_SYS_TIMES_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifndef _CLOCK_T_DECLARED
++typedef long clock_t;
++#define _CLOCK_T_DECLARED
++#endif
++
++struct tms {
++	clock_t tms_utime;  /* User CPU time */
++	clock_t tms_stime;  /* System CPU time */
++	clock_t tms_cutime; /* User CPU time of child processes */
++	clock_t tms_cstime; /* System CPU time of child processes */
++};
++
++/**
++ * @brief Get process and child process times
++ *
++ * See IEEE 1003.1
++ * 
++ * @param buf Pointer to struct tms to be filled
++ * @return The elapsed real time in clock ticks, or (clock_t)-1 on error
++ */
++clock_t times(struct tms *buf);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_INCLUDE_ZEPHYR_POSIX_SYS_TIMES_H_ */
+diff --git a/lib/libc/minimal/include/sys/times.h b/lib/libc/minimal/include/sys/times.h
+new file mode 100644
+index 00000000..ddf52c4f
+--- /dev/null
++++ b/lib/libc/minimal/include/sys/times.h
+@@ -0,0 +1,32 @@
++/*
++ * Copyright (c) 2024 The Zephyr Project Contributors
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef ZEPHYR_LIB_LIBC_MINIMAL_INCLUDE_SYS_TIMES_H_
++#define ZEPHYR_LIB_LIBC_MINIMAL_INCLUDE_SYS_TIMES_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifndef _CLOCK_T_DECLARED
++typedef long clock_t;
++#define _CLOCK_T_DECLARED
++#endif
++
++struct tms {
++	clock_t tms_utime;  /* User CPU time */
++	clock_t tms_stime;  /* System CPU time */  
++	clock_t tms_cutime; /* User CPU time of child processes */
++	clock_t tms_cstime; /* System CPU time of child processes */
++};
++
++clock_t times(struct tms *buf);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_LIB_LIBC_MINIMAL_INCLUDE_SYS_TIMES_H_ */
+diff --git a/lib/posix/options/multi_process.c b/lib/posix/options/multi_process.c
+index ab697a66..526dcf93 100644
+--- a/lib/posix/options/multi_process.c
++++ b/lib/posix/options/multi_process.c
+@@ -4,7 +4,10 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
++#include <errno.h>
+ #include <zephyr/posix/unistd.h>
++#include <zephyr/posix/sys/times.h>
++#include <zephyr/sys/clock.h>
+ 
+ pid_t getpid(void)
+ {
+@@ -24,3 +27,34 @@ pid_t getpid(void)
+ #ifdef CONFIG_POSIX_MULTI_PROCESS_ALIAS_GETPID
+ FUNC_ALIAS(getpid, _getpid, pid_t);
+ #endif /* CONFIG_POSIX_MULTI_PROCESS_ALIAS_GETPID */
++
++clock_t times(struct tms *buf)
++{
++	uint64_t uptime_ms;
++	clock_t elapsed_ticks;
++
++	if (buf == NULL) {
++		errno = EFAULT;
++		return (clock_t)-1;
++	}
++
++	/* Get system uptime in milliseconds */
++	uptime_ms = k_uptime_get();
++
++	/* Convert to clock ticks based on system tick rate */
++	elapsed_ticks = (clock_t)(uptime_ms * CONFIG_SYS_CLOCK_TICKS_PER_SEC / 1000);
++
++	/* Fill the tms structure */
++	/* User CPU time - approximate as total uptime since we don't separate user/system */
++	buf->tms_utime = elapsed_ticks;
++	
++	/* System CPU time - set to 0 since we can't distinguish it in Zephyr */
++	buf->tms_stime = 0;
++	
++	/* Child process times - always 0 since Zephyr doesn't support child processes */
++	buf->tms_cutime = 0;
++	buf->tms_cstime = 0;
++
++	/* Return elapsed real time in clock ticks */
++	return elapsed_ticks;
++}
+diff --git a/lib/posix/options/multi_process.c.bak b/lib/posix/options/multi_process.c.bak
+new file mode 100644
+index 00000000..1e2a45f7
+--- /dev/null
++++ b/lib/posix/options/multi_process.c.bak
+@@ -0,0 +1,60 @@
++/*
++ * Copyright (c) 2024, Tenstorrent AI ULC
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/posix/unistd.h>
++
++pid_t getpid(void)
++{
++	/*
++	 * To maintain compatibility with some other POSIX operating systems,
++	 * a PID of zero is used to indicate that the process exists in another namespace.
++	 * PID zero is also used by the scheduler in some cases.
++	 * PID one is usually reserved for the init process.
++	 * Also note, that negative PIDs may be used by kill()
++	 * to send signals to process groups in some implementations.
++	 *
++	 * At the moment, getpid just returns an arbitrary number >= 2
++	 */
++
++	return 42;
++}
++#ifdef CONFIG_POSIX_MULTI_PROCESS_ALIAS_GETPID
++FUNC_ALIAS(getpid, _getpid, pid_t);
++#endif /* CONFIG_POSIX_MULTI_PROCESS_ALIAS_GETPID */
++
++#include <zephyr/sys/clock.h>
++#include <errno.h>
++
++clock_t times(struct tms *buf)
++{
++	uint64_t uptime_ms;
++	clock_t elapsed_ticks;
++
++	if (buf == NULL) {
++		errno = EFAULT;
++		return (clock_t)-1;
++	}
++
++	/* Get system uptime in milliseconds */
++	uptime_ms = k_uptime_get();
++
++	/* Convert to clock ticks based on system tick rate */
++	elapsed_ticks = (clock_t)(uptime_ms * CONFIG_SYS_CLOCK_TICKS_PER_SEC / 1000);
++
++	/* Fill the tms structure */
++	/* User CPU time - approximate as total uptime since we don't separate user/system */
++	buf->tms_utime = elapsed_ticks;
++	
++	/* System CPU time - set to 0 since we can't distinguish it in Zephyr */
++	buf->tms_stime = 0;
++	
++	/* Child process times - always 0 since Zephyr doesn't support child processes */
++	buf->tms_cutime = 0;
++	buf->tms_cstime = 0;
++
++	/* Return elapsed real time in clock ticks */
++	return elapsed_ticks;
++}

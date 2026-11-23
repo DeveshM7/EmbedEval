@@ -1,0 +1,83 @@
+diff --git a/sched/pthread/pthread_detach.c b/sched/pthread/pthread_detach.c
+index 48c6d09f..3e7c3005 100644
+--- a/sched/pthread/pthread_detach.c
++++ b/sched/pthread/pthread_detach.c
+@@ -77,17 +77,7 @@ int pthread_detach(pthread_t thread)
+        * status in the group.
+        */
+ 
+-      ret = pthread_findjoininfo(group, (pid_t)thread, &join, false);
+-      if (ret == OK)
+-        {
+-          join->detached = true;
+-        }
+-      else
+-        {
+-          ret = ESRCH;
+-        }
+-
+-      goto errout;
++      ret = pthread_findjoininfo(group, (pid_t)thread, &join, false);      if (ret == OK)        {          /* Thread has terminated and join info exists.           * Detach should clean up the join info so subsequent           * pthread_join returns ESRCH. */          pthread_destroyjoin(group, join);          ret = OK;        }      else        {          ret = ESRCH;        }
+     }
+ 
+   if ((group != tcb->group) ||
+diff --git a/sched/pthread/pthread_join.c b/sched/pthread/pthread_join.c
+index 27422008..da75698c 100644
+--- a/sched/pthread/pthread_join.c
++++ b/sched/pthread/pthread_join.c
+@@ -89,39 +89,25 @@ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+       ret = pthread_findjoininfo(group, (pid_t)thread, &join, false);
+       if (ret == OK)
+         {
+-          /* If the task is terminated, maintain the same behavior as Linux:
+-           * 1. Join detached task will always return EINVAL.
+-           * 2. Other threads will destroy the join information after
+-           *    obtain the exit value, ESRCH will return if calling
+-           *    pthread_join() again
+-           */
+-
+-          if (join->detached)
+-            {
+-              ret = EINVAL;
++          /* Handle join info for terminated thread */
++          if (join->detached) {
++            pthread_destroyjoin(group, join);
++            ret = ESRCH;
++          } else {
++            if (pexit_value != NULL) {
++              *pexit_value = join->exit_value;
+             }
+-          else
+-            {
+-              if (pexit_value != NULL)
+-                {
+-                  *pexit_value = join->exit_value;
+-                }
+-
+-              pthread_destroyjoin(group, join);
+-            }
+-        }
+-      else
+-        {
+-          ret = ESRCH;
+-        }
++            pthread_destroyjoin(group, join);
++          }
+ 
+-      goto errout;
+-    }
+-
+-  /* First make sure that this is not an attempt to join to
+-   * ourself.
+-   */
++        }
++        else
++          {
++            ret = ESRCH;
++          }
+ 
++        goto errout;
++      }
+   if (tcb == rtcb)
+     {
+       ret = EDEADLK;

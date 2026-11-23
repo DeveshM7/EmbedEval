@@ -1,0 +1,169 @@
+diff --git a/fs/mount/fs_mount.c b/fs/mount/fs_mount.c
+index 75eeb3c6..5e5e2786 100644
+--- a/fs/mount/fs_mount.c
++++ b/fs/mount/fs_mount.c
+@@ -30,10 +30,13 @@
+ #include <stdbool.h>
+ #include <string.h>
+ #include <errno.h>
++#include "sched/sched.h"
++#include <nuttx/sched.h>
+ #include <assert.h>
+ #include <nuttx/debug.h>
+ 
+ #include <nuttx/fs/fs.h>
++#include <sys/prctl.h>
+ 
+ #include "driver/driver.h"
+ #include "inode/inode.h"
+@@ -305,6 +308,14 @@ int nx_mount(FAR const char *source, FAR const char *target,
+   int ret;
+ 
+   /* Verify required pointer arguments */
++    /* Enforce raw I/O capability: mount requires PR_CAP_RAWIO */
++# ifdef CONFIG_SCHED_CAPABILITIES
++    FAR struct tcb_s *cur = this_task();
++    if (cur && (cur->caps & PR_CAP_RAWIO) == 0) {
++        ret = -EPERM;
++        goto errout_with_inode;
++    }
++# endif
+ 
+   DEBUGASSERT(target && filesystemtype);
+ 
+diff --git a/include/nuttx/sched.h b/include/nuttx/sched.h
+index 09916b83..3500423d 100644
+--- a/include/nuttx/sched.h
++++ b/include/nuttx/sched.h
+@@ -635,6 +635,7 @@ struct tcb_s
+   cpu_set_t affinity;                    /* Bit set of permitted CPUs       */
+ #endif
+   uint32_t flags;                        /* Misc. general status flags      */
++    uint8_t caps;                         /* Process capability mask */
+   int16_t  lockcount;                    /* 0=preemptible (not-locked)      */
+ #ifdef CONFIG_IRQCOUNT
+   int16_t  irqcount;                     /* 0=Not in critical section       */
+diff --git a/include/sys/prctl.h b/include/sys/prctl.h
+index aea41924..009d7ad7 100644
+--- a/include/sys/prctl.h
++++ b/include/sys/prctl.h
+@@ -79,6 +79,44 @@
+ #define PR_SET_DUMPABLE 5
+ #define PR_GET_DUMPABLE 6
+ 
++/* Process capability commands (optional, enabled by CONFIG_SCHED_CAPABILITIES) */
++/*   PR_CAPS_GET  - Return the current capability mask of the calling process. */
++/*   PR_CAPS_DROP - Drop (clear) specified capabilities from the calling process. */
++/*                The mask argument specifies which capabilities to clear. */
++/*                Dropping can only clear bits; it never adds capabilities. */
++
++#define PR_CAPS_GET   7
++#define PR_CAPS_DROP  8
++
++/* Capability bit definitions.  These are only valid when the capability */
++/* subsystem is enabled.  The definitions are intentionally simple u2013 a */
++/* uint8_t mask is sufficient for the three capabilities required by the */
++/* task.  PR_CAP_ALL represents all defined capabilities. */
++
++#define PR_CAP_RAWIO   (1U << 0) /* Raw I/O u2013 required for mounting filesystems */
++#define PR_CAP_SPAWN   (1U << 1) /* Ability to spawn new tasks */
++#define PR_CAP_ADMIN   (1U << 2) /* Administrative board control */
++#define PR_CAP_ALL    (PR_CAP_RAWIO | PR_CAP_SPAWN | PR_CAP_ADMIN)
++
++/* Process capability commands (optional, enabled by CONFIG_SCHED_CAPABILITIES) */
++/*   PR_CAPS_GET  - Return the current capability mask of the calling process. */
++/*   PR_CAPS_DROP - Drop (clear) specified capabilities from the calling process. */
++/*                The mask argument specifies which capabilities to clear. */
++/*                Dropping can only clear bits; it never adds capabilities. */
++
++#define PR_CAPS_GET   7
++#define PR_CAPS_DROP  8
++
++/* Capability bit definitions.  These are only valid when the capability */
++/* subsystem is enabled.  The definitions are intentionally simple – a */
++/* uint8_t mask is sufficient for the three capabilities required by the */
++/* task.  PR_CAP_ALL represents all defined capabilities. */
++
++#define PR_CAP_RAWIO   (1U << 0) /* Raw I/O – required for mounting filesystems */
++#define PR_CAP_SPAWN   (1U << 1) /* Ability to spawn new tasks */
++#define PR_CAP_ADMIN   (1U << 2) /* Administrative board control */
++#define PR_CAP_ALL    (PR_CAP_RAWIO | PR_CAP_SPAWN | PR_CAP_ADMIN)
++
+ /****************************************************************************
+  * Public Type Definitions
+  ****************************************************************************/
+diff --git a/sched/task/task_create.c b/sched/task/task_create.c
+index 7b90822c..237904bb 100644
+--- a/sched/task/task_create.c
++++ b/sched/task/task_create.c
+@@ -42,6 +42,7 @@
+ #endif
+ 
+ #include "sched/sched.h"
++#include <sys/prctl.h>
+ #include "group/group.h"
+ #include "task/task.h"
+ 
+@@ -98,7 +99,22 @@ int nxthread_create(FAR const char *name, uint8_t ttype, int priority,
+   /* Setup the task type */
+ 
+   tcb->flags = ttype | TCB_FLAG_FREE_TCB;
++#ifdef CONFIG_SCHED_CAPABILITIES
++    /* Initialise the capability mask for the new task */
++    FAR struct tcb_s *parent = this_task();
++    if (parent != NULL) {
++        tcb->caps = parent->caps;
++    } else {
++        tcb->caps = PR_CAP_ALL;
++    }
++    /* Enforce spawn capability: a task may only create a new task if it has PR_CAP_SPAWN */
++    if (parent != NULL && (parent->caps & PR_CAP_SPAWN) == 0) {
++        kmm_free(tcb);
++        set_errno(EPERM);
++        return ERROR;
++    }
+ 
++#endif
+   /* Initialize the task */
+ 
+   ret = nxtask_init(tcb, name, priority,
+diff --git a/sched/task/task_prctl.c b/sched/task/task_prctl.c
+index b065eeae..8b7b06c8 100644
+--- a/sched/task/task_prctl.c
++++ b/sched/task/task_prctl.c
+@@ -187,6 +187,35 @@ int prctl(int option, ...)
+         goto errout;
+ #endif
+ 
++#if defined(CONFIG_SCHED_CAPABILITIES)
++      case PR_CAPS_GET:
++        {
++          FAR struct tcb_s *tcb = this_task();
++          if (tcb == NULL) {
++              errcode = ESRCH;
++              goto errout;
++          }
++          va_end(ap);
++          return tcb->caps;
++        }
++
++      case PR_CAPS_DROP:
++        {
++          FAR struct tcb_s *tcb = this_task();
++          if (tcb == NULL) {
++              errcode = ESRCH;
++              goto errout;
++          }
++          int mask = va_arg(ap, int);
++          tcb->caps &= (uint8_t)~mask;
++        }
++        break;
++#else
++        serr("ERROR: Option not enabled: %d
++", option);
++        errcode = ENOSYS;
++        goto errout;
++#endif
+       default:
+         serr("ERROR: Unrecognized option: %d\n", option);
+         errcode = EINVAL;

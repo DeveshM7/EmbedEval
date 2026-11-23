@@ -1,0 +1,597 @@
+diff --git a/arch/arm64/src/common/arm64_cpupause.c b/arch/arm64/src/common/arm64_cpupause.c
+index 0d7acefe..33b2205d 100644
+--- a/arch/arm64/src/common/arm64_cpupause.c
++++ b/arch/arm64/src/common/arm64_cpupause.c
+@@ -345,3 +345,30 @@ int up_cpu_resume(int cpu)
+ 
+   return OK;
+ }
++
++/****************************************************************************
++ * Name: up_send_sgi
++ *
++ * Description:
++ *   Send a Software Generated Interrupt (SGI) to a specific CPU.
++ *
++ * Input Parameters:
++ *   sgi - The SGI number (0-15)
++ *   cpu - The CPU index to target
++ *
++ * Returned Value:
++ *   Zero on success; a negated errno value on failure.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_SMP
++int up_send_sgi(int sgi, int cpu)
++{
++  DEBUGASSERT(sgi >= 0 && sgi < 16);
++  DEBUGASSERT(cpu >= 0 && cpu < CONFIG_SMP_NCPUS);
++
++  arm64_gic_raise_sgi(sgi, (1 << cpu));
++
++  return OK;
++}
++#endif
+diff --git a/boards/arm64/qemu/qemu-armv8a/configs/nsh_smp/defconfig b/boards/arm64/qemu/qemu-armv8a/configs/nsh_smp/defconfig
+index 3a21ddf0..789f6a26 100644
+--- a/boards/arm64/qemu/qemu-armv8a/configs/nsh_smp/defconfig
++++ b/boards/arm64/qemu/qemu-armv8a/configs/nsh_smp/defconfig
+@@ -69,3 +69,6 @@ CONFIG_UART1_PL011=y
+ CONFIG_UART1_SERIAL_CONSOLE=y
+ CONFIG_UART_PL011=y
+ CONFIG_USEC_PER_TICK=1000
++
++CONFIG_SMP_CALL=y
++CONFIG_SMP_CALL_SGI=3
+diff --git a/include/nuttx/arch.h b/include/nuttx/arch.h
+index 723de853..fee00b49 100644
+--- a/include/nuttx/arch.h
++++ b/include/nuttx/arch.h
+@@ -2226,6 +2226,7 @@ int up_cpu_paused(int cpu);
+ 
+ #ifdef CONFIG_SMP
+ int up_cpu_resume(int cpu);
++int up_send_sgi(int sgi, int cpu);
+ #endif
+ 
+ /****************************************************************************
+diff --git a/include/nuttx/sched.h b/include/nuttx/sched.h
+index f50125e8..8d962767 100644
+--- a/include/nuttx/sched.h
++++ b/include/nuttx/sched.h
+@@ -1400,6 +1400,60 @@ int nxsched_set_affinity(pid_t pid, size_t cpusetsize,
+                          FAR const cpu_set_t *mask);
+ #endif
+ 
++/****************************************************************************
++ * Name: nxsched_smp_call_single
++ *
++ * Description:
++ *   Request a function to be executed on a single CPU.
++ *
++ *   This function is used to request a callback to be executed on a single
++ *   CPU. The callback is non-blocking and cannot wait or perform blocking
++ *   operations.
++ *
++ * Input Parameters:
++ *   cpu  - The CPU index to target
++ *   func - The function to execute
++ *   arg  - The argument to pass to the function
++ *   wait - True to wait for the function to complete
++ *
++ * Returned Value:
++ *   OK on success; a negated errno value on failure.  If wait is true, the
++ *   return value is the result of the callback function.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_SMP_CALL
++int nxsched_smp_call_single(int cpu, int (*func)(FAR void *arg),
++                            FAR void *arg, bool wait);
++#endif
++
++/****************************************************************************
++ * Name: nxsched_smp_call
++ *
++ * Description:
++ *   Request a function to be executed on a set of CPUs.
++ *
++ *   This function is used to request a callback to be executed on each CPU
++ *   in the provided cpu_set_t. The callback is non-blocking and cannot wait
++ *   or perform blocking operations.
++ *
++ * Input Parameters:
++ *   cpuset - The set of CPUs to target
++ *   func   - The function to execute
++ *   arg    - The argument to pass to the function
++ *   wait   - True to wait for all functions to complete
++ *
++ * Returned Value:
++ *   OK on success; a negated errno value on failure.  If wait is true and
++ *   any callback returns a negative value, that value is returned.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_SMP_CALL
++int nxsched_smp_call(cpu_set_t cpuset, int (*func)(FAR void *arg),
++                     FAR void *arg, bool wait);
++#endif
++
+ /****************************************************************************
+  * Name: nxsched_get_stackinfo
+  *
+diff --git a/sched/Kconfig b/sched/Kconfig
+index 0934ff8a..1a087a77 100644
+--- a/sched/Kconfig
++++ b/sched/Kconfig
+@@ -396,8 +396,25 @@ config SMP_DEFAULT_CPUSET
+ 		Set the Default CPU bits. The way to use the unset CPU is to call the
+ 		sched_setaffinity function to bind a task to the CPU. bit0 means CPU0.
+ 
++
++config SMP_CALL
++	bool "SMP function call support"
++	depends on SMP
++	---help---
++		Enable SMP function call support. This provides nxsched_smp_call_single
++		and nxsched_smp_call functions to request execution of a callback on
++		specific CPUs.
+ endif # SMP
+ 
++
++config SMP_CALL_SGI
++	int "SMP call SGI number"
++	default 3
++	range 0 15
++	depends on SMP_CALL
++	---help---
++		The SGI number to use for SMP function calls. SGI2 is reserved
++		for CPU pause/resume. Default is SGI3.
+ choice
+ 	prompt "Initialization Task"
+ 	default INIT_ENTRY if !BUILD_KERNEL
+diff --git a/sched/init/nx_smpstart.c b/sched/init/nx_smpstart.c
+index a740030e..fd4ec028 100644
+--- a/sched/init/nx_smpstart.c
++++ b/sched/init/nx_smpstart.c
+@@ -38,6 +38,10 @@
+ #include "sched/sched.h"
+ #include "init/init.h"
+ 
++#ifdef CONFIG_SMP_CALL
++#  include <nuttx/irq.h>
++#endif
++
+ #ifdef CONFIG_SMP
+ 
+ /****************************************************************************
+@@ -115,6 +119,12 @@ int nx_smp_start(void)
+ 
+   up_flush_dcache_all();
+ 
++  /* Initialize SMP call handler */
++
++#ifdef CONFIG_SMP_CALL
++  nxsched_smp_call_init();
++#endif
++
+   /* Start all of the other CPUs.  CPU0 is already running. */
+ 
+   for (cpu = 1; cpu < CONFIG_SMP_NCPUS; cpu++)
+diff --git a/sched/sched/Make.defs b/sched/sched/Make.defs
+index c69caff6..4e670b30 100644
+--- a/sched/sched/Make.defs
++++ b/sched/sched/Make.defs
+@@ -100,3 +100,7 @@ endif
+ 
+ DEPPATH += --dep-path sched
+ VPATH += :sched
++
++ifeq ($(CONFIG_SMP_CALL),y)
++CSRCS += smp_call.c
++endif
+diff --git a/sched/sched/sched.h b/sched/sched/sched.h
+index c8e42b9e..61d9cb2a 100644
+--- a/sched/sched/sched.h
++++ b/sched/sched/sched.h
+@@ -386,6 +386,16 @@ FAR struct tcb_s *this_task(void);
+ int  nxsched_select_cpu(cpu_set_t affinity);
+ int  nxsched_pause_cpu(FAR struct tcb_s *tcb);
+ 
++/* SMP function call support */
++
++#ifdef CONFIG_SMP_CALL
++int nxsched_smp_call_single(int cpu, int (*func)(FAR void *arg),
++                            FAR void *arg, bool wait);
++int nxsched_smp_call(cpu_set_t cpuset, int (*func)(FAR void *arg),
++                     FAR void *arg, bool wait);
++void nxsched_smp_call_init(void);
++#endif
++
+ #  define nxsched_islocked_global() spin_is_locked(&g_cpu_schedlock)
+ #  define nxsched_islocked_tcb(tcb) nxsched_islocked_global()
+ 
+diff --git a/sched/sched/smp_call.c b/sched/sched/smp_call.c
+new file mode 100644
+index 00000000..a4f18f06
+--- /dev/null
++++ b/sched/sched/smp_call.c
+@@ -0,0 +1,377 @@
++/****************************************************************************
++ * sched/sched/smp_call.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * the License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <stdint.h>
++#include <assert.h>
++#include <errno.h>
++#include <debug.h>
++
++#include <nuttx/arch.h>
++#include <nuttx/irq.h>
++#include <nuttx/sched.h>
++#include <nuttx/spinlock.h>
++#include <nuttx/sched_note.h>
++
++#include "sched/sched.h"
++
++#ifdef CONFIG_SMP_CALL
++
++/****************************************************************************
++ * Private Types
++ ****************************************************************************/
++
++/* This structure describes a pending SMP function call */
++
++struct smp_call_s
++{
++  FAR void *arg;
++  int (*func)(FAR void *arg);
++  volatile int result;
++  volatile bool done;
++};
++
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++/* Pending call data - one per CPU */
++
++static struct smp_call_s g_smp_call_data[CONFIG_SMP_NCPUS];
++
++/* Track pending calls for each CPU */
++
++static volatile bool g_smp_call_pending[CONFIG_SMP_NCPUS];
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: smp_call_handler
++ *
++ * Description:
++ *   This is the SGI handler for SMP function calls.
++ *
++ * Input Parameters:
++ *   irq - The interrupt request (should be SMP_CALL_SGI)
++ *   context - Interrupt context
++ *   arg - User-provided argument
++ *
++ * Returned Value:
++ *   OK on success; a negated errno value on failure.
++ *
++ ****************************************************************************/
++
++static int smp_call_handler(int irq, FAR void *context, FAR void *arg)
++{
++  int cpu = this_cpu();
++  FAR struct smp_call_s *data;
++  irqstate_t flags;
++
++  /* Disable interrupts to protect access to the pending flag */
++
++  flags = enter_critical_section();
++
++  /* Check if there is a pending call for this CPU */
++
++  if (g_smp_call_pending[cpu])
++    {
++      /* Get the call data */
++
++      data = (FAR struct smp_call_s *)&g_smp_call_data[cpu];
++
++      /* Clear the pending flag */
++
++      g_smp_call_pending[cpu] = false;
++
++      /* Execute the callback */
++
++      if (data->func != NULL)
++        {
++          data->result = data->func(data->arg);
++        }
++      else
++        {
++          data->result = -EINVAL;
++        }
++
++      /* Mark the call as done */
++
++      data->done = true;
++    }
++
++  leave_critical_section(flags);
++
++  return OK;
++}
++
++/****************************************************************************
++ * Name: nxsched_smp_call_init
++ *
++ * Description:
++ *   Initialize the SMP call handler. This should be called during SMP
++ *   initialization.
++ *
++ ****************************************************************************/
++
++void nxsched_smp_call_init(void)
++{
++  /* Attach the SGI handler for SMP function calls.
++   * The SGI number is configured via CONFIG_SMP_CALL_SGI.
++   */
++
++  irq_attach(CONFIG_SMP_CALL_SGI, smp_call_handler, NULL);
++
++  /* Enable the SGI interrupt */
++
++#ifdef CONFIG_ARCH_ARM64
++  up_enable_irq(CONFIG_SMP_CALL_SGI);
++#endif
++}
++
++/****************************************************************************
++ * Name: nxsched_smp_call_function
++ *
++ * Description:
++ *   Request a function to be executed on a specific CPU.
++ *
++ * Input Parameters:
++ *   cpu - The CPU index to target
++ *   func - The function to execute
++ *   arg - The argument to pass to the function
++ *   wait - true: wait for the function to complete
++ *
++ * Returned Value:
++ *   OK on success; a negated errno value on failure.
++ *
++ ****************************************************************************/
++
++static int nxsched_smp_call_function(int cpu, int (*func)(FAR void *arg),
++                                    FAR void *arg, bool wait)
++{
++  FAR struct smp_call_s *data;
++  irqstate_t flags;
++  int ret = OK;
++
++  DEBUGASSERT(cpu >= 0 && cpu < CONFIG_SMP_NCPUS);
++  DEBUGASSERT(func != NULL);
++
++  data = (FAR struct smp_call_s *)&g_smp_call_data[cpu];
++
++  /* Take the lock to protect access to the call data */
++
++  flags = enter_critical_section();
++
++  /* Initialize the call data */
++
++  data->func = func;
++  data->arg = arg;
++  data->result = 0;
++  data->done = false;
++
++  /* Set the pending flag */
++
++  g_smp_call_pending[cpu] = true;
++
++  /* Send an SGI to the target CPU */
++
++  up_send_sgi(CONFIG_SMP_CALL_SGI, cpu);
++
++  /* If wait is true, spin until the call completes */
++
++  if (wait)
++    {
++      while (!data->done)
++        {
++          /* Spin... */
++        }
++
++      /* Get the result */
++
++      ret = data->result;
++    }
++
++  leave_critical_section(flags);
++
++  return ret;
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: nxsched_smp_call_single
++ *
++ * Description:
++ *   Request a function to be executed on a single CPU.
++ *
++ *   This function is used to request a callback to be executed on a single
++ *   CPU. The callback is non-blocking and cannot wait or perform blocking
++ *   operations.
++ *
++ * Input Parameters:
++ *   cpu - The CPU index to target
++ *   func - The function to execute
++ *   arg - The argument to pass to the function
++ *   wait - true: wait for the function to complete
++ *
++ * Returned Value:
++ *   OK on success; a negated errno value on failure.  If wait is true, the
++ *   return value is the result of the callback function.
++ *
++ ****************************************************************************/
++
++int nxsched_smp_call_single(int cpu, int (*func)(FAR void *arg),
++                            FAR void *arg, bool wait)
++{
++#ifdef CONFIG_SMP
++  int ret;
++
++  DEBUGASSERT(cpu >= 0 && cpu < CONFIG_SMP_NCPUS);
++  DEBUGASSERT(func != NULL);
++
++  /* If the target is the current CPU, execute the callback directly */
++
++  if (cpu == this_cpu())
++    {
++      ret = func(arg);
++      if (wait && ret < 0)
++        {
++          return ret;
++        }
++
++      /* If wait is false, we still need to return OK since we executed
++       * synchronously
++       */
++
++      return OK;
++    }
++
++  /* Call the function on the target CPU */
++
++  ret = nxsched_smp_call_function(cpu, func, arg, wait);
++
++  /* Check for negative return values if wait is true */
++
++  if (wait && ret < 0)
++    {
++      return ret;
++    }
++
++  return OK;
++#else
++  return -ENOSYS;
++#endif
++}
++
++/****************************************************************************
++ * Name: nxsched_smp_call
++ *
++ * Description:
++ *   Request a function to be executed on a set of CPUs.
++ *
++ *   This function is used to request a callback to be executed on each CPU
++ *   in the provided cpu_set_t. The callback is non-blocking and cannot wait
++ *   or perform blocking operations.
++ *
++ * Input Parameters:
++ *   cpuset - The set of CPUs to target
++ *   func - The function to execute
++ *   arg - The argument to pass to the function
++ *   wait - true: wait for all functions to complete
++ *
++ * Returned Value:
++ *   OK on success; a negated errno value on failure.  If wait is true and
++ *   any callback returns a negative value, that value is returned.
++ *
++ ****************************************************************************/
++
++int nxsched_smp_call(cpu_set_t cpuset, int (*func)(FAR void *arg),
++                    FAR void *arg, bool wait)
++{
++#ifdef CONFIG_SMP
++  cpu_set_t current_cpu;
++  cpu_set_t remote_cpus;
++  int cpu;
++  int ret;
++  int ret_val = OK;
++
++  DEBUGASSERT(func != NULL);
++
++  /* Get the current CPU */
++
++  current_cpu = (1 << this_cpu());
++
++  /* Check if the current CPU is in the cpuset */
++
++  if (cpuset & current_cpu)
++    {
++      /* Execute the callback on the current CPU first */
++
++      ret = func(arg);
++      if (wait && ret < 0)
++        {
++          ret_val = ret;
++        }
++
++      /* Remove the current CPU from the cpuset for remote calls */
++
++      remote_cpus = cpuset & ~current_cpu;
++    }
++  else
++    {
++      remote_cpus = cpuset;
++    }
++
++  /* If there are remote CPUs to call */
++
++  if (remote_cpus != 0)
++    {
++      /* Iterate through each bit in the cpuset */
++
++      for (cpu = 0; cpu < CONFIG_SMP_NCPUS; cpu++)
++        {
++          if (remote_cpus & (1 << cpu))
++            {
++              /* Call the function on this CPU */
++
++              ret = nxsched_smp_call_function(cpu, func, arg, wait);
++              if (wait && ret < 0)
++                {
++                  ret_val = ret;
++                }
++            }
++        }
++    }
++
++  return ret_val;
++#else
++  return -ENOSYS;
++#endif
++}
++
++#endif /* CONFIG_SMP_CALL */

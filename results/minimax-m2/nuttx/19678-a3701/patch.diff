@@ -1,0 +1,1613 @@
+diff --git a/fix.patch b/fix.patch
+new file mode 100644
+index 00000000..3e607360
+--- /dev/null
++++ b/fix.patch
+@@ -0,0 +1,25 @@
++--- a/sched/semaphore/sem_holder.c
+++++ b/sched/semaphore/sem_holder.c
++@@ -446,12 +446,18 @@ static int nxsem_restoreholderprio(FAR struct semholder_s *pholder,
++   FAR struct tcb_s *htcb = pholder->htcb;
+++  bool is_mutex = NXSEM_IS_MUTEX(sem);
++ 
++   /* Release the holder if all counts have been given up
++    * before reprioritizing causes a context switch.
++    *
++-   * Mutex is held only by one thread, so the holder is always freed.
+++   * For mutexes, the holder is freed only when counts go to zero.
+++   * This is important when nxsem_canceled() is called during a timeout:
+++   * it should restore priorities but NOT free the mutex holder because
+++   * the holder is still holding the mutex.
++    */
++ 
++-  if (pholder->counts <= 0 || NXSEM_IS_MUTEX(sem))
+++  if (is_mutex)
++     {
+++      /* For mutexes, only free if counts go to zero */
+++      if (pholder->counts <= 0)
++         nxsem_freeholder(sem, pholder);
++     }
++ 
++   nxsem_restore_priority(htcb);
+diff --git a/fix2.patch b/fix2.patch
+new file mode 100644
+index 00000000..63b80dc8
+--- /dev/null
++++ b/fix2.patch
+@@ -0,0 +1,34 @@
++--- a/sched/semaphore/sem_holder.c
+++++ b/sched/semaphore/sem_holder.c
++@@ -446,12 +446,22 @@ static int nxsem_restoreholderprio(FAR struct semholder_s *pholder,
++   FAR struct tcb_s *htcb = pholder->htcb;
++   bool is_mutex = NXSEM_IS_MUTEX(sem);
++ 
++   /* Release the holder if all counts have been given up
++    * before reprioritizing causes a context switch.
++    *
++-   * Mutex is held only by one thread, so the holder is always freed.
+++   * For mutexes, the holder is freed only when counts go to zero.
+++   * This is important when nxsem_canceled() is called during a timeout:
+++   * it should restore priorities and decrement counts but NOT free the
+++   * mutex holder because the holder is still holding the mutex.
++    */
++ 
++-  if (pholder->counts <= 0 || NXSEM_IS_MUTEX(sem))
+++  if (is_mutex)
++     {
++-      nxsem_freeholder(sem, pholder);
+++      /* For mutexes, decrement counts and only free if counts go to zero.
+++       * This restores the state after nxsem_add_holder_tcb was called
+++       * when the waiter was added.
+++       */
+++      if (pholder->counts > 0)
+++        {
+++          pholder->counts--;
+++        }
+++
+++      if (pholder->counts <= 0)
+++        nxsem_freeholder(sem, pholder);
++     }
++ 
++   nxsem_restore_priority(htcb);
+diff --git a/fix_waitirq.patch b/fix_waitirq.patch
+new file mode 100644
+index 00000000..933a3ace
+--- /dev/null
++++ b/fix_waitirq.patch
+@@ -0,0 +1,30 @@
++--- a/sched/semaphore/sem_waitirq.c
+++++ b/sched/semaphore/sem_waitirq.c
++@@ -91,12 +91,24 @@ void nxsem_wait_irq(FAR struct tcb_s *wtcb, int errcode)
++       nxsem_canceled(wtcb, sem);
++ 
++       /* Remove task from waiting list */
++ 
++       dq_rem((FAR dq_entry_t *)wtcb, SEM_WAITLIST(sem));
++ 
+++      /* For mutexes, update the holder field to clear the blocking bit
+++       * if there are no more waiters. This is necessary because the
+++       * blocking bit was set when the waiter was added, and it needs
+++       * to be cleared when the waiter is removed.
+++       */
+++
+++      if (mutex)
+++        {
+++          uint32_t blocking_bit = dq_empty(SEM_WAITLIST(sem)) ? 0 : NXSEM_MBLOCKING_BIT;
+++          uint32_t mholder = atomic_read(NXSEM_MHOLDER(sem));
+++          atomic_set(NXSEM_MHOLDER(sem), (mholder & ~NXSEM_MBLOCKING_BIT) | blocking_bit);
+++        }
+++
++       /* This restores the value to what it was before the previous sem_wait.
++        * This caused the thread to be blocked in the first place.
++        *
++        * For mutexes, the holder is updated by the thread itself
++        * when it exits nxsem_wait
++        */
++ 
++       if (!mutex)
+diff --git a/sched/semaphore/sem_holder.c b/sched/semaphore/sem_holder.c
+index a124f7c3..3dd2daa0 100644
+--- a/sched/semaphore/sem_holder.c
++++ b/sched/semaphore/sem_holder.c
+@@ -441,19 +441,31 @@ static int nxsem_restoreholderprio(FAR struct semholder_s *pholder,
+                                    FAR sem_t *sem, FAR void *arg)
+ {
+   FAR struct tcb_s *htcb = pholder->htcb;
++  bool is_mutex = NXSEM_IS_MUTEX(sem);
+ 
+   /* Release the holder if all counts have been given up
+    * before reprioritizing causes a context switch.
+    *
+-   * Mutex is held only by one thread, so the holder is always freed.
++   * For mutexes, the holder is freed only when counts go to zero.
++   * This is important when nxsem_canceled() is called during a timeout:
++   * it should restore priorities and decrement counts but NOT free the
++   * mutex holder because the holder is still holding the mutex.
+    */
+ 
+-  if (pholder->counts <= 0 || NXSEM_IS_MUTEX(sem))
++  if (is_mutex)
+     {
+-      nxsem_freeholder(sem, pholder);
+-    }
++      /* For mutexes, decrement counts and only free if counts go to zero.
++       * This restores the state after nxsem_add_holder_tcb was called
++       * when the waiter was added.
++       */
++      if (pholder->counts > 0)
++        {
++          pholder->counts--;
++        }
+ 
+-  nxsem_restore_priority(htcb);
++      if (pholder->counts <= 0)
++        nxsem_freeholder(sem, pholder);
++  return 0;
+ 
+   return 0;
+ }
+diff --git a/sched/semaphore/sem_holder.c.new b/sched/semaphore/sem_holder.c.new
+new file mode 100644
+index 00000000..51361865
+--- /dev/null
++++ b/sched/semaphore/sem_holder.c.new
+@@ -0,0 +1,30 @@
++  FAR struct tcb_s *htcb = pholder->htcb;
++  bool is_mutex = NXSEM_IS_MUTEX(sem);
++
++  /* Release the holder if all counts have been given up
++   * before reprioritizing causes a context switch.
++   *
++   * For mutexes, the holder is freed only when counts go to zero.
++   * This is important when nxsem_canceled() is called during a timeout:
++   * it should restore priorities and decrement counts but NOT free the
++   * mutex holder because the holder is still holding the mutex.
++   */
++
++  if (is_mutex)
++    {
++      /* For mutexes, decrement counts and only free if counts go to zero.
++       * This restores the state after nxsem_add_holder_tcb was called
++       * when the waiter was added.
++       */
++      if (pholder->counts > 0)
++        {
++          pholder->counts--;
++        }
++
++      if (pholder->counts <= 0)
++        nxsem_freeholder(sem, pholder);
++    }
++
++  nxsem_restore_priority(htcb);
++
++  return 0;
+diff --git a/sched/semaphore/sem_holder.c.orig b/sched/semaphore/sem_holder.c.orig
+new file mode 100644
+index 00000000..d8696c24
+--- /dev/null
++++ b/sched/semaphore/sem_holder.c.orig
+@@ -0,0 +1,996 @@
++/****************************************************************************
++ * sched/semaphore/sem_holder.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sched.h>
++#include <assert.h>
++#include <nuttx/debug.h>
++
++#include <nuttx/arch.h>
++#include <nuttx/mm/kmap.h>
++
++#include "sched/sched.h"
++#include "semaphore/semaphore.h"
++
++#ifdef CONFIG_PRIORITY_INHERITANCE
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Private Types
++ ****************************************************************************/
++
++typedef int (*holderhandler_t)(FAR struct semholder_s *pholder,
++                               FAR sem_t *sem, FAR void *arg);
++
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++/* Preallocated holder structures */
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++static struct semholder_s g_holderalloc[CONFIG_SEM_PREALLOCHOLDERS];
++static FAR struct semholder_s *g_freeholders;
++#endif
++
++/****************************************************************************
++ * Name: nxsem_allocholder
++ ****************************************************************************/
++
++static inline FAR struct semholder_s *
++nxsem_allocholder(FAR sem_t *sem, FAR struct tcb_s *htcb)
++{
++  FAR struct semholder_s *pholder;
++
++  /* Check if the "built-in" holder is being used.  We have this built-in
++   * holder to optimize for the simplest case where semaphores are only
++   * used to implement mutexes.
++   */
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  pholder = g_freeholders;
++  if (pholder != NULL)
++    {
++      /* Remove the holder from the free list and
++       * put it into the semaphore's holder list
++       */
++
++      g_freeholders  = pholder->flink;
++      pholder->flink = sem->hhead;
++      sem->hhead     = pholder;
++    }
++#else
++  if (sem->holder.htcb == NULL)
++    {
++      pholder = &sem->holder;
++    }
++#endif
++  else
++    {
++      serr("ERROR: Insufficient pre-allocated holders\n");
++      PANIC();
++    }
++
++#ifdef CONFIG_MM_KMAP
++  sem = kmm_map_user(this_task(), sem, sizeof(*sem));
++#endif
++
++  pholder->sem    = sem;
++  pholder->htcb   = htcb;
++  pholder->counts = 0;
++
++  /* Put it into the task's list */
++
++  pholder->tlink  = htcb->holdsem;
++  htcb->holdsem   = pholder;
++
++  return pholder;
++}
++
++/****************************************************************************
++ * Name: nxsem_findholder
++ *
++ * NOTE: htcb may be used only as a look-up key.  It certain cases, the task
++ * may have exited and htcb may refer to a stale memory.  It must not be
++ * dereferenced.
++ *
++ ****************************************************************************/
++
++static FAR struct semholder_s *
++nxsem_findholder(FAR sem_t *sem, FAR struct tcb_s *htcb)
++{
++  FAR struct semholder_s *pholder;
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  /* Try to find the holder in the list of holders associated with this
++   * semaphore
++   */
++
++  for (pholder = sem->hhead; pholder != NULL; pholder = pholder->flink)
++    {
++      if (pholder->htcb == htcb)
++        {
++          /* Got it! */
++
++          return pholder;
++        }
++    }
++#else
++  /* We have one hard-allocated holder structures in sem_t */
++
++  pholder = &sem->holder;
++
++  if (pholder->htcb == htcb)
++    {
++      /* Got it! */
++
++      return pholder;
++    }
++#endif
++
++  /* The holder does not appear in the list */
++
++  return NULL;
++}
++
++/****************************************************************************
++ * Name: nxsem_findorallocateholder
++ ****************************************************************************/
++
++static inline FAR struct semholder_s *
++nxsem_findorallocateholder(FAR sem_t *sem, FAR struct tcb_s *htcb)
++{
++  FAR struct semholder_s *pholder = nxsem_findholder(sem, htcb);
++  if (pholder == NULL)
++    {
++      pholder = nxsem_allocholder(sem, htcb);
++    }
++
++  return pholder;
++}
++
++/****************************************************************************
++ * Name: nxsem_freeholder
++ ****************************************************************************/
++
++static inline void nxsem_freeholder(FAR sem_t *sem,
++                                    FAR struct semholder_s *pholder)
++{
++  FAR struct semholder_s * FAR *curr;
++
++  /* Remove the holder from the task's list */
++
++  for (curr = &pholder->htcb->holdsem;
++       *curr != NULL;
++       curr = &(*curr)->tlink)
++    {
++      if (*curr == pholder)
++        {
++          *curr = pholder->tlink;
++          break;
++        }
++    }
++
++#ifdef CONFIG_MM_KMAP
++  kmm_unmap(pholder->sem);
++#endif
++
++  /* Release the holder and counts */
++
++  pholder->tlink  = NULL;
++  pholder->sem    = NULL;
++  pholder->htcb   = NULL;
++  pholder->counts = 0;
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  /* Remove the holder from the semaphore's list */
++
++  for (curr = &sem->hhead;
++       *curr != NULL;
++       curr = &(*curr)->flink)
++    {
++      if (*curr == pholder)
++        {
++          *curr = pholder->flink;
++          break;
++        }
++    }
++
++  /* And put it in the free list */
++
++  pholder->flink = g_freeholders;
++  g_freeholders  = pholder;
++#endif
++}
++
++/****************************************************************************
++ * Name: nxsem_freecount0holder
++ ****************************************************************************/
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++static int nxsem_freecount0holder(FAR struct semholder_s *pholder,
++                                  FAR sem_t *sem, FAR void *arg)
++{
++  /* When no more counts are held, remove the holder from the list.  The
++   * count was decremented in nxsem_release_holder.
++   *
++   * Mutex is held only by one thread, so the holder is always freed.
++   */
++
++  if (pholder->counts <= 0 || NXSEM_IS_MUTEX(sem))
++    {
++      nxsem_freeholder(sem, pholder);
++      return 1;
++    }
++
++  return 0;
++}
++#endif
++
++/****************************************************************************
++ * Name: nxsem_foreachholder
++ ****************************************************************************/
++
++static int nxsem_foreachholder(FAR sem_t *sem, holderhandler_t handler,
++                               FAR void *arg)
++{
++  FAR struct semholder_s *pholder;
++  int ret = 0;
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  FAR struct semholder_s *next;
++
++  for (pholder = sem->hhead; pholder && ret == 0; pholder = next)
++    {
++      /* In case this holder gets deleted */
++
++      next = pholder->flink;
++
++      DEBUGASSERT(pholder->htcb != NULL);
++
++      /* Call the handler */
++
++      ret = handler(pholder, sem, arg);
++    }
++#else
++  /* We have one hard-allocated holder structures in sem_t */
++
++  pholder = &sem->holder;
++
++  /* The hard-allocated containers may hold a NULL holder */
++
++  if (pholder->htcb != NULL)
++    {
++      /* Call the handler */
++
++      ret = handler(pholder, sem, arg);
++    }
++#endif
++
++  return ret;
++}
++
++/****************************************************************************
++ * Name: nxsem_recoverholders
++ ****************************************************************************/
++
++static int nxsem_recoverholders(FAR struct semholder_s *pholder,
++                                FAR sem_t *sem, FAR void *arg)
++{
++  nxsem_freeholder(sem, pholder);
++  return 0;
++}
++
++/****************************************************************************
++ * Name: nxsem_boostholderprio
++ ****************************************************************************/
++
++static int nxsem_boostholderprio(FAR struct semholder_s *pholder,
++                                 FAR sem_t *sem, FAR void *arg)
++{
++  FAR struct tcb_s *htcb = pholder->htcb;
++  FAR struct tcb_s *rtcb = (FAR struct tcb_s *)arg;
++
++  /* If the priority of the thread that is waiting for a count is less than
++   * or equal to the priority of the thread holding a count, then do nothing
++   * because the thread is already running at a sufficient priority.
++   */
++
++  if (rtcb && htcb && rtcb->sched_priority > htcb->sched_priority)
++    {
++      /* Raise the priority of the holder of the semaphore.  This
++       * cannot cause a context switch because we have preemption
++       * disabled.  The task will be marked "pending" and the switch
++       * will occur during up_contex_switch() processing.
++       */
++
++      nxsched_set_priority(htcb, rtcb->sched_priority);
++    }
++
++  return 0;
++}
++
++/****************************************************************************
++ * Name: nxsem_verifyholder
++ ****************************************************************************/
++
++#ifdef CONFIG_DEBUG_ASSERTIONS
++static int nxsem_verifyholder(FAR struct semholder_s *pholder,
++                              FAR sem_t *sem, FAR void *arg)
++{
++  /* Need to revisit this, but these assumptions seem to be untrue -- OR
++   * there is a bug???
++   */
++
++#if 0
++  FAR struct tcb_s *htcb = pholder->htcb;
++
++  /* Called after a semaphore has been released (incremented), the semaphore
++   * could be non-negative, and there is no thread waiting for the count.
++   * In this case, the priority of the holder should not be boosted.
++   */
++
++  DEBUGASSERT(htcb->sched_priority == htcb->base_priority);
++#endif
++
++  return 0;
++}
++#endif
++
++/****************************************************************************
++ * Name: nxsem_dumpholder
++ ****************************************************************************/
++
++#if defined(CONFIG_DEBUG_INFO) && defined(CONFIG_SEM_PHDEBUG)
++static int nxsem_dumpholder(FAR struct semholder_s *pholder, FAR sem_t *sem,
++                            FAR void *arg)
++{
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  _info("  %08x: %08x %08x %08x %08x %04x\n",
++        pholder, pholder->flink,
++#else
++  _info("  %08x: %08x %08x %08x %04x\n",
++        pholder,
++#endif
++        pholder->tlink, pholder->sem, pholder->htcb, pholder->counts);
++  return 0;
++}
++#endif
++
++/****************************************************************************
++ * Name: nxsem_restore_priority
++ ****************************************************************************/
++
++static void nxsem_restore_priority(FAR struct tcb_s *htcb)
++{
++  int hpriority;
++
++  /* We attempt to restore thread priority to its base priority.  If
++   * there is any thread with the higher priority waiting for the
++   * semaphore held by htcb then this value will be overwritten.
++   */
++
++  hpriority = htcb->boost_priority > htcb->base_priority ?
++              htcb->boost_priority : htcb->base_priority;
++
++  /* Was the priority of the holder thread boosted? If so, then drop its
++   * priority back to the correct level.  What is the correct level?
++   */
++
++  if (htcb->sched_priority != hpriority)
++    {
++      FAR struct semholder_s *pholder;
++
++      /* Try to find the highest priority across all the threads that are
++       * waiting for any semaphore held by htcb.
++       */
++
++      for (pholder = htcb->holdsem; pholder != NULL;
++           pholder = pholder->tlink)
++        {
++          FAR struct tcb_s *stcb;
++
++          stcb = (FAR struct tcb_s *)dq_peek(SEM_WAITLIST(pholder->sem));
++
++          if (stcb != NULL && stcb->sched_priority > hpriority)
++            {
++              hpriority = stcb->sched_priority;
++            }
++        }
++
++      /* Apply the selected priority to the thread (hopefully back to the
++       * threads base_priority).
++       */
++
++      nxsched_set_priority(htcb, hpriority);
++    }
++}
++
++/****************************************************************************
++ * Name: nxsem_restoreholderprio
++ ****************************************************************************/
++
++static int nxsem_restoreholderprio(FAR struct semholder_s *pholder,
++                                   FAR sem_t *sem, FAR void *arg)
++{
++  FAR struct tcb_s *htcb = pholder->htcb;
++  bool is_mutex = NXSEM_IS_MUTEX(sem);
++
++  /* Release the holder if all counts have been given up
++   * before reprioritizing causes a context switch.
++   *
++   * For mutexes, the holder is freed only when counts go to zero.
++   * This is important when nxsem_canceled() is called during a timeout:
++   * it should restore priorities but NOT free the mutex holder because
++   * the holder is still holding the mutex.
++   */
++
++  if (is_mutex)
++    {
++      /* For mutexes, only free if counts go to zero */
++      if (pholder->counts <= 0)
++      nxsem_freeholder(sem, pholder);
++    }
++
++  nxsem_restore_priority(htcb);
++
++  return 0;
++}
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++
++/****************************************************************************
++ * Name: nxsem_restoreholderprio_others
++ *
++ * Description:
++ *   Reprioritize all holders except the currently executing task
++ *
++ ****************************************************************************/
++
++static int nxsem_restoreholderprio_others(FAR struct semholder_s *pholder,
++                                          FAR sem_t *sem, FAR void *arg)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  if (pholder->htcb != rtcb)
++    {
++      return nxsem_restoreholderprio(pholder, sem, arg);
++    }
++
++  return 0;
++}
++
++/****************************************************************************
++ * Name: nxsem_restoreholderprio_self
++ *
++ * Description:
++ *   Reprioritize only the currently executing task
++ *
++ ****************************************************************************/
++
++static int nxsem_restoreholderprio_self(FAR struct semholder_s *pholder,
++                                        FAR sem_t *sem, FAR void *arg)
++{
++  FAR struct tcb_s *rtcb = this_task();
++
++  if (pholder->htcb == rtcb)
++    {
++      /* The running task has given up a count on the semaphore */
++
++      nxsem_restoreholderprio(pholder, sem, arg);
++      return 1;
++    }
++
++  return 0;
++}
++
++#endif
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: nxsem_initialize_holders
++ *
++ * Description:
++ *   Called from nxsem_initialize() to set up semaphore holder information.
++ *
++ * Input Parameters:
++ *   None
++ *
++ * Returned Value:
++ *   None
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++void nxsem_initialize_holders(void)
++{
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  int i;
++
++  /* Put all of the pre-allocated holder structures into the free list */
++
++  g_freeholders = g_holderalloc;
++  for (i = 0; i < (CONFIG_SEM_PREALLOCHOLDERS - 1); i++)
++    {
++      g_holderalloc[i].flink = &g_holderalloc[i + 1];
++    }
++
++  g_holderalloc[CONFIG_SEM_PREALLOCHOLDERS - 1].flink = NULL;
++#endif
++}
++
++/****************************************************************************
++ * Name: nxsem_destroyholder
++ *
++ * Description:
++ *   Called from nxsem_destroy() to handle any holders of a semaphore
++ *   when it is destroyed.
++ *
++ * Input Parameters:
++ *   sem - A reference to the semaphore being destroyed
++ *
++ * Returned Value:
++ *   None
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++void nxsem_destroyholder(FAR sem_t *sem)
++{
++  irqstate_t flags = enter_critical_section();
++
++  /* It might be an error if a semaphore is destroyed while there are any
++   * holders of the semaphore (except perhaps the thread that release the
++   * semaphore itself).  We actually have to assume that the caller knows
++   * what it is doing because could have killed another thread that is the
++   * actual holder of the semaphore.
++   *
++   * It is also a standard practice to destroy the semaphore while the
++   * caller holds it.  Of course, the caller MUST assure that there are no
++   * other holders of the semaphore in this case.  This occurs, for example,
++   * when a driver is unlink'ed and the driver instance must be destroyed.
++   *
++   * Therefore, we cannot make any assumptions about the state of the
++   * semaphore or the state of any of the holder threads.  So just recover
++   * any stranded holders and hope the task knows what it is doing.
++   */
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  if (sem->hhead != NULL)
++    {
++      /* There may be an issue if there are multiple holders of
++       * the semaphore.
++       */
++
++      DEBUGASSERT(sem->hhead->flink == NULL);
++    }
++
++#else
++  /* There may be an issue if there are multiple holders of the semaphore. */
++
++  DEBUGASSERT(sem->holder.htcb == NULL || sem->holder.htcb == this_task());
++
++#endif
++
++  nxsem_foreachholder(sem, nxsem_recoverholders, NULL);
++
++  leave_critical_section(flags);
++}
++
++/****************************************************************************
++ * Name: nxsem_add_holder_tcb
++ *
++ * Description:
++ *   Called from nxsem_wait() when the calling thread obtains the semaphore;
++ *   Called from sem_post() when the waiting thread obtains the semaphore.
++ *
++ * Input Parameters:
++ *   htcb - TCB of the thread that just obtained the semaphore
++ *   sem  - A reference to the incremented semaphore
++ *
++ * Returned Value:
++ *   0 (OK) or -1 (ERROR) if unsuccessful
++ *
++ * Assumptions:
++ *   Interrupts are disabled.
++ *
++ ****************************************************************************/
++
++void nxsem_add_holder_tcb(FAR struct tcb_s *htcb, FAR sem_t *sem)
++{
++  FAR struct semholder_s *pholder;
++  uint8_t prioinherit = sem->flags & SEM_PRIO_MASK;
++
++  /* If priority inheritance is disabled for this thread or it is IDLE
++   * thread, then do not add the holder.
++   * If there are never holders of the semaphore, the priority
++   * inheritance is effectively disabled.
++   */
++
++  if (!is_idle_task(htcb) && prioinherit == SEM_PRIO_INHERIT)
++    {
++      /* Find or allocate a container for this new holder */
++
++      pholder = nxsem_findorallocateholder(sem, htcb);
++      if (pholder->counts < SEM_VALUE_MAX)
++        {
++          /* Increment the number of counts held by this holder */
++
++          pholder->counts++;
++        }
++    }
++}
++
++/****************************************************************************
++ * Name: nxsem_add_holder
++ *
++ * Description:
++ *   Called from nxsem_wait() when the calling thread obtains the semaphore
++ *
++ * Input Parameters:
++ *   sem - A reference to the incremented semaphore
++ *
++ * Returned Value:
++ *   0 (OK) or -1 (ERROR) if unsuccessful
++ *
++ * Assumptions:
++ *   Interrupts are disabled.
++ *
++ ****************************************************************************/
++
++void nxsem_add_holder(FAR sem_t *sem)
++{
++  nxsem_add_holder_tcb(this_task(), sem);
++}
++
++/****************************************************************************
++ * Name: void nxsem_boost_priority(sem_t *sem)
++ *
++ * Description:
++ *
++ *
++ * Input Parameters:
++ *   None
++ *
++ * Returned Value:
++ *   0 (OK) or -1 (ERROR) if unsuccessful
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++void nxsem_boost_priority(FAR sem_t *sem)
++{
++  FAR struct tcb_s *rtcb = this_task();
++
++  /* Boost the priority of every thread holding counts on this semaphore
++   * that are lower in priority than the new thread that is waiting for a
++   * count.
++   */
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  nxsem_foreachholder(sem, nxsem_boostholderprio, rtcb);
++#else
++  nxsem_boostholderprio(&sem->holder, sem, rtcb);
++#endif
++}
++
++/****************************************************************************
++ * Name: nxsem_release_holder
++ *
++ * Description:
++ *   Called from sem_post() after a thread releases one count on the
++ *   semaphore.
++ *
++ * Input Parameters:
++ *   sem - A reference to the semaphore being posted
++ *
++ * Returned Value:
++ *   None
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++void nxsem_release_holder(FAR sem_t *sem)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  uint8_t prioinherit = sem->flags & SEM_PRIO_MASK;
++
++  /* If priority inheritance is disabled for this thread or it is IDLE
++   * thread, then do not add the holder.
++   * If there are never holders of the semaphore, the priority
++   * inheritance is effectively disabled.
++   */
++
++  if (!is_idle_task(rtcb) && prioinherit == SEM_PRIO_INHERIT)
++    {
++      FAR struct semholder_s *pholder;
++
++      DEBUGASSERT(!up_interrupt_context());
++
++      /* Find the container for this holder */
++
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++      for (pholder = sem->hhead; pholder != NULL; pholder = pholder->flink)
++        {
++          DEBUGASSERT(pholder->counts > 0);
++
++          if (pholder->htcb == rtcb)
++            {
++              /* Decrement the counts on this holder -- the holder will be
++               * freed later in nxsem_restore_baseprio.
++               */
++
++              pholder->counts--;
++              return;
++            }
++        }
++#else
++      pholder = &sem->holder;
++      if (pholder->htcb)
++        {
++          DEBUGASSERT(pholder->htcb == rtcb);
++          nxsem_freeholder(sem, pholder);
++        }
++#endif
++    }
++}
++
++/****************************************************************************
++ * Name: nxsem_restore_baseprio
++ *
++ * Description:
++ *   This function is called after the current running task releases a
++ *   count on the semaphore or an interrupt handler posts a new count.  It
++ *   will check if we need to drop the priority of any threads holding a
++ *   count on the semaphore.  Their priority could have been boosted while
++ *   they held the count.
++ *
++ * Input Parameters:
++ *   stcb - The TCB of the task that was just started (if any).  If the
++ *     post action caused a count to be given to another thread, then stcb
++ *     is the TCB that received the count.  Note, just because stcb received
++ *     the count, it does not mean that it is higher priority than other
++ *     threads.
++ *   sem - A reference to the semaphore being posted.
++ *     - If the semaphore count is <0 then there are still threads waiting
++ *       for a count.  stcb should be non-null and will be higher priority
++ *       than all of the other threads still waiting.
++ *     - If it is ==0 then stcb refers to the thread that got the last count;
++ *       no other threads are waiting.
++ *     - If it is >0 then there should be no threads waiting for counts and
++ *       stcb should be null.
++ *
++ * Returned Value:
++ *   None
++ *
++ * Assumptions:
++ *   The scheduler is locked.
++ *
++ ****************************************************************************/
++
++void nxsem_restore_baseprio(FAR struct tcb_s *stcb, FAR sem_t *sem)
++{
++#if 0  /* DSA: sometimes crashes when Telnet calls external cmd (i.e. 'i2c') */
++  /* Check our assumptions */
++
++  DEBUGASSERT((sem->semcount > 0  && stcb == NULL) ||
++              (sem->semcount <= 0 && stcb != NULL));
++#endif
++
++  DEBUGASSERT(!up_interrupt_context());
++
++  /* Perform the following actions only if a new thread was given a count.
++   * The thread that received the count should be the highest priority
++   * of all threads waiting for a count from the semaphore.  So in that
++   * case, the priority of all holder threads should be dropped to the
++   * next highest pending priority.
++   */
++
++  if (stcb != NULL)
++    {
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++      /* The currently executed thread should be the lower priority
++       * thread that just posted the count and caused this action.
++       * However, we cannot drop the priority of the currently running
++       * thread -- because that will cause it to be suspended.
++       *
++       * So, do this in two passes.  First, reprioritizing all holders
++       * except for the running thread.
++       */
++
++      nxsem_foreachholder(sem, nxsem_restoreholderprio_others, stcb);
++
++      /* Now, find an reprioritize only the ready to run task */
++
++      nxsem_foreachholder(sem, nxsem_restoreholderprio_self, stcb);
++#else
++      /* New owner is already the highest priority since the wait queue
++       * is priority-based, no need to adjust its priority, only restore
++       * the older owner when posted the count.
++       */
++
++      nxsem_restore_priority(this_task());
++#endif
++    }
++  else
++    {
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++      /* Remove the holder from the list if it's counts is zero. */
++
++      nxsem_foreachholder(sem, nxsem_freecount0holder, NULL);
++
++      /* If there are no tasks waiting for available counts, then all holders
++       * should be at their base priority.
++       */
++#endif
++
++#ifdef CONFIG_DEBUG_ASSERTIONS
++      nxsem_foreachholder(sem, nxsem_verifyholder, NULL);
++#endif
++    }
++}
++
++/****************************************************************************
++ * Name: nxsem_canceled
++ *
++ * Description:
++ *   Called from nxsem_wait_irq() after a thread that was waiting for a
++ *   semaphore count was awakened because of a signal and the semaphore wait
++ *   has been canceled.  This function restores the correct thread priority
++ *   of each holder of the semaphore.
++ *
++ * Input Parameters:
++ *   sem - A reference to the semaphore no longer being waited for
++ *
++ * Returned Value:
++ *   None
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++void nxsem_canceled(FAR struct tcb_s *stcb, FAR sem_t *sem)
++{
++  /* Check our assumptions */
++
++  DEBUGASSERT(NXSEM_IS_MUTEX(sem) || atomic_read(NXSEM_COUNT(sem)) <= 0);
++  DEBUGASSERT(!NXSEM_IS_MUTEX(sem) ||
++              NXSEM_MACQUIRED(atomic_read(NXSEM_MHOLDER(sem))));
++
++  /* Adjust the priority of every holder as necessary */
++
++  nxsem_foreachholder(sem, nxsem_restoreholderprio, stcb);
++}
++
++/****************************************************************************
++ * Name: sem_enumholders
++ *
++ * Description:
++ *   Show information about threads currently waiting on this semaphore
++ *
++ * Input Parameters:
++ *   sem - A reference to the semaphore
++ *
++ * Returned Value:
++ *   None
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++#if defined(CONFIG_DEBUG_FEATURES) && defined(CONFIG_SEM_PHDEBUG)
++void sem_enumholders(FAR sem_t *sem)
++{
++#ifdef CONFIG_DEBUG_INFO
++  nxsem_foreachholder(sem, nxsem_dumpholder, NULL);
++#endif
++}
++#endif
++
++/****************************************************************************
++ * Name: nxsem_nfreeholders
++ *
++ * Description:
++ *   Return the number of available holder containers.  This is a good way
++ *   to find out which threads are not calling sem_destroy.
++ *
++ * Input Parameters:
++ *   sem - A reference to the semaphore
++ *
++ * Returned Value:
++ *   The number of available holder containers
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++#if defined(CONFIG_DEBUG_FEATURES) && defined(CONFIG_SEM_PHDEBUG)
++int nxsem_nfreeholders(void)
++{
++#if CONFIG_SEM_PREALLOCHOLDERS > 0
++  FAR struct semholder_s *pholder;
++  int n;
++
++  for (pholder = g_freeholders, n = 0; pholder; pholder = pholder->flink)
++    {
++      n++;
++    }
++
++  return n;
++#else
++  return 0;
++#endif
++}
++#endif
++
++/****************************************************************************
++ * Name: nxsem_release_all
++ *
++ * Description:
++ *   Release all semaphore holders for the task.
++ *
++ * Input Parameters:
++ *   htcb - TCB of the task
++ *
++ * Returned Value:
++ *   None
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++void nxsem_release_all(FAR struct tcb_s *htcb)
++{
++  FAR struct semholder_s *pholder;
++
++  while ((pholder = htcb->holdsem) != NULL)
++    {
++      FAR sem_t *sem = pholder->sem;
++
++      nxsem_freeholder(sem, pholder);
++
++      if (!NXSEM_IS_MUTEX(sem))
++        {
++          /* Increment the count on the semaphore, to releases the count
++           * that was taken by sem_wait() or sem_post().
++           */
++
++          atomic_fetch_add(NXSEM_COUNT(sem), 1);
++        }
++    }
++}
++
++#endif /* CONFIG_PRIORITY_INHERITANCE */
+diff --git a/sched/semaphore/sem_holder.c.rej b/sched/semaphore/sem_holder.c.rej
+new file mode 100644
+index 00000000..77afa978
+--- /dev/null
++++ b/sched/semaphore/sem_holder.c.rej
+@@ -0,0 +1,28 @@
++--- sched/semaphore/sem_holder.c
+++++ sched/semaphore/sem_holder.c
++@@ -446,12 +446,22 @@ static int nxsem_restoreholderprio(FAR struct semholder_s *pholder,
++   FAR struct tcb_s *htcb = pholder->htcb;
++   bool is_mutex = NXSEM_IS_MUTEX(sem);
++ 
++   /* Release the holder if all counts have been given up
++    * before reprioritizing causes a context switch.
++    *
++-   * Mutex is held only by one thread, so the holder is always freed.
+++   * For mutexes, the holder is freed only when counts go to zero.
+++   * This is important when nxsem_canceled() is called during a timeout:
+++   * it should restore priorities and decrement counts but NOT free the
+++   * mutex holder because the holder is still holding the mutex.
++    */
++ 
++-  if (pholder->counts <= 0 || NXSEM_IS_MUTEX(sem))
+++  if (is_mutex)
++     {
++-      nxsem_freeholder(sem, pholder);
+++      /* For mutexes, decrement counts and only free if counts go to zero.
+++       * This restores the state after nxsem_add_holder_tcb was called
+++       * when the waiter was added.
+++       */
+++      if (pholder->counts > 0)
+++        {
+++          pholder->counts--;
+++        }
+diff --git a/sched/semaphore/sem_waitirq.c b/sched/semaphore/sem_waitirq.c
+index 5f73031b..fa234298 100644
+--- a/sched/semaphore/sem_waitirq.c
++++ b/sched/semaphore/sem_waitirq.c
+@@ -96,6 +96,20 @@ void nxsem_wait_irq(FAR struct tcb_s *wtcb, int errcode)
+ 
+       dq_rem((FAR dq_entry_t *)wtcb, SEM_WAITLIST(sem));
+ 
++      /* For mutexes, update the holder field to clear the blocking bit
++       * if there are no more waiters. This is necessary because the
++       * blocking bit was set when the waiter was added, and it needs
++       * to be cleared when the waiter is removed (via timeout or cancel).
++       */
++
++      if (mutex)
++        {
++          uint32_t blocking_bit = dq_empty(SEM_WAITLIST(sem)) ? 0 : NXSEM_MBLOCKING_BIT;
++          uint32_t mholder = atomic_read(NXSEM_MHOLDER(sem));
++          atomic_set(NXSEM_MHOLDER(sem), (mholder & ~NXSEM_MBLOCKING_BIT) | blocking_bit);
++        }
++
++
+       /* This restores the value to what it was before the previous sem_wait.
+        * This caused the thread to be blocked in the first place.
+        *
+diff --git a/simple_test b/simple_test
+new file mode 100755
+index 0000000000000000000000000000000000000000..869ae9dc3b4c27de55653540059b11e09a6e0a54
+GIT binary patch
+literal 70792
+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
+MaQ_!OY8#CI5BBuT&;S4c
+
+literal 0
+HcmV?d00001
+
+diff --git a/simple_test.c b/simple_test.c
+new file mode 100644
+index 00000000..f3ffd5fd
+--- /dev/null
++++ b/simple_test.c
+@@ -0,0 +1,26 @@
++#include <stdio.h>
++#include <pthread.h>
++#include <errno.h>
++
++int main()
++{
++    pthread_mutex_t mutex;
++    pthread_mutex_init(&mutex, NULL);
++    
++    printf("Locking...\n");
++    pthread_mutex_lock(&mutex);
++    
++    printf("Unlocking...\n");
++    int ret = pthread_mutex_unlock(&mutex);
++    printf("Unlock returned: %d\n", ret);
++    
++    printf("Trying trylock...\n");
++    ret = pthread_mutex_trylock(&mutex);
++    printf("trylock returned: %d (%s)\n", ret, ret == 0 ? "OK" : strerror(ret));
++    
++    if (ret == 0)
++        pthread_mutex_unlock(&mutex);
++    
++    pthread_mutex_destroy(&mutex);
++    return 0;
++}
+diff --git a/test_mutex_timeout b/test_mutex_timeout
+new file mode 100755
+index 0000000000000000000000000000000000000000..3a6ee536da9e629681af7717d149d805d7726cfd
+GIT binary patch
+literal 71088
+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
+EKap4+rT_o{
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_mutex_timeout.c b/test_mutex_timeout.c
+new file mode 100644
+index 00000000..45073ea0
+--- /dev/null
++++ b/test_mutex_timeout.c
+@@ -0,0 +1,83 @@
++#include <stdio.h>
++#include <pthread.h>
++#include <unistd.h>
++#include <time.h>
++#include <errno.h>
++#include <assert.h>
++
++static pthread_mutex_t mutex;
++
++void *waiter_thread(void *arg)
++{
++    struct timespec ts;
++    int ret;
++
++    printf("Waiter: Starting\n");
++
++    /* Get current time + 1 second */
++    clock_gettime(CLOCK_REALTIME, &ts);
++    ts.tv_sec += 1;
++
++    /* Try to lock with timeout */
++    ret = pthread_mutex_timedlock(&mutex, &ts);
++    if (ret == ETIMEDOUT)
++    {
++        printf("Waiter: Timed out as expected\n");
++    }
++    else
++    {
++        printf("Waiter: Got lock (unexpected) ret=%d\n", ret);
++    }
++
++    return NULL;
++}
++
++int main()
++{
++    pthread_t thread;
++    int ret;
++
++    /* Initialize mutex */
++    pthread_mutex_init(&mutex, NULL);
++
++    /* Lock the mutex */
++    printf("Main: Locking mutex\n");
++    pthread_mutex_lock(&mutex);
++
++    /* Create waiter thread */
++    printf("Main: Creating waiter thread\n");
++    pthread_create(&thread, NULL, waiter_thread, NULL);
++
++    /* Wait for waiter to start and timeout */
++    sleep(2);
++
++    /* Now try to unlock - this should work but might fail due to the bug */
++    printf("Main: Unlocking mutex\n");
++    ret = pthread_mutex_unlock(&mutex);
++    if (ret != 0)
++    {
++        printf("Main: ERROR - unlock failed with %d\n", ret);
++        printf("Main: BUG REPRODUCED!\n");
++        return 1;
++    }
++    printf("Main: Unlock succeeded\n");
++
++    /* Try to lock again to verify mutex is usable */
++    printf("Main: Trying to lock again\n");
++    ret = pthread_mutex_trylock(&mutex);
++    if (ret != 0)
++    {
++        printf("Main: ERROR - trylock failed with %d\n", ret);
++        printf("Main: BUG REPRODUCED!\n");
++        return 1;
++    }
++    printf("Main: trylock succeeded\n");
++    pthread_mutex_unlock(&mutex);
++
++    /* Clean up */
++    pthread_join(thread, NULL);
++    pthread_mutex_destroy(&mutex);
++
++    printf("Main: Test PASSED\n");
++    return 0;
++}
+diff --git a/test_simple.c b/test_simple.c
+new file mode 100644
+index 00000000..832191a3
+--- /dev/null
++++ b/test_simple.c
+@@ -0,0 +1,30 @@
++#include <stdio.h>
++#include <pthread.h>
++#include <unistd.h>
++#include <time.h>
++#include <errno.h>
++
++static pthread_mutex_t mutex;
++
++int main()
++{
++    pthread_mutex_init(&mutex, NULL);
++    
++    printf("Locking mutex\n");
++    pthread_mutex_lock(&mutex);
++    
++    printf("Creating thread\n");
++    pthread_t thread;
++    pthread_create(&thread, NULL, NULL, NULL);
++    sleep(2);
++    
++    printf("Unlocking mutex\n");
++    int ret = pthread_mutex_unlock(&mutex);
++    printf("Unlock returned: %d\n", ret);
++    
++    printf("Trying trylock\n");
++    ret = pthread_mutex_trylock(&mutex);
++    printf("trylock returned: %d\n", ret);
++    
++    return 0;
++}
+diff --git a/waitirq_addition.txt b/waitirq_addition.txt
+new file mode 100644
+index 00000000..1e797690
+--- /dev/null
++++ b/waitirq_addition.txt
+@@ -0,0 +1,13 @@
++      /* For mutexes, update the holder field to clear the blocking bit
++       * if there are no more waiters. This is necessary because the
++       * blocking bit was set when the waiter was added, and it needs
++       * to be cleared when the waiter is removed (via timeout or cancel).
++       */
++
++      if (mutex)
++        {
++          uint32_t blocking_bit = dq_empty(SEM_WAITLIST(sem)) ? 0 : NXSEM_MBLOCKING_BIT;
++          uint32_t mholder = atomic_read(NXSEM_MHOLDER(sem));
++          atomic_set(NXSEM_MHOLDER(sem), (mholder & ~NXSEM_MBLOCKING_BIT) | blocking_bit);
++        }
++
+diff --git a/waitirq_fix.txt b/waitirq_fix.txt
+new file mode 100644
+index 00000000..97445e62
+--- /dev/null
++++ b/waitirq_fix.txt
+@@ -0,0 +1,14 @@
++
++      /* For mutexes, update the holder field to clear the blocking bit
++       * if there are no more waiters. This is necessary because the
++       * blocking bit was set when the waiter was added, and it needs
++       * to be cleared when the waiter is removed (via timeout or cancel).
++       */
++
++      if (mutex)
++        {
++          uint32_t blocking_bit = dq_empty(SEM_WAITLIST(sem)) ? 0 : NXSEM_MBLOCKING_BIT;
++          uint32_t mholder = atomic_read(NXSEM_MHOLDER(sem));
++          atomic_set(NXSEM_MHOLDER(sem), (mholder & ~NXSEM_MBLOCKING_BIT) | blocking_bit);
++        }
++

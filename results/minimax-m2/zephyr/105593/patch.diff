@@ -1,0 +1,108 @@
+diff --git a/include/zephyr/kvss/zms.h b/include/zephyr/kvss/zms.h
+index e2544b63c..5f20eeecc 100644
+--- a/include/zephyr/kvss/zms.h
++++ b/include/zephyr/kvss/zms.h
+@@ -290,6 +290,31 @@ ssize_t zms_active_sector_free_space(struct zms_fs *fs);
+  */
+ int zms_sector_use_next(struct zms_fs *fs);
+ 
++/**
++ * @brief Get the maximum number of cycles across all sectors.
++ *
++ * @param fs Pointer to the file system.
++ * @param cycles Pointer to store the maximum cycle count.
++ *
++ * @retval 0 on success.
++ * @retval -EACCES if ZMS is not initialized.
++ * @retval -EINVAL if `fs` or `cycles` is NULL.
++ */
++int zms_get_num_cycles(struct zms_fs *fs, uint32_t *cycles);
++
++/**
++ * @brief Get the number of cycles for a specific sector.
++ *
++ * @param fs Pointer to the file system.
++ * @param sector Sector index (0-based).
++ * @param cycles Pointer to store the sector's cycle count.
++ *
++ * @retval 0 on success.
++ * @retval -EACCES if ZMS is not initialized.
++ * @retval -EINVAL if `fs` or `cycles` is NULL, or sector is out of range.
++ */
++int zms_get_sector_num_cycles(struct zms_fs *fs, uint32_t sector, uint32_t *cycles);
++
+ /**
+  * @}
+  */
+diff --git a/subsys/kvss/zms/zms.c b/subsys/kvss/zms/zms.c
+index 0a14f5880..b84a2063d 100644
+--- a/subsys/kvss/zms/zms.c
++++ b/subsys/kvss/zms/zms.c
+@@ -2030,3 +2030,67 @@ end:
+ 	k_mutex_unlock(&fs->zms_lock);
+ 	return ret;
+ }
++
++/**
++ * @brief Get the maximum number of cycles across all sectors
++ */
++int zms_get_num_cycles(struct zms_fs *fs, uint32_t *cycles)
++{
++	int rc;
++	
++	/* Validate inputs */
++	if (!fs || !cycles) {
++		return -EINVAL;
++	}
++
++	if (!fs->ready) {
++		return -EACCES;
++	}
++
++	/* Find maximum 8-bit cycle count across all sectors */
++	uint8_t max_8bit_cycle = 0;
++	for (uint32_t i = 0; i < fs->sector_count; i++) {
++		uint8_t sector_cycle;
++		rc = zms_get_sector_cycle(fs, ((uint64_t)i << ADDR_SECT_SHIFT), &sector_cycle);
++		if (rc == 0 && sector_cycle > max_8bit_cycle) {
++			max_8bit_cycle = sector_cycle;
++		}
++	}
++
++	/* Report as 32-bit value */
++	*cycles = max_8bit_cycle;
++	return 0;
++}
++
++/**
++ * @brief Get the number of cycles for a specific sector
++ */
++int zms_get_sector_num_cycles(struct zms_fs *fs, uint32_t sector, uint32_t *cycles)
++{
++	int rc;
++	
++	/* Validate inputs */
++	if (!fs || !cycles) {
++		return -EINVAL;
++	}
++
++	if (!fs->ready) {
++		return -EACCES;
++	}
++
++	/* Validate sector index */
++	if (sector >= fs->sector_count) {
++		return -EINVAL;
++	}
++
++	/* Get 8-bit cycle count for the sector */
++	uint8_t sector_cycle;
++	rc = zms_get_sector_cycle(fs, ((uint64_t)sector << ADDR_SECT_SHIFT), &sector_cycle);
++	if (rc < 0) {
++		return rc;
++	}
++
++	/* Report as 32-bit value */
++	*cycles = sector_cycle;
++	return 0;
++}

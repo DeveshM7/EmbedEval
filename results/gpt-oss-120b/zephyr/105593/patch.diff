@@ -1,0 +1,183 @@
+diff --git a/include/zephyr/kvss/zms.h b/include/zephyr/kvss/zms.h
+index e2544b63c..effc8e8d4 100644
+--- a/include/zephyr/kvss/zms.h
++++ b/include/zephyr/kvss/zms.h
+@@ -298,4 +298,30 @@ int zms_sector_use_next(struct zms_fs *fs);
+ }
+ #endif
+ 
++/**
++ * @brief Get the maximum recycle count across all sectors.
++ *
++ * Returns the highest recycle (cycle) counter value observed among all sectors.
++ * The counter is stored as an 8‑bit value in each sector's empty ATE and wraps at
++ * 256; this function returns the value as a 32‑bit integer. The count is
++ * preserved across @ref zms_clear() and re‑mounting because the underlying
++ * 8‑bit counter continues incrementing rather than being reset.
++ *
++ * @param fs Pointer to the file system.
++ * @param cycles Output pointer that will receive the maximum cycle count.
++ * @return 0 on success, -EINVAL for NULL pointers, -EACCES if the file system
++ *         is not mounted.
++ */
++int zms_get_num_cycles(struct zms_fs *fs, uint32_t *cycles);
++
++/**
++ * @brief Get the recycle count for a specific sector.
++ *
++ * @param fs Pointer to the file system.
++ * @param sector 0‑based sector index (must be less than fs->sector_count).
++ * @param cycles Output pointer that will receive the sector's cycle count.
++ * @return 0 on success, -EINVAL for NULL pointers or out‑of‑range sector,
++ *         -EACCES if the file system is not mounted.
++ */
++int zms_get_sector_num_cycles(struct zms_fs *fs, uint32_t sector, uint32_t *cycles);
+ #endif /* ZEPHYR_INCLUDE_KVSS_ZMS_H_ */
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 000000000..e75fd8c1c
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,42 @@
++*** Begin Patch
++*** Update File: include/zephyr/kvss/zms.h
++@@
++ ssize_t zms_calc_free_space(struct zms_fs *fs);
++@@
++ ssize_t zms_active_sector_free_space(struct zms_fs *fs);
++ 
++ int zms_sector_use_next(struct zms_fs *fs);
+++
+++/**
+++ * @brief Get the maximum recycle count across all sectors.
+++ *
+++ * The recycle count (also called a "cycle") is incremented each time a
+++ * sector is closed and reused. The value is stored in the sector's empty
+++ * ATE as an 8‑bit counter that wraps at 256. This API returns the maximum
+++ * observed cycle count as a 32‑bit unsigned integer. The count is preserved
+++ * across @ref zms_clear() and re‑mounting because the underlying 8‑bit value is
+++ * never reset – it is only incremented when a sector is re‑used.
+++ *
+++ * @param fs Pointer to the file system.
+++ * @param cycles Output pointer receiving the maximum cycle count.
+++ *
+++ * @retval 0 on success.
+++ * @retval -EINVAL if @p fs or @p cycles is NULL.
+++ * @retval -EACCES if the file system is not mounted.
+++ */
+++int zms_get_num_cycles(struct zms_fs *fs, uint32_t *cycles);
+++
+++/**
+++ * @brief Get the recycle count for a specific sector.
+++ *
+++ * @param fs Pointer to the file system.
+++ * @param sector 0‑based index of the sector (< fs->sector_count).
+++ * @param cycles Output pointer receiving the cycle count for the sector.
+++ *
+++ * @retval 0 on success.
+++ * @retval -EINVAL if @p fs or @p cycles is NULL, or if @p sector is out of
+++ *                 range.
+++ * @retval -EACCES if the file system is not mounted.
+++ */
+++int zms_get_sector_num_cycles(struct zms_fs *fs, uint32_t sector, uint32_t *cycles);
++*** End Patch
+diff --git a/subsys/kvss/zms/zms.c b/subsys/kvss/zms/zms.c
+index 0a14f5880..4bcccfaeb 100644
+--- a/subsys/kvss/zms/zms.c
++++ b/subsys/kvss/zms/zms.c
+@@ -2030,3 +2030,63 @@ end:
+ 	k_mutex_unlock(&fs->zms_lock);
+ 	return ret;
+ }
++/**
++ * @brief Get the maximum recycle count across all sectors.
++ */
++int zms_get_num_cycles(struct zms_fs *fs, uint32_t *cycles)
++{
++    if (!fs || !cycles) {
++        LOG_ERR("Invalid arguments");
++        return -EINVAL;
++    }
++    if (!fs->ready) {
++        LOG_ERR("ZMS not initialized");
++        return -EACCES;
++    }
++
++    uint32_t max = 0;
++    for (uint32_t i = 0; i < fs->sector_count; i++) {
++        uint64_t addr = (uint64_t)i << ADDR_SECT_SHIFT;
++        uint8_t cnt;
++        int rc = zms_get_sector_cycle(fs, addr, &cnt);
++        if (rc == -ENOENT) {
++            cnt = 0;
++        } else if (rc) {
++            return rc;
++        }
++        if ((uint32_t)cnt > max) {
++            max = cnt;
++        }
++    }
++    *cycles = max;
++    return 0;
++}
++
++/**
++ * @brief Get the recycle count for a specific sector.
++ */
++int zms_get_sector_num_cycles(struct zms_fs *fs, uint32_t sector, uint32_t *cycles)
++{
++    if (!fs || !cycles) {
++        LOG_ERR("Invalid arguments");
++        return -EINVAL;
++    }
++    if (!fs->ready) {
++        LOG_ERR("ZMS not initialized");
++        return -EACCES;
++    }
++    if (sector >= fs->sector_count) {
++        LOG_ERR("Sector out of range");
++        return -EINVAL;
++    }
++    uint64_t addr = (uint64_t)sector << ADDR_SECT_SHIFT;
++    uint8_t cnt;
++    int rc = zms_get_sector_cycle(fs, addr, &cnt);
++    if (rc == -ENOENT) {
++        cnt = 0;
++    } else if (rc) {
++        return rc;
++    }
++    *cycles = (uint32_t)cnt;
++    return 0;
++}
+diff --git a/tmp/prototypes.txt b/tmp/prototypes.txt
+new file mode 100644
+index 000000000..d4068c924
+--- /dev/null
++++ b/tmp/prototypes.txt
+@@ -0,0 +1,26 @@
++/**
++ * @brief Get the maximum recycle count across all sectors.
++ *
++ * Returns the highest recycle (cycle) counter value observed among all sectors.
++ * The counter is stored as an 8‑bit value in each sector's empty ATE and wraps at
++ * 256; this function returns the value as a 32‑bit integer. The count is
++ * preserved across @ref zms_clear() and re‑mounting because the underlying
++ * 8‑bit counter continues incrementing rather than being reset.
++ *
++ * @param fs Pointer to the file system.
++ * @param cycles Output pointer that will receive the maximum cycle count.
++ * @return 0 on success, -EINVAL for NULL pointers, -EACCES if the file system
++ *         is not mounted.
++ */
++int zms_get_num_cycles(struct zms_fs *fs, uint32_t *cycles);
++
++/**
++ * @brief Get the recycle count for a specific sector.
++ *
++ * @param fs Pointer to the file system.
++ * @param sector 0‑based sector index (must be less than fs->sector_count).
++ * @param cycles Output pointer that will receive the sector's cycle count.
++ * @return 0 on success, -EINVAL for NULL pointers or out‑of‑range sector,
++ *         -EACCES if the file system is not mounted.
++ */
++int zms_get_sector_num_cycles(struct zms_fs *fs, uint32_t sector, uint32_t *cycles);

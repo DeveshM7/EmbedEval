@@ -1,0 +1,230 @@
+diff --git a/include/zephyr/kvss/zms.h b/include/zephyr/kvss/zms.h
+index e2544b63c..6e5668126 100644
+--- a/include/zephyr/kvss/zms.h
++++ b/include/zephyr/kvss/zms.h
+@@ -64,6 +64,8 @@ struct zms_fs {
+ 	uint32_t mount_flags;
+ 	/** Current cycle counter of the active sector (pointed to by `ate_wra`) */
+ 	uint8_t sector_cycle;
++	/** Cycle wrap count (high bits for 32-bit cycle count) */
++	uint32_t sector_cycle_wraps;
+ 	/** Flag indicating if the file system is initialized */
+ 	bool ready;
+ 	/** Mutex used to lock flash writes */
+@@ -290,6 +292,31 @@ ssize_t zms_active_sector_free_space(struct zms_fs *fs);
+  */
+ int zms_sector_use_next(struct zms_fs *fs);
+ 
++/**
++ * @brief Get the maximum number of cycles across all sectors.
++ *
++ * @param fs Pointer to the file system.
++ * @param cycles Pointer to store the maximum cycle count.
++ *
++ * @retval 0 on success.
++ * @retval -EINVAL if `fs` or `cycles` is NULL.
++ * @retval -EACCES if ZMS is not initialized.
++ */
++int zms_get_num_cycles(struct zms_fs *fs, uint32_t *cycles);
++
++/**
++ * @brief Get the number of cycles for a specific sector.
++ *
++ * @param fs Pointer to the file system.
++ * @param sector Sector index (0-based).
++ * @param cycles Pointer to store the cycle count.
++ *
++ * @retval 0 on success.
++ * @retval -EINVAL if `fs` or `cycles` is NULL, or if sector is out of range.
++ * @retval -EACCES if ZMS is not initialized.
++ */
++int zms_get_sector_num_cycles(struct zms_fs *fs, uint32_t sector, uint32_t *cycles);
++
+ /**
+  * @}
+  */
+diff --git a/subsys/kvss/zms/zms.c b/subsys/kvss/zms/zms.c
+index 0a14f5880..aee1cf30e 100644
+--- a/subsys/kvss/zms/zms.c
++++ b/subsys/kvss/zms/zms.c
+@@ -852,20 +852,39 @@ static int zms_add_empty_ate(struct zms_fs *fs, uint64_t addr)
+ 			     FIELD_PREP(ZMS_MAGIC_NUMBER_MASK, ZMS_MAGIC_NUMBER) |
+ 			     FIELD_PREP(ZMS_ATE_FORMAT_MASK, ZMS_DEFAULT_ATE_FORMAT);
+ 
+-	rc = zms_get_sector_cycle(fs, addr, &cycle_cnt);
+-	if (rc == -ENOENT) {
+-		/* sector never used */
+-		cycle_cnt = 0;
+-	} else if (rc) {
++	/* Read current cycle count from sector header */
++	struct zms_ate sector_empty_ate;
++	uint64_t empty_addr = zms_empty_ate_addr(fs, addr);
++
++	rc = zms_flash_ate_rd(fs, empty_addr, &sector_empty_ate);
++	if (rc < 0) {
+ 		/* bad flash read */
+ 		return rc;
+ 	}
+ 
++	if (!zms_empty_ate_valid(fs, &sector_empty_ate)) {
++		/* sector never used */
++		cycle_cnt = 0;
++	} else {
++		cycle_cnt = sector_empty_ate.cycle_cnt;
++	}
++
++	/* Detect wraparound: if current cycle is 255 and we're about to increment */
++	uint8_t old_cycle_cnt = cycle_cnt;
++	uint32_t wraps = ZMS_GET_CYCLE_WRAPS(sector_empty_ate.metadata);
++
+ 	/* Increase cycle counter */
+ 	rc = zms_verify_and_increment_cycle_cnt(fs, addr, &cycle_cnt);
+ 	if (rc < 0) {
+ 		return rc;
+ 	}
++
++	/* Check for wraparound (old was 255, new is 0) */
++	if (old_cycle_cnt == 255 && cycle_cnt == 0) {
++		/* Wrap detected - increment wrap count */
++		empty_ate.metadata |= ZMS_CYCLE_WRAPS_SET(wraps + 1);
++	}
++
+ 	empty_ate.cycle_cnt = cycle_cnt;
+ 	zms_ate_crc8_update(&empty_ate);
+ 
+@@ -2030,3 +2049,120 @@ end:
+ 	k_mutex_unlock(&fs->zms_lock);
+ 	return ret;
+ }
++
++int zms_get_num_cycles(struct zms_fs *fs, uint32_t *cycles)
++{
++	int rc;
++	struct zms_ate empty_ate;
++	struct zms_ate close_ate;
++	uint64_t addr;
++	uint32_t max_cycles = 0;
++	uint32_t sector_cycles;
++
++	if (!fs || !cycles) {
++		LOG_ERR("Invalid fs or cycles pointer");
++		return -EINVAL;
++	}
++
++	if (!fs->ready) {
++		LOG_ERR("ZMS not initialized");
++		return -EACCES;
++	}
++
++	k_mutex_lock(&fs->zms_lock, K_FOREVER);
++
++	/* Scan all sectors to find the maximum cycle count */
++	for (uint32_t i = 0; i < fs->sector_count; i++) {
++		addr = ((uint64_t)i << ADDR_SECT_SHIFT);
++		addr = zms_close_ate_addr(fs, addr);
++
++		rc = zms_get_sector_header(fs, addr, &empty_ate, &close_ate);
++		if (rc != 0) {
++			continue;
++		}
++
++		if (!zms_sector_closed(fs, &empty_ate, &close_ate)) {
++			/* Sector not closed, skip */
++			continue;
++		}
++
++		/* Calculate full 32-bit cycle count:
++		 * - lower 8 bits from cycle_cnt
++		 * - upper bits from metadata (bits 20-31)
++		 */
++		sector_cycles = close_ate.cycle_cnt |
++				((uint32_t)ZMS_GET_CYCLE_WRAPS(empty_ate.metadata) << 8);
++
++		if (sector_cycles > max_cycles) {
++			max_cycles = sector_cycles;
++		}
++	}
++
++	/* Also check the current active sector */
++	if (fs->ready) {
++		/* Read the current sector's header to get the wrap count */
++		struct zms_ate current_empty_ate;
++		uint64_t current_addr = zms_empty_ate_addr(fs, fs->ate_wra);
++		
++		rc = zms_flash_ate_rd(fs, current_addr, &current_empty_ate);
++		if (rc == 0 && zms_empty_ate_valid(fs, &current_empty_ate)) {
++			sector_cycles = fs->sector_cycle |
++					((uint32_t)ZMS_GET_CYCLE_WRAPS(current_empty_ate.metadata) << 8);
++			if (sector_cycles > max_cycles) {
++				max_cycles = sector_cycles;
++			}
++		}
++	}
++
++	*cycles = max_cycles;
++
++	k_mutex_unlock(&fs->zms_lock);
++	return 0;
++}
++
++int zms_get_sector_num_cycles(struct zms_fs *fs, uint32_t sector, uint32_t *cycles)
++{
++	int rc;
++	struct zms_ate empty_ate;
++	struct zms_ate close_ate;
++	uint64_t addr;
++
++	if (!fs || !cycles) {
++		LOG_ERR("Invalid fs or cycles pointer");
++		return -EINVAL;
++	}
++
++	if (!fs->ready) {
++		LOG_ERR("ZMS not initialized");
++		return -EACCES;
++	}
++
++	if (sector >= fs->sector_count) {
++		LOG_ERR("Sector index out of range: %u (max: %u)", sector, fs->sector_count - 1);
++		return -EINVAL;
++	}
++
++	k_mutex_lock(&fs->zms_lock, K_FOREVER);
++
++	addr = ((uint64_t)sector << ADDR_SECT_SHIFT);
++	addr = zms_close_ate_addr(fs, addr);
++
++	rc = zms_get_sector_header(fs, addr, &empty_ate, &close_ate);
++	if (rc != 0) {
++		k_mutex_unlock(&fs->zms_lock);
++		return rc;
++	}
++
++	if (!zms_sector_closed(fs, &empty_ate, &close_ate)) {
++		/* Sector not closed yet, use the empty_ate cycle count */
++		*cycles = empty_ate.cycle_cnt |
++			  ((uint32_t)ZMS_GET_CYCLE_WRAPS(empty_ate.metadata) << 8);
++	} else {
++		/* Sector is closed, use the close_ate cycle count */
++		*cycles = close_ate.cycle_cnt |
++			  ((uint32_t)ZMS_GET_CYCLE_WRAPS(empty_ate.metadata) << 8);
++	}
++
++	k_mutex_unlock(&fs->zms_lock);
++	return 0;
++}
+diff --git a/subsys/kvss/zms/zms_priv.h b/subsys/kvss/zms/zms_priv.h
+index 44cfb2f3d..dd2e1be07 100644
+--- a/subsys/kvss/zms/zms_priv.h
++++ b/subsys/kvss/zms/zms_priv.h
+@@ -38,6 +38,10 @@
+ #define ZMS_ATE_FORMAT_MASK     GENMASK(19, 16)
+ #define ZMS_GET_ATE_FORMAT(x)   FIELD_GET(ZMS_ATE_FORMAT_MASK, x)
+ #define ZMS_MIN_ATE_NUM         5
++/* Bits 20-31 are unused in metadata, can be used for cycle wrap count */
++#define ZMS_CYCLE_WRAPS_MASK    GENMASK(31, 20)
++#define ZMS_GET_CYCLE_WRAPS(x)  FIELD_GET(ZMS_CYCLE_WRAPS_MASK, x)
++#define ZMS_CYCLE_WRAPS_SET(x)  FIELD_PREP(ZMS_CYCLE_WRAPS_MASK, x)
+ 
+ #define ZMS_INVALID_SECTOR_NUM -1
+ 

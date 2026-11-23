@@ -1,0 +1,531 @@
+diff --git a/libs/libc/unistd/lib_getopt.c b/libs/libc/unistd/lib_getopt.c
+index 7b1329fc..f9fca93a 100644
+--- a/libs/libc/unistd/lib_getopt.c
++++ b/libs/libc/unistd/lib_getopt.c
+@@ -4,7 +4,7 @@
+  * Licensed to the Apache Software Foundation (ASF) under one or more
+  * contributor license agreements.  See the NOTICE file distributed with
+  * this work for additional information regarding copyright ownership.  The
+- * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * ASF licenses this file under the Apache License, Version 2.0 (the
+  * "License"); you may not use this file except in compliance with the
+  * License.  You may obtain a copy of the License at
+  *
+@@ -16,11 +16,11 @@
+  * License for the specific language governing permissions and limitations
+  * under the License.
+  *
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ /****************************************************************************
+  * Included Files
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ #include <nuttx/config.h>
+ 
+@@ -32,16 +32,222 @@
+ 
+ /****************************************************************************
+  * Pre-processor Definitions
+- ****************************************************************************/
++ ****************************************************************/
+ 
+ #undef optarg
+ #undef opterr
+ #undef optind
+ #undef optopt
+ 
++/****************************************************************************
++ * Private Functions
++ *****************************************************************************/
++
++/****************************************************************************
++ * Name: find_long_option
++ *
++ * Description:
++ *   Find a long option in the option table that matches the given string.
++ *
++ * Input Parameters:
++ *   name - The name to match
++ *   longopts - The option table
++ *   len - The length of the name to match
++ *   exact - If true, only exact matches are considered
++ *
++ * Returned Value:
++ *   The index of the matching option in the longopts table, or -1 if not found
++ *
++ *****************************************************************************/
++
++static int find_long_option(FAR const char *name,
++                            FAR const struct option *longopts,
++                            int len,
++                            bool exact)
++{
++  int i;
++  int nmatch = 0;
++  int match_idx = -1;
++
++  if (!name || !longopts)
++    {
++      return -1;
++    }
++
++  for (i = 0; longopts[i].name; i++)
++    {
++      if (strncmp(longopts[i].name, name, len) == 0)
++        {
++          if (strlen(longopts[i].name) == len)
++            {
++              /* Exact match */
++              return i;
++            }
++          else if (!exact)
++            {
++              /* Prefix match - keep track but keep searching for exact match */
++              nmatch++;
++              match_idx = i;
++            }
++        }
++    }
++
++  /* Return prefix match if no exact match found */
++  return (nmatch == 1) ? match_idx : -1;
++}
++
++/****************************************************************************
++ * Name: getopt_parse_long
++ *
++ * Description:
++ *   Parse a long option from argv.
++ *
++ * Input Parameters:
++ *   argc, argv - Standard argument count and array
++ *   longopts - Array of struct option describing long options
++ *   longind - If not NULL, the index of the long option in longopts is stored here
++ *
++ * Returned Value:
++ *   Returns 0 if a long option was found, -1 if not a long option,
++ *   '?' for unrecognized option.
++ *
++ *****************************************************************************/
++
++static int getopt_parse_long(int argc, FAR char *const argv[],
++                             FAR const struct option *longopts,
++                             FAR int *longind,
++                             FAR const char *optstring)
++{
++  FAR struct getopt_s *go = getoptvars();
++  FAR const char *optname;
++  FAR const char *eq;
++  int len;
++  int idx;
++
++  if (!go || !argv || !argv[go->go_optind])
++    {
++      return -1;
++    }
++
++  /* Check if current argument is a long option */
++  if (go->go_optptr[0] != '-' || go->go_optptr[1] == '\0')
++    {
++      /* Not a valid long option */
++      return -1;
++    }
++
++  /* Skip the initial "-" */
++  if (go->go_optptr[1] == '-')
++    {
++      /* Double dash "--" */
++      optname = go->go_optptr + 2;
++      if (*optname == '\0')
++        {
++          /* Empty "--", skip it */
++          go->go_optind++;
++          go->go_optptr = NULL;
++          return -1;
++        }
++    }
++  else
++    {
++      /* Single dash "-" for long options (getopt_long_only only) */
++      optname = go->go_optptr + 1;
++      if (*optname == '\0')
++        {
++          /* Empty "-", skip it */
++          go->go_optind++;
++          go->go_optptr = NULL;
++          return -1;
++        }
++    }
++
++  /* Find the equals sign for --option=value */
++  eq = strchr(optname, '=');
++  len = eq ? eq - optname : strlen(optname);
++
++  /* Try to match long option */
++  idx = find_long_option(optname, longopts, len, false);
++
++  if (idx < 0)
++    {
++      /* No match found */
++      go->go_optopt = 0;
++      go->go_optind++;
++      go->go_optptr = NULL;
++      return '?';
++    }
++
++  /* Store the index if requested */
++  if (longind)
++    {
++      *longind = idx;
++    }
++
++  /* Handle argument based on has_arg */
++  if (longopts[idx].has_arg == required_argument)
++    {
++      /* Argument required */
++      if (eq)
++        {
++          /* Argument is after "=" */
++          go->go_optarg = (FAR char *)(eq + 1);
++        }
++      else
++        {
++          /* Argument is in next argv element */
++          go->go_optarg = argv[go->go_optind + 1];
++          if (go->go_optarg && *go->go_optarg != '-')
++            {
++              go->go_optind++;
++            }
++          else
++            {
++              /* Missing argument */
++              go->go_optarg = NULL;
++              go->go_optopt = 0;
++              go->go_optind++;
++              return optstring && *optstring == ':' ? ':' : '?';
++            }
++        }
++    }
++  else if (longopts[idx].has_arg == optional_argument)
++    {
++    /* Optional argument - check if there's one */
++    if (eq)
++      {
++        go->go_optarg = (FAR char *)(eq + 1);
++      }
++    else
++      {
++        /* Check next argv */
++        go->go_optarg = argv[go->go_optind + 1];
++        if (go->go_optarg && *go->go_optarg != '-')
++          {
++            go->go_optind++;
++          }
++        else
++          {
++            go->go_optarg = NULL;
++          }
++      }
++  }
++  else
++    {
++      /* No argument */
++      go->go_optarg = NULL;
++    }
++
++  go->go_optind++;
++  go->go_optptr = NULL;
++
++  /* Return 0 for long option */
++  return 0;
++}
++
+ /****************************************************************************
+  * Public Functions
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ /****************************************************************************
+  * Name: getopt
+@@ -69,6 +275,9 @@
+  *   option so getopt() places a pointer to the following text in the same
+  *   argv-element, or the text of the following argv-element, in optarg.
+  *
++ *   If a character is followed by two colons, the argument is optional.
++ *   This is a GNU extension.
++ *
+  *   NOTES:
+  *   1. opterr is not supported and this implementation of getopt() never
+  *      printfs error messages.
+@@ -88,7 +297,7 @@
+  *   character in optstring: if it is ':', then ':' is returned; otherwise
+  *   '?' is returned.
+  *
+- ****************************************************************************/
++ *****************************************************************************/
+ 
+ int getopt(int argc, FAR char * const argv[], FAR const char *optstring)
+ {
+@@ -210,51 +419,82 @@ int getopt(int argc, FAR char * const argv[], FAR const char *optstring)
+           return '?';
+         }
+ 
+-      /* Yes, the character is in the list of valid options.  Does it have an
+-       * required argument?
+-       */
+-
+-      if (optchar[1] != ':')
+-        {
+-          /* No, no arguments. Just return the character that we found */
+-
+-          go->go_optptr++;
+-          return *optchar;
+-        }
+-
+-      /* Yes, it has a required argument.  Is the required argument
+-       * immediately after the command in this same argument?
++      /* Yes, the character is in the list of valid options.  Check if it has
++       * an optional or required argument.
++       * One colon (:) = required argument
++       * Two colons (::) = optional argument (GNU extension)
+        */
+ 
+-      if (go->go_optptr[1] != '\0')
++      if (optchar[1] == ':')
+         {
+-          /* Yes, return a pointer into the current argument */
+-
+-          go->go_optarg = &go->go_optptr[1];
+-          go->go_optind++;
+-          go->go_optptr = NULL;
+-          return *optchar;
+-        }
+-
+-      /* No.. is the optional argument the next argument in argv[] ? */
+-
+-      if (argv[go->go_optind + 1] && *argv[go->go_optind + 1] != '-')
+-        {
+-          /* Yes.. return that */
+-
+-          go->go_optarg = argv[go->go_optind + 1];
+-          go->go_optind += 2;
+-          go->go_optptr = NULL;
+-          return *optchar;
++          /* It has an argument (required or optional) */
++          
++          if (optchar[2] == ':')
++            {
++              /* Optional argument - check if there's an argument in the same argv element */
++              if (go->go_optptr[1] != '\0')
++                {
++                  /* Yes, argument is in the same argv element */
++                  go->go_optarg = &go->go_optptr[1];
++                  go->go_optind++;
++                  go->go_optptr = NULL;
++                  return *optchar;
++                }
++              
++              /* No argument in the same argv element - check if next argv is an argument */
++              if (argv[go->go_optind + 1] && *argv[go->go_optind + 1] != '-')
++                {
++                  /* Next argv is an argument */
++                  go->go_optarg = argv[go->go_optind + 1];
++                  go->go_optind += 2;
++                  go->go_optptr = NULL;
++                  return *optchar;
++                }
++              
++              /* No argument provided - accept the option without argument */
++              go->go_optarg = NULL;
++              go->go_optptr++;
++              return *optchar;
++            }
++          else
++            {
++              /* Required argument */
++              if (go->go_optptr[1] != '\0')
++                {
++                  /* Yes, return a pointer into the current argument */
++
++                  go->go_optarg = &go->go_optptr[1];
++                  go->go_optind++;
++                  go->go_optptr = NULL;
++                  return *optchar;
++                }
++
++              /* No.. is the optional argument the next argument in argv[] ? */
++
++              if (argv[go->go_optind + 1] && *argv[go->go_optind + 1] != '-')
++                {
++                  /* Yes.. return that */
++
++                  go->go_optarg = argv[go->go_optind + 1];
++                  go->go_optind += 2;
++                  go->go_optptr = NULL;
++                  return *optchar;
++                }
++
++              /* No argument was supplied */
++
++              go->go_optptr = NULL;
++              go->go_optarg = NULL;
++              go->go_optopt = *optchar;
++              go->go_optind++;
++              return noarg_ret;
++            }
+         }
+ 
+-      /* No argument was supplied */
++      /* No, no arguments. Just return the character that we found */
+ 
+-      go->go_optptr = NULL;
+-      go->go_optarg = NULL;
+-      go->go_optopt = *optchar;
+-      go->go_optind++;
+-      return noarg_ret;
++      go->go_optptr++;
++      return *optchar;
+     }
+ 
+   /* Restore the initial, uninitialized state */
+@@ -263,10 +503,137 @@ int getopt(int argc, FAR char * const argv[], FAR const char *optstring)
+   return ERROR;
+ }
+ 
++/****************************************************************************
++ * Name: getopt_long
++ *
++ * Description:
++ *   getopt_long() works like getopt() except that it also accepts long
++ *   options prefixed with "--". If the option takes a value, that value
++ *   can be specified as either:
++ *     --option value
++ *     --option=value
++ *   Long option names may be abbreviated if the abbreviation is unique.
++ *
++ * Input Parameters:
++ *   argc, argv - Standard argument count and array
++ *   shortopts - Short options string
++ *   longopts - Array of struct option describing long options
++ *   longind - If not NULL, the index of the long option in longopts is stored here
++ *
++ * Returned Value:
++ *   Returns the option character for short options, 0 for long options,
++ *   -1 if no more options, '?' for unrecognized option, ':' for missing
++ *   argument (if optstring starts with ':').
++ *
++ *****************************************************************************/
++
+ int getopt_long(int argc, FAR char *const argv[],
+                 FAR const char *shortopts,
+                 FAR const struct option *longopts,
+                 FAR int *longind)
+ {
++  FAR struct getopt_s *go = getoptvars();
++  int ret;
++
++  if (go == NULL)
++    {
++      return '?';
++    }
++
++  /* If longopts is NULL, just call getopt */
++  if (!longopts)
++    {
++      return getopt(argc, argv, shortopts);
++    }
++
++  /* Check if we're at the start of a new argument */
++  if (!go->go_optptr || !*go->go_optptr)
++    {
++      /* Check if current argument is a long option */
++      if (argv[go->go_optind] && 
++          strncmp(argv[go->go_optind], "--", 2) == 0 &&
++          argv[go->go_optind][2] != '\0')
++        {
++          /* It's a long option */
++          go->go_optptr = argv[go->go_optind] + 2;
++          ret = getopt_parse_long(argc, argv, longopts, longind, shortopts);
++          return ret;
++        }
++    }
++
++  /* Not a long option or not at start of argument, let getopt handle it */
++  return getopt(argc, argv, shortopts);
++}
++
++/****************************************************************************
++ * Name: getopt_long_only
++ *
++ * Description:
++ *   getopt_long_only() is like getopt_long(), except that long options
++ *   can also be prefixed with a single dash ("-"). This is useful for
++ *   programs that primarily use short options but want to support some
++ *   long options for backward compatibility.
++ *
++ *   If an option starting with "-" doesn't match a long option, it is
++ *   treated as a short option.
++ *
++ * Input Parameters:
++ *   argc, argv - Standard argument count and array
++ *   shortopts - Short options string
++ *   longopts - Array of struct option describing long options
++ *   longind - If not NULL, the index of the long option in longopts is stored here
++ *
++ * Returned Value:
++ *   Returns the option character for short options, 0 for long options,
++ *   -1 if no more options, '?' for unrecognized option, ':' for missing
++ *   argument (if optstring starts with ':').
++ *
++ *****************************************************************************/
++
++int getopt_long_only(int argc, FAR char *const argv[],
++                     FAR const char *shortopts,
++                     FAR const struct option *longopts,
++                     FAR int *longind)
++{
++  FAR struct getopt_s *go = getoptvars();
++  int ret;
++
++  if (go == NULL)
++    {
++      return '?';
++    }
++
++  /* If longopts is NULL, just call getopt */
++  if (!longopts)
++    {
++      return getopt(argc, argv, shortopts);
++    }
++
++  /* Check if we're at the start of a new argument */
++  if (!go->go_optptr || !*go->go_optptr)
++    {
++      /* Check if current argument is a long option (starts with "-" but not just "-") */
++      if (argv[go->go_optind] && 
++          argv[go->go_optind][0] == '-' && 
++          argv[go->go_optind][1] != '\0')
++        {
++          /* It's potentially a long option */
++          go->go_optptr = argv[go->go_optind];
++          
++          /* Try to parse it as a long option */
++          ret = getopt_parse_long(argc, argv, longopts, longind, shortopts);
++          
++          /* If it was parsed as a long option, return the result */
++          if (ret != -1)
++            {
++              return ret;
++            }
++          
++          /* Not a long option, reset and let getopt handle it */
++          go->go_optptr = NULL;
++        }
++    }
++
++  /* Not a long option, let getopt handle it */
+   return getopt(argc, argv, shortopts);
+ }

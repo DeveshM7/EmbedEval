@@ -1,0 +1,119 @@
+diff --git a/include/zephyr/devicetree.h b/include/zephyr/devicetree.h
+index e10cb7c8..2102c9c6 100644
+--- a/include/zephyr/devicetree.h
++++ b/include/zephyr/devicetree.h
+@@ -435,6 +435,72 @@
+  */
+ #define DT_CHILD(node_id, child) UTIL_CAT(node_id, DT_S_PREFIX(child))
+ 
++/**
++ * @brief Get a node identifier for a child node with a given unit address
++ *
++ * This macro returns the node identifier of the child of @p node_id whose
++ * integer unit address is @p addr. The child node must have a unit address
++ * in its name (e.g., child@1000).
++ *
++ * Example devicetree fragment:
++ *
++ * @code{.dts}
++ *	parent {
++ *		child@a {
++ *			reg = <0xa 0x100>;
++ *		};
++ *		child@b {
++ *			reg = <0xb 0x100>;
++ *		};
++ *	};
++ * @endcode
++ *
++ * Example usage:
++ *
++ * @code{.c}
++ *     DT_CHILD_BY_UNIT_ADDR_INT(DT_NODELABEL(parent), 0xa) // returns DT_N_parent_S_child_a
++ * @endcode
++ *
++ * @param node_id node identifier of the parent node
++ * @param addr integer unit address to look up
++ * @return node identifier of the child with the matching unit address,
++ *         or 0 if no match is found
++ */
++#define DT_CHILD_BY_UNIT_ADDR_INT(node_id, addr) 	DT_CAT(node_id, _CHILD_BY_UNIT_ADDR_INT)(addr)
++
++/**
++ * @brief Get a node identifier for a child node with a given unit address
++ *
++ * Variant of DT_CHILD_BY_UNIT_ADDR_INT() that operates on a node
++ * identified by @p inst.
++ *
++ * Example devicetree fragment:
++ *
++ * @code{.dts}
++ *	MyDevice {
++ *		compatible = "vnd,device";
++ *		sub-device@a {
++ *			reg = <0xa 0x100>;
++ *		};
++ *		sub-device@b {
++ *			reg = <0xb 0x100>;
++ *		};
++ *	};
++ * @endcode
++ *
++ * Example usage:
++ *
++ * @code{.c}
++ *     DT_INST_CHILD_BY_UNIT_ADDR_INT(0, 0xa) // returns the child with address 0xa
++ * @endcode
++ *
++ * @param inst instance number
++ * @param addr integer unit address to look up
++ * @return node identifier of the child with the matching unit address,
++ *         or DT_INVALID_NODE if no match is found
++ */
++#define DT_INST_CHILD_BY_UNIT_ADDR_INT(inst, addr) 	DT_CHILD_BY_UNIT_ADDR_INT(DT_DRV_INST(inst), addr)
++
+ /**
+  * @brief Get a node identifier for a status `okay` node with a compatible
+  *
+diff --git a/scripts/dts/gen_defines.py b/scripts/dts/gen_defines.py
+index e3913dd5..051b2cff 100755
+--- a/scripts/dts/gen_defines.py
++++ b/scripts/dts/gen_defines.py
+@@ -484,6 +484,37 @@ def write_children(node: edtlib.Node) -> None:
+ 
+     out_dt_define(f"{node.z_path_id}_CHILD_NUM_STATUS_OKAY", ok_nodes_num)
+ 
++    # Child node lookup by unit address macros
++    children_with_addr = []
++    for i, child in enumerate(node.children.values()):
++        unit_addr = child.unit_addr
++        if unit_addr is not None:
++            out_dt_define(f"{node.z_path_id}_CHILD_{i}_UNIT_ADDR", unit_addr)
++            children_with_addr.append((i, child))
++
++    # Generate the lookup macro that checks each child's unit address
++    # This generates a chain of (addr == childN_UNIT_ADDR ? childN : ...) that returns a node identifier
++    # To make it work with token pasting macros, we generate it as nested ternary operators
++    # but wrap the entire result to ensure it's a single expression that can be used
++    if children_with_addr:
++        # Build a chain that checks each address in sequence
++        # Using a helper that we define in devicetree.h: DT_CHILD_BY_UNIT_ADDR_IMPL(addr, idx, max_idx, node_id)
++        # But this is complex - let's use a simpler approach
++        
++        # Instead, generate the expansion directly using a helper defined in devicetree.h
++        # Generate inline expansion using nested ternary operators
++        # This expands to: ((addr == a0) ? id0 : ((addr == a1) ? id1 : ... 0))
++        # Note: Using 0 for no match (will need special handling by users)
++        if children_with_addr:
++            # Build from the end backwards
++            result = "0"  # Use 0 instead of DT_INVALID_NODE to avoid compilation issues
++            for i, child in reversed(list(children_with_addr)):
++                addr_macro = f"DT_{node.z_path_id}_CHILD_{i}_UNIT_ADDR"
++                child_id = f"DT_{child.z_path_id}"
++                result = f"((addr) == ({addr_macro}) ? {child_id} : {result})"
++            
++            out_dt_define(f"{node.z_path_id}_CHILD_BY_UNIT_ADDR_INT(addr)", result)
++
+     out_dt_define(f"{node.z_path_id}_FOREACH_CHILD(fn)",
+             " ".join(f"fn(DT_{child.z_path_id})" for child in
+                 node.children.values()))

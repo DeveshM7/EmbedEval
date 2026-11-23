@@ -1,0 +1,137 @@
+diff --git a/include/zephyr/posix/sys/times.h b/include/zephyr/posix/sys/times.h
+new file mode 100644
+index 00000000..34519536
+--- /dev/null
++++ b/include/zephyr/posix/sys/times.h
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (c) 2025
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef ZEPHYR_INCLUDE_POSIX_SYS_TIMES_H_
++#define ZEPHYR_INCLUDE_POSIX_SYS_TIMES_H_
++
++#include <zephyr/posix/posix_types.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Process times structure
++ *
++ * Contains timing information for a process and its terminated child processes.
++ */
++struct tms {
++	clock_t tms_utime;    /**< User CPU time */
++	clock_t tms_stime;    /**< System CPU time */
++	clock_t tms_cutime;   /**< User CPU time of terminated children */
++	clock_t tms_cstime;   /**< System CPU time of terminated children */
++};
++
++/**
++ * @brief Get process and child process times
++ *
++ * This function fills the buffer pointed to by @a buf with timing
++ * information for the calling process and its terminated child processes.
++ *
++ * @param buf Pointer to a struct tms to fill with timing information
++ *
++ * @return The return value is the number of clock ticks since an arbitrary
++ *         point in the past (e.g., system startup). This value wraps around
++ *         when it exceeds the maximum value that can be stored in a clock_t.
++ *         On error, (clock_t)-1 is returned, and errno is set to indicate
++ *         the error.
++ *
++ * @note In Zephyr, there are no child processes, so tms_cutime and tms_cstime
++ *       will always be 0.
++ */
++clock_t times(struct tms *buf);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_INCLUDE_POSIX_SYS_TIMES_H_ */
+diff --git a/lib/posix/options/Kconfig.xsi_single_process b/lib/posix/options/Kconfig.xsi_single_process
+index 9ef3d3a6..c6ed5482 100644
+--- a/lib/posix/options/Kconfig.xsi_single_process
++++ b/lib/posix/options/Kconfig.xsi_single_process
+@@ -7,7 +7,7 @@ config XSI_SINGLE_PROCESS
+ 	select HWINFO
+ 	help
+ 	  Select 'y' here and Zephyr will provide implementations of
+-	  gethostid(), gettimeofday(), and putenv().
++	  gethostid(), gettimeofday(), putenv(), and times().
+ 
+ 	  For more information, please see
+ 	  https://pubs.opengroup.org/onlinepubs/9699919799/xrat/V4_subprofiles.html
+diff --git a/lib/posix/options/xsi_single_process.c b/lib/posix/options/xsi_single_process.c
+index 006577fe..4d100e67 100644
+--- a/lib/posix/options/xsi_single_process.c
++++ b/lib/posix/options/xsi_single_process.c
+@@ -92,3 +92,62 @@ int putenv(char *string)
+ 	errno = EINVAL;
+ 	return -1;
+ }
++
++#include <zephyr/kernel/thread.h>
++#include <zephyr/posix/sys/times.h>
++
++clock_t times(struct tms *buf)
++{
++	k_thread_runtime_stats_t stats;
++	struct timespec ts;
++	int ret;
++
++	if (buf == NULL) {
++		errno = EINVAL;
++		return (clock_t)-1;
++	}
++
++	/* Get current thread's runtime statistics */
++	ret = k_thread_runtime_stats_get(k_current_get(), &stats);
++	if (ret != 0) {
++		errno = EINVAL;
++		return (clock_t)-1;
++	}
++
++	/* Convert execution cycles to clock ticks
++	 * We use the clock frequency to convert from cycles to time,
++	 * then to clock ticks as defined by CLOCKS_PER_SEC
++	 */
++#ifdef CONFIG_SCHED_THREAD_USAGE
++	/* Calculate user time (thread's total execution time) */
++	/* Convert cycles to nanoseconds, then to clock ticks */
++	uint64_t execution_ns = k_cyc_to_ns_floor64(stats.execution_cycles);
++	
++	/* Calculate clock ticks based on CLOCKS_PER_SEC */
++	buf->tms_utime = (clock_t)((execution_ns * (uint64_t)CLOCKS_PER_SEC) / 1000000000ULL);
++	buf->tms_stime = 0;  /* No separate system time in single-process model */
++	buf->tms_cutime = 0;  /* No child processes */
++	buf->tms_cstime = 0;  /* No child processes */
++#else
++	/* If thread usage stats are not enabled, return zeros */
++	buf->tms_utime = 0;
++	buf->tms_stime = 0;
++	buf->tms_cutime = 0;
++	buf->tms_cstime = 0;
++#endif /* CONFIG_SCHED_THREAD_USAGE */
++
++	/* Get elapsed real time (system uptime in clock ticks) */
++	ret = sys_clock_gettime(SYS_CLOCK_REALTIME, &ts);
++	if (ret < 0) {
++		errno = -ret;
++		return (clock_t)-1;
++	}
++
++	/* Convert real time to clock ticks */
++	/* CLOCKS_PER_SEC represents the number of clock ticks per second */
++	clock_t clk_ticks = (clock_t)((uint64_t)ts.tv_sec * (uint64_t)CLOCKS_PER_SEC +
++				       (uint64_t)ts.tv_nsec * (uint64_t)CLOCKS_PER_SEC /
++				       1000000000ULL);
++
++	return clk_ticks;
++}

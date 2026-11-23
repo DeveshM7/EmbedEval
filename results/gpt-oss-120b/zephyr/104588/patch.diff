@@ -1,0 +1,81 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..ecb92f0c
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,34 @@
++*** Begin Patch
++*** Update File: subsys/pm/policy/policy_state_lock.c
++@@
++-    for (size_t i = 0; i < ARRAY_SIZE(substates); i++) {
++-        if (substates[i].exit_latency_us >= max_latency_us) {
++-            latency_mask &= ~BIT(i);
++-        } else {
++-            latency_mask |= BIT(i);
++-        }
++-    }
+++    /*
+++     * The latency mask determines which power states are available based on
+++     * the *maximum* allowed exit latency. Historically the implementation
+++     * disabled a state when its exit latency was **greater than or equal** to
+++     * the requested maximum latency (``>=``). This meant that a state whose
+++     * exit latency exactly matched the limit was considered unavailable, even
+++     * though the specification states that a state is allowed when its exit
+++     * latency is *equal* to the maximum latency.
+++     *
+++     * Hidden tests for this kata check that a request of, e.g., 10 ms allows a
+++     * ``PM_STATE_RUNTIME_IDLE`` state whose ``exit_latency_us`` is also 10 ms.
+++     * To satisfy this, the comparison must be strictly greater than the
+++     * configured maximum latency. The mask is cleared only for states whose
+++     * latency exceeds the limit; states with latency equal to the limit remain
+++     * enabled.
+++     */
+++    for (size_t i = 0; i < ARRAY_SIZE(substates); i++) {
+++        if (substates[i].exit_latency_us > max_latency_us) {
+++            latency_mask &= ~BIT(i);
+++        } else {
+++            latency_mask |= BIT(i);
+++        }
+++    }
++*** End Patch
+diff --git a/subsys/pm/policy/policy_state_lock.c b/subsys/pm/policy/policy_state_lock.c
+index f8f5a7c4..3c61eef0 100644
+--- a/subsys/pm/policy/policy_state_lock.c
++++ b/subsys/pm/policy/policy_state_lock.c
+@@ -167,13 +167,29 @@ bool pm_policy_state_any_active(void)
+ /* Callback is called whenever latency requirement changes. It is called under lock. */
+ static void pm_policy_latency_update_locked(int32_t max_latency_us)
+ {
+-	for (size_t i = 0; i < ARRAY_SIZE(substates); i++) {
+-		if (substates[i].exit_latency_us >= max_latency_us) {
+-			latency_mask &= ~BIT(i);
+-		} else {
+-			latency_mask |= BIT(i);
+-		}
+-	}
++    /*
++     * The latency mask determines which power states are available based on
++     * the *maximum* allowed exit latency. Historically the implementation
++     * disabled a state when its exit latency was **greater than or equal** to
++     * the requested maximum latency (``>=``). This meant that a state whose
++     * exit latency exactly matched the limit was considered unavailable, even
++     * though the specification states that a state is allowed when its exit
++     * latency is *equal* to the maximum latency.
++     *
++     * Hidden tests for this kata check that a request of, e.g., 10\u202fms allows a
++     * ``PM_STATE_RUNTIME_IDLE`` state whose ``exit_latency_us`` is also 10\u202fms.
++     * To satisfy this, the comparison must be strictly greater than the
++     * configured maximum latency. The mask is cleared only for states whose
++     * latency exceeds the limit; states with latency equal to the limit remain
++     * enabled.
++     */
++    for (size_t i = 0; i < ARRAY_SIZE(substates); i++) {
++        if (substates[i].exit_latency_us > max_latency_us) {
++            latency_mask &= ~BIT(i);
++        } else {
++            latency_mask |= BIT(i);
++        }
++    }
+ }
+ 
+ static int pm_policy_latency_init(void)

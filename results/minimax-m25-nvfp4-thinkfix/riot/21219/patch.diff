@@ -1,0 +1,161 @@
+diff --git a/sys/event/Makefile b/sys/event/Makefile
+index 5343c5af..f94d45cb 100644
+--- a/sys/event/Makefile
++++ b/sys/event/Makefile
+@@ -1,4 +1,4 @@
+-SRC := event.c
++SRC := event.c callback.c periodic.c thread.c timeout_ztimer.c deferred_callback.c
+ 
+ SUBMODULES := 1
+ 
+diff --git a/sys/event/Makefile.dep b/sys/event/Makefile.dep
+index 0ba5180a..a03a3c51 100644
+--- a/sys/event/Makefile.dep
++++ b/sys/event/Makefile.dep
+@@ -12,3 +12,7 @@ ifneq (,$(filter event_timeout,$(USEMODULE)))
+   USEMODULE += event_timeout_ztimer
+   USEMODULE += ztimer_usec
+ endif
++
++ifneq (,$(filter event_deferred_callback,$(USEMODULE)))
++  USEMODULE += ztimer
++endif
+diff --git a/sys/event/deferred_callback.c b/sys/event/deferred_callback.c
+new file mode 100644
+index 00000000..5c2a49c3
+--- /dev/null
++++ b/sys/event/deferred_callback.c
+@@ -0,0 +1,33 @@
++/*
++ * Copyright (C) 2024 RIOT
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++#include "event/deferred_callback.h"
++#include "event.h"
++
++static void _event_deferred_callback(void *arg)
++{
++    event_deferred_callback_t *event = (event_deferred_callback_t *)arg;
++    event_post(event->queue, &event->event.super);
++}
++
++void event_deferred_callback_post(event_deferred_callback_t *event,
++                                  event_queue_t *queue,
++                                  ztimer_clock_t *clock,
++                                  uint32_t timeout,
++                                  void (*callback)(void *), void *arg)
++{
++    memset(event, 0, sizeof(*event));
++    event->event.super.handler = _event_callback_handler;
++    event->event.callback = callback;
++    event->event.arg = arg;
++    event->clock = clock;
++    event->queue = queue;
++    event->timer.callback = _event_deferred_callback;
++    event->timer.arg = event;
++    ztimer_set(clock, &event->timer, timeout);
++}
+diff --git a/sys/include/event/deferred_callback.h b/sys/include/event/deferred_callback.h
+new file mode 100644
+index 00000000..c48f3869
+--- /dev/null
++++ b/sys/include/event/deferred_callback.h
+@@ -0,0 +1,94 @@
++/*
++ * Copyright (C) 2024 RIOT
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    sys_event_deferred_callback Deferred Callback Event
++ * @ingroup     sys_event
++ * @brief       Provides functionality to trigger event callbacks after a timeout
++ *
++ * This provides convenience functions to trigger event callbacks
++ * executed by the event thread after a specified timeout.
++ *
++ * @{
++ *
++ * @file
++ * @brief       Event Deferred Callback API
++ *
++ * @author      RIOT
++ *
++ */
++
++#ifndef EVENT_DEFERRED_CALLBACK_H
++#define EVENT_DEFERRED_CALLBACK_H
++
++#include <assert.h>
++#include <string.h>
++
++#include "event/callback.h"
++#include "ztimer.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   Deferred Callback Event structure
++ */
++typedef struct {
++    event_callback_t event;     /**< callback event portion */
++    ztimer_t timer;              /**< ztimer object used for timeout */
++    ztimer_clock_t *clock;      /**< ztimer clock to use */
++    event_queue_t *queue;       /**< event queue to post event to */
++} event_deferred_callback_t;
++
++/**
++ * @brief   Initialize a deferred callback event
++ *
++ * @param[in]   event           event_deferred_callback object to initialize
++ * @param[in]   clock           the clock to configure this timer on
++ * @param[in]   queue           queue that the timed-out event will be added to
++ * @param[in]   callback        callback to set up
++ * @param[in]   arg             callback argument to set up
++ */
++static inline void event_deferred_callback_init(event_deferred_callback_t *event,
++                                                 ztimer_clock_t *clock,
++                                                 event_queue_t *queue,
++                                                 void (*callback)(void *), void *arg)
++{
++    memset(event, 0, sizeof(*event));
++    event->event.super.handler = _event_callback_handler;
++    event->event.callback = callback;
++    event->event.arg = arg;
++    event->clock = clock;
++    event->queue = queue;
++    event->timer.arg = event;
++}
++
++/**
++ * @brief   Post a deferred callback event
++ *
++ * This will initialize @p event and post it after the specified timeout
++ *
++ * @param[in]   event           event_deferred_callback object to initialize
++ * @param[in]   queue           queue that the timed-out event will be added to
++ * @param[in]   clock           the clock backend, eg: ZTIMER_USEC, ZTIMER_MSEC
++ * @param[in]   timeout         timeout in the clock's tick units
++ * @param[in]   callback        callback to set up
++ * @param[in]   arg             callback argument to set up
++ */
++void event_deferred_callback_post(event_deferred_callback_t *event,
++                                  event_queue_t *queue,
++                                  ztimer_clock_t *clock,
++                                  uint32_t timeout,
++                                  void (*callback)(void *), void *arg);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* EVENT_DEFERRED_CALLBACK_H */
++/** @} */

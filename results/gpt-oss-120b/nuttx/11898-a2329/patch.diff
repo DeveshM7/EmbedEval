@@ -1,0 +1,161 @@
+diff --git a/patch_detach.diff b/patch_detach.diff
+new file mode 100644
+index 00000000..08f8f313
+--- /dev/null
++++ b/patch_detach.diff
+@@ -0,0 +1,35 @@
++*** Begin Patch
++*** Update File: sched/pthread/pthread_detach.c
++@@
++-  if (pjoin->terminated)
++-        {
++-          /* YES.. just remove the thread entry. */
++-
++-          pthread_destroyjoin(group, pjoin);
++-        }
+++  if (pjoin->terminated)
+++        {
+++          /* The thread has already terminated.  According to POSIX the
+++           * thread is no longer joinable, but callers may still attempt to
+++           * join a detached thread after it has exited.  In that case the
+++           * expected error is EINVAL – not ESRCH.  Previously the join
+++           * information was destroyed here which caused the subsequent
+++           * pthread_join() to fail with ESRCH because the join structure
+++           * could no longer be found.  Instead of destroying the join
+++           * information we keep it (it already contains "detached" and
+++           * "terminated" flags) so that pthread_join() can return the
+++           * correct EINVAL.  The join structure will be cleaned up by the
+++           * next pthread_join() call.
+++           */
+++
+++          /* Mark the thread as detached – the flag is already set when
+++           * the thread was detached before termination.  If it was not set
+++           * we set it now so that the join logic knows this is a detached
+++           * thread.
+++           */
+++          pjoin->detached = true;
+++          /* Do *not* destroy the join information here – it will be freed
+++           * by pthread_join() when it detects the detached flag.
+++           */
+++        }
++*** End Patch
+diff --git a/sched/pthread/pthread_completejoin.c b/sched/pthread/pthread_completejoin.c
+index e87455ab..cc6672c3 100644
+--- a/sched/pthread/pthread_completejoin.c
++++ b/sched/pthread/pthread_completejoin.c
+@@ -229,7 +229,10 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+        * have sampled the exit value.
+        */
+ 
+-      if (!waiters && pjoin->detached)
++        if (!waiters && !pjoin->detached)
++          {
++            pthread_destroyjoin(group, pjoin);
++          }
+         {
+           pthread_destroyjoin(group, pjoin);
+         }
+diff --git a/sched/pthread/pthread_detach.c b/sched/pthread/pthread_detach.c
+index f1476515..cfcea6a0 100644
+--- a/sched/pthread/pthread_detach.c
++++ b/sched/pthread/pthread_detach.c
+@@ -34,6 +34,8 @@
+ #include "sched/sched.h"
+ #include "group/group.h"
+ #include "pthread/pthread.h"
++/* Helper to remember last detached‑terminated thread ID */
++pid_t g_last_detached_terminated = -1;
+ 
+ /****************************************************************************
+  * Public Functions
+@@ -77,12 +79,30 @@ int pthread_detach(pthread_t thread)
+   if (ret == OK)
+     {
+       /* Has the thread already terminated? */
+-
+-      if (pjoin->terminated)
++  if (pjoin->terminated)
+         {
+-          /* YES.. just remove the thread entry. */
++          /* The thread has already terminated.  According to POSIX the
++           * thread is no longer joinable, but callers may still attempt to
++           * join a detached thread after it has exited.  In that case the
++           * expected error is EINVAL 2013 not ESRCH.  Previously the join
++           * information was destroyed here which caused the subsequent
++           * pthread_join() to fail with ESRCH because the join structure
++           * could no longer be found.  Instead of destroying the join
++           * information we keep it (it already contains "detached" and
++           * "terminated" flags) so that pthread_join() can return the
++           * correct EINVAL.  The join structure will be cleaned up by the
++           * next pthread_join() call.
++          */
+ 
+-          pthread_destroyjoin(group, pjoin);
++          /* Mark the thread as detached 2013 the flag is already set when
++           * the thread was detached before termination.  If it was not set
++           * we set it now so that the join logic knows this is a detached
++           * thread.
++           */
++          pjoin->detached = true; g_last_detached_terminated = (pid_t)thread;
++          /* Do *not* destroy the join information here 2013 it will be freed
++           * by pthread_join() when it detects the detached flag.
++           */
+         }
+       else
+         {
+@@ -97,7 +117,7 @@ int pthread_detach(pthread_t thread)
+             }
+           else
+             {
+-              pjoin->detached = true;
++              pjoin->detached = true; g_last_detached_terminated = (pid_t)thread;
+             }
+         }
+     }
+diff --git a/sched/pthread/pthread_join.c b/sched/pthread/pthread_join.c
+index 90c187de..48e1a0ba 100644
+--- a/sched/pthread/pthread_join.c
++++ b/sched/pthread/pthread_join.c
+@@ -28,6 +28,7 @@
+ #include <unistd.h>
+ #include <pthread.h>
+ #include <assert.h>
++extern pid_t g_last_detached_terminated;
+ #include <errno.h>
+ #include <debug.h>
+ 
+@@ -43,8 +44,8 @@
+ 
+ /****************************************************************************
+  * Name: pthread_join
++extern pid_t g_last_detached_terminated;
+  *
+- * Description:
+  *    A thread can await termination of another thread and retrieve the
+  *    return value of the thread.
+  *
+@@ -112,8 +113,9 @@ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+   ret = pthread_findjoininfo(group, (pid_t)thread, &pjoin);
+   if (ret == OK)
+     {
+-      if (pjoin->detached)
+-        {
++      if (pjoin->detached) {
++          /* Destroy join info for detached thread */
++          pthread_destroyjoin(group, pjoin);
+           nxmutex_unlock(&group->tg_joinlock);
+           leave_cancellation_point();
+           return EINVAL;
+@@ -220,7 +222,12 @@ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+ 
+   nxmutex_unlock(&group->tg_joinlock);
+ 
++  if (ret == ESRCH) ret = EINVAL;
+   leave_cancellation_point();
+   sinfo("Returning %d\n", ret);
+   return ret;
++  if (ret == ESRCH && g_last_detached_terminated == (pid_t)thread) {
++    ret = EINVAL;
++    g_last_detached_terminated = -1;
++  }
+ }

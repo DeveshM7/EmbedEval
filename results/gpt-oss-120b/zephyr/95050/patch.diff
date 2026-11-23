@@ -1,0 +1,131 @@
+diff --git a/await_patch.diff b/await_patch.diff
+new file mode 100644
+index 00000000..5bd0e55e
+--- /dev/null
++++ b/await_patch.diff
+@@ -0,0 +1,45 @@
++*** Begin Patch
++*** Update File: include/zephyr/rtio/rtio.h
++@@
++ static inline void rtio_sqe_prep_delay(struct rtio_sqe *sqe,
++                                        k_timeout_t timeout,
++                                        void *userdata)
++@@
++ 	sqe->op = RTIO_OP_DELAY;
++ 	sqe->prio = 0;
++ 	sqe->iodev = NULL;
++ 	sqe->delay.timeout = timeout;
++ 	sqe->userdata = userdata;
++ }
+++
+++/**
+++ * @brief Prepare an await submission that is not attached to any I/O device.
+++ *
+++ * This helper creates a submission that will pause only the current submission
+++ * chain until the caller explicitly signals the SQE with @ref rtio_sqe_signal().
+++ * While the await is pending the I/O device slot remains free for other
+++ * unrelated submissions, allowing the executor to continue processing other
+++ * chains. When the await is signaled the chain continues and a CQE is generated
+++ * carrying the provided @p userdata.
+++ *
+++ * The implementation sets the await callback to an internal helper that marks
+++ * the SQE as completed with a successful result. The callback is invoked by the
+++ * generic @ref rtio_sqe_signal() mechanism.
+++ */
+++static inline void rtio_sqe_prep_await_executor(struct rtio_sqe *sqe,
+++                                                int8_t prio,
+++                                                void *userdata)
+++{
+++    memset(sqe, 0, sizeof(struct rtio_sqe));
+++    sqe->op = RTIO_OP_AWAIT;
+++    sqe->prio = prio;
+++    sqe->iodev = NULL;
+++    sqe->userdata = userdata;
+++    /* The executor will wait for a signal; set the internal callback that
+++     * completes the SQE and resumes the chain.
+++     */
+++    sqe->await.callback = (rtio_signaled_t)rtio_iodev_sqe_ok;
+++    sqe->await.userdata = NULL;
+++    /* The atomic flag is cleared by memset; it will be set by the signal. */
+++}
++*** End Patch
+diff --git a/include/zephyr/rtio/rtio.h b/include/zephyr/rtio/rtio.h
+index ea4e6389..d8e3a5f8 100644
+--- a/include/zephyr/rtio/rtio.h
++++ b/include/zephyr/rtio/rtio.h
+@@ -1835,4 +1835,48 @@ static inline void z_impl_rtio_pool_release(struct rtio_pool *pool, struct rtio
+ 
+ #include <zephyr/syscalls/rtio.h>
+ 
++/**
++ * @brief Prepare an await submission that is not attached to any I/O device.
++ *
++ * This helper creates a submission that will pause only the current submission
++ * chain until the caller explicitly signals the SQE with @ref rtio_sqe_signal().
++ * While the await is pending the I/O device slot remains free for other
++ * unrelated submissions, allowing the executor to continue processing other
++ * chains. When the await is signaled the chain continues and a CQE is generated
++ * carrying the provided @p userdata.
++ *
++ * The implementation sets the await callback to an internal helper that marks
++ * the SQE as completed with a successful result. The callback is invoked by the
++ * generic @ref rtio_sqe_signal() mechanism.
++ */
++static inline void rtio_sqe_prep_await_executor(struct rtio_sqe *sqe,
++                                                int8_t prio,
++                                                void *userdata)
++{
++    memset(sqe, 0, sizeof(struct rtio_sqe));
++    sqe->op = RTIO_OP_AWAIT;
++    sqe->prio = prio;
++    sqe->iodev = NULL;
++    sqe->userdata = userdata;
++    /* The executor will wait for a signal; set the internal callback that
++     * completes the SQE and resumes the chain.
++     */
++    sqe->await.callback = (rtio_signaled_t)rtio_iodev_sqe_ok;
++    sqe->await.userdata = NULL;
++    /* The atomic flag is cleared by memset; it will be set by the signal. */
++}
+ #endif /* ZEPHYR_INCLUDE_RTIO_RTIO_H_ */
++/**
++ * @brief Prepare an await submission that is not attached to any I/O device.
++ *
++ * This helper creates a submission that will pause only the current submission
++ * chain until the caller explicitly signals the SQE with @ref rtio_sqe_signal().
++ * While the await is pending the I/O device slot remains free for other
++ * unrelated submissions, allowing the executor to continue processing other
++ * chains. When the await is signaled the chain continues and a CQE is generated
++ * carrying the provided @p userdata.
++ *
++ * The implementation sets the await callback to an internal helper that marks
++ * the SQE as completed with a successful result. The callback is invoked by the
++ * generic @ref rtio_sqe_signal() mechanism.
++ */
+diff --git a/subsys/rtio/rtio_executor.c b/subsys/rtio/rtio_executor.c
+index 6a4c8000..5dbb0797 100644
+--- a/subsys/rtio/rtio_executor.c
++++ b/subsys/rtio/rtio_executor.c
+@@ -21,13 +21,15 @@ static void rtio_executor_op(struct rtio_iodev_sqe *iodev_sqe)
+ 
+ 	switch (sqe->op) {
+ 	case RTIO_OP_CALLBACK:
+-		sqe->callback.callback(iodev_sqe->r, sqe, sqe->callback.arg0);
+-		rtio_iodev_sqe_ok(iodev_sqe, 0);
+-		break;
+-	case RTIO_OP_DELAY:
+-		rtio_sched_alarm(iodev_sqe, sqe->delay.timeout);
+-		break;
+-	default:
++        sqe->callback.callback(iodev_sqe->r, sqe, sqe->callback.arg0);
++        rtio_iodev_sqe_ok(iodev_sqe, 0);
++        break;
++    case RTIO_OP_DELAY:
++        rtio_sched_alarm(iodev_sqe, sqe->delay.timeout);
++        break;
++    case RTIO_OP_AWAIT:
++        break;
++    default:
+ 		rtio_iodev_sqe_err(iodev_sqe, -EINVAL);
+ 	}
+ }

@@ -1,0 +1,278 @@
+diff --git a/boards/boardctl.c b/boards/boardctl.c
+index 3b63ca4d..10dd786b 100644
+--- a/boards/boardctl.c
++++ b/boards/boardctl.c
+@@ -42,6 +42,9 @@
+ #include <nuttx/drivers/ramdisk.h>
+ #include <nuttx/reboot_notifier.h>
+ #include <nuttx/trace.h>
++#include <nuttx/sched.h>
++#include "../sched/sched/sched.h"
++#include <sys/prctl.h>
+ 
+ #ifdef CONFIG_NX
+ #  include <nuttx/nx/nxmu.h>
+@@ -385,6 +388,19 @@ int boardctl(unsigned int cmd, uintptr_t arg)
+ {
+   int ret = OK;
+ 
++#ifdef CONFIG_SCHED_CAPABILITIES
++  /* Check if the caller has PR_CAP_ADMIN capability */
++  {
++    FAR struct tcb_s *tcb = this_task();
++    if (tcb != NULL && tcb->group != NULL &&
++        (tcb->group->tg_caps & PR_CAP_ADMIN) == 0)
++      {
++        serr("ERROR: Caller does not have PR_CAP_ADMIN capability\n");
++        return -EPERM;
++      }
++  }
++#endif
++
+   switch (cmd)
+     {
+ #ifdef CONFIG_BOARDCTL_FINALINIT
+diff --git a/fs/mount/fs_mount.c b/fs/mount/fs_mount.c
+index 75eeb3c6..3c4a7329 100644
+--- a/fs/mount/fs_mount.c
++++ b/fs/mount/fs_mount.c
+@@ -34,6 +34,9 @@
+ #include <nuttx/debug.h>
+ 
+ #include <nuttx/fs/fs.h>
++#include <nuttx/sched.h>
++#include "../sched/sched/sched.h"
++#include <sys/prctl.h>
+ 
+ #include "driver/driver.h"
+ #include "inode/inode.h"
+@@ -592,6 +595,20 @@ int mount(FAR const char *source, FAR const char *target,
+ {
+   int ret;
+ 
++
++#ifdef CONFIG_SCHED_CAPABILITIES
++  /* Check if the caller has PR_CAP_RAWIO capability */
++  {
++    FAR struct tcb_s *tcb = this_task();
++    if (tcb != NULL && tcb->group != NULL &&
++        (tcb->group->tg_caps & PR_CAP_RAWIO) == 0)
++      {
++        serr("ERROR: Caller does not have PR_CAP_RAWIO capability\n");
++        set_errno(EPERM);
++        return ERROR;
++      }
++  }
++#endif
+   ret = nx_mount(source, target, filesystemtype, mountflags, data);
+   if (ret < 0)
+     {
+diff --git a/include/nuttx/sched.h b/include/nuttx/sched.h
+index 09916b83..1f2ea604 100644
+--- a/include/nuttx/sched.h
++++ b/include/nuttx/sched.h
+@@ -457,6 +457,10 @@ struct task_group_s
+   pid_t tg_ppid;                    /* This is the ID of the parent thread      */
+   uint8_t tg_flags;                 /* See GROUP_FLAG_* definitions             */
+ 
++#ifdef CONFIG_SCHED_CAPABILITIES
++  uint8_t tg_caps;                 /* Process capability set (PR_CAP_*)       */
++#endif
++
+   /* User identity (POSIX real, effective, and saved-set IDs) ***************/
+ 
+ #ifdef CONFIG_SCHED_USER_IDENTITY
+diff --git a/include/sys/prctl.h b/include/sys/prctl.h
+index aea41924..cfc7d644 100644
+--- a/include/sys/prctl.h
++++ b/include/sys/prctl.h
+@@ -14,9 +14,9 @@
+  *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See
++ * the License for the specific language governing permissions and
++ * limitations under the License.
+  *
+  ****************************************************************************/
+ 
+@@ -79,6 +79,40 @@
+ #define PR_SET_DUMPABLE 5
+ #define PR_GET_DUMPABLE 6
+ 
++/* Process capability commands (CONFIG_SCHED_CAPABILITIES)
++ *
++ *  PR_CAPS_GET
++ *    Return the current capability set of the calling process.
++ *    The return value is a bitmask of capabilities.
++ *
++ *  PR_CAPS_DROP
++ *    Remove the named capabilities from the calling process.
++ *    The argument is a bitmask of capabilities to drop.
++ *    Once dropped, a capability cannot be regained.
++ *
++ * Capability definitions:
++ *
++ *  PR_CAP_RAWIO
++ *    Required for raw I/O operations like mounting filesystems.
++ *
++ *  PR_CAP_SPAWN
++ *    Required for creating new tasks.
++ *
++ *  PR_CAP_ADMIN
++ *    Required for administrative board-control operations.
++ *
++ *  PR_CAP_ALL
++ *    Represents all capabilities.
++ */
++
++#define PR_CAPS_GET    7
++#define PR_CAPS_DROP   8
++
++#define PR_CAP_RAWIO   (1 << 0)
++#define PR_CAP_SPAWN   (1 << 1)
++#define PR_CAP_ADMIN  (1 << 2)
++#define PR_CAP_ALL    (PR_CAP_RAWIO | PR_CAP_SPAWN | PR_CAP_ADMIN)
++
+ /****************************************************************************
+  * Public Type Definitions
+  ****************************************************************************/
+diff --git a/sched/group/group_create.c b/sched/group/group_create.c
+index 71e288c7..63e4ad01 100644
+--- a/sched/group/group_create.c
++++ b/sched/group/group_create.c
+@@ -36,6 +36,7 @@
+ #include <nuttx/kmalloc.h>
+ #include <nuttx/semaphore.h>
+ #include <nuttx/sched.h>
++#include <sys/prctl.h>
+ 
+ #include "sched/sched.h"
+ #include "group/group.h"
+@@ -99,6 +100,35 @@ static inline void group_inherit_identity(FAR struct task_group_s *group)
+ }
+ #else
+ #  define group_inherit_identity(group)
++
++#ifdef CONFIG_SCHED_CAPABILITIES
++static inline void group_inherit_caps(FAR struct task_group_s *group,
++                                        uint8_t ttype)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR struct task_group_s *rgroup = rtcb->group;
++
++  DEBUGASSERT(group != NULL);
++
++  if (ttype == TCB_FLAG_TTYPE_KERNEL)
++    {
++      /* Kernel threads get all capabilities */
++      group->tg_caps = PR_CAP_ALL;
++    }
++  else if (rgroup != NULL)
++    {
++      /* Inherit capabilities from parent */
++      group->tg_caps = rgroup->tg_caps;
++    }
++  else
++    {
++      /* If no parent (should not happen), give all capabilities */
++      group->tg_caps = PR_CAP_ALL;
++    }
++}
++#else
++#  define group_inherit_caps(group, ttype)
++#endif
+ #endif
+ 
+ #ifdef CONFIG_FS_CHROOT
+@@ -244,6 +274,10 @@ int group_allocate(FAR struct tcb_s *tcb, uint8_t ttype)
+ 
+   group_inherit_identity(group);
+ 
++  /* Inherit the capabilities from the parent task group */
++
++  group_inherit_caps(group, ttype);
++
+   ret = group_inherit_chroot(group, ttype);
+   if (ret < 0)
+     {
+diff --git a/sched/task/task_create.c b/sched/task/task_create.c
+index 7b90822c..d68ec7d9 100644
+--- a/sched/task/task_create.c
++++ b/sched/task/task_create.c
+@@ -34,6 +34,7 @@
+ #include <nuttx/arch.h>
+ #include <nuttx/kmalloc.h>
+ #include <nuttx/sched.h>
++#include <sys/prctl.h>
+ #include <nuttx/kthread.h>
+ #include <nuttx/fs/fs.h>
+ 
+@@ -88,6 +89,20 @@ int nxthread_create(FAR const char *name, uint8_t ttype, int priority,
+ 
+   /* Allocate a TCB for the new task. */
+ 
++#ifdef CONFIG_SCHED_CAPABILITIES
++  /* Check if the caller has PR_CAP_SPAWN capability for user tasks */
++  if ((ttype & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_KERNEL)
++    {
++      FAR struct tcb_s *rtcb = this_task();
++      if (rtcb != NULL && rtcb->group != NULL &&
++          (rtcb->group->tg_caps & PR_CAP_SPAWN) == 0)
++        {
++          serr("ERROR: Caller does not have PR_CAP_SPAWN capability\n");
++          return -EPERM;
++        }
++    }
++#endif
++
+   tcb = kmm_zalloc(sizeof(struct tcb_s));
+   if (!tcb)
+     {
+diff --git a/sched/task/task_prctl.c b/sched/task/task_prctl.c
+index b065eeae..0fa2fcfe 100644
+--- a/sched/task/task_prctl.c
++++ b/sched/task/task_prctl.c
+@@ -187,6 +187,39 @@ int prctl(int option, ...)
+         goto errout;
+ #endif
+ 
++      case PR_CAPS_GET:
++      case PR_CAPS_DROP:
++#ifdef CONFIG_SCHED_CAPABILITIES
++        {
++          FAR struct tcb_s *tcb = this_task();
++
++          if (tcb == NULL || tcb->group == NULL)
++            {
++              errcode = ESRCH;
++              goto errout;
++            }
++
++          if (option == PR_CAPS_GET)
++            {
++              /* Return the current capability set */
++              va_end(ap);
++              return tcb->group->tg_caps;
++            }
++          else
++            {
++              /* PR_CAPS_DROP: Drop the specified capabilities */
++              unsigned int drop_mask = va_arg(ap, unsigned int);
++
++              /* Only drop capabilities; cannot gain new ones */
++              tcb->group->tg_caps &= ~drop_mask;
++            }
++        }
++        break;
++#else
++        serr("ERROR: Option not enabled: %d\n", option);
++        errcode = ENOSYS;
++        goto errout;
++#endif
+       default:
+         serr("ERROR: Unrecognized option: %d\n", option);
+         errcode = EINVAL;

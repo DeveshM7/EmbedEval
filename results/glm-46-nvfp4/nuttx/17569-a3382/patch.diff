@@ -1,0 +1,320 @@
+diff --git a/include/nuttx/seqlock.h b/include/nuttx/seqlock.h
+new file mode 100644
+index 00000000..74e74a08
+--- /dev/null
++++ b/include/nuttx/seqlock.h
+@@ -0,0 +1,178 @@
++/****************************************************************************
++ * include/nuttx/seqlock.h
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++#ifndef __INCLUDE_NUTTX_SEQLOCK_H
++#define __INCLUDE_NUTTX_SEQLOCK_H
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/types.h>
++#include <assert.h>
++#include <stdint.h>
++
++#include <nuttx/compiler.h>
++#include <nuttx/irq.h>
++#include <nuttx/arch.h>
++
++#include <nuttx/atomic.h>
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Public Data Types
++ ****************************************************************************/
++
++/* Sequential lock count type.
++ * The count starts at 0 (even) indicating no writer is active.
++ * When a writer acquires the lock, the count is incremented to 1 (odd).
++ * When the writer releases, the count is incremented to 2 (even).
++ * An odd count indicates a writer is active, even count indicates no writer.
++ */
++
++typedef atomic_t seqcount_t;
++
++/****************************************************************************
++ * Public Function Prototypes
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: seqlock_init
++ *
++ * Description:
++ *   Initialize a sequential lock count to its initial, unlocked state.
++ *
++ * Input Parameters:
++ *   seq  - A reference to the seqcount_t object to be initialized.
++ *
++ * Returned Value:
++ *   None.
++ *
++ ****************************************************************************/
++
++static inline void seqlock_init(FAR seqcount_t *seq)
++{
++  atomic_set(seq, 0);
++}
++
++#if defined(CONFIG_SPINLOCK)
++
++/****************************************************************************
++ * Name: write_seqlock_irqsave
++ *
++ * Description:
++ *   Acquire exclusive write access to the seqlock, disabling interrupts
++ *   and saving the interrupt state. This function will not return until the
++ *   caller owns the seqlock (i.e., no other writer holds it).
++ *
++ *   The function increments the sequence count to indicate a write is in
++ *   progress (making it odd).
++ *
++ * Input Parameters:
++ *   seq  - A reference to the seqcount_t object.
++ *
++ * Returned Value:
++ *   An opaque, architecture-specific value that represents the state of
++ *   the interrupts prior to the call.
++ *
++ ****************************************************************************/
++
++irqstate_t write_seqlock_irqsave(FAR seqcount_t *seq);
++
++/****************************************************************************
++ * Name: write_sequnlock_irqrestore
++ *
++ * Description:
++ *   Release exclusive write access to the seqlock and restore the interrupt
++ *   state to what it was prior to the previous call to write_seqlock_irqsave.
++ *
++ *   The function increments the sequence count to indicate the write is
++ *   complete (making it even).
++ *
++ * Input Parameters:
++ *   seq   - A reference to the seqcount_t object.
++ *   flags - The interrupt state returned by write_seqlock_irqsave.
++ *
++ * Returned Value:
++ *   None.
++ *
++ ****************************************************************************/
++
++void write_sequnlock_irqrestore(FAR seqcount_t *seq, irqstate_t flags);
++
++#else
++
++/****************************************************************************
++ * If CONFIG_SPINLOCK is not set (UP configuration), we still need to
++ * maintain the sequence count, but we don't need to worry about
++ * inter-CPU synchronization.
++ */
++
++/****************************************************************************
++ * Name: write_seqlock_irqsave
++ *
++ * Description:
++ *   UP version of write_seqlock_irqsave - saves interrupts and increments
++ *   the sequence count.
++ *
++ ****************************************************************************/
++
++static inline irqstate_t write_seqlock_irqsave(FAR seqcount_t *seq)
++{
++  irqstate_t flags;
++  
++  /* Disable interrupts and save state */
++  flags = up_irq_save();
++  
++  /* Increment the sequence count to mark write as in progress */
++  atomic_fetch_add(seq, 1);
++  
++  return flags;
++}
++
++/****************************************************************************
++ * Name: write_sequnlock_irqrestore
++ *
++ * Description:
++ *   UP version of write_sequnlock_irqrestore - increments the sequence
++ *   count again and restores interrupts.
++ *
++ ****************************************************************************/
++
++static inline void write_sequnlock_irqrestore(FAR seqcount_t *seq, 
++                                              irqstate_t flags)
++{
++  /* Increment the sequence count again to mark write as complete */
++  atomic_fetch_add(seq, 1);
++  
++  /* Restore interrupt state */
++  up_irq_restore(flags);
++}
++
++#endif /* CONFIG_SPINLOCK */
++
++#endif /* __INCLUDE_NUTTX_SEQLOCK_H */
+diff --git a/sched/irq/Make.defs b/sched/irq/Make.defs
+index 6c53716e..fbf6258e 100644
+--- a/sched/irq/Make.defs
++++ b/sched/irq/Make.defs
+@@ -24,6 +24,7 @@ CSRCS += irq_initialize.c irq_attach.c irq_dispatch.c irq_unexpectedisr.c
+ CSRCS += irq_attach_thread.c irq_attach_wqueue.c
+ 
+ ifeq ($(CONFIG_SPINLOCK),y)
++CSRCS += irq_seqlock.c
+ CSRCS += irq_spinlock.c
+ endif
+ 
+diff --git a/sched/irq/irq_seqlock.c b/sched/irq/irq_seqlock.c
+new file mode 100644
+index 00000000..bc1a7105
+--- /dev/null
++++ b/sched/irq/irq_seqlock.c
+@@ -0,0 +1,118 @@
++/****************************************************************************
++ * sched/irq/irq_seqlock.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++#include <nuttx/seqlock.h>
++
++#include <assert.h>
++#include <sys/types.h>
++#include <arch/irq.h>
++
++#include <nuttx/atomic.h>
++
++#include "sched/sched.h"
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: write_seqlock_irqsave
++ *
++ * Description:
++ *   Acquire exclusive write access to the seqlock, disabling interrupts
++ *   and saving the interrupt state. This function will not return until the
++ *   caller owns the seqlock (i.e., no other writer holds it).
++ *
++ *   The function increments the sequence count to indicate a write is in
++ *   progress (making it odd).
++ *
++ * Input Parameters:
++ *   seq  - A reference to the seqcount_t object.
++ *
++ * Returned Value:
++ *   An opaque, architecture-specific value that represents the state of
++ *   the interrupts prior to the call.
++ *
++ ****************************************************************************/
++
++irqstate_t write_seqlock_irqsave(FAR seqcount_t *seq)
++{
++  irqstate_t flags;
++  unsigned int seqval;
++
++  /* Disable interrupts and save state */
++
++  flags = up_irq_save();
++
++  /* Get current sequence count and increment to mark write as in progress */
++
++  seqval = atomic_fetch_add(seq, 1);
++
++  /* If the resulting value is even, it means we wrapped from odd to even
++   * without acquiring the lock (another writer is active). We need to
++   * keep incrementing until we get an odd value that we can claim.
++   */
++
++  while ((seqval & 1) == 0)
++    {
++      /* Try again - increment again */
++
++      seqval = atomic_fetch_add(seq, 1);
++    }
++
++  return flags;
++}
++
++/****************************************************************************
++ * Name: write_sequnlock_irqrestore
++ *
++ * Description:
++ *   Release exclusive write access to the seqlock and restore the interrupt
++ *   state to what it was prior to the previous call to write_seqlock_irqsave.
++ *
++ *   The function increments the sequence count to indicate the write is
++ *   complete (making it even).
++ *
++ * Input Parameters:
++ *   seq   - A reference to the seqcount_t object.
++ *   flags - The interrupt state returned by write_seqlock_irqsave.
++ *
++ * Returned Value:
++ *   None.
++ *
++ ****************************************************************************/
++
++void write_sequnlock_irqrestore(FAR seqcount_t *seq, irqstate_t flags)
++{
++  /* Increment the sequence count again to mark write as complete */
++
++  atomic_fetch_add(seq, 1);
++
++  /* Restore interrupt state */
++
++  up_irq_restore(flags);
++}

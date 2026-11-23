@@ -1,0 +1,465 @@
+diff --git a/include/zephyr/devicetree/io-channels.h b/include/zephyr/devicetree/io-channels.h
+index f6dc05ab..1d1da695 100644
+--- a/include/zephyr/devicetree/io-channels.h
++++ b/include/zephyr/devicetree/io-channels.h
+@@ -249,3 +249,122 @@ extern "C" {
+ #endif
+ 
+ #endif  /* ZEPHYR_INCLUDE_DEVICETREE_IO_CHANNELS_H_ */
++
++/**
++ * @brief Get an io-channels specifier output cell at an index
++ *
++ * This macro only works for io-channels specifiers with cells named
++ * "output". Refer to the node's binding to check if necessary.
++ *
++ * Example devicetree fragment:
++ *
++ *     dac1: dac@... {
++ *             compatible = "vnd,dac";
++ *             #io-channel-cells = <1>;
++ *     };
++ *
++ *     dac2: dac@... {
++ *             compatible = "vnd,dac";
++ *             #io-channel-cells = <1>;
++ *     };
++ *
++ *     n: node {
++ *             io-channels = <&dac1 10>, <&dac2 20>;
++ *     };
++ *
++ * Bindings fragment for the vnd,dac compatible:
++ *
++ *    io-channel-cells:
++ *      - output
++ *
++ * Example usage:
++ *
++ *     DT_IO_CHANNELS_OUTPUT_BY_IDX(DT_NODELABEL(n), 0) // 10
++ *     DT_IO_CHANNELS_OUTPUT_BY_IDX(DT_NODELABEL(n), 1) // 20
++ *
++ * @param node_id node identifier for a node with an io-channels property
++ * @param idx logical index into io-channels property
++ * @return the output cell in the specifier at index "idx"
++ * @see DT_PHA_BY_IDX()
++ */
++#define DT_IO_CHANNELS_OUTPUT_BY_IDX(node_id, idx) \
++	DT_PHA_BY_IDX(node_id, io_channels, idx, output)
++
++/**
++ * @brief Get an io-channels specifier output cell by name
++ *
++ * This macro only works for io-channels specifiers with cells named
++ * "output". Refer to the node's binding to check if necessary.
++ *
++ * Example devicetree fragment:
++ *
++ *     dac1: dac@... {
++ *             compatible = "vnd,dac";
++ *             #io-channel-cells = <1>;
++ *     };
++ *
++ *     dac2: dac@... {
++ *             compatible = "vnd,dac";
++ *             #io-channel-cells = <1>;
++ *     };
++ *
++ *     n: node {
++ *             io-channels = <&dac1 10>, <&dac2 20>;
++ *             io-channel-names = "ch1", "ch2";
++ *     };
++ *
++ * Bindings fragment for the vnd,dac compatible:
++ *
++ *    io-channel-cells:
++ *      - output
++ *
++ * Example usage:
++ *
++ *     DT_IO_CHANNELS_OUTPUT_BY_NAME(DT_NODELABEL(n), ch1) // 10
++ *     DT_IO_CHANNELS_OUTPUT_BY_NAME(DT_NODELABEL(n), ch2) // 20
++ *
++ * @param node_id node identifier for a node with an io-channels property
++ * @param name lowercase-and-underscores name of an io-channels element
++ *             as defined by the node's io-channel-names property
++ * @return the output cell in the specifier at the named element
++ * @see DT_PHA_BY_NAME()
++ */
++#define DT_IO_CHANNELS_OUTPUT_BY_NAME(node_id, name) \
++	DT_PHA_BY_NAME(node_id, io_channels, name, output)
++/**
++ * @brief Equivalent to DT_IO_CHANNELS_OUTPUT_BY_IDX(node_id, 0)
++ * @param node_id node identifier for a node with an io-channels property
++ * @return the output cell in the specifier at index 0
++ * @see DT_IO_CHANNELS_OUTPUT_BY_IDX()
++ */
++#define DT_IO_CHANNELS_OUTPUT(node_id) DT_IO_CHANNELS_OUTPUT_BY_IDX(node_id, 0)
++
++/**
++ * @brief Get an output cell from the "DT_DRV_INST(inst)" io-channels
++ *        property at an index
++ * @param inst DT_DRV_COMPAT instance number
++ * @param idx logical index into io-channels property
++ * @return the output cell in the specifier at index "idx"
++ * @see DT_IO_CHANNELS_OUTPUT_BY_IDX()
++ */
++#define DT_INST_IO_CHANNELS_OUTPUT_BY_IDX(inst, idx) \
++	DT_IO_CHANNELS_OUTPUT_BY_IDX(DT_DRV_INST(inst), idx)
++
++/**
++ * @brief Get an output cell from the "DT_DRV_INST(inst)" io-channels
++ *        property by name
++ * @param inst DT_DRV_COMPAT instance number
++ * @param name lowercase-and-underscores name of an io-channels element
++ *             as defined by the instance's io-channel-names property
++ * @return the output cell in the specifier at the named element
++ * @see DT_IO_CHANNELS_OUTPUT_BY_NAME()
++ */
++#define DT_INST_IO_CHANNELS_OUTPUT_BY_NAME(inst, name) \
++	DT_IO_CHANNELS_OUTPUT_BY_NAME(DT_DRV_INST(inst), name)
++
++/**
++ * @brief Equivalent to DT_INST_IO_CHANNELS_OUTPUT_BY_IDX(inst, 0)
++ * @param inst DT_DRV_COMPAT instance number
++ * @return the output cell in the specifier at index 0
++ */
++#define DT_INST_IO_CHANNELS_OUTPUT(inst) DT_INST_IO_CHANNELS_OUTPUT_BY_IDX(inst, 0)
+diff --git a/include/zephyr/drivers/dac.h b/include/zephyr/drivers/dac.h
+index fdb9a611..ef7ec3a7 100644
+--- a/include/zephyr/drivers/dac.h
++++ b/include/zephyr/drivers/dac.h
+@@ -144,6 +144,333 @@ static inline int z_impl_dac_write_value(const struct device *dev,
+  * @}
+  */
+ 
++#include <zephyr/devicetree/io-channels.h>
++
++/**
++ * @brief Devicetree specifier for a DAC channel
++ *
++ * This structure contains information extracted from a devicetree
++ * io-channels property about how to reference a particular DAC channel.
++ */
++struct dac_dt_spec {
++	/**
++	 * Pointer to the device structure for the DAC driver instance
++	 * used by this io-channel.
++	 */
++	const struct device *dev;
++
++	/** DAC channel identifier used by this io-channel. */
++	uint8_t channel_id;
++
++	/** Configuration of the DAC channel. */
++	struct dac_channel_cfg channel_cfg;
++};
++
++/** @cond INTERNAL_HIDDEN */
++
++#define DAC_DT_SPEC_STRUCT(ctlr, output) { \
++		.dev = DEVICE_DT_GET(ctlr), \
++		.channel_id = output, \
++		.channel_cfg = { \
++			.channel_id = output, \
++		}, \
++	}
++
++/** @endcond */
++
++/**
++ * @brief Get DAC io-channel information from devicetree.
++ *
++ * This returns a static initializer for an @p dac_dt_spec structure
++ * given a devicetree node and a channel name. The node must have
++ * the "io-channels" property defined.
++ *
++ * Example devicetree fragment:
++ *
++ * @code{.dts}
++ * / {
++ *     zephyr,user {
++ *         io-channels = <&dac0 10>, <&dac0 20>;
++ *         io-channel-names = "ch1", "ch2";
++ *     };
++ * };
++ *
++ * &dac0 {
++ *    #address-cells = <1>;
++ *    #size-cells = <0>;
++ * };
++ * @endcode
++ *
++ * Example usage:
++ *
++ * @code{.c}
++ * static const struct dac_dt_spec dac_chan0 =
++ *     DAC_DT_SPEC_GET_BY_NAME(DT_PATH(zephyr_user), ch1);
++ * static const struct dac_dt_spec dac_chan1 =
++ *     DAC_DT_SPEC_GET_BY_NAME(DT_PATH(zephyr_user), ch2);
++ *
++ * // Initializes 'dac_chan0' to:
++ * // {
++ * //     .dev = DEVICE_DT_GET(DT_NODELABEL(dac0)),
++ * //     .channel_id = 10,
++ * //     .channel_cfg = {
++ * //         .channel_id = 10,
++ * //     },
++ * // }
++ * // and 'dac_chan1' to:
++ * // {
++ * //     .dev = DEVICE_DT_GET(DT_NODELABEL(dac0)),
++ * //     .channel_id = 20,
++ * //     .channel_cfg = {
++ * //         .channel_id = 20,
++ * //     },
++ * // }
++ * @endcode
++ *
++ * @param node_id Devicetree node identifier.
++ * @param name Channel name.
++ *
++ * @return Static initializer for an dac_dt_spec structure.
++ */
++#define DAC_DT_SPEC_GET_BY_NAME(node_id, name) \
++	DAC_DT_SPEC_STRUCT(DT_IO_CHANNELS_CTLR_BY_NAME(node_id, name), \
++			   DT_IO_CHANNELS_OUTPUT_BY_NAME(node_id, name))
++
++/**
++ * @brief Like DAC_DT_SPEC_GET_BY_NAME(), with a fallback to a default value.
++ *
++ * @param node_id Devicetree node identifier.
++ * @param name Channel name.
++ * @param default_value Fallback value to expand to.
++ *
++ * @return Static initializer for a struct dac_dt_spec for the property,
++ *         or @p default_value if the node or property do not exist.
++ *
++ * @see DAC_DT_SPEC_INST_GET_BY_NAME_OR
++ */
++#define DAC_DT_SPEC_GET_BY_NAME_OR(node_id, name, default_value) \
++	COND_CODE_1(DT_PROP_HAS_NAME(node_id, io_channels, name), \
++		    (DAC_DT_SPEC_GET_BY_NAME(node_id, name)), (default_value))
++
++/** @brief Get DAC io-channel information from a DT_DRV_COMPAT devicetree
++ *         instance by name.
++ *
++ * @see DAC_DT_SPEC_GET_BY_NAME()
++ *
++ * @param inst DT_DRV_COMPAT instance number
++ * @param name Channel name.
++ *
++ * @return Static initializer for an dac_dt_spec structure.
++ */
++#define DAC_DT_SPEC_INST_GET_BY_NAME(inst, name) \
++	DAC_DT_SPEC_GET_BY_NAME(DT_DRV_INST(inst), name)
++
++/**
++ * @brief Like DAC_DT_SPEC_INST_GET_BY_NAME(), with a fallback to a default value.
++ *
++ * @param inst DT_DRV_COMPAT instance number
++ * @param name Channel name.
++ * @param default_value Fallback value to expand to.
++ *
++ * @return Static initializer for a struct dac_dt_spec for the property,
++ *         or @p default_value if the node or property do not exist.
++ *
++ * @see DAC_DT_SPEC_GET_BY_NAME_OR
++ */
++#define DAC_DT_SPEC_INST_GET_BY_NAME_OR(inst, name, default_value) \
++	DAC_DT_SPEC_GET_BY_NAME_OR(DT_DRV_INST(inst), name, default_value)
++
++/**
++ * @brief Get DAC io-channel information from devicetree.
++ *
++ * This returns a static initializer for an @p dac_dt_spec structure
++ * given a devicetree node and a channel index. The node must have
++ * the "io-channels" property defined.
++ *
++ * Example devicetree fragment:
++ *
++ * @code{.dts}
++ * / {
++ *     zephyr,user {
++ *         io-channels = <&dac0 10>, <&dac0 20>;
++ *     };
++ * };
++ *
++ * &dac0 {
++ *    #address-cells = <1>;
++ *    #size-cells = <0>;
++ * };
++ * @endcode
++ *
++ * Example usage:
++ *
++ * @code{.c}
++ * static const struct dac_dt_spec dac_chan0 =
++ *     DAC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 0);
++ * static const struct dac_dt_spec dac_chan1 =
++ *     DAC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 1);
++ *
++ * // Initializes 'dac_chan0' to:
++ * // {
++ * //     .dev = DEVICE_DT_GET(DT_NODELABEL(dac0)),
++ * //     .channel_id = 10,
++ * //     .channel_cfg = {
++ * //         .channel_id = 10,
++ * //     },
++ * // }
++ * // and 'dac_chan1' to:
++ * // {
++ * //     .dev = DEVICE_DT_GET(DT_NODELABEL(dac0)),
++ * //     .channel_id = 20,
++ * //     .channel_cfg = {
++ * //         .channel_id = 20,
++ * //     },
++ * // }
++ * @endcode
++ *
++ * @see DAC_DT_SPEC_GET()
++ *
++ * @param node_id Devicetree node identifier.
++ * @param idx Channel index.
++ *
++ * @return Static initializer for an dac_dt_spec structure.
++ */
++#define DAC_DT_SPEC_GET_BY_IDX(node_id, idx) \
++	DAC_DT_SPEC_STRUCT(DT_IO_CHANNELS_CTLR_BY_IDX(node_id, idx), \
++			   DT_IO_CHANNELS_OUTPUT_BY_IDX(node_id, idx))
++
++/**
++ * @brief Like DAC_DT_SPEC_GET_BY_IDX(), with a fallback to a default value.
++ *
++ * @param node_id Devicetree node identifier.
++ * @param idx Channel index.
++ * @param default_value Fallback value to expand to.
++ *
++ * @return Static initializer for a struct dac_dt_spec for the property,
++ *         or @p default_value if the node or property do not exist.
++ *
++ * @see DAC_DT_SPEC_INST_GET_BY_IDX_OR
++ */
++#define DAC_DT_SPEC_GET_BY_IDX_OR(node_id, idx, default_value) \
++	COND_CODE_1(DT_PROP_HAS_IDX(node_id, io_channels, idx), \
++		    (DAC_DT_SPEC_GET_BY_IDX(node_id, idx)), (default_value))
++
++/** @brief Get DAC io-channel information from a DT_DRV_COMPAT devicetree
++ *         instance.
++ *
++ * @see DAC_DT_SPEC_GET_BY_IDX()
++ *
++ * @param inst DT_DRV_COMPAT instance number
++ * @param idx Channel index.
++ *
++ * @return Static initializer for an dac_dt_spec structure.
++ */
++#define DAC_DT_SPEC_INST_GET_BY_IDX(inst, idx) \
++	DAC_DT_SPEC_GET_BY_IDX(DT_DRV_INST(inst), idx)
++
++/**
++ * @brief Like DAC_DT_SPEC_INST_GET_BY_IDX(), with a fallback to a default value.
++ *
++ * @param inst DT_DRV_COMPAT instance number
++ * @param idx Channel index.
++ * @param default_value Fallback value to expand to.
++ *
++ * @return Static initializer for a struct dac_dt_spec for the property,
++ *         or @p default_value if the node or property do not exist.
++ *
++ * @see DAC_DT_SPEC_GET_BY_IDX_OR
++ */
++#define DAC_DT_SPEC_INST_GET_BY_IDX_OR(inst, idx, default_value) \
++	DAC_DT_SPEC_GET_BY_IDX_OR(DT_DRV_INST(inst), idx, default_value)
++/**
++ * @brief Equivalent to DAC_DT_SPEC_GET_BY_IDX(node_id, 0).
++ *
++ * @see DAC_DT_SPEC_GET_BY_IDX()
++ *
++ * @param node_id Devicetree node identifier.
++ *
++ * @return Static initializer for an dac_dt_spec structure.
++ */
++#define DAC_DT_SPEC_GET(node_id) DAC_DT_SPEC_GET_BY_IDX(node_id, 0)
++
++/**
++ * @brief Equivalent to DAC_DT_SPEC_GET_BY_IDX_OR(node_id, 0, default_value).
++ *
++ * @see DAC_DT_SPEC_GET_BY_IDX_OR()
++ *
++ * @param node_id Devicetree node identifier.
++ * @param default_value Fallback value to expand to.
++ *
++ * @return Static initializer for a struct dac_dt_spec for the property,
++ *         or @p default_value if the node or property do not exist.
++ */
++#define DAC_DT_SPEC_GET_OR(node_id, default_value) \
++	DAC_DT_SPEC_GET_BY_IDX_OR(node_id, 0, default_value)
++
++/**
++ * @brief Equivalent to DAC_DT_SPEC_INST_GET_BY_IDX(inst, 0).
++ *
++ * @see DAC_DT_SPEC_GET()
++ *
++ * @param inst DT_DRV_COMPAT instance number
++ *
++ * @return Static initializer for an dac_dt_spec structure.
++ */
++#define DAC_DT_SPEC_INST_GET(inst) DAC_DT_SPEC_GET(DT_DRV_INST(inst))
++
++/**
++ * @brief Equivalent to DAC_DT_SPEC_INST_GET_BY_IDX_OR(inst, 0, default).
++ *
++ * @see DAC_DT_SPEC_GET_OR()
++ *
++ * @param inst DT_DRV_COMPAT instance number
++ * @param default_value Fallback value to expand to.
++ *
++ * @return Static initializer for a struct dac_dt_spec for the property,
++ *         or @p default_value if the node or property do not exist.
++ */
++#define DAC_DT_SPEC_INST_GET_OR(inst, default_value) \
++	DAC_DT_SPEC_GET_OR(DT_DRV_INST(inst), default_value)
++
++/**
++ * @brief Validate that the DAC device is ready.
++ *
++ * @param spec DAC specification from devicetree
++ *
++ * @return true if the DAC device is ready for use and false otherwise.
++ */
++static inline bool dac_is_ready_dt(const struct dac_dt_spec *spec)
++{
++	return device_is_ready(spec->dev);
++}
++
++/**
++ * @brief Configure a DAC channel from a struct dac_dt_spec.
++ *
++ * @param spec DAC specification from devicetree.
++ *
++ * @retval 0 On success.
++ * @retval -EINVAL If a parameter with an invalid value has been provided.
++ */
++static inline int dac_channel_setup_dt(const struct dac_dt_spec *spec)
++{
++	return dac_channel_setup(spec->dev, &spec->channel_cfg);
++}
++
++/**
++ * @brief Write a value to a DAC channel from a struct dac_dt_spec.
++ *
++ * @param spec DAC specification from devicetree.
++ * @param value Data to be written to DAC output register.
++ *
++ * @retval 0 On success.
++ * @retval -EINVAL If a parameter with an invalid value has been provided.
++ */
++static inline int dac_write_value_dt(const struct dac_dt_spec *spec, uint32_t value)
++{
++	return dac_write_value(spec->dev, spec->channel_id, value);
++}
++
+ #ifdef __cplusplus
+ }
+ #endif

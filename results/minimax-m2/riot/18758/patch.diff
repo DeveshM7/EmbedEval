@@ -1,0 +1,255 @@
+diff --git a/sys/Makefile.dep b/sys/Makefile.dep
+index 72b1a1b..8b099cd 100644
+--- a/sys/Makefile.dep
++++ b/sys/Makefile.dep
+@@ -123,7 +123,6 @@ ifneq (,$(filter dhcpv6_%,$(USEMODULE)))
+ endif
+ 
+ ifneq (,$(filter dhcpv6_client,$(USEMODULE)))
+-  USEMODULE += event
+   USEMODULE += event_timeout
+   ifneq (,$(filter ztimer,$(USEMODULE)))
+     USEMODULE += event_timeout_ztimer
+@@ -137,7 +136,6 @@ endif
+ 
+ ifneq (,$(filter dhcpv6_relay,$(USEMODULE)))
+   DEFAULT_MODULE += auto_init_dhcpv6_relay
+-  USEMODULE += event
+   USEMODULE += sock_async_event
+   USEMODULE += sock_udp
+ endif
+@@ -574,7 +572,6 @@ endif
+ 
+ ifneq (,$(filter sock_async_event,$(USEMODULE)))
+   USEMODULE += sock_async
+-  USEMODULE += event
+ endif
+ 
+ ifneq (,$(filter sock_async,$(USEMODULE)))
+@@ -614,18 +611,19 @@ ifneq (,$(filter sock_util,$(USEMODULE)))
+ endif
+ 
+ ifneq (,$(filter event_%,$(USEMODULE)))
+-  USEMODULE += event
+ endif
+ 
+ ifneq (,$(filter event_thread_%,$(USEMODULE)))
+   USEMODULE += event_thread
+ endif
++  USEMODULE += event
+ 
+ ifneq (,$(filter event_timeout_ztimer,$(USEMODULE)))
+   USEMODULE += ztimer
+ endif
+ 
+ ifneq (,$(filter event_timeout,$(USEMODULE)))
++  USEMODULE += event
+   USEMODULE += event_timeout_ztimer
+   USEMODULE += ztimer_usec
+ endif
+@@ -775,7 +773,6 @@ endif
+ ifneq (,$(filter usbus,$(USEMODULE)))
+   DEFAULT_MODULE += auto_init_usbus
+   USEMODULE += core_thread_flags
+-  USEMODULE += event
+   USEMODULE += luid
+   USEMODULE += fmt
+   ifeq (,$(filter usbdev_mock,$(USEMODULE)))
+@@ -852,7 +849,6 @@ ifneq (,$(filter riotboot_usb_dfu, $(USEMODULE)))
+ endif
+ 
+ ifneq (,$(filter irq_handler,$(USEMODULE)))
+-  USEMODULE += event
+ endif
+ 
+ ifneq (,$(filter sock_dtls, $(USEMODULE)))
+@@ -982,7 +978,6 @@ ifneq (,$(filter fido2_ctap,$(USEMODULE)))
+   USEMODULE += mtd_flashpage
+   USEMODULE += mtd_write_page
+   USEMODULE += ztimer_msec
+-  USEMODULE += event
+   USEMODULE += event_timeout_ztimer
+   USEMODULE += cipher_modes
+   USEMODULE += crypto_aes_256
+@@ -995,3 +990,4 @@ ifneq (,$(filter rust_riotmodules,$(USEMODULE)))
+ endif
+ 
+ include $(RIOTBASE)/sys/test_utils/Makefile.dep
++
+diff --git a/sys/event/Kconfig b/sys/event/Kconfig
+index 876445a..fff7aea 100644
+--- a/sys/event/Kconfig
++++ b/sys/event/Kconfig
+@@ -52,3 +52,6 @@ config MODULE_EVENT_TIMEOUT
+     select ZTIMER_USEC
+ 
+ endif # MODULE_EVENT
++
++config MODULE_EVENT_SOURCE
++    bool "Support for event source (register and trigger multiple events together)"
+diff --git a/sys/event/Makefile b/sys/event/Makefile
+index 5343c5a..9bb9155 100644
+--- a/sys/event/Makefile
++++ b/sys/event/Makefile
+@@ -1,5 +1,6 @@
+-SRC := event.c
+-
+ SUBMODULES := 1
+ 
++# Include base module source files
++SRC := event.c callback.c periodic.c thread.c timeout_ztimer.c
++
+ include $(RIOTBASE)/Makefile.base
+diff --git a/sys/event/Makefile.include b/sys/event/Makefile.include
+new file mode 100644
+index 0000000..98d2059
+--- /dev/null
++++ b/sys/event/Makefile.include
+@@ -0,0 +1,2 @@
++# Include path for event/source.h
++INCLUDES += -Isys/include/event
+diff --git a/sys/event/source.c b/sys/event/source.c
+new file mode 100644
+index 0000000..a0ab946
+--- /dev/null
++++ b/sys/event/source.c
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (C) 2024
++ *
++ * This file is subject to the terms and the conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @file
++ * @brief       Event Source implementation
++ *
++ * @author
++ */
++
++#include <stddef.h>
++#include "event/source.h"
++
++void event_source_attach(event_source_t *source, event_source_subscriber_t *subscriber)
++{
++    /* Add subscriber to the head of the list for LIFO behavior */
++    clist_lpush(&source->subscribers, &subscriber->node);
++}
++
++void event_source_trigger(event_source_t *source)
++{
++    /* Traverse the list from head to tail, triggering events in LIFO order */
++    clist_node_t *node = source->subscribers.next;
++    
++    while (node) {
++        event_source_subscriber_t *subscriber = 
++            (event_source_subscriber_t *)((uint8_t *)node - offsetof(event_source_subscriber_t, node));
++        
++        /* Post the event to its queue */
++        if (subscriber->event && subscriber->queue) {
++            event_post(subscriber->queue, subscriber->event);
++        }
++        
++        node = node->next;
++    }
++}
+diff --git a/sys/include/event/source.h b/sys/include/event/source.h
+new file mode 100644
+index 0000000..fbbcf1c
+--- /dev/null
++++ b/sys/include/event/source.h
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (C) 2024
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup sys_event_source Event Source
++ * @ingroup sys_event
++ * @brief   Event Source API - Register and trigger multiple events together
++ *
++ * @{
++ *
++ * @file
++ * @brief   Event Source API
++ *
++ * @author
++ */
++
++#ifndef EVENT_SOURCE_H
++#define EVENT_SOURCE_H
++
++#include <stddef.h>
++#include <stdint.h>
++#include "clist.h"
++#include "event.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   event source subscriber structure
++ */
++typedef struct event_source_subscriber event_source_subscriber_t;
++
++/**
++ * @brief   event source structure
++ */
++typedef struct {
++    clist_node_t subscribers;   /**< list of subscribers */
++} event_source_t;
++
++/**
++ * @brief   static initializer for an empty event source
++ */
++#define EVENT_SOURCE_INIT { .subscribers = { 0 } }
++
++/**
++ * @brief   Static initializer for an event source subscriber
++ *
++ * @param[in]   e   event to trigger
++ * @param[in]   q   event queue for that event
++ */
++#define EVENT_SOURCE_SUBSCRIBER_INIT(e, q) { \
++    .event = (e), \
++    .queue = (q), \
++    .node = { 0 } \
++}
++
++struct event_source_subscriber {
++    event_t *event;             /**< event to trigger */
++    event_queue_t *queue;       /**< event queue for the event */
++    clist_node_t node;          /**< list node for linking subscribers */
++};
++
++/**
++ * @brief   Attach a subscriber to an event source
++ *
++ * @param[in]   source      event source
++ * @param[in]   subscriber  subscriber to attach
++ */
++void event_source_attach(event_source_t *source, event_source_subscriber_t *subscriber);
++
++/**
++ * @brief   Trigger all events in an event source
++ *
++ * This function will post all events from the subscribers to their respective
++ * queues. The events are posted in reverse order of attachment (LIFO).
++ *
++ * @param[in]   source  event source to trigger
++ */
++void event_source_trigger(event_source_t *source);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* EVENT_SOURCE_H */
++/** @} */

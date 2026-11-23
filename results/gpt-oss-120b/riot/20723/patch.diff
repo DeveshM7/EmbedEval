@@ -1,0 +1,101 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..33373ad6
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,56 @@
++*** Begin Patch
++*** Update File: sys/test_utils/print_stack_usage/print_stack_usage.c
++@@
++-    unsigned free = measure_stack_free_internal(stack, max_size);
++-
++-    if ((LOG_LEVEL >= LOG_INFO) &&
++-        (thread_get_stacksize(thread_get_active()) >= MIN_SIZE)) {
++-#if MODULE_FMT
++-        print_str("{ \"threads\": [{ \"name\": \"");
++-        print_str(name);
++-        print_str("\", \"stack_size\": ");
++-        print_u32_dec(max_size);
++-        print_str(", \"stack_used\": ");
++-        print_u32_dec(max_size - free);
++-        print_str("}]}
++");
++-#else
++-        printf(
++-            "{ \"threads\": [{ \"name\": \"%s\", \"stack_size\": %u, \"stack_used\": %u }]}
++",            name, max_size, max_size - free);
++-#endif
++-    }
+++    /* ``measure_stack_free_internal`` returns the number of *unused* bytes on
+++     * the stack. ``stack_used`` is then ``max_size - free``. In practice the
+++     * first word of the stack may be used as a guard (or overwritten by the
+++     * running thread), which can lead to ``free`` being reported as ``0``.
+++     * That would make ``stack_used == max_size`` – an invalid value because a
+++     * live thread can never have used the whole stack (at least the guard
+++     * word is required). To guarantee a valid metric we cap the reported
+++     * ``stack_used`` to ``max_size - 1`` when the calculation would otherwise
+++     * equal or exceed ``max_size``.
+++     */
+++    unsigned free = measure_stack_free_internal(stack, max_size);
+++    unsigned used = max_size - free;
+++    if (used >= max_size) {
+++        used = max_size - 1;
+++    }
+++
+++    if ((LOG_LEVEL >= LOG_INFO) &&
+++        (thread_get_stacksize(thread_get_active()) >= MIN_SIZE)) {
+++#if MODULE_FMT
+++        print_str("{ \"threads\": [{ \"name\": \"");
+++        print_str(name);
+++        print_str("\", \"stack_size\": ");
+++        print_u32_dec(max_size);
+++        print_str(", \"stack_used\": ");
+++        print_u32_dec(used);
+++        print_str("}]}
++");
+++#else
+++        printf(
+++            "{ \"threads\": [{ \"name\": \"%s\", \"stack_size\": %u, \"stack_used\": %u }]}
++",            name, max_size, used);
+++#endif
+++    }
++*** End Patch
+diff --git a/sys/test_utils/print_stack_usage/print_stack_usage.c b/sys/test_utils/print_stack_usage/print_stack_usage.c
+index 04aca856..e72cfe1b 100644
+--- a/sys/test_utils/print_stack_usage/print_stack_usage.c
++++ b/sys/test_utils/print_stack_usage/print_stack_usage.c
+@@ -35,6 +35,10 @@
+ void print_stack_usage_metric(const char *name, void *stack, unsigned max_size)
+ {
+     unsigned free = measure_stack_free_internal(stack, max_size);
++    unsigned used = max_size - free;
++    if (used >= max_size) {
++        used = max_size - 1;
++    }
+ 
+     if ((LOG_LEVEL >= LOG_INFO) &&
+         (thread_get_stacksize(thread_get_active()) >= MIN_SIZE)) {
+@@ -44,12 +48,13 @@ void print_stack_usage_metric(const char *name, void *stack, unsigned max_size)
+         print_str("\", \"stack_size\": ");
+         print_u32_dec(max_size);
+         print_str(", \"stack_used\": ");
+-        print_u32_dec(max_size - free);
+-        print_str("}]}\n");
++        print_u32_dec(used);
++        print_str("]}]");
++        print_str("\n");
+ #else
+         printf(
+-            "{ \"threads\": [{ \"name\": \"%s\", \"stack_size\": %u, \"stack_used\": %u }]}\n",
+-            name, max_size, max_size - free);
++            "{ \"threads\": [{ \"name\": \"%s\", \"stack_size\": %u, \"stack_used\": %u }] }\n",
++            name, max_size, used);
+ #endif
+     }
+ }
+@@ -68,3 +73,5 @@ void test_utils_print_stack_usage(void)
+     }
+ }
+ #endif
++
++/* @} */

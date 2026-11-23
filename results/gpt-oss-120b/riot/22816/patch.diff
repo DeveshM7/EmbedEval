@@ -1,0 +1,74 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..2332b596
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,34 @@
++*** Begin Patch
++*** Update File: sys/net/application_layer/nanocoap/nanocoap.c
++@@
++-int coap_get_block(coap_pkt_t *pkt, coap_block1_t *block, uint16_t option)
++-{
++-    block->blknum = 0;
++-    block->more = coapi_get_blockopt(pkt, option, &block->blknum, &block->szx);
++-    block->offset = block->blknum << (block->szx + 4);
++-
++-    return block->more >= 0;
++-}
+++int coap_get_block(coap_pkt_t *pkt, coap_block1_t *block, uint16_t option)
+++{
+++    uint32_t blknum = 0;
+++    uint8_t szx = 0;
+++    int more = coap_get_blockopt(pkt, option, &blknum, &szx);
+++    if (more < 0) {
+++        /* No block option present – fill defaults */
+++        block->blknum = 0;
+++        block->szx = CONFIG_NANOCOAP_BLOCKSIZE_DEFAULT;
+++        block->offset = 0;
+++        block->more = 0; /* false */
+++        return 0;
+++    }
+++    if (szx > COAP_BLOCKWISE_SZX_MAX) {
+++        return -EBADMSG;
+++    }
+++    block->blknum = blknum;
+++    block->szx = szx;
+++    block->offset = blknum << (szx + 4);
+++    block->more = more ? 1 : 0;
+++    return 1;
+++}
++*** End Patch
+diff --git a/sys/net/application_layer/nanocoap/nanocoap.c b/sys/net/application_layer/nanocoap/nanocoap.c
+index edb27938..711d4338 100644
+--- a/sys/net/application_layer/nanocoap/nanocoap.c
++++ b/sys/net/application_layer/nanocoap/nanocoap.c
+@@ -1153,11 +1153,24 @@ static unsigned _slicer2blkopt(coap_block_slicer_t *slicer, bool more)
+ 
+ int coap_get_block(coap_pkt_t *pkt, coap_block1_t *block, uint16_t option)
+ {
+-    block->blknum = 0;
+-    block->more = coap_get_blockopt(pkt, option, &block->blknum, &block->szx);
+-    block->offset = block->blknum << (block->szx + 4);
+-
+-    return block->more >= 0;
++    uint32_t blknum = 0;
++    uint8_t szx = 0;
++    int more = coap_get_blockopt(pkt, option, &blknum, &szx);
++    if (more < 0) {
++        block->blknum = 0;
++        block->szx = CONFIG_NANOCOAP_BLOCKSIZE_DEFAULT;
++        block->offset = 0;
++        block->more = 0;
++        return 0;
++    }
++    if (szx > COAP_BLOCKWISE_SZX_MAX) {
++        return -EBADMSG;
++    }
++    block->blknum = blknum;
++    block->szx = szx;
++    block->offset = blknum << (szx + 4);
++    block->more = more ? 1 : 0;
++    return 1;
+ }
+ 
+ int coap_put_block1_ok(coap_builder_t *state, coap_block1_t *block1)

@@ -1,0 +1,157 @@
+diff --git a/subsys/net/lib/sockets/sockets_tls.c b/subsys/net/lib/sockets/sockets_tls.c
+index 6f4919dc..20a941c7 100644
+--- a/subsys/net/lib/sockets/sockets_tls.c
++++ b/subsys/net/lib/sockets/sockets_tls.c
+@@ -1464,10 +1464,130 @@ static int tls_mbedtls_init(struct tls_context *context, bool is_server)
+ 	return 0;
+ }
+ 
++static int tls_sec_tag_list_validate(const sec_tag_t *sec_tag_list,
++				      int sec_tag_cnt)
++{
++	struct tls_credential *cred;
++	sec_tag_t tag;
++	int i, err = 0;
++	bool tag_found;
++
++	credentials_lock();
++
++	for (i = 0; i < sec_tag_cnt; i++) {
++		tag = sec_tag_list[i];
++		cred = NULL;
++		tag_found = false;
++
++		while ((cred = credential_next_get(tag, cred)) != NULL) {
++			tag_found = true;
++
++			switch (cred->type) {
++			case TLS_CREDENTIAL_PSK:
++			{
++				struct tls_credential *psk_id =
++					credential_get(tag, TLS_CREDENTIAL_PSK_ID);
++				if (!psk_id) {
++					err = -EINVAL;
++					goto exit;
++				}
++				break;
++			}
++#if defined(MBEDTLS_X509_CRT_PARSE_C)
++			case TLS_CREDENTIAL_CA_CERTIFICATE:
++			{
++				mbedtls_x509_crt ca_cert;
++				int ret;
++
++				mbedtls_x509_crt_init(&ca_cert);
++				if (crt_is_pem(cred->buf, cred->len)) {
++					ret = mbedtls_x509_crt_parse(&ca_cert,
++								     cred->buf,
++								     cred->len);
++				} else {
++					ret = mbedtls_x509_crt_parse_der_nocopy(&ca_cert,
++									    cred->buf,
++									    cred->len);
++				}
++				mbedtls_x509_crt_free(&ca_cert);
++				if (ret != 0) {
++					err = -EINVAL;
++					goto exit;
++				}
++				break;
++			}
++
++			case TLS_CREDENTIAL_PUBLIC_CERTIFICATE:
++			{
++				mbedtls_x509_crt own_cert;
++				int ret;
++
++				mbedtls_x509_crt_init(&own_cert);
++				if (crt_is_pem(cred->buf, cred->len)) {
++					ret = mbedtls_x509_crt_parse(&own_cert,
++								     cred->buf,
++								     cred->len);
++				} else {
++					ret = mbedtls_x509_crt_parse_der_nocopy(&own_cert,
++									    cred->buf,
++									    cred->len);
++				}
++				mbedtls_x509_crt_free(&own_cert);
++				if (ret != 0) {
++					err = -EINVAL;
++					goto exit;
++				}
++				break;
++			}
++
++			case TLS_CREDENTIAL_PRIVATE_KEY:
++			{
++				mbedtls_pk_context priv_key;
++				int ret;
++
++				mbedtls_pk_init(&priv_key);
++				ret = mbedtls_pk_parse_key(&priv_key, cred->buf,
++							   cred->len, NULL, 0,
++							   tls_ctr_drbg_random,
++							   NULL);
++				mbedtls_pk_free(&priv_key);
++				if (ret != 0) {
++					err = -EINVAL;
++					goto exit;
++				}
++				break;
++			}
++#endif /* MBEDTLS_X509_CRT_PARSE_C */
++
++			case TLS_CREDENTIAL_PSK_ID:
++				/* Ignore PSK ID - it will be used together
++				 * with PSK
++				 */
++				break;
++
++			default:
++				err = -EINVAL;
++				goto exit;
++			}
++		}
++
++		if (!tag_found) {
++			err = -ENOENT;
++			goto exit;
++		}
++	}
++
++exit:
++	credentials_unlock();
++
++	return err;
++}
++
+ static int tls_opt_sec_tag_list_set(struct tls_context *context,
+ 				    const void *optval, socklen_t optlen)
+ {
+ 	int sec_tag_cnt;
++	int err;
+ 
+ 	if (!optval) {
+ 		return -EINVAL;
+@@ -1483,12 +1603,21 @@ static int tls_opt_sec_tag_list_set(struct tls_context *context,
+ 		return -EINVAL;
+ 	}
+ 
++#if defined(MBEDTLS_X509_CRT_PARSE_C)
++	/* Validate the credentials before accepting the sec_tag_list */
++	err = tls_sec_tag_list_validate(optval, sec_tag_cnt);
++	if (err != 0) {
++		return err;
++	}
++#endif
++
+ 	memcpy(context->options.sec_tag_list.sec_tags, optval, optlen);
+ 	context->options.sec_tag_list.sec_tag_count = sec_tag_cnt;
+ 
+ 	return 0;
+ }
+ 
++
+ static int sock_opt_protocol_get(struct tls_context *context,
+ 				 void *optval, socklen_t *optlen)
+ {

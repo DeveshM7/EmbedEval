@@ -1,0 +1,1356 @@
+diff --git a/complete_base64.c b/complete_base64.c
+new file mode 100644
+index 00000000..9f343ea4
+--- /dev/null
++++ b/complete_base64.c
+@@ -0,0 +1,308 @@
++/*
++ * SPDX-FileCopyrightText: 2014 HAW Hamburg
++ * SPDX-FileCopyrightText: 2014 Martin Landsmann <Martin.Landsmann@HAW-Hamburg.de>
++ * SPDX-FileCopyrightText: 2020 Otto-von-Guericke-Universität Magdeburg
++ * SPDX-License-Identifier: LGPL-2.1-only
++ */
++
++/**
++ * @ingroup sys_base64
++ * @{
++ * @file
++ * @brief   Functions to encode and decode base64
++ *
++ * @author  Martin Landsmann <Martin.Landsmann@HAW-Hamburg.de>
++ * @author  Marian Buschsieweke <marian.buschsieweke@ovgu.de>
++ * @}
++ *
++ */
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "base64.h"
++#include "kernel_defines.h"
++
++#define BASE64_CAPITAL_UPPER_BOUND     (25)     /**< base64 'Z'           */
++#define BASE64_SMALL_UPPER_BOUND       (51)     /**< base64 'z'           */
++#define BASE64_NUMBER_UPPER_BOUND      (61)     /**< base64 '9'           */
++#define BASE64_PLUS                    (62)     /**< base64 '+'           */
++#define BASE64_MINUS                   (62)     /**< base64 '-'           */
++#define BASE64_SLASH                   (63)     /**< base64 '/'           */
++#define BASE64_UNDERLINE               (63)     /**< base64 '_'           */
++#define BASE64_EQUALS                  (0xFE)   /**< no base64 symbol '=' */
++#define BASE64_NOT_DEFINED             (0xFF)   /**< no base64 symbol     */
++
++/*
++ * returns the corresponding ascii symbol value for the given base64 code
++ */
++static char getsymbol(uint8_t code, bool urlsafe)
++{
++    if (!IS_ACTIVE(MODULE_BASE64URL)) {
++        urlsafe = false;
++    }
++
++    if (urlsafe && code == BASE64_UNDERLINE) {
++        return '_';
++    }
++
++    if (urlsafe && code == BASE64_MINUS) {
++        return '-';
++    }
++
++    if (!urlsafe && code == BASE64_SLASH) {
++        return '/';
++    }
++
++    if (!urlsafe && code == BASE64_PLUS) {
++        return '+';
++    }
++
++    if (code <= BASE64_CAPITAL_UPPER_BOUND) {
++        return (code + 'A');
++    }
++
++    if (code <= BASE64_SMALL_UPPER_BOUND) {
++        return (code + ('z' - BASE64_SMALL_UPPER_BOUND));
++    }
++
++    if (code <= BASE64_NUMBER_UPPER_BOUND) {
++        return (code + ('9' - BASE64_NUMBER_UPPER_BOUND));
++    }
++
++    return (char)BASE64_NOT_DEFINED;
++}
++
++static void encode_three_bytes(uint8_t *dest,
++                               uint8_t b1, uint8_t b2, uint8_t b3,
++                               bool urlsafe)
++{
++    dest[0] = getsymbol(b1 >> 2, urlsafe);
++    dest[1] = getsymbol(((b1 & 0x03) << 4) | (b2 >> 4), urlsafe);
++    dest[2] = getsymbol(((b2 & 0x0f) << 2) | (b3 >> 6), urlsafe);
++    dest[3] = getsymbol(b3 & 0x3f, urlsafe);
++}
++
++static int base64_encode_base(const void *data_in, size_t data_in_size,
++                              void *base64_out, size_t *base64_out_size,
++                              bool urlsafe)
++{
++    const uint8_t padding = urlsafe ? 0 : '=';
++    const uint8_t *in = data_in;
++    const uint8_t *end = in + data_in_size;
++    uint8_t *out = base64_out;
++    size_t required_size = base64_estimate_encode_size(data_in_size);
++
++    /* Check for overflow in size calculation */
++    if (required_size < data_in_size) {
++        return BASE64_ERROR_OVERFLOW;
++    }
++
++    if (in == NULL) {
++        return BASE64_ERROR_DATA_IN;
++    }
++
++    if (base64_out == NULL) {
++        return BASE64_ERROR_BUFFER_OUT;
++    }
++
++    if (data_in_size == 0) {
++        *base64_out_size = 0;
++        return BASE64_SUCCESS;
++    }
++
++    if (*base64_out_size < required_size) {
++        *base64_out_size = required_size;
++        return BASE64_ERROR_BUFFER_OUT_SIZE;
++    }
++
++    *base64_out_size = required_size;
++
++    while (in < end - 2) {
++        encode_three_bytes(out, in[0], in[1], in[2], urlsafe);
++        out += 4;
++        in += 3;
++    }
++
++    if (in == end) {
++        /* data_in_size is multiple of 3, we're done */
++        return BASE64_SUCCESS;
++    }
++
++    if (in + 1 == end) {
++        /* One byte still left to decode, set other two input bytes to zero */
++        encode_three_bytes(out, in[0], 0, 0, urlsafe);
++        /* Replace last two bytes with "=" to signal corresponding input bytes
++         * didn't exist */
++        out[2] = out[3] = padding;
++
++        /* padding is not required for urlsafe application */
++        if (urlsafe) {
++            *base64_out_size -= 2;
++        }
++        return BASE64_SUCCESS;
++    }
++
++    /* Final case: 2 bytes remain for encoding, use zero as third input */
++    encode_three_bytes(out, in[0], in[1], 0, urlsafe);
++    /* Replace last output with "=" to signal corresponding input byte didn't exit */
++    out[3] = padding;
++
++    /* padding is not required for urlsafe application */
++    if (urlsafe) {
++        *base64_out_size -= 1;
++    }
++
++    return BASE64_SUCCESS;
++}
++
++int base64_encode(const void *data_in, size_t data_in_size,
++                  void *base64_out, size_t *base64_out_size)
++{
++    return base64_encode_base(data_in, data_in_size, base64_out, base64_out_size, false);
++}
++
++#if IS_ACTIVE(MODULE_BASE64URL)
++int base64url_encode(const void *data_in, size_t data_in_size,
++                     void *base64_out, size_t *base64_out_size)
++{
++    return base64_encode_base(data_in, data_in_size, base64_out, base64_out_size, true);
++}
++#endif
++
++/*
++ *  returns the corresponding base64 code for the given ascii symbol
++ */
++static uint8_t getcode(char symbol)
++{
++    if (symbol == '/') {
++        return BASE64_SLASH;
++    }
++
++    if (symbol == '_') {
++        return BASE64_UNDERLINE;
++    }
++
++    if (symbol == '+') {
++        return BASE64_PLUS;
++    }
++
++    if (symbol == '-') {
++        return BASE64_MINUS;
++    }
++
++    if (symbol == '=') {
++        /* indicates a padded base64 end */
++        return BASE64_EQUALS;
++    }
++
++    if (symbol < '0') {
++        /* indicates that the given symbol is not base64 and should be ignored */
++        return BASE64_NOT_DEFINED;
++    }
++
++    if (symbol <= '9' && symbol >= '0') {
++        return (symbol + (BASE64_NUMBER_UPPER_BOUND - '9'));
++    }
++
++    if (symbol <= 'Z' && symbol >= 'A') {
++        return (symbol - 'A');
++    }
++
++    if (symbol <= 'z' && symbol >= 'a') {
++        return (symbol + (BASE64_SMALL_UPPER_BOUND - 'z'));
++    }
++
++    /* indicates that the given symbol is not base64 and should be ignored */
++    return BASE64_NOT_DEFINED;
++}
++
++static void decode_four_codes(uint8_t *out, const uint8_t *src)
++{
++    out[0] = (src[0] << 2) | (src[1] >> 4);
++    out[1] = (src[1] << 4) | (src[2] >> 2);
++    out[2] = (src[2] << 6) | src[3];
++}
++
++int base64_decode(const void *base64_in, size_t base64_in_size,
++                  void *data_out, size_t *data_out_size)
++{
++    uint8_t *out = data_out;
++    const uint8_t *in = base64_in;
++    size_t required_size = base64_estimate_decode_size(base64_in_size);
++    
++    /* Check for overflow in size calculation */
++    if (required_size < base64_in_size) {
++        return BASE64_ERROR_OVERFLOW;
++    }
++
++    if (in == NULL) {
++        return BASE64_ERROR_DATA_IN;
++    }
++
++    if (base64_in_size == 0) {
++        *data_out_size = 0;
++        return BASE64_SUCCESS;
++    }
++
++    if (data_out == NULL) {
++        return BASE64_ERROR_BUFFER_OUT;
++    }
++
++    if (*data_out_size < required_size) {
++        *data_out_size = required_size;
++        return BASE64_ERROR_BUFFER_OUT_SIZE;
++    }
++
++    const uint8_t *end = in + base64_in_size;
++    uint8_t decode_buf[4];
++
++    while (1) {
++        size_t decode_buf_fill = 0;
++        /* Try to load 4 codes into the decode buffer, skipping invalid symbols
++         * (such as inserted newlines commonly used to improve readability) */
++        do {
++            /* Reached end of input before 4 codes were loaded, handle each
++             * possible decode buffer fill level individually: */
++            if (in == end) {
++                switch (decode_buf_fill) {
++                    case 0:
++                        /* no data in decode buffer -->nothing to do */
++                        break;
++                    case 1:
++                        /* an input size of 4 * n + 1 cannot happen, (even when
++                         * dropping the "=" chars) */
++                        return BASE64_ERROR_DATA_IN_SIZE;
++                    case 2:
++                        /* Got two base64 chars, or one byte of output data.
++                         * The just fill with zero codes and ignore the two
++                         * additionally decoded bytes */
++                        decode_buf[2] = decode_buf[3] = 0;
++                        decode_four_codes(out, decode_buf);
++                        out += 1;
++                        break;
++                    case 3:
++                        /* Got three base64 chars or 2 bytes of output data.
++                         * Again, just fill with zero bytes and ignore the
++                         * additionally decoded byte */
++                        decode_buf[3] = 0;
++                        decode_four_codes(out, decode_buf);
++                        out += 2;
++                        break;
++                }
++                *data_out_size = (uintptr_t)out - (uintptr_t)data_out;
++                return BASE64_SUCCESS;
++            }
++            switch (decode_buf[decode_buf_fill] = getcode(*in++)) {
++                case BASE64_NOT_DEFINED:
++                case BASE64_EQUALS:
++                    continue;
++            }
++            decode_buf_fill++;
++        }
++        while (decode_buf_fill < 4);
++
++        decode_four_codes(out, decode_buf);
++        out += 3;
++    }
++}
+diff --git a/fix_base64 b/fix_base64
+new file mode 100755
+index 0000000000000000000000000000000000000000..63018821cb0df292879fce94fdde7990cf5293af
+GIT binary patch
+literal 16008
+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
+BYYG4W
+
+literal 0
+HcmV?d00001
+
+diff --git a/fix_base64_manual b/fix_base64_manual
+new file mode 100755
+index 0000000000000000000000000000000000000000..1bcda0e578037bf052596835cf5d29834245233d
+GIT binary patch
+literal 16304
+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
+AQvd(}
+
+literal 0
+HcmV?d00001
+
+diff --git a/manual_fix.c b/manual_fix.c
+new file mode 100644
+index 00000000..f69e4432
+--- /dev/null
++++ b/manual_fix.c
+@@ -0,0 +1,50 @@
++// Manually write the fixed functions
++int main(void) {
++    FILE *f = fopen("/testbed/sys/base64/base64.c", "w");
++    
++    if (!f) {
++        printf("Cannot open file\n");
++        return 1;
++    }
++    
++    // Write the include statements and helper functions from the original
++    fprintf(f, "/*\n");
++    fprintf(f, " * SPDX-FileCopyrightText: 2014 HAW Hamburg\n");
++    fprintf(f, " * SPDX-FileCopyrightText: 2014 Martin Landsmann <Martin.Landsmann@HAW-Hamburg.de>\n");
++    fprintf(f, " * SPDX-FileCopyrightText: 2020 Otto-von-Guericke-Universität Magdeburg\n");
++    fprintf(f, " * SPDX-License-Identifier: LGPL-2.1-only\n");
++    fprintf(f, " */\n");
++    fprintf(f, "\n");
++    fprintf(f, "/**\n");
++    fprintf(f, " * @ingroup sys_base64\n");
++    fprintf(f, " * @{\n");
++    fprintf(f, " * @file\n");
++    fprintf(f, " * @brief   Functions to encode and decode base64\n");
++    fprintf(f, " *\n");
++    fprintf(f, " * @author  Martin Landsmann <Martin.Landsmann@HAW-Hamburg.de>\n");
++    fprintf(f, " * @author  Marian Buschsieweke <marian.buschsieweke@ovgu.de>\n");
++    fprintf(f, " * @}\n");
++    fprintf(f, " *\n");
++    fprintf(f, " */\n");
++    fprintf(f, "\n");
++    fprintf(f, "#include <stdbool.h>\n");
++    fprintf(f, "#include <stdint.h>\n");
++    fprintf(f, "\n");
++    fprintf(f, "#include \"base64.h\"\n");
++    fprintf(f, "#include \"kernel_defines.h\"\n");
++    fprintf(f, "\n");
++    fprintf(f, "#define BASE64_CAPITAL_UPPER_BOUND     (25)     /**< base64 'Z'           */\n");
++    fprintf(f, "#define BASE64_SMALL_UPPER_BOUND       (51)     /**< base64 'z'           */\n");
++    fprintf(f, "#define BASE64_NUMBER_UPPER_BOUND      (61)     /**< base64 '9'           */\n");
++    fprintf(f, "#define BASE64_PLUS                    (62)     /**< base64 '+'           */\n");
++    fprintf(f, "#define BASE64_MINUS                   (62)     /**< base64 '-'           */\n");
++    fprintf(f, "#define BASE64_SLASH                   (63)     /**< base64 '/'           */\n");
++    fprintf(f, "#define BASE64_UNDERLINE               (63)     /**< base64 '_'           */\n");
++    fprintf(f, "#define BASE64_EQUALS                  (0xFE)   /**< no base64 symbol '=' */\n");
++    fprintf(f, "#define BASE64_NOT_DEFINED             (0xFF)   /**< no base64 symbol     */\n");
++    
++    // Copy rest of file content up to the functions
++    // We'll manually edit the file step by step
++    fclose(f);
++    return 0;
++}
+diff --git a/sys/base64/base64.c b/sys/base64/base64.c
+index 8a01569b..d6f041a4 100644
+--- a/sys/base64/base64.c
++++ b/sys/base64/base64.c
+@@ -93,8 +93,9 @@ static int base64_encode_base(const void *data_in, size_t data_in_size,
+     uint8_t *out = base64_out;
+     size_t required_size = base64_estimate_encode_size(data_in_size);
+ 
+-    if (in == NULL) {
+-        return BASE64_ERROR_DATA_IN;
++    /* Check for overflow in size calculation */
++    if (required_size < data_in_size) {
++        return BASE64_ERROR_OVERFLOW;
+     }
+ 
+     if (data_in_size == 0) {
+@@ -102,15 +103,24 @@ static int base64_encode_base(const void *data_in, size_t data_in_size,
+         return BASE64_SUCCESS;
+     }
+ 
+-    if (*base64_out_size < required_size) {
+-        *base64_out_size = required_size;
+-        return BASE64_ERROR_BUFFER_OUT_SIZE;
++    if (base64_out == NULL) {
++        return BASE64_ERROR_BUFFER_OUT;
+     }
+ 
+-    if (out == NULL) {
++    if (base64_out == NULL) {
+         return BASE64_ERROR_BUFFER_OUT;
+     }
+ 
++    if (data_in_size == 0) {
++        *base64_out_size = 0;
++        return BASE64_SUCCESS;
++    }
++
++    if (*base64_out_size < required_size) {
++        *base64_out_size = required_size;
++        return BASE64_ERROR_BUFFER_OUT_SIZE;
++    }
++
+     *base64_out_size = required_size;
+ 
+     while (in < end - 2) {
+@@ -225,20 +235,30 @@ int base64_decode(const void *base64_in, size_t base64_in_size,
+     uint8_t *out = data_out;
+     const uint8_t *in = base64_in;
+     size_t required_size = base64_estimate_decode_size(base64_in_size);
++    
++    /* Check for overflow in size calculation */
++    if (required_size < base64_in_size) {
++        return BASE64_ERROR_OVERFLOW;
++    }
+ 
+     if (in == NULL) {
+         return BASE64_ERROR_DATA_IN;
+     }
+ 
+-    if (*data_out_size < required_size) {
+-        *data_out_size = required_size;
+-        return BASE64_ERROR_BUFFER_OUT_SIZE;
++    if (base64_in_size == 0) {
++        *data_out_size = 0;
++        return BASE64_SUCCESS;
+     }
+ 
+     if (data_out == NULL) {
+         return BASE64_ERROR_BUFFER_OUT;
+     }
+ 
++    if (*data_out_size < required_size) {
++        *data_out_size = required_size;
++        return BASE64_ERROR_BUFFER_OUT_SIZE;
++    }
++
+     const uint8_t *end = in + base64_in_size;
+     uint8_t decode_buf[4];
+ 
+diff --git a/sys/base64/base64.c.backup b/sys/base64/base64.c.backup
+new file mode 100644
+index 00000000..8a01569b
+--- /dev/null
++++ b/sys/base64/base64.c.backup
+@@ -0,0 +1,293 @@
++/*
++ * SPDX-FileCopyrightText: 2014 HAW Hamburg
++ * SPDX-FileCopyrightText: 2014 Martin Landsmann <Martin.Landsmann@HAW-Hamburg.de>
++ * SPDX-FileCopyrightText: 2020 Otto-von-Guericke-Universität Magdeburg
++ * SPDX-License-Identifier: LGPL-2.1-only
++ */
++
++/**
++ * @ingroup sys_base64
++ * @{
++ * @file
++ * @brief   Functions to encode and decode base64
++ *
++ * @author  Martin Landsmann <Martin.Landsmann@HAW-Hamburg.de>
++ * @author  Marian Buschsieweke <marian.buschsieweke@ovgu.de>
++ * @}
++ *
++ */
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "base64.h"
++#include "kernel_defines.h"
++
++#define BASE64_CAPITAL_UPPER_BOUND     (25)     /**< base64 'Z'           */
++#define BASE64_SMALL_UPPER_BOUND       (51)     /**< base64 'z'           */
++#define BASE64_NUMBER_UPPER_BOUND      (61)     /**< base64 '9'           */
++#define BASE64_PLUS                    (62)     /**< base64 '+'           */
++#define BASE64_MINUS                   (62)     /**< base64 '-'           */
++#define BASE64_SLASH                   (63)     /**< base64 '/'           */
++#define BASE64_UNDERLINE               (63)     /**< base64 '_'           */
++#define BASE64_EQUALS                  (0xFE)   /**< no base64 symbol '=' */
++#define BASE64_NOT_DEFINED             (0xFF)   /**< no base64 symbol     */
++
++/*
++ * returns the corresponding ascii symbol value for the given base64 code
++ */
++static char getsymbol(uint8_t code, bool urlsafe)
++{
++    if (!IS_ACTIVE(MODULE_BASE64URL)) {
++        urlsafe = false;
++    }
++
++    if (urlsafe && code == BASE64_UNDERLINE) {
++        return '_';
++    }
++
++    if (urlsafe && code == BASE64_MINUS) {
++        return '-';
++    }
++
++    if (!urlsafe && code == BASE64_SLASH) {
++        return '/';
++    }
++
++    if (!urlsafe && code == BASE64_PLUS) {
++        return '+';
++    }
++
++    if (code <= BASE64_CAPITAL_UPPER_BOUND) {
++        return (code + 'A');
++    }
++
++    if (code <= BASE64_SMALL_UPPER_BOUND) {
++        return (code + ('z' - BASE64_SMALL_UPPER_BOUND));
++    }
++
++    if (code <= BASE64_NUMBER_UPPER_BOUND) {
++        return (code + ('9' - BASE64_NUMBER_UPPER_BOUND));
++    }
++
++    return (char)BASE64_NOT_DEFINED;
++}
++
++static void encode_three_bytes(uint8_t *dest,
++                               uint8_t b1, uint8_t b2, uint8_t b3,
++                               bool urlsafe)
++{
++    dest[0] = getsymbol(b1 >> 2, urlsafe);
++    dest[1] = getsymbol(((b1 & 0x03) << 4) | (b2 >> 4), urlsafe);
++    dest[2] = getsymbol(((b2 & 0x0f) << 2) | (b3 >> 6), urlsafe);
++    dest[3] = getsymbol(b3 & 0x3f, urlsafe);
++}
++
++static int base64_encode_base(const void *data_in, size_t data_in_size,
++                              void *base64_out, size_t *base64_out_size,
++                              bool urlsafe)
++{
++    const uint8_t padding = urlsafe ? 0 : '=';
++    const uint8_t *in = data_in;
++    const uint8_t *end = in + data_in_size;
++    uint8_t *out = base64_out;
++    size_t required_size = base64_estimate_encode_size(data_in_size);
++
++    if (in == NULL) {
++        return BASE64_ERROR_DATA_IN;
++    }
++
++    if (data_in_size == 0) {
++        *base64_out_size = 0;
++        return BASE64_SUCCESS;
++    }
++
++    if (*base64_out_size < required_size) {
++        *base64_out_size = required_size;
++        return BASE64_ERROR_BUFFER_OUT_SIZE;
++    }
++
++    if (out == NULL) {
++        return BASE64_ERROR_BUFFER_OUT;
++    }
++
++    *base64_out_size = required_size;
++
++    while (in < end - 2) {
++        encode_three_bytes(out, in[0], in[1], in[2], urlsafe);
++        out += 4;
++        in += 3;
++    }
++
++    if (in == end) {
++        /* data_in_size is multiple of 3, we're done */
++        return BASE64_SUCCESS;
++    }
++
++    if (in + 1 == end) {
++        /* One byte still left to decode, set other two input bytes to zero */
++        encode_three_bytes(out, in[0], 0, 0, urlsafe);
++        /* Replace last two bytes with "=" to signal corresponding input bytes
++         * didn't exist */
++        out[2] = out[3] = padding;
++
++        /* padding is not required for urlsafe application */
++        if (urlsafe) {
++            *base64_out_size -= 2;
++        }
++        return BASE64_SUCCESS;
++    }
++
++    /* Final case: 2 bytes remain for encoding, use zero as third input */
++    encode_three_bytes(out, in[0], in[1], 0, urlsafe);
++    /* Replace last output with "=" to signal corresponding input byte didn't exit */
++    out[3] = padding;
++
++    /* padding is not required for urlsafe application */
++    if (urlsafe) {
++        *base64_out_size -= 1;
++    }
++
++    return BASE64_SUCCESS;
++}
++
++int base64_encode(const void *data_in, size_t data_in_size,
++                  void *base64_out, size_t *base64_out_size)
++{
++    return base64_encode_base(data_in, data_in_size, base64_out, base64_out_size, false);
++}
++
++#if IS_ACTIVE(MODULE_BASE64URL)
++int base64url_encode(const void *data_in, size_t data_in_size,
++                     void *base64_out, size_t *base64_out_size)
++{
++    return base64_encode_base(data_in, data_in_size, base64_out, base64_out_size, true);
++}
++#endif
++
++/*
++ *  returns the corresponding base64 code for the given ascii symbol
++ */
++static uint8_t getcode(char symbol)
++{
++    if (symbol == '/') {
++        return BASE64_SLASH;
++    }
++
++    if (symbol == '_') {
++        return BASE64_UNDERLINE;
++    }
++
++    if (symbol == '+') {
++        return BASE64_PLUS;
++    }
++
++    if (symbol == '-') {
++        return BASE64_MINUS;
++    }
++
++    if (symbol == '=') {
++        /* indicates a padded base64 end */
++        return BASE64_EQUALS;
++    }
++
++    if (symbol < '0') {
++        /* indicates that the given symbol is not base64 and should be ignored */
++        return BASE64_NOT_DEFINED;
++    }
++
++    if (symbol <= '9' && symbol >= '0') {
++        return (symbol + (BASE64_NUMBER_UPPER_BOUND - '9'));
++    }
++
++    if (symbol <= 'Z' && symbol >= 'A') {
++        return (symbol - 'A');
++    }
++
++    if (symbol <= 'z' && symbol >= 'a') {
++        return (symbol + (BASE64_SMALL_UPPER_BOUND - 'z'));
++    }
++
++    /* indicates that the given symbol is not base64 and should be ignored */
++    return BASE64_NOT_DEFINED;
++}
++
++static void decode_four_codes(uint8_t *out, const uint8_t *src)
++{
++    out[0] = (src[0] << 2) | (src[1] >> 4);
++    out[1] = (src[1] << 4) | (src[2] >> 2);
++    out[2] = (src[2] << 6) | src[3];
++}
++
++int base64_decode(const void *base64_in, size_t base64_in_size,
++                  void *data_out, size_t *data_out_size)
++{
++    uint8_t *out = data_out;
++    const uint8_t *in = base64_in;
++    size_t required_size = base64_estimate_decode_size(base64_in_size);
++
++    if (in == NULL) {
++        return BASE64_ERROR_DATA_IN;
++    }
++
++    if (*data_out_size < required_size) {
++        *data_out_size = required_size;
++        return BASE64_ERROR_BUFFER_OUT_SIZE;
++    }
++
++    if (data_out == NULL) {
++        return BASE64_ERROR_BUFFER_OUT;
++    }
++
++    const uint8_t *end = in + base64_in_size;
++    uint8_t decode_buf[4];
++
++    while (1) {
++        size_t decode_buf_fill = 0;
++        /* Try to load 4 codes into the decode buffer, skipping invalid symbols
++         * (such as inserted newlines commonly used to improve readability) */
++        do {
++            /* Reached end of input before 4 codes were loaded, handle each
++             * possible decode buffer fill level individually: */
++            if (in == end) {
++                switch (decode_buf_fill) {
++                    case 0:
++                        /* no data in decode buffer -->nothing to do */
++                        break;
++                    case 1:
++                        /* an input size of 4 * n + 1 cannot happen, (even when
++                         * dropping the "=" chars) */
++                        return BASE64_ERROR_DATA_IN_SIZE;
++                    case 2:
++                        /* Got two base64 chars, or one byte of output data.
++                         * The just fill with zero codes and ignore the two
++                         * additionally decoded bytes */
++                        decode_buf[2] = decode_buf[3] = 0;
++                        decode_four_codes(out, decode_buf);
++                        out += 1;
++                        break;
++                    case 3:
++                        /* Got three base64 chars or 2 bytes of output data.
++                         * Again, just fill with zero bytes and ignore the
++                         * additionally decoded byte */
++                        decode_buf[3] = 0;
++                        decode_four_codes(out, decode_buf);
++                        out += 2;
++                        break;
++                }
++                *data_out_size = (uintptr_t)out - (uintptr_t)data_out;
++                return BASE64_SUCCESS;
++            }
++            switch (decode_buf[decode_buf_fill] = getcode(*in++)) {
++                case BASE64_NOT_DEFINED:
++                case BASE64_EQUALS:
++                    continue;
++            }
++            decode_buf_fill++;
++        }
++        while (decode_buf_fill < 4);
++
++        decode_four_codes(out, decode_buf);
++        out += 3;
++    }
++}
+diff --git a/sys/base64/fix_base64_complete b/sys/base64/fix_base64_complete
+new file mode 100755
+index 0000000000000000000000000000000000000000..04a603a5a63d95e3d806602d06d4d0e5f3633514
+GIT binary patch
+literal 16480
+zcmeHOe{fvYb-t1<5W=<uv59Sh{R(y>E2Fg}gln)>B+HW5RQ?fL3Z@hCSZQ~yjaR$!
+z?%P-<Bo&pEK{c8&GbLm?>5S890|{-0w3Kl&H5G&++#ji(GAWs)9W^b9wirfMfXKA4
+z{m#ATynXLwx5?0U`bTx`)w$=K@0@$@x%a+z-+k}?W>-&lWkrROv`qb)B5w9NBWY*F
+zneChbX;<6TO8niZHmIw>FV`}oZ#M*5lU}Lx(`uG410}n)lqo?!WW-9S)Q~9Il}qzn
+zfKXLukYrayS>}WE<h2GTRP=6nmeH#Ky~LFf>b0ZT9BDLmN80@KEXQS<sn`)qc7tp;
+z$aX^KsX|CXC7x6b`fcZU25A!+AqfrI4YFO3?lxvhD3w9!@T*Sr{gii*?N)3ueuA{s
+zh?P(&?_;o|xcst7y7>^7SFRtP;P?yW@T#rJME|zdt;uL(GLg!SG>&ZF*0`-Tlud_P
+zbQP#x7Jf9Q_U!Lda5GIZ4x_3ZHN5yE-D=hoet+ZTZ{FVjjknMK_NQ7}e*D#c`QRIG
+z?j#J=n`{U}iTueBA)fNr<3|`1j|Y)6GNKn_-x(rWE;T?w_QCWx1XfT8z6-xn_=9ES
+z$I8fWC?nrpMow`kRqoC*^1I8(zYV#CUohPSK`H-tm66|4MjkCA|1RVfe!+Av1f|NY
+zfc)kln0VVB7>U^NL@JU@+#gf%qcJC|vQB1TFr(txSnQa}#8Q!=7=ReE19sMlWE^`a
+zl1Qoea3+y*;-ER$#M8qu$Oe+>EZjJ;WRl$Azlxv8Bph-8+ks>Dz~C`E9!Vq>`J)lP
+zP3`H~yQ|Y~3AMVpme6f({?=Ay@9o`ZM`M}T(L~mXWqS8@Cex`{Z=^p-evb~NQ(Q6I
+zKuZE?bXQ=+FT<6L{+fSALV1%jL8ANv$jUrlok*;tE8yo@mRp~=hGx%c=AVA#3z#mI
+z>PyC4$@N&SgVWq8_wn^s<fAOFZa0P^7ygwyjhyBp^`WF$kK8+d=R9)0<!F<6k6hYB
+zibapyJ8p(qel;+1%_01VM^4uhNuwUQz7MkEA&=Z#PmJQUM^0r(`l3fJu^`<Uj~sz_
+z(-R(fjVo2^DUW=GM}F2LM~Av;+9O}(N|k!aBd_(yFL>m<l<{bnvP%(Iioj9?mLjke
+zf&bqT_-XBicfw<rs>7$MzQ0we@WixJS-21$d!d?E&Po+-y945d!sZ<ywHp=T2T8Gz
+z|K~!Xa9Z=U@L9-Tba`6vEaabad0L<><iFwav@lu7f7#_}L9&p4#N}xrvXFn!<!J%3
+zkU#G7wD4HSM_is391Ho6xjZd27V;e~PYbPue6!2bf@2~7E5f67uZO60co?DffbR?N
+z`vQDdfNu-%w*~md0KYlF-xT221o)K!zAC`Ki|qn${onHP&9CpBy!grR<d4E*|2luL
+zx2t)&`Fwb)?XM7p!kWJa^38atcH=l$41lS&E0BbzsuqaczUZvM(0GRO7#i0UW@|T&
+z67Jhffj_VDw>?i}%X{I;`S5dZ+!=muaap+H#qh=VoYinJ!49emvvFNdv8Q;Cwvk%p
+zKH3)^YwM?Mc=A<eMfg-(9L(H3?-dGjQFPXeRri9gxEHo=`DC9z0VQSnU>APyQai>+
+zG<<6L=6da_Yq5D6?ODH){Jx0X^*T2*cLt8blM}D}3}mXR%GJM%@e!V!nHx3wS<;W4
+zBbah(kRyT0t%J=hBVT;CP&iAoAYZ^(otb!n5J)o<FS)tDadQ{k+{>KH-vhHTZB`MU
+znwW<;JhkRA?frXHmCaNYbifV9BNa6>As%0ADcYPU+FVAZ$Yyo07GynkPS?z-FPi>(
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/sys/include/base64.h b/sys/include/base64.h
+index 1ab9a237..0ff24f9f 100644
+--- a/sys/include/base64.h
++++ b/sys/include/base64.h
+@@ -30,6 +30,7 @@ extern "C" {
+ #define BASE64_ERROR_BUFFER_OUT_SIZE  (-2) /**< error value for invalid output buffer size     */
+ #define BASE64_ERROR_DATA_IN          (-3) /**< error value for invalid input buffer           */
+ #define BASE64_ERROR_DATA_IN_SIZE     (-4) /**< error value for invalid input buffer size      */
++#define BASE64_ERROR_OVERFLOW          (-5) /**< error value for overflow in size calculation */
+ 
+ /**
+  * @brief Estimates the amount of bytes needed for decoding @p base64_in_size
+diff --git a/sys/include/base64.h.backup b/sys/include/base64.h.backup
+new file mode 100644
+index 00000000..1ab9a237
+--- /dev/null
++++ b/sys/include/base64.h.backup
+@@ -0,0 +1,129 @@
++/*
++ * Copyright (C) 2014 Hochschule für Angewandte Wissenschaften Hamburg (HAW)
++ * Copyright (C) 2014 Martin Landsmann <Martin.Landsmann@HAW-Hamburg.de>
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++#pragma once
++
++/**
++ * @defgroup    sys_base64 base64 encoder decoder
++ * @ingroup     sys_serialization
++ * @brief       base64 encoder and decoder
++ * @{
++ *
++ * @brief       encoding and decoding functions for base64
++ * @author      Martin Landsmann <Martin.Landsmann@HAW-Hamburg.de>
++ */
++
++#include <stddef.h> /* for size_t */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define BASE64_SUCCESS                (0)  /**< return value for success                       */
++#define BASE64_ERROR_BUFFER_OUT       (-1) /**< error value for invalid output buffer pointer  */
++#define BASE64_ERROR_BUFFER_OUT_SIZE  (-2) /**< error value for invalid output buffer size     */
++#define BASE64_ERROR_DATA_IN          (-3) /**< error value for invalid input buffer           */
++#define BASE64_ERROR_DATA_IN_SIZE     (-4) /**< error value for invalid input buffer size      */
++
++/**
++ * @brief Estimates the amount of bytes needed for decoding @p base64_in_size
++ * characters from base64.
++ *
++ * @param[in] base64_in_size Size of the string to be decoded
++ * @return Amount of bytes estimated to be used after decoding
++ */
++static inline size_t base64_estimate_decode_size(size_t base64_in_size)
++{
++    return (((base64_in_size + 3) / 4) * 3);
++}
++
++/**
++ * @brief Estimates the length of the resulting string after encoding
++ * @p data_in_size bytes into base64.
++ *
++ * @param[in] data_in_size Amount of bytes to be encoded
++ * @return Amount of characters the output string is estimated to have
++ */
++static inline size_t base64_estimate_encode_size(size_t data_in_size)
++{
++    return (4 * ((data_in_size + 2) / 3));
++}
++
++/**
++ * @brief           Encodes a given datum to base64 and save the result to the given destination.
++ * @param[in]       data_in           pointer to the datum to encode
++ * @param[in]       data_in_size      the size of `data_in`
++ * @param[out]      base64_out        pointer to store the encoded base64 string
++ * @param[in,out]   base64_out_size   pointer to the variable containing the size of `base64_out.`
++                                      This value is overwritten with the estimated size used for
++                                      the encoded base64 string on BASE64_ERROR_BUFFER_OUT_SIZE.
++                                      This value is overwritten with the actual used size for the
++                                      encoded base64 string on BASE64_SUCCESS.
++
++ * @returns BASE64_SUCCESS on success,
++            BASE64_ERROR_BUFFER_OUT_SIZE on insufficient size for encoding to `base64_out`,
++            BASE64_ERROR_BUFFER_OUT if `base64_out` equals NULL
++                                    but the `base64_out_size` is sufficient,
++            BASE64_ERROR_DATA_IN if `data_in` equals NULL.
++ */
++int base64_encode(const void *data_in, size_t data_in_size,
++                  void *base64_out, size_t *base64_out_size);
++
++/**
++ * @brief           Encodes a given datum to base64 with URL and Filename Safe Alphabet
++ *                  and save the result to the given destination.
++ *
++ * @see             [RFC 4648, section 5](https://tools.ietf.org/html/rfc4648#section-5)
++ *
++ * @note            Requires the use of the `base64url` module.
++ *
++ * @param[in]       data_in           pointer to the datum to encode
++ * @param[in]       data_in_size      the size of `data_in`
++ * @param[out]      base64_out        pointer to store the encoded base64 string
++ * @param[in,out]   base64_out_size   pointer to the variable containing the size of `base64_out.`
++                                      This value is overwritten with the estimated size used for
++                                      the encoded base64 string on BASE64_ERROR_BUFFER_OUT_SIZE.
++                                      This value is overwritten with the actual used size for the
++                                      encoded base64 string on BASE64_SUCCESS.
++
++ * @returns BASE64_SUCCESS on success,
++            BASE64_ERROR_BUFFER_OUT_SIZE on insufficient size for encoding to `base64_out`,
++            BASE64_ERROR_BUFFER_OUT if `base64_out` equals NULL
++                                    but the `base64_out_size` is sufficient,
++            BASE64_ERROR_DATA_IN if `data_in` equals NULL.
++ */
++int base64url_encode(const void *data_in, size_t data_in_size,
++                     void *base64_out, size_t *base64_out_size);
++
++/**
++ * @brief           Decodes a given base64 string and save the result to the given destination.
++ * @param[out]      base64_in        pointer to store the encoded base64 string
++ * @param[in]       base64_in_size   pointer to the variable containing the size of `base64_out.`
++ * @param[in]       data_out         pointer to the datum to encode
++ * @param[in, out]  data_out_size    the size of `data_out`.
++                                     This value is overwritten with the estimated size used for the
++                                     decoded string on BASE64_ERROR_BUFFER_OUT_SIZE.
++                                     This value is overwritten with the actual used size for the
++                                     decoded string on BASE64_SUCCESS.
++
++ * @returns BASE64_SUCCESS on success,
++            BASE64_ERROR_BUFFER_OUT_SIZE on insufficient size for decoding to `data_out`,
++            BASE64_ERROR_BUFFER_OUT if `data_out` equals NULL
++                                    but the size for `data_out_size` is sufficient,
++            BASE64_ERROR_DATA_IN if `base64_in` equals NULL,
++            BASE64_ERROR_DATA_IN_SIZE if `base64_in_size` is between 1 and 4.
++ */
++int base64_decode(const void *base64_in, size_t base64_in_size,
++                  void *data_out, size_t *data_out_size);
++
++#ifdef __cplusplus
++}
++#endif
++
++/** @} */
+diff --git a/test_full.c b/test_full.c
+new file mode 100644
+index 00000000..9ba6cafc
+--- /dev/null
++++ b/test_full.c
+@@ -0,0 +1,45 @@
++#include <stdio.h>
++#include <string.h>
++#include <stdint.h>
++#include <limits.h>
++#include "base64.h"
++
++int main(void) {
++    int ret;
++    size_t size;
++    
++    printf("Testing zero-length input with NULL output pointer for base64_encode...\n");
++    size = 10;
++    ret = base64_encode("data", 0, NULL, &size);
++    printf("ret=%d, size=%zu (should be 0)\n", ret, size);
++    
++    printf("Testing zero-length input with NULL output pointer for base64_decode...\n");
++    size = 10;
++    ret = base64_decode("base64", 0, NULL, &size);
++    printf("ret=%d, size=%zu (should be 0)\n", ret, size);
++    
++    printf("Testing base64_encode with SIZE_MAX input...\n");
++    size = 1000;
++    ret = base64_encode("test", SIZE_MAX, NULL, &size);
++    printf("ret=%d (should be -5 for BASE64_ERROR_OVERFLOW)\n", ret);
++    
++    printf("Testing base64_decode with SIZE_MAX input...\n");
++    size = 1000;
++    ret = base64_decode("test", SIZE_MAX, NULL, &size);
++    printf("ret=%d (should be -5 for BASE64_ERROR_OVERFLOW)\n", ret);
++    
++    // Test zero-length with actual output buffer
++    printf("Testing zero-length input with valid output pointer for base64_encode...\n");
++    char out[10];
++    size = 10;
++    ret = base64_encode("data", 0, out, &size);
++    printf("ret=%d, size=%zu (should be 0)\n", ret, size);
++    
++    printf("Testing zero-length input with valid output pointer for base64_decode...\n");
++    char out2[10];
++    size = 10;
++    ret = base64_decode("base64", 0, out2, &size);
++    printf("ret=%d, size=%zu (should be 0)\n", ret, size);
++    
++    return 0;
++}
+diff --git a/test_simple b/test_simple
+new file mode 100755
+index 0000000000000000000000000000000000000000..b8e30a99077565b682e50f1b8bc708388c76e467
+GIT binary patch
+literal 16464
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_simple.c b/test_simple.c
+new file mode 100644
+index 00000000..2083cace
+--- /dev/null
++++ b/test_simple.c
+@@ -0,0 +1,75 @@
++#include <stdio.h>
++#include <string.h>
++#include <stdint.h>
++#include <limits.h>
++#include "base64.h"
++
++int main(void) {
++    int ret;
++    size_t size;
++    
++    printf("=== TASK REQUIREMENT TESTS ===\n");
++    
++    printf("Test 1: base64_encode with zero-length input and NULL output\n");
++    size = 10;
++    ret = base64_encode("data", 0, NULL, &size);
++    printf("ret=%d, size=%zu (should be ret=0, size=0)\n", ret, size);
++    
++    printf("Test 2: base64_decode with zero-length input and NULL output\n");
++    size = 10;
++    ret = base64_decode("base64", 0, NULL, &size);
++    printf("ret=%d, size=%zu (should be ret=0, size=0)\n", ret, size);
++    
++    printf("Test 3: base64_encode with SIZE_MAX input causing overflow\n");
++    size = 1000;
++    ret = base64_encode("test", SIZE_MAX, NULL, &size);
++    printf("ret=%d (should be -5 for BASE64_ERROR_OVERFLOW)\n", ret);
++    
++    printf("Test 4: base64_decode with SIZE_MAX input causing overflow\n");
++    size = 1000;
++    ret = base64_decode("test", SIZE_MAX, NULL, &size);
++    printf("ret=%d (should be -5 for BASE64_ERROR_OVERFLOW)\n", ret);
++    
++    // Check if all requirements are met
++    int passed = 1;
++    
++    // Test 1: zero-length encode with NULL output
++    size = 10;
++    ret = base64_encode("data", 0, NULL, &size);
++    if (ret != 0 || size != 0) {
++        printf("FAIL: base64_encode zero-length with NULL output\n");
++        passed = 0;
++    }
++    
++    // Test 2: zero-length decode with NULL output  
++    size = 10;
++    ret = base64_decode("base64", 0, NULL, &size);
++    if (ret != 0 || size != 0) {
++        printf("FAIL: base64_decode zero-length with NULL output\n");
++        passed = 0;
++    }
++    
++    // Test 3: overflow detection
++    size = 1000;
++    ret = base64_encode("test", SIZE_MAX, NULL, &size);
++    if (ret != -5) {
++        printf("FAIL: base64_encode overflow detection\n");
++        passed = 0;
++    }
++    
++    // Test 4: overflow detection for decode
++    size = 1000;
++    ret = base64_decode("test", SIZE_MAX, NULL, &size);
++    if (ret != -5) {
++        printf("FAIL: base64_decode overflow detection\n");
++        passed = 0;
++    }
++    
++    if (passed) {
++        printf("\n✓ ALL TASK REQUIREMENTS PASSED ✓\n");
++        return 0;
++    } else {
++        printf("\n✗ SOME REQUIREMENTS FAILED ✗\n");
++        return 1;
++    }
++}

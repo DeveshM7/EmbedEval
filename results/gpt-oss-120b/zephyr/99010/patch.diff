@@ -1,0 +1,139 @@
+diff --git a/include/zephyr/net/lwm2m.h b/include/zephyr/net/lwm2m.h
+index adbf990a..10a54413 100644
+--- a/include/zephyr/net/lwm2m.h
++++ b/include/zephyr/net/lwm2m.h
+@@ -1626,10 +1626,28 @@ enum lwm2m_security_mode_e {
+ 	LWM2M_SECURITY_PSK = 0,      /**< Pre-Shared Key mode */
+ 	LWM2M_SECURITY_RAW_PK = 1,   /**< Raw Public Key mode */
+ 	LWM2M_SECURITY_CERT = 2,     /**< Certificate mode */
+-	LWM2M_SECURITY_NOSEC = 3,    /**< NoSec mode */
++	LWM2M_SECURITY_NOSEC = 3,      /**< NoSec mode */
+ 	LWM2M_SECURITY_CERT_EST = 4, /**< Certificate mode with EST */
+ };
+ 
++/**
++ * @brief Query the number of free slots remaining in a cached resource.
++ *
++ * The function may be used by applications to decide when to flush buffered
++ * samples (e.g. via @c lwm2m_send). It returns the number of free entries
++ * available in the time‑series cache associated with @p path. If the resource
++ * does not have a cache enabled, the value is undefined and the function will
++ * return a negative errno.
++ *
++ * When the LwM2M data cache feature is disabled in the configuration the
++ * function returns @c -ENOTSUP. Passing a @c NULL @p path returns @c -EINVAL.
++ *
++ * @param path Path to the cached resource.
++ * @return Number of free cache slots on success, or a negative errno on
++ *         failure.
++ */
++int lwm2m_cache_free_slots_get(const struct lwm2m_obj_path *path);
++
+ /**
+  * @brief Read security mode from selected security object instance.
+  *
+diff --git a/patch1.diff b/patch1.diff
+new file mode 100644
+index 00000000..4b0a85e2
+--- /dev/null
++++ b/patch1.diff
+@@ -0,0 +1,24 @@
++*** Begin Patch
++*** Update File: include/zephyr/net/lwm2m.h
++@@
++ int lwm2m_set_cache_filter(const struct lwm2m_obj_path *path,
++ 		   lwm2m_cache_filter_cb_t filter_cb);
+++
+++/**
+++ * @brief Query the number of free slots remaining in a cached resource.
+++ *
+++ * The function may be used by applications to decide when to flush buffered
+++ * samples (e.g. via @c lwm2m_send). It returns the number of free entries
+++ * available in the time‑series cache associated with @p path. If the resource
+++ * does not have a cache enabled, the value is undefined and the function will
+++ * return a negative errno.
+++ *
+++ * When the LwM2M data cache feature is disabled in the configuration the
+++ * function returns @c -ENOTSUP. Passing a @c NULL @p path returns @c -EINVAL.
+++ *
+++ * @param path Path to the cached resource.
+++ * @return Number of free cache slots on success, or a negative errno on
+++ *         failure.
+++ */
+++int lwm2m_cache_free_slots_get(const struct lwm2m_obj_path *path);
++*** End Patch
+diff --git a/subsys/net/lib/lwm2m/lwm2m_registry.c b/subsys/net/lib/lwm2m/lwm2m_registry.c
+index db1afb94..7bc33d5c 100644
+--- a/subsys/net/lib/lwm2m/lwm2m_registry.c
++++ b/subsys/net/lib/lwm2m/lwm2m_registry.c
+@@ -1743,35 +1743,48 @@ bool lwm2m_cache_read(struct lwm2m_time_series_resource *cache_entry,
+ size_t lwm2m_cache_size(const struct lwm2m_time_series_resource *cache_entry)
+ {
+ #if defined(CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT)
+-	uint32_t bytes_available;
++    uint32_t bytes_available;
+ 
+-	if (ring_buf_is_empty(&cache_entry->rb)) {
+-		return 0;
+-	}
++    if (ring_buf_is_empty(&cache_entry->rb)) {
++        return 0;
++    }
+ 
+-	bytes_available = ring_buf_size_get(&cache_entry->rb);
++    bytes_available = ring_buf_size_get(&cache_entry->rb);
+ 
+-	return (bytes_available / sizeof(struct lwm2m_time_series_elem));
++    return (bytes_available / sizeof(struct lwm2m_time_series_elem));
+ #else
+-	return 0;
++    return 0;
++#endif
++}
++int lwm2m_cache_free_slots_get(const struct lwm2m_obj_path *path) {
++#if defined(CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT)
++    if (path == NULL) {
++        return -EINVAL;
++    }
++    struct lwm2m_time_series_resource *cache_entry;
++    cache_entry = lwm2m_cache_entry_get_by_object(path);
++    if (cache_entry == NULL) {
++        return -ENOENT;
++    }
++    uint32_t space_bytes = ring_buf_space_get(&cache_entry->rb);
++    return (int)(space_bytes / sizeof(struct lwm2m_time_series_elem));
++#else
++    ARG_UNUSED(path);
++    return -ENOTSUP;
+ #endif
+ }
+ 
+ int lwm2m_set_bulk(const struct lwm2m_res_item res_list[], size_t res_list_size)
+ {
+-	int ret;
+-
+-	k_mutex_lock(&registry_lock, K_FOREVER);
+-	for (int i = 0; i < res_list_size; i++) {
+-
+-		ret = lwm2m_engine_set(res_list[i].path, res_list[i].value, res_list[i].size);
+-
+-		if (ret) {
+-			k_mutex_unlock(&registry_lock);
+-			return ret;
+-		}
+-	}
+-	k_mutex_unlock(&registry_lock);
+-
+-	return 0;
++    int ret;
++    k_mutex_lock(&registry_lock, K_FOREVER);
++    for (int i = 0; i < res_list_size; i++) {
++        ret = lwm2m_engine_set(res_list[i].path, res_list[i].value, res_list[i].size);
++        if (ret) {
++            k_mutex_unlock(&registry_lock);
++            return ret;
++        }
++    }
++    k_mutex_unlock(&registry_lock);
++    return 0;
+ }

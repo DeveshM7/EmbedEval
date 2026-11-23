@@ -1,0 +1,103 @@
+diff --git a/core/lib/include/rmutex.h b/core/lib/include/rmutex.h
+index eee8c8bb..276ad310 100644
+--- a/core/lib/include/rmutex.h
++++ b/core/lib/include/rmutex.h
+@@ -101,6 +101,21 @@ void rmutex_lock(rmutex_t *rmutex);
+  */
+ void rmutex_unlock(rmutex_t *rmutex);
+ 
++/**
++ * @brief Locks a recursive mutex with a maximum nesting limit, blocking.
++ *
++ * @param[in] rmutex Recursive mutex object to lock. Has to be
++ *                 initialized first. Must not be NULL.
++ * @param[in] max   Maximum number of nested acquisitions by the owner.
++ *                  Must be greater than 0.
++ *
++ * @return 1 if mutex was acquired (including when the calling thread
++ *         already owns the mutex and the nesting limit has not been reached).
++ * @return 0 if the calling thread already owns the mutex and the maximum
++ *         number of nested acquisitions has been reached.
++ */
++int rmutex_lock_max(rmutex_t *rmutex, uint16_t max);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/core/lib/rmutex.c b/core/lib/rmutex.c
+index 25cac17b..87fa1746 100644
+--- a/core/lib/rmutex.c
++++ b/core/lib/rmutex.c
+@@ -112,6 +112,60 @@ static int _lock(rmutex_t *rmutex, int trylock)
+     return 1;
+ }
+ 
++static int _lock_max(rmutex_t *rmutex, uint16_t max, int trylock)
++{
++    kernel_pid_t owner;
++
++    /* try to lock the mutex */
++    DEBUG("rmutex %" PRIi16 " : trylock\n", thread_getpid());
++    if (mutex_trylock(&rmutex->mutex) == 0) {
++        DEBUG("rmutex %" PRIi16 " : mutex already held\n", thread_getpid());
++        /* Mutex is already held */
++
++        /* ensure that owner is read atomically, since I need a consistent value */
++        owner = atomic_load_kernel_pid(&rmutex->owner);
++        DEBUG("rmutex %" PRIi16 " : mutex held by %" PRIi16 " \n",
++              thread_getpid(), owner);
++
++        /* Case 1: Mutex is not held by me */
++        if (owner != thread_getpid()) {
++            /* wait for the mutex */
++            DEBUG("rmutex %" PRIi16 " : locking mutex\n", thread_getpid());
++
++            if (trylock) {
++                return 0;
++            }
++            else {
++                mutex_lock(&rmutex->mutex);
++            }
++        }
++        /* Case 2: Mutex is held by me (relock) */
++        else {
++            /* Check if we've reached the maximum nesting level */
++            if (rmutex->refcount >= max) {
++                DEBUG("rmutex %" PRIi16 " : max nesting level reached\n", thread_getpid());
++                return 0;
++            }
++            /* Case 2: refcount < max, we can increment it */
++        }
++    }
++
++    DEBUG("rmutex %" PRIi16 " : I am now holding the mutex\n", thread_getpid());
++
++    /* I am holding the recursive mutex */
++    DEBUG("rmutex %" PRIi16 " : setting the owner\n", thread_getpid());
++
++    /* ensure that owner is written atomically, since others need a consistent value */
++    atomic_store_kernel_pid(&rmutex->owner, thread_getpid());
++
++    DEBUG("rmutex %" PRIi16 " : increasing refs\n", thread_getpid());
++
++    /* increase the refcount */
++    rmutex->refcount++;
++
++    return 1;
++}
++
+ void rmutex_lock(rmutex_t *rmutex)
+ {
+     _lock(rmutex, 0);
+@@ -122,6 +176,11 @@ int rmutex_trylock(rmutex_t *rmutex)
+     return _lock(rmutex, 1);
+ }
+ 
++int rmutex_lock_max(rmutex_t *rmutex, uint16_t max)
++{
++    return _lock_max(rmutex, max, 0);
++}
++
+ void rmutex_unlock(rmutex_t *rmutex)
+ {
+     /* ensure that owner is read atomically, since I need a consistent value */

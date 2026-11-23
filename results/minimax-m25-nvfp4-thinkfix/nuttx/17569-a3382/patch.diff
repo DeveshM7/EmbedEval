@@ -1,0 +1,257 @@
+diff --git a/include/nuttx/seqlock.h b/include/nuttx/seqlock.h
+new file mode 100644
+index 00000000..26030a74
+--- /dev/null
++++ b/include/nuttx/seqlock.h
+@@ -0,0 +1,251 @@
++/****************************************************************************
++ * include/nuttx/seqlock.h
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See
++ * the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++#ifndef __INCLUDE_NUTTX_SEQLOCK_H
++#define __INCLUDE_NUTTX_SEQLOCK_H
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <stdint.h>
++
++#include <nuttx/irq.h>
++#include <nuttx/spinlock.h>
++
++#undef EXTERN
++#if defined(__cplusplus)
++#define EXTERN extern "C"
++extern "C"
++{
++#else
++#define EXTERN extern
++#endif
++
++/****************************************************************************
++ * Public Types
++ ****************************************************************************/
++
++/* Sequence count type for sequential lock.
++ * The seqcount holds a sequence number that increments on each write
++ * operation. When the sequence number is odd, a writer is active.
++ * Writers must acquire exclusive access using a spinlock.
++ */
++
++typedef struct seqcount_s
++{
++  volatile uint32_t sequence;  /* Sequence number for lock-free readers */
++  spinlock_t lock;             /* Spinlock for writer mutual exclusion */
++} seqcount_t;
++
++/****************************************************************************
++ * Public Function Prototypes
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: seqlock_init
++ *
++ * Description:
++ *   Initialize a seqcount_t object for use as a sequential lock.
++ *   After initialization, the object is in a non-writing state
++ *   (sequence number is 0).
++ *
++ * Input Parameters:
++ *   seqlock - Pointer to the seqcount_t object to initialize
++ *
++ * Returned Value:
++ *   None
++ *
++ ****************************************************************************/
++
++static inline_function void seqlock_init(FAR seqcount_t *seqlock)
++{
++  seqlock->sequence = 0;
++  seqlock->lock = SP_UNLOCKED;
++}
++
++/****************************************************************************
++ * Name: write_seqlock_irqsave
++ *
++ * Description:
++ *   Acquire exclusive write access to the seqcount object and disable
++ *   interrupts. This function saves the previous interrupt state and
++ *   returns it to the caller. The caller will use this value with
++ *   write_sequnlock_irqrestore to restore the interrupt state.
++ *
++ *   This function provides mutual exclusion between writers and ensures
++ *   that the seqcount is in a "writing" state (odd sequence number) while
++ *   the caller owns the lock. If another writer already owns the seqcount,
++ *   this function will spin until that writer releases it.
++ *
++ *   Memory ordering on SMP:
++ *   - The spinlock acquisition provides memory synchronization
++ *   - The sequence number increment provides release semantics
++ *   - After this function returns, other CPUs will see any writes
++ *     made by this writer after the corresponding unlock
++ *
++ * Input Parameters:
++ *   seqlock - Pointer to the seqcount_t object
++ *
++ * Returned Value:
++ *   The previous interrupt state that should be passed to
++ *   write_sequnlock_irqrestore
++ *
++ ****************************************************************************/
++
++static inline_function irqstate_t write_seqlock_irqsave(FAR seqcount_t *seqlock)
++{
++  irqstate_t flags;
++
++  /* Disable interrupts and save the previous state */
++
++  flags = up_irq_save();
++
++  /* Acquire the spinlock for writer mutual exclusion.
++   * This spin provides mutual exclusion between writers on SMP.
++   */
++
++  spin_lock(&seqlock->lock);
++
++  /* Increment the sequence number to indicate we are now in the
++   * "writing" state. This odd sequence number allows lock-free
++   * readers to detect that a writer is active.
++   * Use release semantics to ensure all previous writes are visible
++   * before other CPUs see the writing state.
++   */
++
++  atomic_fetch_add(&seqlock->sequence, 1);
++
++  return flags;
++}
++
++/****************************************************************************
++ * Name: write_sequnlock_irqrestore
++ *
++ * Description:
++ *   Release exclusive write access to the seqcount object and restore
++ *   the interrupt state. This function must be called with the flags
++ *   returned by a corresponding call to write_seqlock_irqsave.
++ *
++ *   After this function returns, the seqcount is in a "non-writing"
++ *   state (even sequence number), allowing lock-free readers to
++ *   access the protected data.
++ *
++ *   Memory ordering on SMP:
++ *   - The sequence number increment provides release semantics
++ *   - The spinlock release provides memory synchronization
++ *   - Before other CPUs see the non-writing state, they will see
++ *     all writes made by this writer
++ *
++ * Input Parameters:
++ *   seqlock - Pointer to the seqcount_t object
++ *   flags   - The interrupt state returned by write_seqlock_irqsave
++ *
++ * Returned Value:
++ *   None
++ *
++ ****************************************************************************/
++
++static inline_function void
++write_sequnlock_irqrestore(FAR seqcount_t *seqlock, irqstate_t flags)
++{
++  /* Increment the sequence number again to indicate we have left the
++   * "writing" state. Now the sequence number is even, allowing
++   * lock-free readers to access the protected data.
++   * Use release semantics to ensure all our writes are visible
++   * before other CPUs see the non-writing state.
++   */
++
++  atomic_fetch_add(&seqlock->sequence, 1);
++
++  /* Release the spinlock for writer mutual exclusion */
++
++  spin_unlock(&seqlock->lock);
++
++  /* Restore the previous interrupt state */
++
++  up_irq_restore(flags);
++}
++
++/****************************************************************************
++ * Name: write_seqlock_irqsave_nonatomic
++ *
++ * Description:
++ *   This is a version of write_seqlock_irqsave that doesn't do atomic
++ *   operations. It is provided for use in certain initialization
++ *   contexts where atomic operations may not be available.
++ *   NOTE: This should only be used during early boot when there's
++ *   no possibility of concurrent access.
++ *
++ * Input Parameters:
++ *   seqlock - Pointer to the seqcount_t object
++ *
++ * Returned Value:
++ *   The previous interrupt state that should be passed to
++ *   write_sequnlock_irqrestore
++ *
++ ****************************************************************************/
++
++static inline_function irqstate_t
++write_seqlock_irqsave_nonatomic(FAR seqcount_t *seqlock)
++{
++  irqstate_t flags;
++
++  flags = up_irq_save();
++  spin_lock(&seqlock->lock);
++  seqlock->sequence++;
++
++  return flags;
++}
++
++/****************************************************************************
++ * Name: write_sequnlock_irqrestore_nonatomic
++ *
++ * Description:
++ *   Non-atomic version of write_sequnlock_irqrestore for early boot use.
++ *
++ * Input Parameters:
++ *   seqlock - Pointer to the seqcount_t object
++ *   flags   - The interrupt state returned by write_seqlock_irqsave_nonatomic
++ *
++ * Returned Value:
++ *   None
++ *
++ ****************************************************************************/
++
++static inline_function void
++write_sequnlock_irqrestore_nonatomic(FAR seqcount_t *seqlock,
++                                     irqstate_t flags)
++{
++  seqlock->sequence++;
++  spin_unlock(&seqlock->lock);
++  up_irq_restore(flags);
++}
++
++#undef EXTERN
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __INCLUDE_NUTTX_SEQLOCK_H */

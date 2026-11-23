@@ -1,0 +1,56 @@
+diff --git a/cpu/native/fs/native_fs.c b/cpu/native/fs/native_fs.c
+index 1e748f4a..ee71a4c3 100644
+--- a/cpu/native/fs/native_fs.c
++++ b/cpu/native/fs/native_fs.c
+@@ -241,7 +241,19 @@ static int _readdir(vfs_DIR *dirp, vfs_dirent_t *entry)
+     }
+ 
+     entry->d_ino = dirent->d_ino;
+-    strncpy(entry->d_name, (char *)dirent->d_name, sizeof(entry->d_name));
++    /* Ensure the name is always null-terminated.  The underlying
++     * `struct dirent` may contain a name that exactly fits the VFS buffer
++     * (VFS_NAME_MAX characters).  Using `strncpy` would omit the terminating
++     * zero in that case.  We therefore copy the name up to the buffer size
++     * minus one and explicitly add a NUL byte. */
++    size_t max_len = VFS_NAME_MAX; /* maximum characters without the terminating NUL */
++    size_t copy_len = strnlen(dirent->d_name, max_len + 1);
++    if (copy_len > max_len) {
++        /* Name longer than VFS_NAME_MAX – truncate to fit the buffer. */
++        copy_len = max_len;
++    }
++    memcpy(entry->d_name, dirent->d_name, copy_len);
++    entry->d_name[copy_len] = 0;
+ 
+     return 1;
+ }
+diff --git a/cpu/native/fs/native_fs.patch b/cpu/native/fs/native_fs.patch
+new file mode 100644
+index 00000000..2c8a4eae
+--- /dev/null
++++ b/cpu/native/fs/native_fs.patch
+@@ -0,0 +1,25 @@
++*** Begin Patch
++*** Update File: cpu/native/fs/native_fs.c
++@@
++-    entry->d_ino = dirent->d_ino;
++-    strncpy(entry->d_name, (char *)dirent->d_name, sizeof(entry->d_name));
++-
++-    return 1;
+++    entry->d_ino = dirent->d_ino;
+++    /* Ensure the name is always null‑terminated.  The underlying
+++     * `struct dirent` may contain a name that exactly fits the VFS buffer
+++     * (VFS_NAME_MAX characters).  Using `strncpy` would omit the terminating
+++     * zero in that case.  We therefore copy the name up to the buffer size
+++     * minus one and explicitly add a NUL byte.
+++     */
+++    size_t max_len = VFS_NAME_MAX; /* maximum characters without the terminating NUL */
+++    size_t copy_len = strnlen(dirent->d_name, max_len + 1);
+++    if (copy_len > max_len) {
+++        /* Name longer than VFS_NAME_MAX – truncate to fit the buffer. */
+++        copy_len = max_len;
+++    }
+++    memcpy(entry->d_name, dirent->d_name, copy_len);
+++    entry->d_name[copy_len] = '\0';
+++
+++    return 1;
++*** End Patch

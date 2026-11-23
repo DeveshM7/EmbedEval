@@ -1,0 +1,94 @@
+diff --git a/sys/include/ztimer.h b/sys/include/ztimer.h
+index 52a8d10d..0469da24 100644
+--- a/sys/include/ztimer.h
++++ b/sys/include/ztimer.h
+@@ -268,6 +268,7 @@
+ #include "msg.h"
+ #include "mutex.h"
+ #include "rmutex.h"
++#include "mbox.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -799,6 +800,25 @@ int ztimer_mutex_lock_timeout(ztimer_clock_t *clock, mutex_t *mutex,
+ int ztimer_rmutex_lock_timeout(ztimer_clock_t *clock, rmutex_t *rmutex,
+                                uint32_t timeout);
+ 
++
++/**
++ * @brief   Get a message from a mailbox with timeout
++ *
++ * Tries to get a message from @p mbox. If a message is already available,
++ * it returns immediately. Otherwise, it blocks until a message becomes available
++ * or @p timeout elapses.
++ *
++ * @param[in]       clock       ztimer clock to operate on
++ * @param[in]       mbox        mailbox to get message from
++ * @param[in,out]   msg         pointer to message buffer for retrieved message
++ * @param[in]       timeout     timeout in ztimer_clock's ticks
++ *
++ * @retval  0               Success, message retrieved into @p msg
++ * @retval  -ETIMEDOUT      No message available within @p timeout
++ */
++int ztimer_mbox_get_timeout(ztimer_clock_t *clock, mbox_t *mbox, msg_t *msg,
++                             uint32_t timeout);
++
+ /**
+  * @brief   Initialize the board-specific default ztimer configuration
+  */
+diff --git a/sys/ztimer/util.c b/sys/ztimer/util.c
+index 277f4854..9b4bd74c 100644
+--- a/sys/ztimer/util.c
++++ b/sys/ztimer/util.c
+@@ -28,6 +28,7 @@
+ #include "mutex.h"
+ #include "rmutex.h"
+ #include "thread.h"
++#include "mbox.h"
+ #include "ztimer.h"
+ 
+ static void _callback_unlock_mutex(void *arg)
+@@ -209,3 +210,43 @@ int ztimer_rmutex_lock_timeout(ztimer_clock_t *clock, rmutex_t *rmutex,
+     }
+     return -ECANCELED;
+ }
++
++#ifdef MODULE_CORE_MBOX
++static void _mbox_timeout_cb(void *arg)
++{
++    kernel_pid_t *pid = (kernel_pid_t *)arg;
++    thread_wakeup(*pid);
++}
++
++int ztimer_mbox_get_timeout(ztimer_clock_t *clock, mbox_t *mbox, msg_t *msg,
++                             uint32_t timeout)
++{
++    /* Try to get a message immediately */
++    if (mbox_try_get(mbox, msg)) {
++        return 0;
++    }
++
++    /* No message available, set up timeout */
++    ztimer_t timer = { .base = { .next = NULL } };
++    kernel_pid_t pid = thread_getpid();
++
++    timer.callback = _mbox_timeout_cb;
++    timer.arg = (void *)&pid;
++
++    ztimer_set(clock, &timer, timeout);
++
++    /* Block until message arrives or timeout */
++    _mbox_get(mbox, msg, BLOCKING);
++
++    /* Message arrived or timeout occurred, check which */
++    if (timer.base.next) {
++        /* Timer still active, message arrived first */
++        ztimer_remove(clock, &timer);
++        return 0;
++    }
++    else {
++        /* Timer fired, timeout occurred */
++        return -ETIMEDOUT;
++    }
++}
++#endif /* MODULE_CORE_MBOX */

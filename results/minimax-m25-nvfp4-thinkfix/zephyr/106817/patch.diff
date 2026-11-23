@@ -1,0 +1,33 @@
+diff --git a/subsys/net/ip/tcp.c b/subsys/net/ip/tcp.c
+index e780dbde..65e361d4 100644
+--- a/subsys/net/ip/tcp.c
++++ b/subsys/net/ip/tcp.c
+@@ -3709,6 +3709,7 @@ int net_tcp_put(struct net_context *context, bool force_close)
+ 
+ 	if (force_close) {
+ 		k_work_cancel_delayable(&conn->send_data_timer);
++		k_work_cancel_delayable(&conn->send_timer);
+ 		keep_alive_timer_stop(conn);
+ 
+ 		k_mutex_unlock(&conn->lock);
+@@ -3748,8 +3749,20 @@ int net_tcp_put(struct net_context *context, bool force_close)
+ 			keep_alive_timer_stop(conn);
+ 		}
+ 	} else if (conn->in_connect) {
++		/* Cancel any pending SYN retransmissions when closing the socket
++		 * during an async handshake. This prevents zombie TCP connections.
++		 */
++		(void)k_work_cancel_delayable(&conn->send_data_timer);
++		(void)k_work_cancel_delayable(&conn->send_timer);
++
+ 		conn->in_connect = false;
+ 		k_sem_reset(&conn->connect_sem);
++
++		k_mutex_unlock(&conn->lock);
++
++		tcp_conn_close(conn, -ECONNABORTED);
++
++		return 0;
+ 	}
+ 
+ 	k_mutex_unlock(&conn->lock);

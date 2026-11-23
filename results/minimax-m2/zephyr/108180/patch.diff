@@ -1,0 +1,1107 @@
+diff --git a/include/zephyr/net/socket_service.h b/include/zephyr/net/socket_service.h
+index 85a9dc884..cc29adf9f 100644
+--- a/include/zephyr/net/socket_service.h
++++ b/include/zephyr/net/socket_service.h
+@@ -178,6 +178,23 @@ static inline int net_socket_service_unregister(const struct net_socket_service_
+ 	return net_socket_service_register(service, NULL, 0, NULL);
+ }
+ 
++/**
++ * @brief Unregister pollable sockets and close them.
++ *
++ * This function is similar to net_socket_service_unregister() but additionally
++ * closes the socket file descriptors for the caller. After this function returns,
++ * the caller should not close the sockets as they are already closed by the
++ * socket service.
++ *
++ * @param service Pointer to a service description.
++ *
++ * @retval 0 No error
++ * @retval -ENOENT Service is not found.
++ * @retval -ENINVAL Invalid parameter.
++ * @retval -ETIMEDOUT Timeout waiting for sockets to be closed.
++ */
++__syscall int net_socket_service_close(const struct net_socket_service_desc *service);
++
+ /**
+  * @typedef net_socket_service_cb_t
+  * @brief Callback used while iterating over socket services.
+diff --git a/include/zephyr/net/socket_service.h.bak b/include/zephyr/net/socket_service.h.bak
+new file mode 100644
+index 000000000..85a9dc884
+--- /dev/null
++++ b/include/zephyr/net/socket_service.h.bak
+@@ -0,0 +1,209 @@
++/**
++ * @file
++ * @brief BSD Socket service API
++ *
++ * API can be used to install a k_work that is called
++ * if there is data received to a socket.
++ */
++
++/*
++ * Copyright (c) 2023 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef ZEPHYR_INCLUDE_NET_SOCKET_SERVICE_H_
++#define ZEPHYR_INCLUDE_NET_SOCKET_SERVICE_H_
++
++/**
++ * @brief BSD socket service API
++ * @defgroup bsd_socket_service BSD socket service API
++ * @since 3.6
++ * @version 0.2.0
++ * @ingroup networking
++ * @{
++ */
++
++#include <sys/types.h>
++#include <zephyr/types.h>
++#include <zephyr/net/socket.h>
++#include <zephyr/logging/log.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct net_socket_service_event;
++
++/** @brief The signature for a net socket service handler function.
++ *
++ * The function will be invoked by the socket service.
++ *
++ * @param pev the socket service event that provided the handler.
++ */
++typedef void (*net_socket_service_handler_t)(struct net_socket_service_event *pev);
++
++/**
++ * This struct contains information which socket triggered
++ * calls to the callback function.
++ */
++struct net_socket_service_event {
++	/** Callback to be called for desired socket activity */
++	net_socket_service_handler_t callback;
++	/** Socket information that triggered this event. */
++	struct zsock_pollfd event;
++	/** User data */
++	void *user_data;
++	/** Service back pointer */
++	struct net_socket_service_desc *svc;
++};
++
++/**
++ * Main structure holding socket service configuration information.
++ * The k_work item is created so that when there is data coming
++ * to those fds, the k_work callback is then called.
++ * The workqueue can be set NULL in which case system workqueue is used.
++ * The service descriptor should be created at built time, and then used
++ * as a parameter to register the sockets to be monitored.
++ * User should create needed sockets and then setup the poll struct and
++ * then register the sockets to be monitored at runtime.
++ */
++struct net_socket_service_desc {
++#if CONFIG_NET_SOCKETS_LOG_LEVEL >= LOG_LEVEL_DBG
++	/**
++	 * Owner name. This can be used in debugging to see who has
++	 * registered this service.
++	 */
++	const char *owner;
++#endif
++	/** Pointer to the list of services that we are listening */
++	struct net_socket_service_event *pev;
++	/** Length of the pollable socket array for this service. */
++	int pev_len;
++	/** Where are my pollfd entries in the global list */
++	int *idx;
++};
++
++/** @cond INTERNAL_HIDDEN */
++
++#define __z_net_socket_svc_get_name(_svc_id) __z_net_socket_service_##_svc_id
++#define __z_net_socket_svc_get_idx(_svc_id) __z_net_socket_service_idx_##_svc_id
++#define __z_net_socket_svc_get_owner __FILE__ ":" STRINGIFY(__LINE__)
++
++#if CONFIG_NET_SOCKETS_LOG_LEVEL >= LOG_LEVEL_DBG
++#define NET_SOCKET_SERVICE_OWNER .owner = __z_net_socket_svc_get_owner,
++#else
++#define NET_SOCKET_SERVICE_OWNER
++#endif
++
++#define __z_net_socket_service_define(_name, _cb, _count, ...) \
++	static int __z_net_socket_svc_get_idx(_name);			\
++	static struct net_socket_service_event				\
++			__z_net_socket_svc_get_name(_name)[_count] = {	\
++		[0 ... ((_count) - 1)] = {				\
++			.event.fd = -1, /* Invalid socket */		\
++			.callback = _cb,				\
++		}							\
++	};								\
++	COND_CODE_0(NUM_VA_ARGS_LESS_1(__VA_ARGS__), (), __VA_ARGS__)	\
++	const STRUCT_SECTION_ITERABLE(net_socket_service_desc, _name) = { \
++		NET_SOCKET_SERVICE_OWNER				\
++		.pev = __z_net_socket_svc_get_name(_name),		\
++		.pev_len = (_count),					\
++		.idx = &__z_net_socket_svc_get_idx(_name),		\
++	}
++
++/** @endcond */
++
++/**
++ * @brief Statically define a network socket service.
++ *        The user callback is called synchronously for this service meaning that
++ *        the service API will wait until the user callback returns before continuing
++ *        with next socket service.
++ *
++ * The socket service can be accessed outside the module where it is defined using:
++ *
++ * @code extern struct net_socket_service_desc <name>; @endcode
++ *
++ * @note This macro cannot be used together with a static keyword.
++ *       If such a use-case is desired, use NET_SOCKET_SERVICE_SYNC_DEFINE_STATIC
++ *       instead.
++ *
++ * @param name Name of the service.
++ * @param cb Callback function that is called for socket activity.
++ * @param count How many pollable sockets is needed for this service.
++ */
++#define NET_SOCKET_SERVICE_SYNC_DEFINE(name, cb, count)	\
++	__z_net_socket_service_define(name, cb, count)
++
++/**
++ * @brief Statically define a network socket service in a private (static) scope.
++ *        The user callback is called synchronously for this service meaning that
++ *        the service API will wait until the user callback returns before continuing
++ *        with next socket service.
++ *
++ * @param name Name of the service.
++ * @param cb Callback function that is called for socket activity.
++ * @param count How many pollable sockets is needed for this service.
++ */
++#define NET_SOCKET_SERVICE_SYNC_DEFINE_STATIC(name, cb, count)	\
++	__z_net_socket_service_define(name, cb, count, static)
++
++/**
++ * @brief Register pollable sockets.
++ *
++ * @param service Pointer to a service description.
++ * @param fds Socket array to poll.
++ * @param len Length of the socket array.
++ * @param user_data User specific data.
++ *
++ * @retval 0 No error
++ * @retval -ENOENT Service is not found.
++ * @retval -ENINVAL Invalid parameter.
++ */
++__syscall int net_socket_service_register(const struct net_socket_service_desc *service,
++					  struct zsock_pollfd *fds, int len, void *user_data);
++
++/**
++ * @brief Unregister pollable sockets.
++ *
++ * @param service Pointer to a service description.
++ *
++ * @retval 0 No error
++ * @retval -ENOENT Service is not found.
++ * @retval -ENINVAL Invalid parameter.
++ */
++static inline int net_socket_service_unregister(const struct net_socket_service_desc *service)
++{
++	return net_socket_service_register(service, NULL, 0, NULL);
++}
++
++/**
++ * @typedef net_socket_service_cb_t
++ * @brief Callback used while iterating over socket services.
++ *
++ * @param svc Pointer to current socket service.
++ * @param user_data A valid pointer to user data or NULL
++ */
++typedef void (*net_socket_service_cb_t)(const struct net_socket_service_desc *svc,
++					void *user_data);
++
++/**
++ * @brief Go through all the socket services and call callback for each service.
++ *
++ * @param cb User-supplied callback function to call
++ * @param user_data User specified data
++ */
++void net_socket_service_foreach(net_socket_service_cb_t cb, void *user_data);
++
++#ifdef __cplusplus
++}
++#endif
++
++#include <zephyr/syscalls/socket_service.h>
++
++/**
++ * @}
++ */
++
++#endif /* ZEPHYR_INCLUDE_NET_SOCKET_SERVICE_H_ */
+diff --git a/subsys/net/lib/sntp/sntp.c b/subsys/net/lib/sntp/sntp.c
+index af8cc0362..f48435d08 100644
+--- a/subsys/net/lib/sntp/sntp.c
++++ b/subsys/net/lib/sntp/sntp.c
+@@ -343,12 +343,13 @@ int sntp_read_async(struct net_socket_service_event *event, struct sntp_time *ts
+ 
+ void sntp_close_async(const struct net_socket_service_desc *service)
+ {
+-	struct sntp_ctx *ctx = service->pev->user_data;
+-	/* Detach socket from socket service */
+-	net_socket_service_unregister(service);
+-	/* CLose the socket */
+-	if (ctx) {
+-		(void)zsock_close(ctx->sock.fd);
++	/* 
++	 * Close the socket through the socket service instead of closing
++	 * it directly. This ensures the socket is not closed while it is
++	 * being polled by the service.
++	 */
++	(void)net_socket_service_close(service);
++}
+ 	}
+ }
+ 
+diff --git a/subsys/net/lib/sntp/sntp.c.bak b/subsys/net/lib/sntp/sntp.c.bak
+new file mode 100644
+index 000000000..af8cc0362
+--- /dev/null
++++ b/subsys/net/lib/sntp/sntp.c.bak
+@@ -0,0 +1,355 @@
++/*
++ * Copyright (c) 2017 Linaro Limited
++ * Copyright (c) 2019 Intel Corporation
++ * Copyright (c) 2024 Embeint Inc
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/logging/log.h>
++LOG_MODULE_REGISTER(net_sntp, CONFIG_SNTP_LOG_LEVEL);
++
++#include <zephyr/net/sntp.h>
++#include <zephyr/net/net_log.h>
++#include <zephyr/sys/clock.h>
++#include "sntp_pkt.h"
++#include <limits.h>
++
++#define SNTP_LI_MAX 3
++#define SNTP_VERSION_NUMBER 3
++#define SNTP_MODE_CLIENT 3
++#define SNTP_MODE_SERVER 4
++#define SNTP_STRATUM_KOD 0 /* kiss-o'-death */
++#define OFFSET_1970_JAN_1 2208988800
++
++static void sntp_pkt_dump(struct sntp_pkt *pkt)
++{
++	if (!pkt) {
++		return;
++	}
++
++	NET_DBG("li               %x", pkt->li);
++	NET_DBG("vn               %x", pkt->vn);
++	NET_DBG("mode             %x", pkt->mode);
++	NET_DBG("stratum:         %x", pkt->stratum);
++	NET_DBG("poll:            %x", pkt->poll);
++	NET_DBG("precision:       %x", pkt->precision);
++	NET_DBG("root_delay:      %x", net_ntohl(pkt->root_delay));
++	NET_DBG("root_dispersion: %x", net_ntohl(pkt->root_dispersion));
++	NET_DBG("ref_id:          %x", net_ntohl(pkt->ref_id));
++	NET_DBG("ref_tm_s:        %x", net_ntohl(pkt->ref_tm_s));
++	NET_DBG("ref_tm_f:        %x", net_ntohl(pkt->ref_tm_f));
++	NET_DBG("orig_tm_s:       %x", net_ntohl(pkt->orig_tm_s));
++	NET_DBG("orig_tm_f:       %x", net_ntohl(pkt->orig_tm_f));
++	NET_DBG("rx_tm_s:         %x", net_ntohl(pkt->rx_tm_s));
++	NET_DBG("rx_tm_f:         %x", net_ntohl(pkt->rx_tm_f));
++	NET_DBG("tx_tm_s:         %x", net_ntohl(pkt->tx_tm_s));
++	NET_DBG("tx_tm_f:         %x", net_ntohl(pkt->tx_tm_f));
++}
++
++static int64_t q32_32_s_to_ll_us(uint32_t t_s, uint32_t t_f)
++{
++	return (uint64_t)t_s * USEC_PER_SEC + (((uint64_t)t_f * (uint64_t)USEC_PER_SEC) >> 32);
++}
++
++#if defined(CONFIG_SNTP_UNCERTAINTY)
++static int64_t q16_16_s_to_ll_us(uint32_t t)
++{
++	return (int64_t)(t >> 16) * (int64_t)USEC_PER_SEC +
++	       (((int64_t)(t & 0xFFFF) * (int64_t)USEC_PER_SEC) >> 16);
++}
++#endif
++
++static int32_t parse_response(uint8_t *data, uint16_t len, struct sntp_time *expected_orig_ts,
++			      struct sntp_time *res)
++{
++	struct sntp_pkt *pkt = (struct sntp_pkt *)data;
++	struct timespec client_rx_ts;
++	int64_t client_tx_us;
++	int64_t client_rx_us;
++	int64_t server_rx_us;
++	int64_t server_tx_us;
++	int32_t rtt_us;
++	uint32_t ts;
++	int ret;
++
++	sntp_pkt_dump(pkt);
++
++	if (net_ntohl(pkt->orig_tm_s) != expected_orig_ts->seconds ||
++	    net_ntohl(pkt->orig_tm_f) != expected_orig_ts->fraction) {
++		NET_DBG("Mismatch originate timestamp: %d.%09d, expect: %llu.%09u",
++			net_ntohl(pkt->orig_tm_s), net_ntohl(pkt->orig_tm_f),
++			expected_orig_ts->seconds,
++			expected_orig_ts->fraction);
++		return -ERANGE;
++	}
++
++	if (pkt->mode != SNTP_MODE_SERVER) {
++		/* For unicast and manycast, server should return 4.
++		 * For broadcast (which is not supported now), server should
++		 * return 5.
++		 */
++		NET_DBG("Unexpected mode: %d", pkt->mode);
++		return -EINVAL;
++	}
++
++	if (pkt->stratum == SNTP_STRATUM_KOD) {
++		NET_DBG("kiss-o'-death stratum");
++		return -EBUSY;
++	}
++
++	if (net_ntohl(pkt->tx_tm_s) == 0 && net_ntohl(pkt->tx_tm_f) == 0) {
++		NET_DBG("zero transmit timestamp");
++		return -EINVAL;
++	}
++
++	/* Compute total round trip time */
++	ret = sys_clock_gettime(SYS_CLOCK_REALTIME, &client_rx_ts);
++	if (ret < 0) {
++		return ret;
++	}
++	client_rx_us = (USEC_PER_SEC * (int64_t)(client_rx_ts.tv_sec + OFFSET_1970_JAN_1)) +
++		       (client_rx_ts.tv_nsec / NSEC_PER_USEC);
++	client_tx_us = q32_32_s_to_ll_us(expected_orig_ts->seconds, expected_orig_ts->fraction);
++	rtt_us = client_rx_us - client_tx_us;
++
++	server_rx_us = q32_32_s_to_ll_us(net_ntohl(pkt->rx_tm_s), net_ntohl(pkt->rx_tm_f));
++	server_tx_us = q32_32_s_to_ll_us(net_ntohl(pkt->tx_tm_s), net_ntohl(pkt->tx_tm_f));
++
++	/* Compute single sided path delay (assumes symmetrical packet delay) */
++	res->rsp_delay_us = (rtt_us - (server_tx_us - server_rx_us)) / 2;
++
++#if defined(CONFIG_SNTP_UNCERTAINTY)
++
++	if (server_rx_us > server_tx_us || client_tx_us > client_rx_us) {
++		NET_DBG("Invalid timestamps from SNTP server");
++		return -EINVAL;
++	}
++
++	int64_t d_us = (client_rx_us - client_tx_us) - (server_tx_us - server_rx_us);
++	int64_t clk_offset_us = ((server_rx_us - client_tx_us) + (server_tx_us - client_rx_us)) / 2;
++	int64_t root_dispersion_us = q16_16_s_to_ll_us(net_ntohl(pkt->root_dispersion));
++	int64_t root_delay_us = q16_16_s_to_ll_us(net_ntohl(pkt->root_delay));
++	uint32_t precision_us;
++
++	if (pkt->precision <= 0) {
++		precision_us = (uint32_t)(USEC_PER_SEC + USEC_PER_SEC / 2) >> -pkt->precision;
++	} else if (pkt->precision <= 10) {
++		precision_us = (uint32_t)(USEC_PER_SEC + USEC_PER_SEC / 2) << pkt->precision;
++	} else {
++		NET_DBG("SNTP packet precision out of range: %d", pkt->precision);
++		return -EINVAL;
++	}
++
++	res->uptime_us = client_rx_us;
++	res->seconds = (res->uptime_us + clk_offset_us) / USEC_PER_SEC;
++	res->fraction = (res->uptime_us + clk_offset_us) % USEC_PER_SEC;
++	res->uncertainty_us = (d_us + root_delay_us + precision_us) / 2 + root_dispersion_us;
++#else
++	res->fraction = net_ntohl(pkt->tx_tm_f);
++	res->seconds = net_ntohl(pkt->tx_tm_s);
++#endif
++	ts = net_ntohl(pkt->tx_tm_s);
++
++	/* Check if most significant bit is set */
++	if (ts & 0x80000000) {
++		/* UTC time is reckoned from 0h 0m 0s UTC
++		 * on 1 January 1900.
++		 */
++		if (ts >= OFFSET_1970_JAN_1) {
++			res->seconds -= OFFSET_1970_JAN_1;
++		} else {
++			return -EINVAL;
++		}
++	} else {
++		/* UTC time is reckoned from 6h 28m 16s UTC
++		 * on 7 February 2036.
++		 */
++		res->seconds += 0x100000000ULL - OFFSET_1970_JAN_1;
++	}
++
++	return 0;
++}
++
++int sntp_init(struct sntp_ctx *ctx, const struct net_sockaddr *addr, net_socklen_t addr_len)
++{
++	int ret;
++
++	if (!ctx || !addr) {
++		return -EFAULT;
++	}
++
++	memset(ctx, 0, sizeof(struct sntp_ctx));
++
++	ctx->sock.fd = zsock_socket(addr->sa_family, NET_SOCK_DGRAM, NET_IPPROTO_UDP);
++	if (ctx->sock.fd < 0) {
++		NET_ERR("Failed to create UDP socket %d", errno);
++		return -errno;
++	}
++
++	ret = zsock_connect(ctx->sock.fd, addr, addr_len);
++	if (ret < 0) {
++		(void)zsock_close(ctx->sock.fd);
++		NET_ERR("Cannot connect to UDP remote : %d", errno);
++		return -errno;
++	}
++
++	ctx->sock.fds[ctx->sock.nfds].fd = ctx->sock.fd;
++	ctx->sock.fds[ctx->sock.nfds].events = ZSOCK_POLLIN;
++	ctx->sock.nfds++;
++
++	return 0;
++}
++
++static int sntp_query_send(struct sntp_ctx *ctx)
++{
++	struct sntp_pkt tx_pkt = { 0 };
++	struct timespec ts;
++	int ret;
++
++	ret = sys_clock_gettime(SYS_CLOCK_REALTIME, &ts);
++	if (ret < 0) {
++		return ret;
++	}
++
++	/* prepare request pkt */
++	tx_pkt.li = 0;
++	tx_pkt.vn = SNTP_VERSION_NUMBER;
++	tx_pkt.mode = SNTP_MODE_CLIENT;
++	ctx->expected_orig_ts.seconds = (uint32_t)(ts.tv_sec + OFFSET_1970_JAN_1);
++	ctx->expected_orig_ts.fraction =
++		(uint32_t)((uint64_t)ts.tv_nsec * UINT32_MAX / NSEC_PER_SEC);
++	tx_pkt.tx_tm_s = net_htonl(ctx->expected_orig_ts.seconds);
++	tx_pkt.tx_tm_f = net_htonl(ctx->expected_orig_ts.fraction);
++
++	return zsock_send(ctx->sock.fd, (uint8_t *)&tx_pkt, sizeof(tx_pkt), 0);
++}
++
++int sntp_query(struct sntp_ctx *ctx, uint32_t timeout, struct sntp_time *ts)
++{
++	int ret = 0;
++
++	if (!ctx || !ts) {
++		return -EFAULT;
++	}
++
++	ret = sntp_query_send(ctx);
++	if (ret < 0) {
++		NET_ERR("Failed to send over UDP socket %d", ret);
++		return ret;
++	}
++
++	return sntp_recv_response(ctx, timeout, ts);
++}
++
++int sntp_recv_response(struct sntp_ctx *ctx, uint32_t timeout,
++			      struct sntp_time *ts)
++{
++	struct sntp_pkt buf = { 0 };
++	int status;
++	int rcvd;
++
++	status = zsock_poll(ctx->sock.fds, ctx->sock.nfds, timeout);
++	if (status < 0) {
++		NET_ERR("Error in poll:%d", errno);
++		return -errno;
++	}
++
++	if (status == 0) {
++		return -ETIMEDOUT;
++	}
++
++	rcvd = zsock_recv(ctx->sock.fd, (uint8_t *)&buf, sizeof(buf), 0);
++	if (rcvd < 0) {
++		return -errno;
++	}
++
++	if (rcvd != sizeof(struct sntp_pkt)) {
++		return -EMSGSIZE;
++	}
++
++	status = parse_response((uint8_t *)&buf, sizeof(buf),
++				&ctx->expected_orig_ts,
++				ts);
++	return status;
++}
++
++void sntp_close(struct sntp_ctx *ctx)
++{
++	if (ctx) {
++		(void)zsock_close(ctx->sock.fd);
++	}
++}
++
++#ifdef CONFIG_NET_SOCKETS_SERVICE
++
++int sntp_init_async(struct sntp_ctx *ctx, const struct net_sockaddr *addr, net_socklen_t addr_len,
++		    const struct net_socket_service_desc *service)
++{
++	int ret;
++
++	/* Validate service pointer */
++	if (service == NULL) {
++		return -EFAULT;
++	}
++	/* Standard init */
++	ret = sntp_init(ctx, addr, addr_len);
++	if (ret < 0) {
++		return ret;
++	}
++	/* Attach socket to socket service */
++	ret = net_socket_service_register(service, ctx->sock.fds, ctx->sock.nfds, ctx);
++	if (ret < 0) {
++		NET_ERR("Failed to register socket %d", ret);
++		/* Cleanup init on register failure*/
++		sntp_close(ctx);
++	}
++	return ret;
++}
++
++int sntp_send_async(struct sntp_ctx *ctx)
++{
++	int ret = 0;
++
++	if (!ctx) {
++		return -EFAULT;
++	}
++
++	ret = sntp_query_send(ctx);
++	if (ret < 0) {
++		NET_ERR("Failed to send over UDP socket %d", ret);
++		return ret;
++	}
++	return 0;
++}
++
++int sntp_read_async(struct net_socket_service_event *event, struct sntp_time *ts)
++{
++	struct sntp_ctx *ctx = event->user_data;
++	struct sntp_pkt buf = {0};
++	int rcvd;
++
++	rcvd = zsock_recv(ctx->sock.fd, (uint8_t *)&buf, sizeof(buf), 0);
++	if (rcvd < 0) {
++		return -errno;
++	}
++
++	if (rcvd != sizeof(struct sntp_pkt)) {
++		return -EMSGSIZE;
++	}
++
++	return parse_response((uint8_t *)&buf, sizeof(buf), &ctx->expected_orig_ts, ts);
++}
++
++void sntp_close_async(const struct net_socket_service_desc *service)
++{
++	struct sntp_ctx *ctx = service->pev->user_data;
++	/* Detach socket from socket service */
++	net_socket_service_unregister(service);
++	/* CLose the socket */
++	if (ctx) {
++		(void)zsock_close(ctx->sock.fd);
++	}
++}
++
++#endif /* CONFIG_NET_SOCKETS_SERVICE */
+diff --git a/subsys/net/lib/sockets/sockets_service.c b/subsys/net/lib/sockets/sockets_service.c
+index e60f919ac..0aa5823c7 100644
+--- a/subsys/net/lib/sockets/sockets_service.c
++++ b/subsys/net/lib/sockets/sockets_service.c
+@@ -36,6 +36,18 @@ static struct service {
+ 
+ #define get_idx(svc) (*(svc->idx))
+ 
++static K_MUTEX_DEFINE(close_lock);
++static K_SEM_DEFINE(close_sem, 0, 1);
++
++/* Track sockets that need to be closed */
++static struct {
++	int fds[CONFIG_ZVFS_POLL_MAX];
++	int count;
++	int service_idx;
++	bool active;
++} close_queue;
++
++
+ void net_socket_service_foreach(net_socket_service_cb_t cb, void *user_data)
+ {
+ 	STRUCT_SECTION_FOREACH(net_socket_service_desc, svc) {
+@@ -51,6 +63,25 @@ static void cleanup_svc_events(const struct net_socket_service_desc *svc)
+ 	}
+ }
+ 
++/**
++ * Close sockets marked for closing
++ */
++static void close_marked_sockets(void)
++{
++	int i;
++
++	/* Close sockets directly from the list */
++	for (i = 0; i < close_queue.count; i++) {
++		NET_DBG("Closing socket %d", close_queue.fds[i]);
++		zsock_close(close_queue.fds[i]);
++	}
++
++	close_queue.active = false;
++	close_queue.count = 0;
++	k_sem_give(&close_sem);
++}
++
++
+ int z_impl_net_socket_service_register(const struct net_socket_service_desc *svc,
+ 				       struct zsock_pollfd *fds, int len,
+ 				       void *user_data)
+@@ -59,6 +90,14 @@ int z_impl_net_socket_service_register(const struct net_socket_service_desc *svc
+ 
+ 	k_mutex_lock(&lock, K_FOREVER);
+ 
++	if (thread_status == SOCKET_SERVICE_THREAD_UNINITIALIZED) {
++		(void)k_condvar_wait(&wait_start, &lock, K_FOREVER);
++	} else if (thread_status != SOCKET_SERVICE_THREAD_RUNNING) {
++		NET_ERR("Socket service thread not running");
++		ret = -EIO;
++		goto out;
++	}
++
+ 	if (thread_status == SOCKET_SERVICE_THREAD_UNINITIALIZED) {
+ 		(void)k_condvar_wait(&wait_start, &lock, K_FOREVER);
+ 	} else if (thread_status != SOCKET_SERVICE_THREAD_RUNNING) {
+@@ -99,6 +138,76 @@ out:
+ 	return ret;
+ }
+ 
++
++int z_impl_net_socket_service_close(const struct net_socket_service_desc *svc)
++{
++	int ret = 0;
++	int i;
++	int timeout_ms = 5000;  /* 5 second timeout */
++
++	k_mutex_lock(&lock, K_FOREVER);
++
++	if (thread_status == SOCKET_SERVICE_THREAD_UNINITIALIZED) {
++		(void)k_condvar_wait(&wait_start, &lock, K_FOREVER);
++	} else if (thread_status != SOCKET_SERVICE_THREAD_RUNNING) {
++		NET_ERR("Socket service thread not running");
++		ret = -EIO;
++		goto out;
++	}
++
++	if (thread_status != SOCKET_SERVICE_THREAD_RUNNING) {
++		NET_ERR("Socket service thread not running");
++		ret = -EIO;
++		goto out;
++	}
++
++	if (STRUCT_SECTION_START(net_socket_service_desc) > svc ||
++	    STRUCT_SECTION_END(net_socket_service_desc) <= svc) {
++		ret = -ENOENT;
++		goto out;
++	}
++
++	/* Collect all socket fds from this service */
++	close_queue.count = 0;
++	close_queue.service_idx = get_idx(svc);
++	close_queue.active = true;
++
++	for (i = 0; i < svc->pev_len; i++) {
++		if (svc->pev[i].event.fd >= 0 && close_queue.count < CONFIG_ZVFS_POLL_MAX) {
++			close_queue.fds[close_queue.count++] = svc->pev[i].event.fd;
++		}
++	}
++
++	if (close_queue.count == 0) {
++		NET_DBG("No sockets to close for service %p", svc);
++		close_queue.active = false;
++		ret = 0;
++		goto out;
++	}
++
++	/* Unregister the service first */
++	cleanup_svc_events(svc);
++
++	/* Trigger the service thread to close the sockets */
++	zvfs_eventfd_write(ctx.events[0].fd, 1);
++
++	k_mutex_unlock(&lock);
++
++	/* Wait for the sockets to be closed */
++	ret = k_sem_take(&close_sem, K_MSEC(timeout_ms));
++	if (ret != 0) {
++	NET_DBG("Waiting for sockets to be closed, active=%d", close_queue.active);
++		NET_ERR("Timeout waiting for sockets to be closed");
++		ret = -ETIMEDOUT;
++	}
++
++	return ret;
++
++out:
++	k_mutex_unlock(&lock);
++	return ret;
++}
++
+ static struct net_socket_service_desc *find_svc_and_event(
+ 	struct zsock_pollfd *pev,
+ 	struct net_socket_service_event **event)
+@@ -223,6 +332,14 @@ restart:
+ 
+ 	k_mutex_lock(&lock, K_FOREVER);
+ 
++	if (thread_status == SOCKET_SERVICE_THREAD_UNINITIALIZED) {
++		(void)k_condvar_wait(&wait_start, &lock, K_FOREVER);
++	} else if (thread_status != SOCKET_SERVICE_THREAD_RUNNING) {
++		NET_ERR("Socket service thread not running");
++		ret = -EIO;
++		goto out;
++	}
++
+ 	/* Copy individual events to the big array */
+ 	STRUCT_SECTION_FOREACH(net_socket_service_desc, svc) {
+ 		for (int j = 0; j < svc->pev_len; j++) {
+@@ -263,6 +380,9 @@ restart:
+ 		/* Relocate after trigger work so the work gets done before restarting */
+ 		if (ctx.events[0].revents) {
+ 			zvfs_eventfd_read(ctx.events[0].fd, &value);
++			if (close_queue.active) {
++				close_marked_sockets();
++			}
+ 			ctx.events[0].revents = 0;
+ 			NET_DBG("Received restart event.");
+ 			goto restart;
+diff --git a/subsys/net/lib/sockets/sockets_service.c.bak b/subsys/net/lib/sockets/sockets_service.c.bak
+new file mode 100644
+index 000000000..e60f919ac
+--- /dev/null
++++ b/subsys/net/lib/sockets/sockets_service.c.bak
+@@ -0,0 +1,307 @@
++/*
++ * Copyright (c) 2023 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/logging/log.h>
++LOG_MODULE_REGISTER(net_sock_svc, CONFIG_NET_SOCKETS_LOG_LEVEL);
++
++#include <zephyr/kernel.h>
++#include <zephyr/init.h>
++#include <zephyr/net/net_log.h>
++#include <zephyr/net/socket_service.h>
++#include <zephyr/zvfs/eventfd.h>
++
++static int init_socket_service(void);
++
++enum SOCKET_SERVICE_THREAD_STATUS {
++	SOCKET_SERVICE_THREAD_UNINITIALIZED = 0,
++	SOCKET_SERVICE_THREAD_FAILED,
++	SOCKET_SERVICE_THREAD_STOPPED,
++	SOCKET_SERVICE_THREAD_RUNNING,
++};
++static enum SOCKET_SERVICE_THREAD_STATUS thread_status;
++
++static K_MUTEX_DEFINE(lock);
++static K_CONDVAR_DEFINE(wait_start);
++
++STRUCT_SECTION_START_EXTERN(net_socket_service_desc);
++STRUCT_SECTION_END_EXTERN(net_socket_service_desc);
++
++static struct service {
++	struct zsock_pollfd events[CONFIG_ZVFS_POLL_MAX];
++	int count;
++} ctx;
++
++#define get_idx(svc) (*(svc->idx))
++
++void net_socket_service_foreach(net_socket_service_cb_t cb, void *user_data)
++{
++	STRUCT_SECTION_FOREACH(net_socket_service_desc, svc) {
++		cb(svc, user_data);
++	}
++}
++
++static void cleanup_svc_events(const struct net_socket_service_desc *svc)
++{
++	for (int i = 0; i < svc->pev_len; i++) {
++		svc->pev[i].event.fd = -1;
++		svc->pev[i].event.events = 0;
++	}
++}
++
++int z_impl_net_socket_service_register(const struct net_socket_service_desc *svc,
++				       struct zsock_pollfd *fds, int len,
++				       void *user_data)
++{
++	int i, ret = -ENOENT;
++
++	k_mutex_lock(&lock, K_FOREVER);
++
++	if (thread_status == SOCKET_SERVICE_THREAD_UNINITIALIZED) {
++		(void)k_condvar_wait(&wait_start, &lock, K_FOREVER);
++	} else if (thread_status != SOCKET_SERVICE_THREAD_RUNNING) {
++		NET_ERR("Socket service thread not running, service %p register fails.", svc);
++		ret = -EIO;
++		goto out;
++	}
++
++	if (STRUCT_SECTION_START(net_socket_service_desc) > svc ||
++	    STRUCT_SECTION_END(net_socket_service_desc) <= svc) {
++		goto out;
++	}
++
++	cleanup_svc_events(svc);
++
++	if (fds != NULL) {
++		if (len > svc->pev_len) {
++			NET_DBG("Too many file descriptors, "
++				"max is %d for service %p",
++				svc->pev_len, svc);
++			ret = -ENOMEM;
++			goto out;
++		}
++
++		for (i = 0; i < len; i++) {
++			svc->pev[i].event = fds[i];
++			svc->pev[i].user_data = user_data;
++		}
++	}
++
++	/* Tell the thread to re-read the variables */
++	zvfs_eventfd_write(ctx.events[0].fd, 1);
++	ret = 0;
++
++out:
++	k_mutex_unlock(&lock);
++
++	return ret;
++}
++
++static struct net_socket_service_desc *find_svc_and_event(
++	struct zsock_pollfd *pev,
++	struct net_socket_service_event **event)
++{
++	STRUCT_SECTION_FOREACH(net_socket_service_desc, svc) {
++		for (int i = 0; i < svc->pev_len; i++) {
++			if (svc->pev[i].event.fd == pev->fd) {
++				*event = &svc->pev[i];
++				return svc;
++			}
++		}
++	}
++
++	return NULL;
++}
++
++/* We do not set the user callback to our work struct because we need to
++ * hook into the flow and restore the global poll array so that the next poll
++ * round will not notice it and call the callback again while we are
++ * servicing the callback.
++ */
++void net_socket_service_callback(struct net_socket_service_event *pev)
++{
++	struct net_socket_service_event ev = *pev;
++
++	ev.callback(&ev);
++}
++
++static int call_work(struct zsock_pollfd *pev, struct net_socket_service_event *event)
++{
++	int ret = 0;
++	int fd = pev->fd;
++
++	/* Mark the global fd non pollable so that we do not
++	 * call the callback second time.
++	 */
++	pev->fd = -1;
++
++	/* Synchronous call */
++	net_socket_service_callback(event);
++
++	/* Restore the fd so that new data can be re-triggered */
++	pev->fd = fd;
++
++	return ret;
++}
++
++static int trigger_work(struct zsock_pollfd *pev)
++{
++	struct net_socket_service_event *event;
++	struct net_socket_service_desc *svc;
++
++	svc = find_svc_and_event(pev, &event);
++	if (svc == NULL) {
++		return -ENOENT;
++	}
++
++	event->svc = svc;
++
++	/* Copy the triggered event to our event so that we know what
++	 * was actually causing the event.
++	 */
++	event->event = *pev;
++
++	return call_work(pev, event);
++}
++
++static void socket_service_thread(void *p1, void *p2, void *p3)
++{
++	ARG_UNUSED(p1);
++	ARG_UNUSED(p2);
++	ARG_UNUSED(p3);
++
++	int ret, i, fd, count = 0;
++	zvfs_eventfd_t value;
++
++	STRUCT_SECTION_COUNT(net_socket_service_desc, &ret);
++	if (ret == 0) {
++		NET_INFO("No socket services found, service disabled.");
++		goto fail;
++	}
++
++	/* Create contiguous poll event array to enable socket polling */
++	STRUCT_SECTION_FOREACH(net_socket_service_desc, svc) {
++		NET_DBG("Service %s has %d pollable sockets",
++			COND_CODE_1(CONFIG_NET_SOCKETS_LOG_LEVEL_DBG,
++				    (svc->owner), ("")),
++			svc->pev_len);
++		get_idx(svc) = count + 1;
++		count += svc->pev_len;
++	}
++
++	if ((count + 1) > ARRAY_SIZE(ctx.events)) {
++		NET_ERR("You have %d services to monitor but "
++			"%zd poll entries configured.",
++			count + 1, ARRAY_SIZE(ctx.events));
++		NET_ERR("Please increase value of %s to at least %d",
++			"CONFIG_ZVFS_POLL_MAX", count + 1);
++		goto fail;
++	}
++
++	NET_DBG("Monitoring %d socket entries", count);
++
++	ctx.count = count + 1;
++
++	/* Create an zvfs_eventfd that can be used to trigger events during polling */
++	fd = zvfs_eventfd(0, 0);
++	if (fd < 0) {
++		fd = -errno;
++		NET_ERR("zvfs_eventfd failed (%d)", fd);
++		goto out;
++	}
++
++	thread_status = SOCKET_SERVICE_THREAD_RUNNING;
++	k_condvar_broadcast(&wait_start);
++
++	ctx.events[0].fd = fd;
++	ctx.events[0].events = ZSOCK_POLLIN;
++
++restart:
++	i = 1;
++
++	k_mutex_lock(&lock, K_FOREVER);
++
++	/* Copy individual events to the big array */
++	STRUCT_SECTION_FOREACH(net_socket_service_desc, svc) {
++		for (int j = 0; j < svc->pev_len; j++) {
++			ctx.events[get_idx(svc) + j] = svc->pev[j].event;
++		}
++	}
++
++	k_mutex_unlock(&lock);
++
++	while (true) {
++		ret = zsock_poll(ctx.events, count + 1, -1);
++		if (ret < 0) {
++			ret = -errno;
++			NET_ERR("poll failed (%d)", ret);
++			goto out;
++		}
++
++		if (ret == 0) {
++			/* should not happen because timeout is -1 */
++			break;
++		}
++
++		/* Process work here */
++		for (i = 1; i < (count + 1); i++) {
++			if (ctx.events[i].fd < 0) {
++				continue;
++			}
++
++			if (ctx.events[i].revents > 0) {
++				ret = trigger_work(&ctx.events[i]);
++				if (ret < 0) {
++					NET_DBG("Triggering work failed (%d)", ret);
++					goto restart;
++				}
++			}
++		}
++
++		/* Relocate after trigger work so the work gets done before restarting */
++		if (ctx.events[0].revents) {
++			zvfs_eventfd_read(ctx.events[0].fd, &value);
++			ctx.events[0].revents = 0;
++			NET_DBG("Received restart event.");
++			goto restart;
++		}
++	}
++
++out:
++	NET_DBG("Socket service thread stopped");
++	thread_status = SOCKET_SERVICE_THREAD_STOPPED;
++
++	return;
++
++fail:
++	thread_status = SOCKET_SERVICE_THREAD_FAILED;
++	k_condvar_broadcast(&wait_start);
++}
++
++static int init_socket_service(void)
++{
++	k_tid_t ssm;
++	static struct k_thread service_thread;
++
++	static K_THREAD_STACK_DEFINE(service_thread_stack,
++				     CONFIG_NET_SOCKETS_SERVICE_STACK_SIZE);
++
++	ssm = k_thread_create(&service_thread,
++			      service_thread_stack,
++			      K_THREAD_STACK_SIZEOF(service_thread_stack),
++			      (k_thread_entry_t)socket_service_thread, NULL, NULL, NULL,
++			      CLAMP(CONFIG_NET_SOCKETS_SERVICE_THREAD_PRIO,
++				    K_HIGHEST_APPLICATION_THREAD_PRIO,
++				    K_LOWEST_APPLICATION_THREAD_PRIO), 0, K_NO_WAIT);
++
++	k_thread_name_set(ssm, "net_socket_service");
++
++	return 0;
++}
++
++void socket_service_init(void)
++{
++	(void)init_socket_service();
++}

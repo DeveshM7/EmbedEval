@@ -1,0 +1,149 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..08f46824
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,74 @@
++*** Begin Patch
++*** Update File: sys/shell/shell.c
++@@
++-    else {
++-        if (strcmp("help", argv[0]) == 0) {
++-            print_help(command_list);
++-            return 0;
++-        }
++-        else {
++-            printf("shell: command not found: %s\n", argv[0]);
++-        }
++-    }
+++    else {
+++        /* built‑in commands: "help" and "help_json" */
+++        if (strcmp("help", argv[0]) == 0) {
+++            print_help(command_list);
+++            return 0;
+++        }
+++        if (strcmp("help_json", argv[0]) == 0) {
+++            /* Emit a single‑line JSON object describing all commands.
+++             * The top‑level key is "cmds" and each command is represented by
+++             * an object with "cmd" (name) and "desc" (description). The built‑in
+++             * commands themselves are omitted and each command appears only once.
+++             */
+++            struct printed {
+++                const char *name;
+++            } printed[256];
+++            size_t printed_cnt = 0;
+++
+++            putchar('{');
+++            fputs("\"cmds\":[", stdout);
+++            bool first = true;
+++
+++            /* Helper macro to output a JSON entry if it hasn't been printed
+++             * before and is not a built‑in command. */
+++            #define EMIT_JSON(name, desc) do { \
+++                if ((strcmp((name), "help") == 0) || (strcmp((name), "help_json") == 0)) { \
+++                    break; \
+++                } \
+++                for (size_t _i = 0; _i < printed_cnt; _i++) { \
+++                    if (strcmp(printed[_i].name, (name)) == 0) { \
+++                        break; \
+++                    } \
+++                } \
+++                if (!first) { fputs(",", stdout); } \
+++                fputs("{\"cmd\":\"", stdout); fputs((name), stdout); fputs("\",\"desc\":\"", stdout); fputs((desc), stdout); fputs("\"}\", stdout); \
+++                printed[printed_cnt++].name = (name); \
+++                first = false; \
+++            } while (0)
+++
+++            /* Commands supplied via the explicit command list */
+++            if (command_list != NULL) {
+++                for (const shell_command_t *entry = command_list; entry->name != NULL; entry++) {
+++                    EMIT_JSON(entry->name, entry->desc);
+++                }
+++            }
+++
+++            /* Commands registered through the XFA */
+++            unsigned n = XFA_LEN(shell_command_xfa_t*, shell_commands_xfa);
+++            for (unsigned i = 0; i < n; i++) {
+++                const volatile shell_command_xfa_t *entry = shell_commands_xfa[i];
+++                EMIT_JSON(entry->name, entry->desc);
+++            }
+++
+++            #undef EMIT_JSON
+++            fputs("]}", stdout);
+++            putchar('\n');
+++            return 0;
+++        }
+++        else {
+++            printf("shell: command not found: %s\n", argv[0]);
+++        }
+++    }
++*** End Patch
+diff --git a/sys/shell/cmds/help_json.c b/sys/shell/cmds/help_json.c
+new file mode 100644
+index 00000000..367eec15
+--- /dev/null
++++ b/sys/shell/cmds/help_json.c
+@@ -0,0 +1,63 @@
++/*
++ * Copyright (C) 2024 Embedded Task
++ *
++ * SPDX-License-Identifier: LGPL-2.1
++ */
++
++/**
++ * @ingroup     sys_shell_commands
++ * @brief       Provide a JSON representation of available shell commands.
++ *
++ * This command is meant to be used when the shell is compiled with the
++ * `shell_builtin_cmd_help_json` module. It prints a single‑line JSON object
++ * with a top‑level "cmds" array. Each element of the array is an object with
++ * the fields "cmd" (the command name) and "desc" (its description). The built‑in
++ * `help` and `help_json` commands themselves are omitted.
++ */
++
++#include <stdbool.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "shell.h"
++
++static int _help_json_handler(int argc, char **argv)
++{
++    (void)argc;
++    (void)argv;
++
++    struct printed { const char *name; } printed[256];
++    size_t printed_cnt = 0;
++
++    putchar('{');
++    fputs("\"cmds\":[", stdout);
++    bool first = true;
++
++    #define EMIT_JSON(name, desc) do { \
++        if ((strcmp((name), "help") == 0) || (strcmp((name), "help_json") == 0)) { \
++            break; \
++        } \
++        for (size_t _i = 0; _i < printed_cnt; _i++) { \
++            if (strcmp(printed[_i].name, (name)) == 0) { \
++                break; \
++            } \
++        } \
++        if (!first) { fputs(",", stdout); } \
++        fputs("{\"cmd\":\"", stdout); fputs((name), stdout); fputs("\",\"desc\":\"", stdout); fputs((desc), stdout); fputs("\"}", stdout); \
++        printed[printed_cnt++].name = (name); \
++        first = false; \
++    } while (0)
++
++    unsigned n = XFA_LEN(shell_command_xfa_t*, shell_commands_xfa);
++    for (unsigned i = 0; i < n; i++) {
++        const volatile shell_command_xfa_t *entry = shell_commands_xfa[i];
++        EMIT_JSON(entry->name, entry->desc);
++    }
++
++    #undef EMIT_JSON
++    fputs("]}", stdout);
++    putchar('\n');
++    return 0;
++}
++
++SHELL_COMMAND(help_json, "Print a JSON description of available commands", _help_json_handler);

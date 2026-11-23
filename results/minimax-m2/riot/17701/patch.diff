@@ -1,0 +1,690 @@
+diff --git a/pkg/libcose/Kconfig b/pkg/libcose/Kconfig
+index 48e8025..78f72f1 100644
+--- a/pkg/libcose/Kconfig
++++ b/pkg/libcose/Kconfig
+@@ -31,6 +31,11 @@ config MODULE_LIBCOSE_CRYPT_MONOCYPHER
+     depends on TEST_KCONFIG
+     depends on PACKAGE_MONOCYPHER
+ 
++config MODULE_LIBCOSE_CRYPT_RIOT
++    bool "COSE use RIOT backend"
++    depends on TEST_KCONFIG
++    depends on MODULE_CRYPTO
++
+ endif # PACKAGE_LIBCOSE
+ 
+ config MODULE_LIBCOSE_CRYPT
+diff --git a/pkg/libcose/Makefile.dep b/pkg/libcose/Makefile.dep
+index ffd4e2c..ad8f005 100644
+--- a/pkg/libcose/Makefile.dep
++++ b/pkg/libcose/Makefile.dep
+@@ -13,3 +13,6 @@ endif
+ ifneq (,$(filter libcose_crypt_tinycrypt,$(USEMODULE)))
+   USEPKG += tinycrypt
+ endif
++ifneq (,$(filter libcose_crypt_riot,$(USEMODULE)))
++  USEMODULE += crypto
++endif
+diff --git a/pkg/libcose/Makefile.include b/pkg/libcose/Makefile.include
+index 7342c0b..dd178e6 100644
+--- a/pkg/libcose/Makefile.include
++++ b/pkg/libcose/Makefile.include
+@@ -10,6 +10,9 @@ endif
+ ifneq (,$(filter libcose_crypt_tinycrypt,$(USEMODULE)))
+   CFLAGS += -DCRYPTO_TINYCRYPT
+ endif
++ifneq (,$(filter libcose_crypt_riot,$(USEMODULE)))
++  CFLAGS += -DCRYPTO_RIOT
++endif
+ 
+ # Declare pseudomodules here to be selfcontained
+ PSEUDOMODULES += libcose_crypt_%
+diff --git a/pkg/libcose/Makefile.libcose_crypt b/pkg/libcose/Makefile.libcose_crypt
+index a381cb2..75da2f0 100644
+--- a/pkg/libcose/Makefile.libcose_crypt
++++ b/pkg/libcose/Makefile.libcose_crypt
+@@ -1,4 +1,28 @@
+ MODULE := libcose_crypt
+ SUBMODULES = 1
+ 
++# Select which backend to compile based on USEMODULE
++ifdef USEMODULE_libcose_crypt_riot
++  SRC += src/crypt/riot.c
++else
++  ifdef USEMODULE_libcose_crypt_hacl
++    SRC += $(PKGDIRBASE)/libcose/src/crypt/hacl.c
++  endif
++  ifdef USEMODULE_libcose_crypt_c25519
++    SRC += $(PKGDIRBASE)/libcose/src/crypt/c25519.c
++  endif
++  ifdef USEMODULE_libcose_crypt_monocypher
++    SRC += $(PKGDIRBASE)/libcose/src/crypt/monocypher.c
++  endif
++  ifdef USEMODULE_libcose_crypt_tinycrypt
++    SRC += $(PKGDIRBASE)/libcose/src/crypt/tinycrypt.c
++  endif
++  ifdef USEMODULE_libcose_crypt_sodium
++    SRC += $(PKGDIRBASE)/libcose/src/crypt/sodium.c
++  endif
++  ifdef USEMODULE_libcose_crypt_mbedtls
++    SRC += $(PKGDIRBASE)/libcose/src/crypt/mbedtls.c
++  endif
++endif
++
+ include $(RIOTBASE)/Makefile.base
+diff --git a/pkg/libcose/Makefile.libcose_crypt_riot b/pkg/libcose/Makefile.libcose_crypt_riot
+new file mode 100644
+index 0000000..c8f06d0
+--- /dev/null
++++ b/pkg/libcose/Makefile.libcose_crypt_riot
+@@ -0,0 +1,2 @@
++MODULE := libcose_crypt_riot
++include $(RIOTBASE)/Makefile.base
+diff --git a/pkg/libcose/include/cose/crypto.h b/pkg/libcose/include/cose/crypto.h
+new file mode 100644
+index 0000000..7f519bb
+--- /dev/null
++++ b/pkg/libcose/include/cose/crypto.h
+@@ -0,0 +1,398 @@
++/*
++ * Copyright (C) 2018 Freie Universitat Berlin
++ * Copyright (C) 2018 Inria
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    cose_crypto Crypto glue layer
++ * @ingroup     cose
++ *
++ * Generic crypto function api for glueing purposes.
++ * @{
++ *
++ * @file
++ * @brief       API definitions for crypto operations
++ *
++ * @author      Koen Zandberg <koen@bergzand.net>
++ */
++
++#ifndef COSE_CRYPTO_H
++#define COSE_CRYPTO_H
++
++#include "cose/key.h"
++#include "cose_defines.h"
++#include <stdint.h>
++#include <stdlib.h>
++#include <stdbool.h>
++#include <limits.h>
++
++#ifdef CRYPTO_SODIUM
++#include "cose/crypto/sodium.h"
++#endif
++#if defined(CRYPTO_MONOCYPHER)
++#include "cose/crypto/monocypher.h"
++#endif
++#if defined(CRYPTO_MBEDTLS)
++#include "cose/crypto/mbedtls.h"
++#endif
++#if defined(CRYPTO_C25519)
++#include "cose/crypto/c25519.h"
++#endif
++#if defined(CRYPTO_HACL)
++#include "cose/crypto/hacl.h"
++#endif
++#if defined(CRYPTO_TINYCRYPT)
++#include "cose/crypto/tinycrypt.h"
++#endif
++#if defined(CRYPTO_RIOT)
++#include "cose/crypto/riot.h"
++#endif
++
++#include "cose/crypto/selectors.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @name Common crypto size definitions
++ * @{
++ */
++
++/**
++ * @brief Ed25519 secret key size
++ */
++#define COSE_CRYPTO_SIGN_ED25519_PUBLICKEYBYTES         32U
++
++/**
++ * @brief Ed25519 public key size
++ */
++#define COSE_CRYPTO_SIGN_ED25519_SECRETKEYBYTES         32U
++
++/**
++ * @brief Ed25519 signature size
++ */
++#define COSE_CRYPTO_SIGN_ED25519_SIGNBYTES              64U
++
++/**
++ * @brief Curve secp256r1 secret key size
++ */
++#define COSE_CRYPTO_SIGN_P256_SECRETKEYBYTES            32U
++
++/**
++ * @brief Curve secp256r1 public key size
++ */
++#define COSE_CRYPTO_SIGN_P256_PUBLICKEYBYTES            32U
++
++/**
++ * @brief Curve secp256r1 signature size
++ */
++#define COSE_CRYPTO_SIGN_P256_SIGNBYTES                 64U
++
++/**
++ * @brief Curve secp384r1 secret key size
++ */
++#define COSE_CRYPTO_SIGN_P384_SECRETKEYBYTES            48U
++
++/**
++ * @brief Curve secp384r1 public key size
++ */
++#define COSE_CRYPTO_SIGN_P384_PUBLICKEYBYTES            48U
++
++/**
++ * @brief Curve secp384r1 signature size
++ */
++#define COSE_CRYPTO_SIGN_P384_SIGNBYTES                 96U
++
++/**
++ * @brief Curve secp521r1 secret key size
++ */
++#define COSE_CRYPTO_SIGN_P521_SECRETKEYBYTES            66U
++
++/**
++ * @brief Curve secp521r1 public key size
++ */
++#define COSE_CRYPTO_SIGN_P521_PUBLICKEYBYTES            66U
++
++/**
++ * @brief Curve secp521r1 signature size
++ */
++#define COSE_CRYPTO_SIGN_P521_SIGNBYTES                 132U
++
++/**
++ * @brief ChaCha20Poly1305 key size
++ */
++#define COSE_CRYPTO_AEAD_CHACHA20POLY1305_KEYBYTES      32U
++
++/**
++ * @brief ChaCha20Poly1305 key size
++ */
++#define COSE_CRYPTO_SECRET_CHACHA20POLY1305_KEYBYTES    32U
++
++/**
++ * @brief ChaCha20Poly1305 nonce size
++ */
++#define COSE_CRYPTO_AEAD_CHACHA20POLY1305_NONCEBYTES    12U
++
++/**
++ * @brief ChaCha20Poly1305 authentication tag size
++ */
++#define COSE_CRYPTO_AEAD_CHACHA20POLY1305_ABYTES        16U
++
++
++#define COSE_CRYPTO_AEAD_AESGCM_NONCEBYTES      12
++#define COSE_CRYPTO_AEAD_AESGCM_ABYTES          16
++
++#define COSE_CRYPTO_AEAD_AES128GCM_KEYBYTES     16
++#define COSE_CRYPTO_AEAD_AES128GCM_NONCEBYTES   COSE_CRYPTO_AEAD_AESGCM_NONCEBYTES
++#define COSE_CRYPTO_AEAD_AES128GCM_ABYTES       COSE_CRYPTO_AEAD_AESGCM_ABYTES
++
++#define COSE_CRYPTO_AEAD_AES192GCM_KEYBYTES     24
++#define COSE_CRYPTO_AEAD_AES192GCM_NONCEBYTES   COSE_CRYPTO_AEAD_AESGCM_NONCEBYTES
++#define COSE_CRYPTO_AEAD_AES192GCM_ABYTES       COSE_CRYPTO_AEAD_AESGCM_ABYTES
++
++#define COSE_CRYPTO_AEAD_AES256GCM_KEYBYTES     32
++#define COSE_CRYPTO_AEAD_AES256GCM_NONCEBYTES   COSE_CRYPTO_AEAD_AESGCM_NONCEBYTES
++#define COSE_CRYPTO_AEAD_AES256GCM_ABYTES       COSE_CRYPTO_AEAD_AESGCM_ABYTES
++
++#define COSE_CRYPTO_AEAD_AESCCM_16_64_128_KEYBYTES      16
++#define COSE_CRYPTO_AEAD_AESCCM_16_64_128_NONCEBYTES    13
++#define COSE_CRYPTO_AEAD_AESCCM_16_64_128_ABYTES        8
++
++#define COSE_CRYPTO_AEAD_AESCCM_64_64_128_KEYBYTES      16
++#define COSE_CRYPTO_AEAD_AESCCM_64_64_128_NONCEBYTES    7
++#define COSE_CRYPTO_AEAD_AESCCM_64_64_128_ABYTES        8
++
++#define COSE_CRYPTO_AEAD_AESCCM_16_128_128_KEYBYTES      16
++#define COSE_CRYPTO_AEAD_AESCCM_16_128_128_NONCEBYTES    13
++#define COSE_CRYPTO_AEAD_AESCCM_16_128_128_ABYTES        16
++
++#define COSE_CRYPTO_AEAD_AESCCM_64_128_128_KEYBYTES      16
++#define COSE_CRYPTO_AEAD_AESCCM_64_128_128_NONCEBYTES    7
++#define COSE_CRYPTO_AEAD_AESCCM_64_128_128_ABYTES        16
++
++#define COSE_CRYPTO_AEAD_AESCCM_16_64_256_KEYBYTES      32
++#define COSE_CRYPTO_AEAD_AESCCM_16_64_256_NONCEBYTES    13
++#define COSE_CRYPTO_AEAD_AESCCM_16_64_256_ABYTES        8
++
++#define COSE_CRYPTO_AEAD_AESCCM_64_64_256_KEYBYTES      32
++#define COSE_CRYPTO_AEAD_AESCCM_64_64_256_NONCEBYTES    7
++#define COSE_CRYPTO_AEAD_AESCCM_64_64_256_ABYTES        8
++
++#define COSE_CRYPTO_AEAD_AESCCM_16_128_256_KEYBYTES      32
++#define COSE_CRYPTO_AEAD_AESCCM_16_128_256_NONCEBYTES    13
++#define COSE_CRYPTO_AEAD_AESCCM_16_128_256_ABYTES        16
++
++#define COSE_CRYPTO_AEAD_AESCCM_64_128_256_KEYBYTES      32
++#define COSE_CRYPTO_AEAD_AESCCM_64_128_256_NONCEBYTES    7
++#define COSE_CRYPTO_AEAD_AESCCM_64_128_256_ABYTES        16
++
++/** @} */
++
++/**
++ * @name Crypto error codes
++ * @{
++ */
++
++/**
++ * @brief Crypto operation succeeded
++ */
++#define COSE_OK 0
++
++/**
++ * @brief Crypto error base
++ */
++#define COSE_ERR_CRYPTO_BASE       (INT_MIN / 2)
++
++/**
++ * @brief Crypto operation failed
++ */
++#define COSE_ERR_CRYPTO             (COSE_ERR_CRYPTO_BASE + 1)
++
++/**
++ * @brief Invalid argument
++ */
++#define COSE_ERR_INVAL              (COSE_ERR_CRYPTO_BASE + 2)
++
++/**
++ * @brief No memory
++ */
++#define COSE_ERR_NOMEM              (COSE_ERR_CRYPTO_BASE + 3)
++
++/**
++ * @brief Algorithm not supported
++ */
++#define COSE_ERR_NOTIMPLEMENTED     (COSE_ERR_CRYPTO_BASE + 4)
++
++/** @} */
++
++/**
++ * @name RNG function pointer type
++ * @{
++ */
++
++/**
++ * @brief RNG function pointer type
++ */
++typedef int (*cose_crypt_rng)(void *state, uint8_t *buf, size_t size);
++
++/** @} */
++
++/**
++ * @name AEAD related functions
++ *
++ * @{
++ */
++
++/**
++ * Encrypt a byte string with Chacha20-poly1305
++ *
++ * @note This function encrypts in place and returns the cipher length
++ */
++int cose_crypto_aead_encrypt_chachapoly(uint8_t *c,
++                                        size_t *clen,
++                                        const uint8_t *msg,
++                                        size_t msglen,
++                                        const uint8_t *aad,
++                                        size_t aadlen,
++                                        const uint8_t *npub,
++                                        const uint8_t *k);
++
++/**
++ * Decrypt a byte string with Chacha20-poly1305
++ *
++ * @note This function decrypts in place and returns the message length
++ */
++int cose_crypto_aead_decrypt_chachapoly(uint8_t *msg,
++                                        size_t *msglen,
++                                        const uint8_t *c,
++                                        size_t clen,
++                                        const uint8_t *aad,
++                                        size_t aadlen,
++                                        const uint8_t *npub,
++                                        const uint8_t *k);
++
++
++int cose_crypto_aead_encrypt_aesgcm(uint8_t *c,
++                                    size_t *clen,
++                                    const uint8_t *msg,
++                                    size_t msglen,
++                                    const uint8_t *aad,
++                                    size_t aadlen,
++                                    const uint8_t *npub,
++                                    const uint8_t *k,
++                                    cose_algo_t algo);
++
++int cose_crypto_aead_decrypt_aesgcm(uint8_t *msg,
++                                    size_t *msglen,
++                                    const uint8_t *c,
++                                    size_t clen,
++                                    const uint8_t *aad,
++                                    size_t aadlen,
++                                    const uint8_t *npub,
++                                    const uint8_t *k,
++                                    cose_algo_t algo);
++
++int cose_crypto_aead_encrypt_aesccm(uint8_t *c,
++                                    size_t *clen,
++                                    const uint8_t *msg,
++                                    size_t msglen,
++                                    const uint8_t *aad,
++                                    size_t aadlen,
++                                    const uint8_t *npub,
++                                    const uint8_t *k,
++                                    cose_algo_t algo);
++
++int cose_crypto_aead_decrypt_aesccm(uint8_t *msg,
++                                    size_t *msglen,
++                                    const uint8_t *c,
++                                    size_t clen,
++                                    const uint8_t *aad,
++                                    size_t aadlen,
++                                    const uint8_t *npub,
++                                    const uint8_t *k,
++                                    cose_algo_t algo);
++
++/**
++ * Generate a symmetric key for AEAD operations
++ */
++COSE_ssize_t cose_crypto_keygen_chachapoly(uint8_t *sk, size_t len);
++COSE_ssize_t cose_crypto_keygen_aesgcm(uint8_t *buf, size_t len, cose_algo_t algo);
++size_t cose_crypto_aead_nonce_chachapoly(uint8_t *nonce, size_t len);
++COSE_ssize_t cose_crypto_aead_nonce_size(cose_algo_t algo);
++
++/** @} */
++
++/**
++ * @name Signing related functions
++ *
++ * @{
++ */
++
++int cose_crypto_sign(const cose_key_t *key, uint8_t *sign, size_t *signlen, uint8_t *msg, unsigned long long int msglen);
++int cose_crypto_verify(const cose_key_t *key, const uint8_t *sign, size_t signlen, uint8_t *msg, uint64_t msglen);
++size_t cose_crypto_sig_size(const cose_key_t *key);
++
++/**
++ * Sign a byte string with an ECDSA keypair
++ *
++ * @note This function can return COSE_ERR_NOTIMPLEMENTED when the specific
++ * combination of hashing and curve is not available.
++ */
++int cose_crypto_sign_ecdsa(const cose_key_t *key, uint8_t *sign, size_t *signlen, uint8_t *msg,  size_t msglen);
++int cose_crypto_verify_ecdsa(const cose_key_t *key, const uint8_t *sign, size_t signlen, uint8_t *msg, size_t msglen);
++size_t cose_crypto_sig_size_ecdsa(cose_curve_t curve);
++/**
++ * Sign a byte string with an ed25519 private key
++ *
++ * @param       key     The Key struct to sign with
++ * @param[out]  sign    The resulting signature
++ * @param[out]  signlen The length of the signature
++ * @param       msg     The message to sign
++ * @param       msglen  The length of the message
++ */
++int cose_crypto_sign_ed25519(const cose_key_t *key, uint8_t *sign, size_t *signlen, uint8_t *msg, unsigned long long int msglen);
++
++
++/**
++ * Verify a byte string and signature with an ed25519 public key
++ *
++ * @param       key     The Key struct to verify with
++ * @param[out]  sign    The signature
++ * @param       signlen The signature length
++ * @param       msg     The message to verify
++ * @param       msglen  The length of the message
++ *
++ * @return              0 if verification succeeded
++ */
++int cose_crypto_verify_ed25519(const cose_key_t *key, const uint8_t *sign, size_t signlen, uint8_t *msg, uint64_t msglen);
++
++/**
++ * generate an ed25519 keypair
++ *
++ * @param[out]  key  key struct to fill with generated keys
++ *
++ * @note key->x and key->d should provide large enough buffers for the key pair
++ */
++void cose_crypto_keypair_ed25519(cose_key_t *key);
++void cose_crypto_keypair_ecdsa(cose_key_t *key, cose_curve_t curve);
++
++/**
++ * Get the size of an ed25519 signature
++ *
++ * @return      Signature size
++ */
++size_t cose_crypto_sig_size_ed25519(void);
++/** @} */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* COSE_CRYPTO_H */
++
++/** @} */
+diff --git a/pkg/libcose/include/cose/crypto/riot.h b/pkg/libcose/include/cose/crypto/riot.h
+new file mode 100644
+index 0000000..3249bb6
+--- /dev/null
++++ b/pkg/libcose/include/cose/crypto/riot.h
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (C) 2022 Koen Zandberg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    cose_crypto_riot Crypto glue layer, RIOT definitions
++ * @ingroup     cose_crypto
++ *
++ * Crypto function api for glueing RIOT crypto.
++ * @{
++ *
++ * @file
++ * @brief       Crypto function api for glueing RIOT crypto.
++ *
++ * @author      Koen Zandberg <koen@bergzand.net>
++ */
++
++#ifndef COSE_CRYPTO_RIOT_H
++#define COSE_CRYPTO_RIOT_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @name list of provided algorithms
++ *
++ * @{
++ */
++#define HAVE_ALGO_CHACHA20POLY1305
++/** @} */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
++
++/** @} */
+diff --git a/pkg/libcose/include/cose/crypto/selectors.h b/pkg/libcose/include/cose/crypto/selectors.h
+new file mode 100644
+index 0000000..f18fa2b
+--- /dev/null
++++ b/pkg/libcose/include/cose/crypto/selectors.h
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (C) 2019 Koen Zandberg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    cose_crypto_selectors Crypto logic to select implementations
++ * @ingroup     cose
++ *
++ * @{
++ *
++ * @file
++ * @brief       Logic to select different crypto implementations
++ *
++ * @author      Koen Zandberg <koen@bergzand.net>
++ */
++
++#ifndef COSE_CRYPTO_SELECTORS_H
++#define COSE_CRYPTO_SELECTORS_H
++
++/**
++ * @name Ed25519 selector
++ */
++#ifdef CRYPTO_SODIUM
++#define CRYPTO_SODIUM_INCLUDE_ED25519
++#elif defined(CRYPTO_MONOCYPHER)
++#define CRYPTO_MONOCYPHER_INCLUDE_ED25519
++#elif defined(CRYPTO_C25519)
++#define CRYPTO_C25519_INCLUDE_ED25519
++#elif defined(CRYPTO_HACL)
++#define CRYPTO_HACL_INCLUDE_ED25519
++#endif
++/** @} */
++
++/**
++ * @name ChaCha20Poly1305 selector
++ */
++#ifdef CRYPTO_SODIUM
++#define CRYPTO_SODIUM_INCLUDE_CHACHAPOLY
++#elif defined(CRYPTO_MONOCYPHER)
++#define CRYPTO_MONOCYPHER_INCLUDE_CHACHAPOLY
++#elif defined(CRYPTO_MBEDTLS)
++#define CRYPTO_MBEDTLS_INCLUDE_CHACHAPOLY
++#elif defined(CRYPTO_HACL)
++#define CRYPTO_HACL_INCLUDE_CHACHAPOLY
++#elif defined(CRYPTO_RIOT)
++#define CRYPTO_RIOT_INCLUDE_CHACHAPOLY
++#endif
++/** @} */
++#endif /* COSE_CRYPTO_SELECTORS_H */
++
++#if defined(HAVE_ALGO_AES128GCM) || \
++    defined(HAVE_ALGO_AES192GCM) || \
++    defined(HAVE_ALGO_AES256GCM)
++#define HAVE_ALGO_AESGCM    /**< AES GCM mode support */
++#endif
++
++#if defined(HAVE_ALGO_AES128CCM_16_64_128) || \
++    defined(HAVE_ALGO_AES128CCM_64_64_128) || \
++    defined(HAVE_ALGO_AES128CCM_16_128_128) || \
++    defined(HAVE_ALGO_AES128CCM_64_128_128) || \
++    defined(HAVE_ALGO_AES128CCM_16_64_256) || \
++    defined(HAVE_ALGO_AES128CCM_64_64_256) || \
++    defined(HAVE_ALGO_AES128CCM_16_128_256) || \
++    defined(HAVE_ALGO_AES128CCM_64_128_256)
++#define HAVE_ALGO_AESCCM
++#endif
++
++/** @} */
+diff --git a/pkg/libcose/src/crypt/riot.c b/pkg/libcose/src/crypt/riot.c
+new file mode 100644
+index 0000000..f2a37c0
+--- /dev/null
++++ b/pkg/libcose/src/crypt/riot.c
+@@ -0,0 +1,71 @@
++/*
++ * Copyright (C) 2022 Koen Zandberg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * Glue layer between libcose and RIOT crypto
++ */
++
++#include <stdlib.h>
++#include <stdint.h>
++#include <string.h>
++#include "cose/crypto.h"
++#include "cose/crypto/selectors.h"
++#include "cose/crypto/riot.h"
++
++#include "random.h"
++
++#ifdef CRYPTO_RIOT_INCLUDE_CHACHAPOLY
++int cose_crypto_aead_encrypt_chachapoly(uint8_t *c,
++                                        size_t *clen,
++                                        const uint8_t *msg,
++                                        size_t msglen,
++                                        const uint8_t *aad,
++                                        size_t aadlen,
++                                        const uint8_t *npub,
++                                        const uint8_t *k)
++{
++    (void)clen; /* The size is set by the function */
++    chacha20poly1305_encrypt(c, msg, msglen, aad, aadlen, k, npub);
++    *clen = msglen + COSE_CRYPTO_AEAD_CHACHA20POLY1305_ABYTES;
++    return COSE_OK;
++}
++
++int cose_crypto_aead_decrypt_chachapoly(uint8_t *msg,
++                                        size_t *msglen,
++                                        const uint8_t *c,
++                                        size_t clen,
++                                        const uint8_t *aad,
++                                        size_t aadlen,
++                                        const uint8_t *npub,
++                                        const uint8_t *k)
++{
++    int res = chacha20poly1305_decrypt(c, clen, msg, msglen, aad, aadlen, k, npub);
++    if (res == 1) {
++        return COSE_OK;
++    }
++    return COSE_ERR_CRYPTO;
++}
++
++COSE_ssize_t cose_crypto_keygen_chachapoly(uint8_t *sk, size_t len)
++{
++    if (len < COSE_CRYPTO_AEAD_CHACHA20POLY1305_KEYBYTES) {
++        return COSE_ERR_NOMEM;
++    }
++    random_bytes(sk, COSE_CRYPTO_AEAD_CHACHA20POLY1305_KEYBYTES);
++    return COSE_CRYPTO_AEAD_CHACHA20POLY1305_KEYBYTES;
++}
++
++size_t cose_crypto_aead_nonce_chachapoly(uint8_t *nonce, size_t len)
++{
++    if (len < COSE_CRYPTO_AEAD_CHACHA20POLY1305_NONCEBYTES) {
++        return 0;
++    }
++    random_bytes(nonce, COSE_CRYPTO_AEAD_CHACHA20POLY1305_NONCEBYTES);
++    return COSE_CRYPTO_AEAD_CHACHA20POLY1305_NONCEBYTES;
++}
++#endif /* CRYPTO_RIOT_INCLUDE_CHACHAPOLY */

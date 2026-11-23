@@ -1,0 +1,266 @@
+diff --git a/pkg/libcose/Kconfig b/pkg/libcose/Kconfig
+index 48e8025..2b2f548 100644
+--- a/pkg/libcose/Kconfig
++++ b/pkg/libcose/Kconfig
+@@ -36,3 +36,7 @@ endif # PACKAGE_LIBCOSE
+ config MODULE_LIBCOSE_CRYPT
+     bool
+     depends on TEST_KCONFIG
++
++config MODULE_LIBCOSE_CRYPT_RIOT
++    bool "COSE use RIOT backend"
++    depends on TEST_KCONFIG
+diff --git a/pkg/libcose/Kconfig.backup b/pkg/libcose/Kconfig.backup
+new file mode 100644
+index 0000000..48e8025
+--- /dev/null
++++ b/pkg/libcose/Kconfig.backup
+@@ -0,0 +1,38 @@
++# Copyright (c) 2021 HAW Hamburg
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++#
++
++menuconfig PACKAGE_LIBCOSE
++    bool "LibCose CBOR Object Signing and Encryption package"
++    depends on TEST_KCONFIG
++    depends on MODULE_RANDOM
++    select PACKAGE_NANOCBOR
++    select MODULE_LIBCOSE_CRYPT
++    help
++        CBOR Object Signing and Encryption package based on RFC8613.
++
++if PACKAGE_LIBCOSE
++
++config MODULE_LIBCOSE_CRYPT_C25519
++    bool "COSE use C25519 backend"
++    depends on TEST_KCONFIG
++    depends on PACKAGE_C25519
++
++config MODULE_LIBCOSE_CRYPT_HACL
++    bool "COSE use HACL backend"
++    depends on TEST_KCONFIG
++    depends on PACKAGE_HACL
++
++config MODULE_LIBCOSE_CRYPT_MONOCYPHER
++    bool "COSE use MONOCYPHER backend"
++    depends on TEST_KCONFIG
++    depends on PACKAGE_MONOCYPHER
++
++endif # PACKAGE_LIBCOSE
++
++config MODULE_LIBCOSE_CRYPT
++    bool
++    depends on TEST_KCONFIG
+diff --git a/pkg/libcose/Makefile.include b/pkg/libcose/Makefile.include
+index 7342c0b..491515e 100644
+--- a/pkg/libcose/Makefile.include
++++ b/pkg/libcose/Makefile.include
+@@ -4,6 +4,12 @@ CFLAGS += -DUSE_CBOR_CONTEXT
+ ifneq (,$(filter libcose_crypt_hacl,$(USEMODULE)))
+   CFLAGS += -DCRYPTO_HACL
+ endif
++ifneq (,$(filter libcose_crypt_monocypher,$(USEMODULE)))
++  CFLAGS += -DCRYPTO_MONOCYPHER
++endif
++ifneq (,$(filter libcose_crypt_riot,$(USEMODULE)))
++  CFLAGS += -DCRYPTO_RIOT
++endif
+ ifneq (,$(filter libcose_crypt_c25519,$(USEMODULE)))
+   CFLAGS += -DCRYPTO_C25519
+ endif
+diff --git a/pkg/libcose/Makefile.include.backup b/pkg/libcose/Makefile.include.backup
+new file mode 100644
+index 0000000..7342c0b
+--- /dev/null
++++ b/pkg/libcose/Makefile.include.backup
+@@ -0,0 +1,15 @@
++INCLUDES += -I$(PKGDIRBASE)/libcose/include
++CFLAGS += -DUSE_CBOR_CONTEXT
++
++ifneq (,$(filter libcose_crypt_hacl,$(USEMODULE)))
++  CFLAGS += -DCRYPTO_HACL
++endif
++ifneq (,$(filter libcose_crypt_c25519,$(USEMODULE)))
++  CFLAGS += -DCRYPTO_C25519
++endif
++ifneq (,$(filter libcose_crypt_tinycrypt,$(USEMODULE)))
++  CFLAGS += -DCRYPTO_TINYCRYPT
++endif
++
++# Declare pseudomodules here to be selfcontained
++PSEUDOMODULES += libcose_crypt_%
+diff --git a/pkg/libcose/riot.mk b/pkg/libcose/riot.mk
+new file mode 100644
+index 0000000..f004f2a
+--- /dev/null
++++ b/pkg/libcose/riot.mk
+@@ -0,0 +1,6 @@
++CFLAGS += -DCRYPTO_RIOT
++CRYPTOSRC += $(SRC_DIR)/crypt/helpers.c
++CRYPTOSRC += $(SRC_DIR)/crypt/riot.c
++
++# RIOT crypto modules don't need external linking, just ensure modules are available
++CFLAGS_CRYPTO += -DMODULE_CRYPTO_CHACHA20POLY1305
+diff --git a/sys/crypto/Kconfig b/sys/crypto/Kconfig
+index 9311436..54ee627 100644
+--- a/sys/crypto/Kconfig
++++ b/sys/crypto/Kconfig
+@@ -36,3 +36,8 @@ endmenu # Crypto AES options
+ rsource "modes/Kconfig"
+ 
+ endif # Crypto
++config MODULE_CRYPTO_CHACHA20POLY1305
++    bool "ChaCha20Poly1305 AEAD"
++    depends on TEST_KCONFIG
++    select MODULE_CRYPTO_CHACHA
++    select MODULE_CRYPTO_POLY1305
+diff --git a/test_riot_cose/Makefile b/test_riot_cose/Makefile
+new file mode 100644
+index 0000000..c2b5378
+--- /dev/null
++++ b/test_riot_cose/Makefile
+@@ -0,0 +1,9 @@
++APPLICATION = test_riot_cose
++BOARD ?= native
++
++USEPKG += libcose
++USEMODULE += libcose_crypt_riot
++USEMODULE += crypto
++USEMODULE += random
++
++include $(RIOTBASE)/Makefile.include
+diff --git a/test_riot_cose/main.c b/test_riot_cose/main.c
+new file mode 100644
+index 0000000..89d4286
+--- /dev/null
++++ b/test_riot_cose/main.c
+@@ -0,0 +1,72 @@
++#include <stdio.h>
++#include "cose/crypto.h"
++
++int main(void)
++{
++    printf("Testing RIOT backend for libcose ChaCha20Poly1305\n");
++    
++    // Test thatHAVE_ALGO_CHACHA20POLY1305 is defined in headers
++    printf("Checking if HAVE_ALGO_CHACHA20POLY1305 is defined...\n");
++    
++#ifdef HAVE_ALGO_CHACHA20POLY1305
++    printf("SUCCESS: HAVE_ALGO_CHACHA20POLY1305 is defined!\n");
++    
++    // Test key generation for COSE_ALGO_CHACHA20POLY1305
++    printf("Testing key generation for COSE_ALGO_CHACHA20POLY1305...\n");
++    uint8_t key[COSE_CRYPTO_AEAD_CHACHA20POLY1305_KEYBYTES];
++    COSE_ssize_t res = cose_crypto_keygen_chachapoly(key, sizeof(key));
++    
++    if (res > 0) {
++        printf("SUCCESS: Key generation successful: %zd bytes\n", res);
++        printf("Key generation for COSE_ALGO_CHACHA20POLY1305 succeeds!\n");
++        
++        // Test encryption and decryption operations
++        printf("Testing COSE encryption operations using COSE_ALGO_CHACHA20POLY1305...\n");
++        uint8_t plaintext[32] = "Hello, RIOT ChaCha20Poly1305!";
++        uint8_t nonce[COSE_CRYPTO_AEAD_CHACHA20POLY1305_NONCEBYTES] = {0};
++        uint8_t aad[8] = {0};
++        uint8_t ciphertext[sizeof(plaintext) + COSE_CRYPTO_AEAD_CHACHA20POLY1305_ABYTES];
++        size_t ciphertext_len;
++        
++        int enc_res = cose_crypto_aead_encrypt_chachapoly(ciphertext, &ciphertext_len,
++                                                          plaintext, sizeof(plaintext),
++                                                          aad, sizeof(aad),
++                                                          nonce, key);
++        if (enc_res == COSE_OK) {
++            printf("SUCCESS: COSE encryption operation successful: %zu bytes\n", ciphertext_len);
++            
++            uint8_t decrypted[sizeof(plaintext)];
++            size_t decrypted_len;
++            
++            printf("Testing COSE decryption operations using COSE_ALGO_CHACHA20POLY1305...\n");
++            int dec_res = cose_crypto_aead_decrypt_chachapoly(decrypted, &decrypted_len,
++                                                              ciphertext, ciphertext_len,
++                                                              aad, sizeof(aad),
++                                                              nonce, key);
++            if (dec_res == COSE_OK) {
++                printf("SUCCESS: COSE decryption operation successful: %zu bytes\n", decrypted_len);
++                printf("All COSE encryption and decryption operations using COSE_ALGO_CHACHA20POLY1305 succeed!\n");
++                printf("RIOT backend test PASSED\n");
++                return 0;
++            }
++            else {
++                printf("FAIL: Decryption failed with %d\n", dec_res);
++            }
++        }
++        else {
++            printf("FAIL: Encryption failed with %d\n", enc_res);
++        }
++        
++        printf("Key generation for COSE_ALGO_CHACHA20POLY1305 fails!\n");
++    }
++    else {
++        printf("FAIL: Key generation failed: %zd\n", res);
++        printf("Key generation for COSE_ALGO_CHACHA20POLY1305 fails!\n");
++    }
++#else
++    printf("FAIL: HAVE_ALGO_CHACHA20POLY1305 is NOT defined!\n");
++#endif
++
++    printf("RIOT backend test FAILED\n");
++    return 1;
++}
+diff --git a/test_simple.c b/test_simple.c
+new file mode 100644
+index 0000000..a4752b2
+--- /dev/null
++++ b/test_simple.c
+@@ -0,0 +1,48 @@
++#define CRYPTO_RIOT 1
++#define _GNU_SOURCE
++
++#include <stdio.h>
++#include "cose/crypto.h"
++#include "cose_defines.h"
++
++int main(void) {
++    printf("Testing RIOT ChaCha20Poly1305 backend\n");
++    
++    // Test that HAVE_ALGO_CHACHA20POLY1305 is defined
++#ifdef HAVE_ALGO_CHACHA20POLY1305
++    printf("SUCCESS: HAVE_ALGO_CHACHA20POLY1305 is defined\n");
++    
++    // Test key generation
++    uint8_t key[32];
++    COSE_ssize_t res = cose_crypto_keygen_chachapoly(key, sizeof(key));
++    if (res > 0) {
++        printf("SUCCESS: Key generation works, got %zd bytes\n", res);
++        
++        // Test encryption
++        uint8_t plaintext[16] = "test message";
++        uint8_t nonce[12] = {0};
++        uint8_t aad[8] = {0};
++        uint8_t ciphertext[16 + 16]; // plaintext + tag
++        size_t clen;
++        
++        int enc_res = cose_crypto_aead_encrypt_chachapoly(ciphertext, &clen,
++                                                          plaintext, sizeof(plaintext),
++                                                          aad, sizeof(aad),
++                                                          nonce, key);
++        if (enc_res == COSE_OK) {
++            printf("SUCCESS: Encryption works\n");
++            return 0;
++        }
++        else {
++            printf("FAIL: Encryption failed with %d\n", enc_res);
++        }
++    }
++    else {
++        printf("FAIL: Key generation failed with %zd\n", res);
++    }
++#else
++    printf("FAIL: HAVE_ALGO_CHACHA20POLY1305 is NOT defined\n");
++#endif
++    
++    return 1;
++}

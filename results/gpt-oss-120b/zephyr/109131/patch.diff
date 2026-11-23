@@ -1,0 +1,216 @@
+diff --git a/subsys/net/lib/dhcpv4/Kconfig b/subsys/net/lib/dhcpv4/Kconfig
+index e78dca260..739005ff2 100644
+--- a/subsys/net/lib/dhcpv4/Kconfig
++++ b/subsys/net/lib/dhcpv4/Kconfig
+@@ -227,5 +227,22 @@ config NET_DHCPV4_SERVER_OPTION_ROUTER
+ 	  gateway address in responses from the DHCP server. This can be
+ 	  disabled so that the client does not try to forward traffic to our
+ 	  device.
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL
++	bool "Include Captive‑Portal URI option (RFC 8910) in DHCP server responses"
++	default n
++	help
++	  When enabled, the DHCPv4 server will include option 114 (Captive‑Portal
++	  URI) in Offer and ACK messages if the client requests it via the Parameter
++	  Request List. The URI is taken from the configuration option
++	  NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI, or constructed as
++	  http://<server‑ipv4>/generate_204 when the string is empty.
++
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI
++	string "Captive‑Portal URI"
++	default ""
++	help
++	  URI to be advertised in the Captive‑Portal option. When empty the server
++	  will generate a default URI based on its own IPv4 address.
++
+ 
+ endif # NET_DHCPV4_SERVER
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_internal.h b/subsys/net/lib/dhcpv4/dhcpv4_internal.h
+index e6aa02d98..0351e690f 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_internal.h
++++ b/subsys/net/lib/dhcpv4/dhcpv4_internal.h
+@@ -72,6 +72,9 @@ struct dhcp_msg {
+ #define DHCPV4_OPTIONS_CLIENT_ID	61
+ #define DHCPV4_OPTIONS_END		255
+ 
++/* RFC 8910 Captive-Portal URI option (code 114) */
++#define DHCPV4_OPTIONS_CAPTIVE_PORTAL 114
++
+ /* Useful size macros */
+ #define DHCPV4_OLV_MSG_HOST_NAME	2
+ #define DHCPV4_OLV_MSG_VENDOR_CLASS_ID	2
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_server.c b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+index d4be6a5f5..a1b40a1c1 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_server.c
++++ b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+@@ -21,6 +21,7 @@
+ #include <zephyr/sys/byteorder.h>
+ #include <zephyr/sys/minmax.h>
+ 
++#include <stdio.h>
+ LOG_MODULE_REGISTER(net_dhcpv4_server, CONFIG_NET_DHCPV4_SERVER_LOG_LEVEL);
+ 
+ #include "dhcpv4_internal.h"
+@@ -416,8 +417,6 @@ static uint8_t *dhcpv4_encode_router_option(uint8_t *buf, size_t *buflen,
+ 	*buflen -= DHCPV4_OPTIONS_ROUTER_SIZE;
+ 
+ 	return buf + DHCPV4_OPTIONS_ROUTER_SIZE;
+-}
+-
+ static uint8_t *dhcpv4_encode_dns_server_option(uint8_t *buf, size_t *buflen)
+ {
+ 	struct net_in_addr dns_address;
+@@ -438,89 +437,14 @@ static uint8_t *dhcpv4_encode_dns_server_option(uint8_t *buf, size_t *buflen)
+ 
+ 	*buflen -= DHCPV4_OPTIONS_DNS_SERVER_SIZE;
+ 
++static uint8_t *dhcpv4_encode_captive_portal_option(uint8_t *buf, size_t *buflen, struct dhcpv4_server_ctx *ctx);
+ 	return buf + DHCPV4_OPTIONS_DNS_SERVER_SIZE;
+ }
+ 
+-static uint8_t *dhcpv4_encode_end_option(uint8_t *buf, size_t *buflen)
+-{
+-	if (buf == NULL || *buflen < 1) {
+-		return NULL;
+-	}
+-
+-	buf[0] = DHCPV4_OPTIONS_END;
+-
+-	*buflen -= 1;
+-
+-	return buf + 1;
+-}
+-
+-/* Response handlers. */
+-
+-static uint8_t *dhcpv4_encode_header(uint8_t *buf, size_t *buflen,
+-				     struct dhcp_msg *msg,
+-				     struct net_in_addr *yiaddr)
+-{
+-	struct dhcp_msg *reply_msg = (struct dhcp_msg *)buf;
+-
+-	if (buf == NULL || *buflen < sizeof(struct dhcp_msg)) {
+-		return NULL;
+-	}
+-
+-	reply_msg->op = DHCPV4_MSG_BOOT_REPLY;
+-	reply_msg->htype = msg->htype;
+-	reply_msg->hlen = msg->hlen;
+-	reply_msg->hops = 0;
+-	reply_msg->xid = msg->xid;
+-	reply_msg->secs = 0;
+-	reply_msg->flags = msg->flags;
+-	memcpy(reply_msg->ciaddr, msg->ciaddr, sizeof(reply_msg->ciaddr));
+-	if (yiaddr != NULL) {
+-		memcpy(reply_msg->yiaddr, yiaddr, sizeof(struct net_in_addr));
+-	} else {
+-		memset(reply_msg->yiaddr, 0, sizeof(reply_msg->ciaddr));
+-	}
+-	memset(reply_msg->siaddr, 0, sizeof(reply_msg->siaddr));
+-	memcpy(reply_msg->giaddr, msg->giaddr, sizeof(reply_msg->giaddr));
+-	memcpy(reply_msg->chaddr, msg->chaddr, sizeof(reply_msg->chaddr));
+-
+-	*buflen -= sizeof(struct dhcp_msg);
+-
+-	return buf + sizeof(struct dhcp_msg);
+-}
+-
+-static uint8_t *dhcpv4_encode_string(uint8_t *buf, size_t *buflen, char *str,
+-				     size_t max_len)
+-{
+-	if (buf == NULL || *buflen < max_len) {
+-		return NULL;
+-	}
+-
+-	memset(buf, 0, max_len);
+-
+-	if (str == NULL) {
+-		goto out;
+-	}
+-
+-	strncpy(buf, str, max_len - 1);
+-
+- out:
+-	*buflen -= max_len;
+-
+-	return buf + max_len;
+-}
+-
+-static uint8_t *dhcpv4_encode_sname(uint8_t *buf, size_t *buflen, char *sname)
+-{
+-	return dhcpv4_encode_string(buf, buflen, sname, SIZE_OF_SNAME);
+ }
+ 
+-static uint8_t *dhcpv4_encode_file(uint8_t *buf, size_t *buflen, char *file)
+-{
+-	return dhcpv4_encode_string(buf, buflen, file, SIZE_OF_FILE);
+-}
+ 
+ static uint8_t *dhcpv4_encode_requested_params(
+-				uint8_t *buf, size_t *buflen,
+ 				struct dhcpv4_server_ctx *ctx,
+ 				struct dhcpv4_parameter_request_list *params)
+ {
+@@ -556,14 +480,49 @@ static uint8_t *dhcpv4_encode_requested_params(
+ 				goto out;
+ 			}
+ 			break;
+-		/* Others - just ignore. */
+-		default:
+-			break;
+-		}
+ 	}
+ 
+ out:
+ 	return buf;
++static uint8_t *dhcpv4_encode_end_option(uint8_t *buf, size_t *buflen)
++{
++    if (buf == NULL || *buflen < 1) {
++        return NULL;
++    }
++    buf[0] = DHCPV4_OPTIONS_END;
++    *buflen -= 1;
++    return buf + 1;
++        case DHCPV4_OPTIONS_CAPTIVE_PORTAL:
++            if (!IS_ENABLED(CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL)) {
++                break;
++            }
++            {
++                char uri[64];
++                const char *cfg_uri = CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI;
++                size_t uri_len;
++                if (cfg_uri[0] != 0) {
++                    strncpy(uri, cfg_uri, sizeof(uri)-1);
++                    uri[sizeof(uri)-1] = 0;
++                } else {
++                    char ip_str[NET_IPV4_ADDR_LEN];
++                    net_addr_ntop(NET_AF_INET, &ctx->server_addr, ip_str, sizeof(ip_str));
++                    snprintf(uri, sizeof(uri), "http://%s/generate_204", ip_str);
++                }
++                uri_len = strlen(uri);
++                if (buf == NULL || *buflen < 2 + uri_len) {
++                    buf = NULL;
++                    goto out;
++                }
++                buf[0] = DHCPV4_OPTIONS_CAPTIVE_PORTAL;
++                buf[1] = (uint8_t)uri_len;
++                memcpy(&buf[2], uri, uri_len);
++                *buflen -= 2 + uri_len;
++                buf += 2 + uri_len;
++            }
++            break;
++}
++
++
+ }
+ 
+ static int dhcpv4_send(struct dhcpv4_server_ctx *ctx, enum net_dhcpv4_msg_type type,
+@@ -627,7 +586,7 @@ static int dhcpv4_send(struct dhcpv4_server_ctx *ctx, enum net_dhcpv4_msg_type t
+ 			   sizeof(dst_addr));
+ 	if (ret < 0) {
+ 		return -errno;
+-	}
++}
+ 
+ 	return 0;
+ }

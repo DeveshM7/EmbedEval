@@ -1,0 +1,704 @@
+diff --git a/include/limits.h b/include/limits.h
+index 047dc3d6..6acc64a7 100644
+--- a/include/limits.h
++++ b/include/limits.h
+@@ -124,7 +124,7 @@
+ #define _POSIX_MAX_CANON      255
+ #define _POSIX_MAX_INPUT      255
+ #define _POSIX_NAME_MAX       CONFIG_NAME_MAX
+-#define _POSIX_NGROUPS_MAX    0
++#define _POSIX_NGROUPS_MAX    CONFIG_SCHED_NGROUPS
+ #define _POSIX_OPEN_MAX       16
+ #define _POSIX_PATH_MAX       CONFIG_PATH_MAX
+ #define _POSIX_PIPE_BUF       512
+diff --git a/include/nuttx/sched.h b/include/nuttx/sched.h
+index c2f6df13..4d0ba376 100644
+--- a/include/nuttx/sched.h
++++ b/include/nuttx/sched.h
+@@ -468,6 +468,13 @@ struct task_group_s
+   gid_t   tg_sgid;                  /* Saved set-group identity                 */
+ #endif
+ 
++  /* Supplementary groups ***************************************************/
++
++#ifdef CONFIG_SCHED_NGROUPS
++  gid_t   tg_supgroups[CONFIG_SCHED_NGROUPS];
++  int     tg_nsupgroups;
++#endif
++
+   /* Group membership *******************************************************/
+ 
+ #ifdef HAVE_GROUP_MEMBERS
+diff --git a/include/unistd.h b/include/unistd.h
+index 885bbed1..4438de59 100644
+--- a/include/unistd.h
++++ b/include/unistd.h
+@@ -506,7 +506,11 @@ int     setregid(gid_t rgid, gid_t egid);
+ int     getresuid(FAR uid_t *ruid, FAR uid_t *euid, FAR uid_t *suid);
+ int     getresgid(FAR gid_t *rgid, FAR gid_t *egid, FAR gid_t *sgid);
+ 
++int     setresuid(uid_t ruid, uid_t euid, uid_t suid);
++int     setresgid(gid_t rgid, gid_t egid, gid_t sgid);
++
+ int     getgroups(int, gid_t[]);
++int     setgroups(int, FAR const gid_t *);
+ 
+ int     getentropy(FAR void *buffer, size_t length);
+ 
+diff --git a/libs/libc/unistd/Make.defs b/libs/libc/unistd/Make.defs
+index d4fbc708..599225f5 100644
+--- a/libs/libc/unistd/Make.defs
++++ b/libs/libc/unistd/Make.defs
+@@ -32,7 +32,16 @@ CSRCS += lib_setrlimit.c lib_getrlimit.c lib_setpriority.c lib_getpriority.c
+ CSRCS += lib_futimes.c lib_lutimes.c lib_gethostname.c lib_sethostname.c
+ CSRCS += lib_fchownat.c lib_linkat.c lib_readlinkat.c lib_symlinkat.c
+ CSRCS += lib_unlinkat.c lib_usleep.c lib_getpgrp.c lib_getpgid.c
+-CSRCS += lib_getsid.c lib_getgroups.c lib_setpgid.c lib_setsid.c
++CSRCS += lib_getsid.c lib_setpgid.c lib_setsid.c
++
++# Only include lib_getgroups.c when supplementary groups are not supported
++# (CONFIG_SCHED_NGROUPS is 0 or not set)
++ifeq ($(CONFIG_SCHED_NGROUPS),)
++CSRCS += lib_getgroups.c
++endif
++ifeq ($(CONFIG_SCHED_NGROUPS),0)
++CSRCS += lib_getgroups.c
++endif
+ CSRCS += lib_lockf.c lib_flock.c lib_getpass.c
+ CSRCS += lib_chdir.c lib_fchdir.c lib_confstr.c lib_ulimit.c
+ 
+diff --git a/libs/libc/unistd/lib_getgroups.c b/libs/libc/unistd/lib_getgroups.c
+index 53cbc11b..30ea005a 100644
+--- a/libs/libc/unistd/lib_getgroups.c
++++ b/libs/libc/unistd/lib_getgroups.c
+@@ -14,9 +14,9 @@
+  *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See
++ * the License for the specific language governing permissions and
++ * limitations under the License.
+  *
+  ****************************************************************************/
+ 
+@@ -38,9 +38,7 @@
+  *
+  * Description:
+  *   The getgroups() function returns the supplementary group IDs of the
+- *   calling process in the array grouplist.  NuttX does not support
+- *   supplementary group IDs, so the calling process is treated as belonging
+- *   to a single group: its effective group ID.
++ *   calling process in the array grouplist.
+  *
+  * Input Parameters:
+  *   gidsetsize - The number of elements available in grouplist.
+@@ -53,6 +51,23 @@
+  *
+  ****************************************************************************/
+ 
++#if defined(CONFIG_SCHED_NGROUPS) && CONFIG_SCHED_NGROUPS > 0
++
++/* When CONFIG_SCHED_NGROUPS > 0, call the kernel implementation which
++ * maintains a proper supplementary group list.
++ *
++ * In the sim build, both kernel and user code are in the same address space,
++ * so we can call the kernel function directly.
++ */
++
++extern int getgroups(int gidsetsize, FAR gid_t *grouplist);
++
++#else
++
++/* When CONFIG_SCHED_NGROUPS is 0, there's no supplementary group support,
++ * so return an empty list.
++ */
++
+ int getgroups(int gidsetsize, gid_t grouplist[])
+ {
+   if (gidsetsize < 0)
+@@ -62,12 +77,12 @@ int getgroups(int gidsetsize, gid_t grouplist[])
+     }
+ 
+   /* If gidsetsize is zero, return the number of group IDs without touching
+-   * grouplist.
++   * grouplist. Since we have no supplementary groups, return 0.
+    */
+ 
+   if (gidsetsize == 0)
+     {
+-      return 1;
++      return 0;
+     }
+ 
+   if (grouplist == NULL)
+@@ -76,10 +91,10 @@ int getgroups(int gidsetsize, gid_t grouplist[])
+       return -1;
+     }
+ 
+-  /* NuttX has no notion of supplementary group IDs.  Report the single
+-   * effective group ID of the calling process.
++  /* NuttX has no supplementary group IDs in this configuration.
++   * Return empty list.
+    */
+ 
+-  grouplist[0] = getegid();
+-  return 1;
++  return 0;
+ }
++#endif
+diff --git a/sched/group/Make.defs b/sched/group/Make.defs
+index f505a0d8..5e27830a 100644
+--- a/sched/group/Make.defs
++++ b/sched/group/Make.defs
+@@ -42,9 +42,17 @@ ifeq ($(CONFIG_SCHED_USER_IDENTITY),y)
+ CSRCS += group_setuid.c group_setgid.c group_getuid.c group_getgid.c
+ CSRCS += group_seteuid.c group_setegid.c group_geteuid.c group_getegid.c
+ CSRCS += group_setreuid.c group_setregid.c group_getresuid.c group_getresgid.c
++CSRCS += group_setresuid.c group_setresgid.c
+ CSRCS += group_issetugid.c
+ endif
+ 
++ifeq ($(CONFIG_SCHED_NGROUPS),)
++else
++ifneq ($(CONFIG_SCHED_NGROUPS),0)
++CSRCS += group_getgroups.c group_setgroups.c
++endif
++endif
++
+ ifeq ($(CONFIG_SIG_SIGSTOP_ACTION),y)
+ CSRCS += group_suspendchildren.c group_continue.c
+ endif
+diff --git a/sched/group/group_getgroups.c b/sched/group/group_getgroups.c
+new file mode 100644
+index 00000000..798108f2
+--- /dev/null
++++ b/sched/group/group_getgroups.c
+@@ -0,0 +1,104 @@
++/****************************************************************************
++ * sched/group/group_getgroups.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See
++ * the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/types.h>
++#include <unistd.h>
++#include <assert.h>
++#include <errno.h>
++
++#include <sched/sched.h>
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: getgroups
++ *
++ * Description:
++ *   The getgroups() function returns the supplementary group IDs of the
++ *   calling process.
++ *
++ * Input Parameters:
++ *   gidsetsize - The number of elements available in grouplist.
++ *   grouplist  - The buffer used to return the group IDs.
++ *
++ * Returned Value:
++ *   On success, the number of group IDs is returned.  If gidsetsize is zero,
++ *   the total number of group IDs is returned without modifying grouplist.
++ *   On failure, -1 is returned and errno is set appropriately.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_SCHED_NGROUPS
++int getgroups(int gidsetsize, FAR gid_t *grouplist)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR struct task_group_s *rgroup = rtcb->group;
++  int ngroups;
++
++  DEBUGASSERT(rgroup != NULL);
++
++  if (gidsetsize < 0)
++    {
++      set_errno(EINVAL);
++      return -1;
++    }
++
++  ngroups = rgroup->tg_nsupgroups;
++
++  /* If gidsetsize is zero, return the number of group IDs without touching
++   * grouplist.
++   */
++
++  if (gidsetsize == 0)
++    {
++      return ngroups;
++    }
++
++  if (grouplist == NULL)
++    {
++      set_errno(EFAULT);
++      return -1;
++    }
++
++  /* Return the supplementary group IDs */
++
++  if (ngroups > 0)
++    {
++      if (ngroups > gidsetsize)
++        {
++          ngroups = gidsetsize;
++        }
++
++      memcpy(grouplist, rgroup->tg_supgroups, ngroups * sizeof(gid_t));
++    }
++
++  return ngroups;
++}
++#endif
+diff --git a/sched/group/group_setgroups.c b/sched/group/group_setgroups.c
+new file mode 100644
+index 00000000..2b2d0514
+--- /dev/null
++++ b/sched/group/group_setgroups.c
+@@ -0,0 +1,103 @@
++/****************************************************************************
++ * sched/group/group_setgroups.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See
++ * the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/types.h>
++#include <unistd.h>
++#include <assert.h>
++#include <errno.h>
++
++#include <sched/sched.h>
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: setgroups
++ *
++ * Description:
++ *   The setgroups() function sets the supplementary group IDs for the
++ *   calling process. Requires appropriate privilege.
++ *
++ * Input Parameters:
++ *   ngroups - The number of supplementary group IDs. Must be less than
++ *             or equal to CONFIG_SCHED_NGROUPS. Special value 0 clears
++ *             the supplementary group list.
++ *   grouplist - Pointer to an array of group IDs.
++ *
++ * Returned Value:
++ *   Zero if successful and -1 in case of failure, in which case errno is set
++ *   appropriately.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_SCHED_NGROUPS
++int setgroups(int ngroups, FAR const gid_t *grouplist)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR struct task_group_s *rgroup = rtcb->group;
++
++  DEBUGASSERT(rgroup != NULL);
++
++  /* Validate ngroups */
++
++  if (ngroups < 0 || ngroups > CONFIG_SCHED_NGROUPS)
++    {
++      set_errno(EINVAL);
++      return -1;
++    }
++
++  /* If ngroups is zero, clear the supplementary group list */
++
++  if (ngroups == 0)
++    {
++      if (grouplist != NULL && grouplist != 0)
++        {
++          /* Technically this could be error, but Linux allows it */
++        }
++
++      rgroup->tg_nsupgroups = 0;
++      return 0;
++    }
++
++  /* Validate grouplist pointer */
++
++  if (grouplist == NULL)
++    {
++      set_errno(EFAULT);
++      return -1;
++    }
++
++  /* Copy the supplementary group IDs */
++
++  rgroup->tg_nsupgroups = ngroups;
++  memcpy(rgroup->tg_supgroups, grouplist, ngroups * sizeof(gid_t));
++
++  return 0;
++}
++#endif
+diff --git a/sched/group/group_setresgid.c b/sched/group/group_setresgid.c
+new file mode 100644
+index 00000000..eac07133
+--- /dev/null
++++ b/sched/group/group_setresgid.c
+@@ -0,0 +1,138 @@
++/****************************************************************************
++ * sched/group/group_setresgid.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See
++ * the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/types.h>
++#include <unistd.h>
++#include <assert.h>
++#include <errno.h>
++
++#include <sched/sched.h>
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: setresgid
++ *
++ * Description:
++ *   The setresgid() function sets the real, effective, and saved set-group
++ *   IDs of the calling process.
++ *
++ * Input Parameters:
++ *   rgid - Real group identity to set.  The special value (gid_t)-1
++ *          indicates that the real group ID should not be changed.
++ *   egid - Effective group identity to set.  The special value (gid_t)-1
++ *          indicates that the effective group ID should not be changed.
++ *   sgid - Saved set-group identity to set.  The special value (gid_t)-1
++ *          indicates that the saved set-group ID should not be changed.
++ *
++ * Returned Value:
++ *   Zero if successful and -1 in case of failure, in which case errno is set
++ *   appropriately.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_SCHED_USER_IDENTITY
++int setresgid(gid_t rgid, gid_t egid, gid_t sgid)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR struct task_group_s *rgroup = rtcb->group;
++  gid_t old_rgid;
++  gid_t old_egid;
++  gid_t old_sgid;
++
++  DEBUGASSERT(rgroup != NULL);
++
++  old_rgid = rgroup->tg_gid;
++  old_egid = rgroup->tg_egid;
++  old_sgid = rgroup->tg_sgid;
++
++  /* Check for -1 values that should be left unchanged */
++
++  if (rgid == (gid_t)-1)
++    {
++      rgid = old_rgid;
++    }
++
++  if (egid == (gid_t)-1)
++    {
++      egid = old_egid;
++    }
++
++  if (sgid == (gid_t)-1)
++    {
++      sgid = old_sgid;
++    }
++
++  /* When the effective UID is 0 (super-user), arbitrary values may
++   * be assigned. But wait - we need to check the effective UID, not GID.
++   * Actually, we need to check if the effective UID is 0 to allow
++   * arbitrary GID changes.
++   */
++
++  if (rgroup->tg_euid == 0)
++    {
++      rgroup->tg_gid = rgid;
++      rgroup->tg_egid = egid;
++      rgroup->tg_sgid = sgid;
++      return 0;
++    }
++
++  /* Non-super-user: each requested value must be one of the current
++   * real, effective, or saved values.
++   */
++
++  if (rgid != (gid_t)-1 &&
++      rgid != old_rgid && rgid != old_egid && rgid != old_sgid)
++    {
++      set_errno(EPERM);
++      return -1;
++    }
++
++  if (egid != (gid_t)-1 &&
++      egid != old_rgid && egid != old_egid && egid != old_sgid)
++    {
++      set_errno(EPERM);
++      return -1;
++    }
++
++  if (sgid != (gid_t)-1 &&
++      sgid != old_rgid && sgid != old_egid && sgid != old_sgid)
++    {
++      set_errno(EPERM);
++      return -1;
++    }
++
++  rgroup->tg_gid = rgid;
++  rgroup->tg_egid = egid;
++  rgroup->tg_sgid = sgid;
++
++  return 0;
++}
++#endif
+diff --git a/sched/group/group_setresuid.c b/sched/group/group_setresuid.c
+new file mode 100644
+index 00000000..f794964f
+--- /dev/null
++++ b/sched/group/group_setresuid.c
+@@ -0,0 +1,136 @@
++/****************************************************************************
++ * sched/group/group_setresuid.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See
++ * the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/types.h>
++#include <unistd.h>
++#include <assert.h>
++#include <errno.h>
++
++#include <sched/sched.h>
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: setresuid
++ *
++ * Description:
++ *   The setresuid() function sets the real, effective, and saved set-user
++ *   IDs of the calling process.
++ *
++ * Input Parameters:
++ *   ruid - Real user identity to set.  The special value (uid_t)-1
++ *          indicates that the real user ID should not be changed.
++ *   euid - Effective user identity to set.  The special value (uid_t)-1
++ *          indicates that the effective user ID should not be changed.
++ *   suid - Saved set-user identity to set.  The special value (uid_t)-1
++ *          indicates that the saved set-user ID should not be changed.
++ *
++ * Returned Value:
++ *   Zero if successful and -1 in case of failure, in which case errno is set
++ *   appropriately.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_SCHED_USER_IDENTITY
++int setresuid(uid_t ruid, uid_t euid, uid_t suid)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR struct task_group_s *rgroup = rtcb->group;
++  uid_t old_ruid;
++  uid_t old_euid;
++  uid_t old_suid;
++
++  DEBUGASSERT(rgroup != NULL);
++
++  old_ruid = rgroup->tg_uid;
++  old_euid = rgroup->tg_euid;
++  old_suid = rgroup->tg_suid;
++
++  /* Check for -1 values that should be left unchanged */
++
++  if (ruid == (uid_t)-1)
++    {
++      ruid = old_ruid;
++    }
++
++  if (euid == (uid_t)-1)
++    {
++      euid = old_euid;
++    }
++
++  if (suid == (uid_t)-1)
++    {
++      suid = old_suid;
++    }
++
++  /* When the effective UID is 0 (super-user), arbitrary values may
++   * be assigned.
++   */
++
++  if (old_euid == 0)
++    {
++      rgroup->tg_uid = ruid;
++      rgroup->tg_euid = euid;
++      rgroup->tg_suid = suid;
++      return 0;
++    }
++
++  /* Non-super-user: each requested value must be one of the current
++   * real, effective, or saved values.
++   */
++
++  if (ruid != (uid_t)-1 &&
++      ruid != old_ruid && ruid != old_euid && ruid != old_suid)
++    {
++      set_errno(EPERM);
++      return -1;
++    }
++
++  if (euid != (uid_t)-1 &&
++      euid != old_ruid && euid != old_euid && euid != old_suid)
++    {
++      set_errno(EPERM);
++      return -1;
++    }
++
++  if (suid != (uid_t)-1 &&
++      suid != old_ruid && suid != old_euid && suid != old_suid)
++    {
++      set_errno(EPERM);
++      return -1;
++    }
++
++  rgroup->tg_uid = ruid;
++  rgroup->tg_euid = euid;
++  rgroup->tg_suid = suid;
++
++  return 0;
++}
++#endif
+diff --git a/syscall/syscall.csv b/syscall/syscall.csv
+index f5675cea..271d9eaf 100644
+--- a/syscall/syscall.csv
++++ b/syscall/syscall.csv
+@@ -45,6 +45,7 @@
+ "getenv","stdlib.h","!defined(CONFIG_DISABLE_ENVIRON)","FAR char *","FAR const char *"
+ "geteuid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","uid_t"
+ "getgid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","gid_t"
++"getgroups","unistd.h","defined(CONFIG_SCHED_NGROUPS)","int","int","FAR gid_t *"
+ "gethostname","unistd.h","","int","FAR char *","size_t"
+ "getitimer","sys/time.h","!defined(CONFIG_DISABLE_POSIX_TIMERS)","int","int","FAR struct itimerval *"
+ "getpeername","sys/socket.h","defined(CONFIG_NET)","int","int","FAR struct sockaddr *","FAR socklen_t *"
+@@ -159,10 +160,13 @@
+ "sendto","sys/socket.h","defined(CONFIG_NET)","ssize_t","int","FAR const void *","size_t","int","FAR const struct sockaddr *","socklen_t"
+ "setegid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","int","gid_t"
+ "setregid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","int","gid_t","gid_t"
++"setresgid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","int","gid_t","gid_t","gid_t"
+ "setreuid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","int","uid_t","uid_t"
++"setresuid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","int","uid_t","uid_t","uid_t"
+ "setenv","stdlib.h","!defined(CONFIG_DISABLE_ENVIRON)","int","FAR const char *","FAR const char *","int"
+ "seteuid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","int","uid_t"
+ "setgid","unistd.h","defined(CONFIG_SCHED_USER_IDENTITY)","int","gid_t"
++"setgroups","unistd.h","defined(CONFIG_SCHED_NGROUPS)","int","int","FAR const gid_t *"
+ "sethostname","unistd.h","","int","FAR const char *","size_t"
+ "setitimer","sys/time.h","!defined(CONFIG_DISABLE_POSIX_TIMERS)","int","int","FAR const struct itimerval *","FAR struct itimerval *"
+ "setsockopt","sys/socket.h","defined(CONFIG_NET) && defined(CONFIG_NET_SOCKOPTS)","int","int","int","int","FAR const void *","socklen_t"

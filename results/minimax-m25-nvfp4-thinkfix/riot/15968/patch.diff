@@ -1,0 +1,484 @@
+diff --git a/sys/congure/Kconfig b/sys/congure/Kconfig
+index 7b2fe4f..e67d19b 100644
+--- a/sys/congure/Kconfig
++++ b/sys/congure/Kconfig
+@@ -11,6 +11,7 @@ menu "CongURE congestion control abstraction"
+ rsource "mock/Kconfig"
+ rsource "quic/Kconfig"
+ rsource "reno/Kconfig"
++rsource "abe/Kconfig"
+ rsource "test/Kconfig"
+ 
+ endmenu # CongURE congestion control abstraction
+@@ -26,6 +27,7 @@ if MODULE_CONGURE
+ rsource "mock/Kconfig"
+ rsource "quic/Kconfig"
+ rsource "reno/Kconfig"
++rsource "abe/Kconfig"
+ rsource "test/Kconfig"
+ 
+ endif   # MODULE_CONGURE
+diff --git a/sys/congure/Makefile b/sys/congure/Makefile
+index 67edc5e..6c1e838 100644
+--- a/sys/congure/Makefile
++++ b/sys/congure/Makefile
+@@ -10,6 +10,12 @@ endif
+ ifneq (,$(filter congure_reno_methods,$(USEMODULE)))
+   DIRS += reno/methods
+ endif
++ifneq (,$(filter congure_abe,$(USEMODULE)))
++  DIRS += abe
++endif
++ifneq (,$(filter congure_abe_methods,$(USEMODULE)))
++  DIRS += abe/methods
++endif
+ ifneq (,$(filter congure_test,$(USEMODULE)))
+   DIRS += test
+ endif
+diff --git a/sys/congure/abe/Kconfig b/sys/congure/abe/Kconfig
+new file mode 100644
+index 0000000..4de2df9
+--- /dev/null
++++ b/sys/congure/abe/Kconfig
+@@ -0,0 +1,13 @@
++config MODULE_CONGURE_ABE
++    bool "CongURE implementation of TCP Alternative Backoff with ECN (ABE)"
++    depends on MODULE_CONGURE
++    select MODULE_CONGURE_ABE_METHODS
++
++config MODULE_CONGURE_ABE_METHODS
++    bool "Send driver methods for the CongURE implementation of TCP ABE"
++    select MODULE_CONGURE_RENO_METHODS
++    help
++        This makes the methods of @ref sys_congure_abe available to other
++        @ref sys_congure modules. Use module `congure_abe_methods` to only compile
++        in these modules, but not the driver for `congure_abe_snd_t` or
++        @ref congure_abe_snd_setup().
+diff --git a/sys/congure/abe/Makefile b/sys/congure/abe/Makefile
+new file mode 100644
+index 0000000..3192fae
+--- /dev/null
++++ b/sys/congure/abe/Makefile
+@@ -0,0 +1,3 @@
++MODULE := congure_abe
++
++include $(RIOTBASE)/Makefile.base
+diff --git a/sys/congure/abe/congure_abe.c b/sys/congure/abe/congure_abe.c
+new file mode 100644
+index 0000000..3b0b76d
+--- /dev/null
++++ b/sys/congure/abe/congure_abe.c
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (C) 2021 Freie Universität Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @{
++ *
++ * @file
++ * @author  Martine Lenders <m.lenders@fu-berlin.de>
++ */
++
++#include "congure/abe.h"
++
++static const congure_snd_driver_t _driver = {
++    .init = congure_abe_snd_init,
++    .inter_msg_interval = congure_abe_snd_inter_msg_interval,
++    .report_msg_sent = congure_abe_snd_report_msg_sent,
++    .report_msg_discarded = congure_abe_snd_report_msg_discarded,
++    .report_msgs_timeout = congure_abe_snd_report_msgs_timeout,
++    .report_msgs_lost = congure_abe_snd_report_msgs_lost,
++    .report_msg_acked = congure_abe_snd_report_msg_acked,
++    .report_ecn_ce = congure_abe_snd_report_ecn_ce,
++};
++
++void congure_abe_snd_setup(congure_abe_snd_t *c,
++                           const congure_abe_snd_consts_t *consts)
++{
++    c->super.super.driver = &_driver;
++    c->consts = consts;
++    c->super.consts = &consts->reno;
++}
++
++/** @} */
+diff --git a/sys/congure/abe/methods/Makefile b/sys/congure/abe/methods/Makefile
+new file mode 100644
+index 0000000..739c882
+--- /dev/null
++++ b/sys/congure/abe/methods/Makefile
+@@ -0,0 +1,3 @@
++MODULE := congure_abe_methods
++
++include $(RIOTBASE)/Makefile.base
+diff --git a/sys/congure/abe/methods/congure_abe_methods.c b/sys/congure/abe/methods/congure_abe_methods.c
+new file mode 100644
+index 0000000..9635489
+--- /dev/null
++++ b/sys/congure/abe/methods/congure_abe_methods.c
+@@ -0,0 +1,136 @@
++/*
++ * Copyright (C) 2021 Freie Universität Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @{
++ *
++ * @file
++ * @author  Martine Lenders <m.lenders@fu-berlin.de>
++ */
++
++#include <assert.h>
++#include <stdint.h>
++
++#include "clist.h"
++#include "seq.h"
++
++#include "congure/abe.h"
++
++/**
++ * @brief   Helper function to get ABE state from generic CongURE state
++ */
++static inline congure_abe_snd_t *_get_abe_snd(congure_snd_t *cong)
++{
++    return (congure_abe_snd_t *)cong;
++}
++
++/**
++ * @brief   Helper function to get Reno state from ABE state
++ */
++static inline congure_reno_snd_t *_get_reno_snd(congure_abe_snd_t *c)
++{
++    return &c->super;
++}
++
++void congure_abe_snd_init(congure_snd_t *cong, void *ctx)
++{
++    congure_abe_snd_t *c = _get_abe_snd(cong);
++    congure_reno_snd_t *reno = _get_reno_snd(c);
++
++    congure_reno_snd_init(cong, ctx);
++    (void)reno;
++}
++
++int32_t congure_abe_snd_inter_msg_interval(congure_snd_t *cong,
++                                            unsigned msg_size)
++{
++    (void)cong;
++    (void)msg_size;
++    return -1;
++}
++
++void congure_abe_snd_report_msg_sent(congure_snd_t *cong, unsigned sent_size)
++{
++    congure_abe_snd_t *c = _get_abe_snd(cong);
++    congure_reno_snd_t *reno = _get_reno_snd(c);
++
++    congure_reno_snd_report_msg_sent(cong, sent_size);
++    (void)reno;
++}
++
++void congure_abe_snd_report_msg_discarded(congure_snd_t *cong,
++                                          unsigned msg_size)
++{
++    congure_abe_snd_t *c = _get_abe_snd(cong);
++    congure_reno_snd_t *reno = _get_reno_snd(c);
++
++    congure_reno_snd_report_msg_discarded(cong, msg_size);
++    (void)reno;
++}
++
++void congure_abe_snd_report_msgs_timeout(congure_snd_t *cong,
++                                         congure_snd_msg_t *msgs)
++{
++    congure_abe_snd_t *c = _get_abe_snd(cong);
++    congure_reno_snd_t *reno = _get_reno_snd(c);
++
++    congure_reno_snd_report_msgs_timeout(cong, msgs);
++    (void)reno;
++}
++
++void congure_abe_snd_report_msgs_lost(congure_snd_t *cong,
++                                      congure_snd_msg_t *msgs)
++{
++    congure_abe_snd_t *c = _get_abe_snd(cong);
++    congure_reno_snd_t *reno = _get_reno_snd(c);
++
++    congure_reno_snd_report_msgs_lost(cong, msgs);
++    (void)reno;
++}
++
++void congure_abe_snd_report_msg_acked(congure_snd_t *cong,
++                                       congure_snd_msg_t *msg,
++                                       congure_snd_ack_t *ack)
++{
++    congure_abe_snd_t *c = _get_abe_snd(cong);
++    congure_reno_snd_t *reno = _get_reno_snd(c);
++
++    congure_reno_snd_report_msg_acked(cong, msg, ack);
++    (void)reno;
++}
++
++void congure_abe_snd_report_ecn_ce(congure_snd_t *cong, ztimer_now_t time)
++{
++    congure_abe_snd_t *c = _get_abe_snd(cong);
++    congure_reno_snd_t *reno = _get_reno_snd(c);
++    congure_wnd_size_t new_ssthresh;
++    congure_wnd_size_t multiplier_result;
++
++    /* see https://tools.ietf.org/html/rfc8311#section-4.1 */
++    (void)time;
++
++    /* Calculate the ABE multiplier: (abe_multiplier_numerator / abe_multiplier_denominator) * in_flight_size
++     * We need to compute: (numerator * in_flight_size) / denominator
++     */
++    multiplier_result = (reno->in_flight_size * c->consts->abe_multiplier_numerator) /
++                        c->consts->abe_multiplier_denominator;
++
++    /* ssthresh = max(0.8 * in_flight_size, 2 * mss) */
++    new_ssthresh = (multiplier_result > (reno->mss * 2))
++                   ? multiplier_result
++                   : (reno->mss * 2);
++
++    reno->ssthresh = new_ssthresh;
++
++    /* cwnd = min(cwnd, ssthresh) */
++    if (reno->super.cwnd > reno->ssthresh) {
++        reno->super.cwnd = reno->ssthresh;
++    }
++}
++
++/** @} */
+diff --git a/sys/include/congure/abe.h b/sys/include/congure/abe.h
+new file mode 100644
+index 0000000..4e47bd5
+--- /dev/null
++++ b/sys/include/congure/abe.h
+@@ -0,0 +1,219 @@
++/*
++ * Copyright (C) 2021 Freie Universität Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    sys_congure_abe    CongURE implementation of TCP Alternative Backoff with ECN (ABE)
++ * @ingroup     sys_congure
++ * @brief       Implementation of the TCP Alternative Backoff with ECN (ABE) congestion
++ *              control algorithm for the CongURE framework.
++ *
++ * @see [RFC 8311](https://tools.ietf.org/html/rfc8311)
++ * @{
++ *
++ * @file
++ * @brief
++ *
++ * @author  Martine S. Lenders <m.lenders@fu-berlin.de>
++ */
++#ifndef CONGURE_ABE_H
++#define CONGURE_ABE_H
++
++#include <stdint.h>
++
++#include "congure.h"
++#include "congure/reno.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   Default value for @ref CONFIG_CONGURE_ABE_MULTIPLIER_NUMERATOR
++ */
++#ifndef CONFIG_CONGURE_ABE_MULTIPLIER_NUMERATOR_DEFAULT
++#define CONFIG_CONGURE_ABE_MULTIPLIER_NUMERATOR_DEFAULT    (4U)
++#endif
++
++/**
++ * @brief   Default value for @ref CONFIG_CONGURE_ABE_MULTIPLIER_DENOMINATOR
++ */
++#ifndef CONFIG_CONGURE_ABE_MULTIPLIER_DENOMINATOR_DEFAULT
++#define CONFIG_CONGURE_ABE_MULTIPLIER_DENOMINATOR_DEFAULT  (5U)
++#endif
++
++/**
++ * @brief   Forward declaration of state object for CongURE ABE.
++ */
++typedef struct congure_abe_snd congure_abe_snd_t;
++
++/**
++ * @brief   Constants for the ABE congestion control.
++ *
++ * Example usage:
++ *
++ * ~~~~~~~~~~~~~~~~ {.c}
++ * static const congure_abe_snd_consts_t consts = {
++ *     .reno = {
++ *         .fr = _my_fast_retransmit,
++ *         .same_wnd_adv = _my_same_window_advertised,
++ *         .init_mss = 1460,
++ *         .cwnd_upper = 2190,
++ *         .cwnd_lower = 1095,
++ *         .init_ssthresh = CONGURE_WND_SIZE_MAX,
++ *         .frthresh = 3,
++ *     },
++ *     .abe_multiplier_numerator = 4,
++ *     .abe_multiplier_denominator = 5,
++ * }
++ * static congure_abe_snd_t cong;
++ *
++ * // ...
++ * congure_abe_snd_setup(&cong, &const);
++ * ~~~~~~~~~~~~~~~~
++ */
++typedef struct {
++    /**
++     * @brief   TCP Reno constants (embedded)
++     */
++    congure_reno_snd_consts_t reno;
++
++    /**
++     * @brief   Numerator of the ABE multiplier for ssthresh calculation
++     *
++     * The actual multiplier is abe_multiplier_numerator / abe_multiplier_denominator.
++     * Defaults to @ref CONFIG_CONGURE_ABE_MULTIPLIER_NUMERATOR_DEFAULT.
++     */
++    uint8_t abe_multiplier_numerator;
++
++    /**
++     * @brief   Denominator of the ABE multiplier for ssthresh calculation
++     *
++     * The actual multiplier is abe_multiplier_numerator / abe_multiplier_denominator.
++     * Defaults to @ref CONFIG_CONGURE_ABE_MULTIPLIER_DENOMINATOR_DEFAULT.
++     */
++    uint8_t abe_multiplier_denominator;
++} congure_abe_snd_consts_t;
++
++/**
++ * @brief   State object for CongURE ABE
++ *
++ * @extends congure_reno_snd_t
++ */
++struct congure_abe_snd {
++    congure_reno_snd_t super;            /**< see @ref congure_reno_snd_t */
++
++    /**
++     * @brief   Constants
++     */
++    const congure_abe_snd_consts_t *consts;
++};
++
++/**
++ * @brief   Set-up @ref sys_congure_abe driver and constants.
++ *
++ * @param[in] c         The @ref sys_congure_abe state object
++ * @param[in] consts    The constants to use
++ */
++void congure_abe_snd_setup(congure_abe_snd_t *c,
++                          const congure_abe_snd_consts_t *consts);
++
++/**
++ * @defgroup    sys_congure_abe_methods The send driver methods for CongURE TCP ABE
++ * @ingroup     sys_congure_abe
++ *
++ * This makes the methods of @ref sys_congure_abe available to other
++ * @ref sys_congure modules. Use module `congure_abe_methods` to only compile
++ * in these modules, but not the driver for `congure_abe_snd_t` or
++ * @ref congure_abe_snd_setup().
++ *
++ * @{
++ */
++/**
++ * @brief   Use to override congure_snd_driver_t::init
++ *
++ * @param[in,out]   c       The CongURE object to initialize.
++ * @param[in]       ctx     Context for callbacks specific to the congestion
++ *                          control (such as a TCP PCB). May be NULL.
++ */
++void congure_abe_snd_init(congure_snd_t *c, void *ctx);
++
++/**
++ * @brief   Use to override congure_snd_driver_t::inter_msg_interval
++ *
++ * @param[in,out]   c       The CongURE object to initialize.
++ * @param[in]   msg_size    Size of the next message to sent in caller-defined
++ *                          unit.
++ *
++ * @return  Always -1.
++ */
++int32_t congure_abe_snd_inter_msg_interval(congure_snd_t *c,
++                                          unsigned msg_size);
++
++/**
++ * @brief   Use to override congure_snd_driver_t::report_msg_sent
++ *
++ * @param[in]   c           The CongURE state object.
++ * @param[in]   msg_size    Size of the message in caller-defined unit.
++ */
++void congure_abe_snd_report_msg_sent(congure_snd_t *c, unsigned msg_size);
++
++/**
++ * @brief   Use to override congure_snd_driver_t::report_msg_discarded
++ *
++ * @param[in]   c           The CongURE state object.
++ * @param[in]   msg_size    Size of the discarded message in caller-defined
++ *                          unit.
++ */
++void congure_abe_snd_report_msg_discarded(congure_snd_t *c, unsigned msg_size);
++
++/**
++ * @brief   Use to override congure_snd_driver_t::report_msgs_timeout
++ *
++ * @param[in]   c           The CongURE state object.
++ * @param[in]   msgs        A collection of messages that are known to be lost.
++ *                          The list must not be changed by the method.
++ */
++void congure_abe_snd_report_msgs_timeout(congure_snd_t *c,
++                                         congure_snd_msg_t *msgs);
++
++/**
++ * @brief   Use to override congure_snd_driver_t::report_msgs_lost
++ *
++ * @param[in]   c           The CongURE state object.
++ * @param[in]   msgs        A collection of messages for which the ACK timed
++ *                          out. The list must not be changed by the method.
++ */
++void congure_abe_snd_report_msgs_lost(congure_snd_t *c,
++                                      congure_snd_msg_t *msgs);
++
++/**
++ * @brief   Use to override congure_snd_driver_t::report_msg_acked
++ *
++ * @param[in]   c           The CongURE state object.
++ * @param[in]   msg         The ACK'd message.
++ * @param[in]   ack         The received ACK.
++ */
++void congure_abe_snd_report_msg_acked(congure_snd_t *c, congure_snd_msg_t *msg,
++                                      congure_snd_ack_t *ack);
++
++/**
++ * @brief   Use to override congure_snd_driver_t::report_ecn_ce
++ *
++ * @param[in]   c           The CongURE state object.
++ * @param[in]   time        Timestamp in milliseconds of the message the CE
++ *                          event occurred for was sent.
++ */
++void congure_abe_snd_report_ecn_ce(congure_snd_t *c, ztimer_now_t time);
++/** @} */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* CONGURE_ABE_H */
++/** @} */

@@ -1,0 +1,125 @@
+diff --git a/lib/utils/json.c b/lib/utils/json.c
+index e1b81ab1..8116c617 100644
+--- a/lib/utils/json.c
++++ b/lib/utils/json.c
+@@ -462,17 +462,117 @@ static int skip_field(struct json_obj *obj, struct json_obj_key_value *kv)
+ 	return 0;
+ }
+ 
++
++/*
++ * Unescape a JSON string, converting escape sequences to real characters.
++ * Returns the unescaped length, or negative error code.
++ * If dest is NULL or dest_size is 0, only calculates the length.
++ * Note: Unicode escapes (\uXXXX) are passed through as-is since
++ * the JSON library doesn't decode Unicode.
++ */
++static int json_unescape(const char *src, size_t src_len, char *dest, size_t dest_size)
++{
++	size_t src_idx = 0;
++	size_t dest_idx = 0;
++
++	while (src_idx < src_len) {
++		char chr = src[src_idx];
++
++		if (chr == '\\') {
++			if (src_idx + 1 >= src_len) {
++				/* Trailing backslash - invalid */
++				return -EINVAL;
++			}
++
++			src_idx++;
++			char esc = src[src_idx];
++
++			switch (esc) {
++			case '"':
++				chr = '"';
++				break;
++			case '\\':
++				chr = '\\';
++				break;
++			case '/':
++				chr = '/';
++				break;
++			case 'b':
++				chr = '\b';
++				break;
++			case 'f':
++				chr = '\f';
++				break;
++			case 'n':
++				chr = '\n';
++				break;
++			case 'r':
++				chr = '\r';
++				break;
++			case 't':
++				chr = '\t';
++				break;
++			case 'u':
++				/* Unicode escape - pass through as-is */
++				/* Copy '\u' first */
++				if (dest != NULL && dest_idx >= dest_size) {
++					return -ENOMEM;
++				}
++				if (dest != NULL) {
++					dest[dest_idx++] = '\\';
++				}
++				if (dest != NULL && dest_idx >= dest_size) {
++					return -ENOMEM;
++				}
++				if (dest != NULL) {
++					dest[dest_idx++] = 'u';
++				}
++				src_idx++;
++				continue;
++			default:
++				/* Invalid escape sequence */
++				return -EINVAL;
++			}
++		}
++
++		if (dest != NULL && dest_idx >= dest_size) {
++			/* Buffer overflow */
++			return -ENOMEM;
++		}
++
++		if (dest != NULL) {
++			dest[dest_idx] = chr;
++		}
++		dest_idx++;
++		src_idx++;
++	}
++
++	return (int)dest_idx;
++}
++
+ static int decode_string_buf(const struct json_token *token, char *str, size_t size)
+ {
+ 	size_t len = token->end - token->start;
++	int unescaped_len;
++
++	/* First calculate the unescaped length */
++	unescaped_len = json_unescape(token->start, len, NULL, 0);
++	if (unescaped_len < 0) {
++		return unescaped_len;
++	}
+ 
+ 	/* buffer 'str' must be large enough to fit string and null-terminator */
+-	if (size <= len) {
++	if (size <= (size_t)unescaped_len) {
+ 		return -EINVAL;
+ 	}
+ 
+-	memcpy(str, token->start, len);
+-	str[len] = '\0';
++	/* Now do the actual unescaping */
++	unescaped_len = json_unescape(token->start, len, str, size - 1);
++	if (unescaped_len < 0) {
++		return unescaped_len;
++	}
++
++	str[unescaped_len] = '\0';
+ 
+ 	return 0;
+ }

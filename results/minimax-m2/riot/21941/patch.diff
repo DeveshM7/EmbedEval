@@ -1,0 +1,190 @@
+diff --git a/Makefile.dep b/Makefile.dep
+index 17b6abba..8b0e0ebf 100644
+--- a/Makefile.dep
++++ b/Makefile.dep
+@@ -137,3 +137,5 @@ ifneq (,$(filter test_utils_interactive_sync,$(USEMODULE)))
+     DEFAULT_MODULE += test_utils_interactive_sync_shell
+   endif
+ endif
++
++# Include event thread stack size handling after all modules are processed
+diff --git a/Makefile.include b/Makefile.include
+index 893a463a..cd0b4d23 100644
+--- a/Makefile.include
++++ b/Makefile.include
+@@ -598,6 +598,7 @@ include $(RIOTMAKE)/bindist.inc.mk
+ include $(RIOTMAKE)/modules.inc.mk
+ 
+ 
++include $(RIOTMAKE)/event_thread_stacksize.inc.mk
+ .PHONY: all link clean flash flash-only termdeps term doc doc-man doc-latex debug debug-server reset objdump help info-modules
+ .PHONY: print-size elffile lstfile binfile hexfile flashfile cosy
+ .PHONY: ..in-docker-container
+diff --git a/makefiles/event_thread_stacksize.inc.mk b/makefiles/event_thread_stacksize.inc.mk
+new file mode 100644
+index 00000000..8475db02
+--- /dev/null
++++ b/makefiles/event_thread_stacksize.inc.mk
+@@ -0,0 +1,74 @@
++# Include the utility functions
++include $(RIOTMAKE)/utils/strings.mk
++
++# Default stack size if none is specified (8KB, a reasonable default for most platforms)
++DEFAULT_EVENT_THREAD_STACKSIZE ?= 8192
++
++# If modules declare minimum stack size requirements, collect and compute the maximum
++EVENT_THREAD_HIGHEST_STACKSIZE ?= $(DEFAULT_EVENT_THREAD_STACKSIZE)
++EVENT_THREAD_MEDIUM_STACKSIZE ?= $(DEFAULT_EVENT_THREAD_STACKSIZE)
++EVENT_THREAD_LOWEST_STACKSIZE ?= $(DEFAULT_EVENT_THREAD_STACKSIZE)
++
++# Compute the maximum of all declared minimum requirements for each priority
++EVENT_THREAD_HIGHEST_STACKSIZE_MAX = $(call max_number,$(EVENT_THREAD_HIGHEST_STACKSIZE_MIN))
++EVENT_THREAD_MEDIUM_STACKSIZE_MAX = $(call max_number,$(EVENT_THREAD_MEDIUM_STACKSIZE_MIN))
++EVENT_THREAD_LOWEST_STACKSIZE_MAX = $(call max_number,$(EVENT_THREAD_LOWEST_STACKSIZE_MIN))
++
++# Apply the maximum requirements to the corresponding macros
++ifneq ($(EVENT_THREAD_HIGHEST_STACKSIZE_MAX),0)
++  EVENT_THREAD_HIGHEST_STACKSIZE := $(EVENT_THREAD_HIGHEST_STACKSIZE_MAX)
++endif
++
++ifneq ($(EVENT_THREAD_MEDIUM_STACKSIZE_MAX),0)
++  EVENT_THREAD_MEDIUM_STACKSIZE := $(EVENT_THREAD_MEDIUM_STACKSIZE_MAX)
++endif
++
++ifneq ($(EVENT_THREAD_LOWEST_STACKSIZE_MAX),0)
++  EVENT_THREAD_LOWEST_STACKSIZE := $(EVENT_THREAD_LOWEST_STACKSIZE_MAX)
++endif
++
++# Handle trickling down of requirements to the threads that actually handle the queues
++# The logic is based on event_thread.c:
++# event_queue_t *qs = EVENT_PRIO_MEDIUM;
++# size_t qs_numof = 1;
++# if (!IS_USED(MODULE_EVENT_THREAD_HIGHEST)) {
++#     qs = EVENT_PRIO_HIGHEST;
++#     qs_numof = 2;
++# }
++# if (!IS_USED(MODULE_EVENT_THREAD_MEDIUM)) {
++#     qs_numof++;
++# }
++
++# Determine which queues are handled by which thread
++# Start with the individual requirements
++FINAL_HIGHEST_STACKSIZE = $(EVENT_THREAD_HIGHEST_STACKSIZE)
++FINAL_MEDIUM_STACKSIZE = $(EVENT_THREAD_MEDIUM_STACKSIZE)
++FINAL_LOWEST_STACKSIZE = $(EVENT_THREAD_LOWEST_STACKSIZE)
++
++# If event_thread_highest module is not used, the highest priority queue is handled by the medium thread
++ifeq ($(filter event_thread_highest,$(USEMODULE)),)
++  # The medium thread also handles the highest priority queue
++  FINAL_MEDIUM_STACKSIZE := $(call max_number,$(FINAL_HIGHEST_STACKSIZE) $(FINAL_MEDIUM_STACKSIZE))
++  # The highest priority doesn't have its own thread, but we still need to define the macro
++  # for the array, so use the default value
++  FINAL_HIGHEST_STACKSIZE ?= $(DEFAULT_EVENT_THREAD_STACKSIZE)
++endif
++
++# If event_thread_medium module is not used, the lowest priority queue is handled by the medium thread
++ifeq ($(filter event_thread_medium,$(USEMODULE)),)
++  # The medium thread also handles the lowest priority queue
++  FINAL_MEDIUM_STACKSIZE := $(call max_number,$(FINAL_LOWEST_STACKSIZE) $(FINAL_MEDIUM_STACKSIZE))
++  # The lowest priority doesn't have its own thread, but we still need to define the macro
++  # for the array, so use the default value
++  FINAL_LOWEST_STACKSIZE ?= $(DEFAULT_EVENT_THREAD_STACKSIZE)
++endif
++
++# Ensure all values are defined and non-zero
++FINAL_HIGHEST_STACKSIZE := $(if $(FINAL_HIGHEST_STACKSIZE),$(FINAL_HIGHEST_STACKSIZE),$(DEFAULT_EVENT_THREAD_STACKSIZE))
++FINAL_MEDIUM_STACKSIZE := $(if $(FINAL_MEDIUM_STACKSIZE),$(FINAL_MEDIUM_STACKSIZE),$(DEFAULT_EVENT_THREAD_STACKSIZE))
++FINAL_LOWEST_STACKSIZE := $(if $(FINAL_LOWEST_STACKSIZE),$(FINAL_LOWEST_STACKSIZE),$(DEFAULT_EVENT_THREAD_STACKSIZE))
++
++# Export the final stack sizes as CFLAGS for the compiler
++CFLAGS += -DEVENT_THREAD_HIGHEST_STACKSIZE=$(FINAL_HIGHEST_STACKSIZE)
++CFLAGS += -DEVENT_THREAD_MEDIUM_STACKSIZE=$(FINAL_MEDIUM_STACKSIZE)
++CFLAGS += -DEVENT_THREAD_LOWEST_STACKSIZE=$(FINAL_LOWEST_STACKSIZE)
+diff --git a/makefiles/utils/strings.mk b/makefiles/utils/strings.mk
+index cbc280fc..e60c591e 100644
+--- a/makefiles/utils/strings.mk
++++ b/makefiles/utils/strings.mk
+@@ -46,3 +46,8 @@ _is_equal = $(if $(and $(findstring $(1),$(2)),$(findstring $(2),$(1))),1,)
+ version_is_greater_or_equal = $(or \
+     $(call _is_greater,$(call _padded_version,$1),$(call _padded_version,$2)),\
+     $(call _is_equal,$(call _padded_version,$1),$(call _padded_version,$2)))
++
++# Returns the maximum number from a whitespace-separated list of natural numbers
++#   $1: whitespace-separated list of natural numbers
++#   Returns: the maximum number in the list, or 0 if empty
++max_number = $(if $(strip $1),$(lastword $(sort $1)),0)
+diff --git a/makefiles/utils/strings.mk.backup b/makefiles/utils/strings.mk.backup
+new file mode 100644
+index 00000000..cbc280fc
+--- /dev/null
++++ b/makefiles/utils/strings.mk.backup
+@@ -0,0 +1,48 @@
++# Make only version of string functions
++#
++# This replaces the pattern of using ':= $(shell echo $(var) | tr 'a-z-' 'A-Z_)'
++# On local tests the make version was ~100 times faster than the shell one
++
++lowercase = $(subst A,a,$(subst B,b,$(subst C,c,$(subst D,d,$(subst E,e,$(subst F,f,$(subst G,g,$(subst H,h,$(subst I,i,$(subst J,j,$(subst K,k,$(subst L,l,$(subst M,m,$(subst N,n,$(subst O,o,$(subst P,p,$(subst Q,q,$(subst R,r,$(subst S,s,$(subst T,t,$(subst U,u,$(subst V,v,$(subst W,w,$(subst X,x,$(subst Y,y,$(subst Z,z,$1))))))))))))))))))))))))))
++uppercase = $(subst a,A,$(subst b,B,$(subst c,C,$(subst d,D,$(subst e,E,$(subst f,F,$(subst g,G,$(subst h,H,$(subst i,I,$(subst j,J,$(subst k,K,$(subst l,L,$(subst m,M,$(subst n,N,$(subst o,O,$(subst p,P,$(subst q,Q,$(subst r,R,$(subst s,S,$(subst t,T,$(subst u,U,$(subst v,V,$(subst w,W,$(subst x,X,$(subst y,Y,$(subst z,Z,$1))))))))))))))))))))))))))
++uppercase_and_underscore = $(call uppercase,$(subst -,_,$1))
++
++# Padds number $2 to $1 digits. If $2 is empty, zero will be printed instead.
++_pad_number = $(shell printf '%0$1d' $(if $2,$2,0))
++
++# Gets major, minor, patch from 'major.minor.patch', e.g.: 4.2.1 by index
++#   $1: index
++#   $2: version
++_version = $(word $1, $(subst ., ,$2))
++
++# Returns padded version 'major.minor.patch' to 3 digits
++# eg: 4.2.1 -> 004.002.001
++#   $1: version
++_padded_version = $(subst $(space),.,$(foreach var,1 2 3,$(call _pad_number,3,$(call _version,$(var),$1))))
++
++# Checks if  $1 is greater than $2
++#   $1, $2: The values to compare must be padded to the same length
++#           otherwise when using '$(sort)' make will consider '2' larger
++#           than '19'
++#   Return 1 if $1 is greater than $2, nothing otherwise
++_is_greater = $(if $(filter $1,$(firstword $(sort $1 $2))),,1)
++
++# Checks if version $1 is greater than version $2
++#   $1: version to check, '.' separated version 'major.minor.patch'
++#   $2: minimum version, '.' separated version 'major.minor.patch'
++#   Return 1 if $1 is greater than $2, nothing otherwise
++version_is_greater = $(call _is_greater,$(call _padded_version,$1),\
++                        $(call _padded_version,$2))
++
++# Checks if version $1 is equal to version $2
++#   $1,$2: version to check, '.' separated version 'major.minor.patch'
++#   Return 1 if $1 equal to $2, nothing otherwise
++_is_equal = $(if $(and $(findstring $(1),$(2)),$(findstring $(2),$(1))),1,)
++
++# Checks if version $1 is greater or equal than version $2
++#   $1: version to check, '.' separated version 'major.minor.patch'
++#   $2: minimum version, '.' separated version 'major.minor.patch'
++#   Return 1 if $1 is greater or equal than $2, nothing otherwise
++version_is_greater_or_equal = $(or \
++    $(call _is_greater,$(call _padded_version,$1),$(call _padded_version,$2)),\
++    $(call _is_equal,$(call _padded_version,$1),$(call _padded_version,$2)))
+diff --git a/makefiles/utils/test-strings.mk b/makefiles/utils/test-strings.mk
+index 56e48c60..d2c42a9e 100644
+--- a/makefiles/utils/test-strings.mk
++++ b/makefiles/utils/test-strings.mk
+@@ -35,3 +35,16 @@ test-version_is_greater_or_equal:
+ 	$(Q)test 1 = "$(call version_is_greater_or_equal,$(TEST_VERSION_4),$(TEST_VERSION_3))" || { echo ERROR: "$(TEST_VERSION_3)" \< "$(TEST_VERSION_4)"; exit 1; }
+ 	$(Q)test "" = "$(call version_is_greater_or_equal,$(TEST_VERSION_3),$(TEST_VERSION_4))" || { echo ERROR: Test should fail, "$(TEST_VERSION_4)" is not \< "$(TEST_VERSION_3)"; exit 1; }
+ 	$(Q)test "" = "$(call version_is_greater_or_equal,$(TEST_VERSION_1),$(TEST_VERSION_4))" || { echo ERROR: Test should fail, "$(TEST_VERSION_1)" is not \< "$(TEST_VERSION_4)"; exit 1; }
++
++# Test the max_number function
++TEST_MAX_NUMBER_1 = 3 300 567 256
++TEST_MAX_NUMBER_2 = 10 20 30
++TEST_MAX_NUMBER_3 = 42
++TEST_MAX_NUMBER_4 =
++
++test-max_number:
++	$(Q)test "567" = "$(call max_number,$(TEST_MAX_NUMBER_1))" || { echo ERROR: Expected 567, got "$(call max_number,$(TEST_MAX_NUMBER_1))"; exit 1; }
++	$(Q)test "30" = "$(call max_number,$(TEST_MAX_NUMBER_2))" || { echo ERROR: Expected 30, got "$(call max_number,$(TEST_MAX_NUMBER_2))"; exit 1; }
++	$(Q)test "42" = "$(call max_number,$(TEST_MAX_NUMBER_3))" || { echo ERROR: Expected 42, got "$(call max_number,$(TEST_MAX_NUMBER_3))"; exit 1; }
++	$(Q)test "0" = "$(call max_number,$(TEST_MAX_NUMBER_4))" || { echo ERROR: Expected 0, got "$(call max_number,$(TEST_MAX_NUMBER_4))"; exit 1; }
++	$(Q)test "0" = "$(call max_number,)" || { echo ERROR: Expected 0, got "$(call max_number,)"; exit 1; }

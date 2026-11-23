@@ -1,0 +1,354 @@
+diff --git a/core/lib/include/rmutex.h b/core/lib/include/rmutex.h
+index eee8c8bb..258d65d4 100644
+--- a/core/lib/include/rmutex.h
++++ b/core/lib/include/rmutex.h
+@@ -93,6 +93,19 @@ int rmutex_trylock(rmutex_t *rmutex);
+  *                 initialized first. Must not be NULL.
+  */
+ void rmutex_lock(rmutex_t *rmutex);
++/**
++ * @brief Locks a recursive mutex with a maximum nesting level, blocking.
++ *
++ * @param[in] rmutex Recursive mutex object to lock. Has to be
++ *                   initialized first. Must not be NULL.
++ * @param[in] max    Maximum number of nested acquisitions by the owner.
++ *                   Must be greater than 0.
++ *
++ * @return 1 if mutex was acquired successfully.
++ * @return 0 if the calling thread already owns the mutex and has reached
++ *         the maximum number of nested acquisitions.
++ */
++int rmutex_lock_max(rmutex_t *rmutex, uint16_t max);
+ 
+ /**
+  * @brief Unlocks the recursive mutex.
+diff --git a/core/lib/include/rmutex.h.backup b/core/lib/include/rmutex.h.backup
+new file mode 100644
+index 00000000..eee8c8bb
+--- /dev/null
++++ b/core/lib/include/rmutex.h.backup
+@@ -0,0 +1,108 @@
++/*
++ * SPDX-FileCopyrightText: 2016 Theobroma Systems Design & Consulting GmbH
++ * SPDX-License-Identifier: LGPL-2.1-only
++ */
++
++#pragma once
++
++/**
++ * @defgroup    core_sync_rmutex Recursive Mutex
++ * @ingroup     core_sync
++ * @brief       Recursive Mutex for thread synchronization
++ *
++ * @{
++ *
++ * @file
++ * @brief       Recursive Mutex for thread synchronization
++ *
++ * @author      Martin Elshuber <martin.elshuber@theobroma-systems.com>
++ *
++ */
++
++#include <stdint.h>
++
++#include "mutex.h"
++#include "sched.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Mutex structure. Must never be modified by the user.
++ */
++typedef struct rmutex_t {
++    /* fields are managed by mutex functions, don't touch */
++    /**
++     * @brief The mutex used for locking. **Must never be changed by
++     *        the user.**
++     * @internal
++     */
++    mutex_t mutex;
++
++    /**
++     * @brief   Number of locks owned by the thread owner
++     * @internal
++     */
++    uint16_t refcount;
++
++    /**
++     * @brief   Owner thread of the mutex.
++     * @details Owner is written by the mutex holder, and read
++     *          concurrently to ensure consistency,
++     *          atomic_int_least16_t is used. Note @ref kernel_pid_t is an int16
++     * @internal
++     */
++    kernel_pid_t owner;
++} rmutex_t;
++
++/**
++ * @brief Static initializer for rmutex_t.
++ * @details This initializer is preferable to rmutex_init().
++ */
++#define RMUTEX_INIT { MUTEX_INIT, 0, KERNEL_PID_UNDEF }
++
++/**
++ * @brief Initializes a recursive mutex object.
++ * @details For initialization of variables use RMUTEX_INIT instead.
++ *          Only use the function call for dynamically allocated mutexes.
++ * @param[out] rmutex    pre-allocated mutex structure, must not be NULL.
++ */
++static inline void rmutex_init(rmutex_t *rmutex)
++{
++    rmutex_t empty_rmutex = RMUTEX_INIT;
++
++    *rmutex = empty_rmutex;
++}
++
++/**
++ * @brief Tries to get a recursive mutex, non-blocking.
++ *
++ * @param[in] rmutex Recursive mutex object to lock. Has to be
++ *                  initialized first. Must not be NULL.
++ *
++ * @return 1 if mutex was unlocked, now it is locked.
++ * @return 0 if the mutex was locked.
++ */
++int rmutex_trylock(rmutex_t *rmutex);
++
++/**
++ * @brief Locks a recursive mutex, blocking.
++ *
++ * @param[in] rmutex Recursive mutex object to lock. Has to be
++ *                 initialized first. Must not be NULL.
++ */
++void rmutex_lock(rmutex_t *rmutex);
++
++/**
++ * @brief Unlocks the recursive mutex.
++ *
++ * @param[in] rmutex Recursive mutex object to unlock, must not be NULL.
++ */
++void rmutex_unlock(rmutex_t *rmutex);
++
++#ifdef __cplusplus
++}
++#endif
++
++/** @} */
+diff --git a/core/lib/rmutex.c b/core/lib/rmutex.c
+index 25cac17b..60dc1b18 100644
+--- a/core/lib/rmutex.c
++++ b/core/lib/rmutex.c
+@@ -147,3 +147,56 @@ void rmutex_unlock(rmutex_t *rmutex)
+         mutex_unlock(&rmutex->mutex);
+     }
+ }
++
++int rmutex_lock_max(rmutex_t *rmutex, uint16_t max)
++{
++    kernel_pid_t current_thread = thread_getpid();
++    kernel_pid_t owner;
++
++    /* First check if we are already the owner */
++    owner = atomic_load_kernel_pid(&rmutex->owner);
++    
++    if (owner == current_thread) {
++        /* We already own this mutex, check if we have reached the max */
++        if (rmutex->refcount >= max) {
++            /* Limit reached, return 0 without acquiring */
++            return 0;
++        }
++        /* We haven't reached the limit, continue with normal locking */
++    }
++
++    /* Try to lock the mutex (blocking) */
++    DEBUG("rmutex %" PRIi16 " : trylock\n", thread_getpid());
++    if (mutex_trylock(&rmutex->mutex) == 0) {
++        /* Mutex is already held */
++        DEBUG("rmutex %" PRIi16 " : mutex already held\n", thread_getpid());
++        
++        /* Get current owner atomically */
++        owner = atomic_load_kernel_pid(&rmutex->owner);
++        DEBUG("rmutex %" PRIi16 " : mutex held by %" PRIi16 " \n",
++              thread_getpid(), owner);
++
++        /* If mutex is not held by me, wait for it */
++        if (owner != current_thread) {
++            /* Wait for the mutex */
++            DEBUG("rmutex %" PRIi16 " : locking mutex\n", thread_getpid());
++            mutex_lock(&rmutex->mutex);
++        }
++        /* If mutex is held by me, we already checked the limit above */
++    }
++
++    DEBUG("rmutex %" PRIi16 " : I am now holding the mutex\n", thread_getpid());
++
++    /* I am holding the recursive mutex */
++    DEBUG("rmutex %" PRIi16 " : setting the owner\n", thread_getpid());
++
++    /* Set the owner atomically (in case we just acquired it) */
++    atomic_store_kernel_pid(&rmutex->owner, current_thread);
++
++    DEBUG("rmutex %" PRIi16 " : increasing refs\n", thread_getpid());
++
++    /* increase the refcount */
++    rmutex->refcount++;
++
++    return 1;
++}
+diff --git a/core/lib/rmutex.c.backup b/core/lib/rmutex.c.backup
+new file mode 100644
+index 00000000..25cac17b
+--- /dev/null
++++ b/core/lib/rmutex.c.backup
+@@ -0,0 +1,149 @@
++/*
++ * SPDX-FileCopyrightText: 2016 Theobroma Systems Design & Consulting GmbH
++ * SPDX-License-Identifier: LGPL-2.1-only
++ */
++
++/**
++ * @ingroup     core_sync
++ * @{
++ *
++ * @file
++ * @brief       RIOT synchronization API
++ *
++ * @author      Martin Elshuber <martin.elshuber@theobroma-systems.com>
++ *
++ * The recursive mutex implementation is inspired by the implementetaion of
++ * Nick v. IJzendoorn <nijzendoorn@engineering-spirit.nl>
++ * @see https://github.com/RIOT-OS/RIOT/pull/4529/files#diff-8f48e1b9ed7a0a48d0c686a87cc5084eR35
++ *
++ */
++
++#include <stdio.h>
++#include <inttypes.h>
++
++#include "assert.h"
++#include "atomic_utils.h"
++#include "rmutex.h"
++#include "thread.h"
++
++#define ENABLE_DEBUG 0
++#include "debug.h"
++
++static int _lock(rmutex_t *rmutex, int trylock)
++{
++    kernel_pid_t owner;
++
++    /* try to lock the mutex */
++    DEBUG("rmutex %" PRIi16 " : trylock\n", thread_getpid());
++    if (mutex_trylock(&rmutex->mutex) == 0) {
++        DEBUG("rmutex %" PRIi16 " : mutex already held\n", thread_getpid());
++        /* Mutex is already held
++         *
++         * Case 1: Mutex is not held by me
++         *     Condition 1: holds
++         *     rmutex->owner != thread_getpid()
++         *
++         * Note for Case 1:
++         *
++         *     As a consequence it is necessaray to call
++         *     mutex_lock(). However the read access to owner is not
++         *     locked, and owner can be changed by a thread that is
++         *     holding the lock (e.g.: holder unlocks the mutex, new
++         *     holder acquired the lock). The atomic access strategy
++         *     'relaxed' ensures, that the value of rmutex->owner is read
++         *     consistent.
++         *
++         *     It is not necessary to synchronize (make written values
++         *     visible) read/write with other threads, because every
++         *     write by other threads let evaluate Condition 1 to
++         *     false. They all write either KERNEL_PID_UNDEF or the
++         *     pid of the other thread.
++         *
++         *     Other threads never set rmutex->owner to the pid of the
++         *     current thread. Hence, it is guaranteed that mutex_lock
++         *     is eventually called.
++         *
++         * Case 2: Mutex is held be me (relock)
++         *     Condition 2: holds
++         *     rmutex->owner == thread_getpid()
++         *
++         * Note for Case 2:
++         *
++         *     Because the mutex rmutex->owner is only written be the
++         *     owner (me), rmutex->owner stays constant throughout the
++         *     complete call and rmutex->refcount is protected
++         *     (read/write) by the mutex.
++         */
++
++        /* ensure that owner is read atomically, since I need a consistent value */
++        owner = atomic_load_kernel_pid(&rmutex->owner);
++        DEBUG("rmutex %" PRIi16 " : mutex held by %" PRIi16 " \n",
++              thread_getpid(), owner);
++
++        /* Case 1: Mutex is not held by me */
++        if (owner != thread_getpid()) {
++            /* wait for the mutex */
++            DEBUG("rmutex %" PRIi16 " : locking mutex\n", thread_getpid());
++
++            if (trylock) {
++                return 0;
++            }
++            else {
++                mutex_lock(&rmutex->mutex);
++            }
++        }
++        /* Case 2: Mutex is held be me (relock) */
++        /* Note: There is nothing to do for Case 2; refcount is incremented below */
++    }
++
++    DEBUG("rmutex %" PRIi16 " : I am now holding the mutex\n", thread_getpid());
++
++    /* I am holding the recursive mutex */
++    DEBUG("rmutex %" PRIi16 " : setting the owner\n", thread_getpid());
++
++    /* ensure that owner is written atomically, since others need a consistent value */
++    atomic_store_kernel_pid(&rmutex->owner, thread_getpid());
++
++    DEBUG("rmutex %" PRIi16 " : increasing refs\n", thread_getpid());
++
++    /* increase the refcount */
++    rmutex->refcount++;
++
++    return 1;
++}
++
++void rmutex_lock(rmutex_t *rmutex)
++{
++    _lock(rmutex, 0);
++}
++
++int rmutex_trylock(rmutex_t *rmutex)
++{
++    return _lock(rmutex, 1);
++}
++
++void rmutex_unlock(rmutex_t *rmutex)
++{
++    /* ensure that owner is read atomically, since I need a consistent value */
++    assert(atomic_load_kernel_pid(&rmutex->owner) == thread_getpid());
++    assert(rmutex->refcount > 0);
++
++    DEBUG("rmutex %" PRIi16 " : decrementing refs refs\n", thread_getpid());
++
++    /* decrement refcount */
++    rmutex->refcount--;
++
++    /* check if I should still hold the mutex */
++    if (rmutex->refcount == 0) {
++        /* if not release the mutex */
++
++        DEBUG("rmutex %" PRIi16 " : resetting owner\n", thread_getpid());
++
++        /* ensure that owner is written only once */
++        atomic_store_kernel_pid(&rmutex->owner, KERNEL_PID_UNDEF);
++
++        DEBUG("rmutex %" PRIi16 " : releasing mutex\n", thread_getpid());
++
++        mutex_unlock(&rmutex->mutex);
++    }
++}

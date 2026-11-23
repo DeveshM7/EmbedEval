@@ -1,0 +1,960 @@
+diff --git a/sys/shell/shell.c b/sys/shell/shell.c
+index 0730f8b..b8be65d 100644
+--- a/sys/shell/shell.c
++++ b/sys/shell/shell.c
+@@ -78,6 +78,9 @@ static enum parse_state escape_toggle(enum parse_state s)
+     return s ^ PARSE_ESCAPE_MASK;
+ }
+ 
++
++#include "shell_lock_arch.h"
++
+ static shell_command_handler_t search_commands(const shell_command_t *entry,
+                                                char *command)
+ {
+@@ -472,6 +475,16 @@ void shell_run_once(const shell_command_t *shell_commands,
+                     char *line_buf, int len)
+ {
+     print_prompt();
++    /* Check and prompt for lock at startup */
++    if (IS_USED(MODULE_SHELL_LOCK)) {
++        if (shell_is_locked()) {
++            shell_lock_check_and_prompt();
++        }
++    }
++    if (IS_USED(MODULE_SHELL_LOCK_AUTO_LOCKING) && !shell_is_locked()) {
++        shell_lock_auto_locking_init();
++    }
++
+ 
+     while (1) {
+         int res = readline(line_buf, len);
+@@ -487,6 +500,9 @@ void shell_run_once(const shell_command_t *shell_commands,
+ 
+             default:
+                 handle_input_line(shell_commands, line_buf);
++                if (IS_USED(MODULE_SHELL_LOCK_AUTO_LOCKING) && !shell_is_locked()) {
++                    shell_lock_auto_locking_reset_timer();
++                }
+                 break;
+         }
+ 
+diff --git a/sys/shell/shell.c.bak b/sys/shell/shell.c.bak
+new file mode 100644
+index 0000000..0730f8b
+--- /dev/null
++++ b/sys/shell/shell.c.bak
+@@ -0,0 +1,495 @@
++/*
++ * Copyright (C) 2009, 2020 Freie Universität Berlin
++ * Copyright (C) 2013, INRIA.
++ * Copyright (C) 2015 Kaspar Schleiser <kaspar@schleiser.de>
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_shell
++ * @{
++ *
++ * @file
++ * @brief       Implementation of a very simple command interpreter.
++ *              For each command (i.e. "echo"), a handler can be specified.
++ *              If the first word of a user-entered command line matches the
++ *              name of a handler, the handler will be called with the whole
++ *              command line as parameter.
++ *
++ * @author      Kaspar Schleiser <kaspar@schleiser.de>
++ * @author      René Kijewski <rene.kijewski@fu-berlin.de>
++ * @author      Juan Carrano <j.carrano@fu-berlin.de>
++ * @author      Hendrik van Essen <hendrik.ve@fu-berlin.de>
++ *
++ * @}
++ */
++
++#include <string.h>
++#include <stdio.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <stdbool.h>
++#include <assert.h>
++#include <errno.h>
++
++#include "kernel_defines.h"
++#include "xfa.h"
++#include "shell.h"
++
++/* define shell command cross file array */
++XFA_INIT_CONST(shell_command_t*, shell_commands_xfa);
++
++#define ETX '\x03'  /** ASCII "End-of-Text", or Ctrl-C */
++#define EOT '\x04'  /** ASCII "End-of-Transmission", or Ctrl-D */
++#define BS  '\x08'  /** ASCII "Backspace" */
++#define DEL '\x7f'  /** ASCII "Delete" */
++
++#if defined(MODULE_NEWLIB) || defined(MODULE_PICOLIBC)
++    #define flush_if_needed() fflush(stdout)
++#else
++    #define flush_if_needed()
++#endif /* MODULE_NEWLIB || MODULE_PICOLIBC */
++
++#define SQUOTE '\''
++#define DQUOTE '"'
++#define ESCAPECHAR '\\'
++#define SPACE ' '
++#define TAB '\t'
++
++#define PARSE_ESCAPE_MASK 0x4;
++
++enum parse_state {
++    PARSE_BLANK             = 0x0,
++
++    PARSE_UNQUOTED          = 0x1,
++    PARSE_SINGLEQUOTE       = 0x2,
++    PARSE_DOUBLEQUOTE       = 0x3,
++
++    PARSE_UNQUOTED_ESC      = 0x5,
++    PARSE_SINGLEQUOTE_ESC   = 0x6,
++    PARSE_DOUBLEQUOTE_ESC   = 0x7,
++};
++
++static enum parse_state escape_toggle(enum parse_state s)
++{
++    return s ^ PARSE_ESCAPE_MASK;
++}
++
++static shell_command_handler_t search_commands(const shell_command_t *entry,
++                                               char *command)
++{
++    for (; entry->name != NULL; entry++) {
++        if (strcmp(entry->name, command) == 0) {
++            return entry->handler;
++        }
++    }
++    return NULL;
++}
++
++static shell_command_handler_t search_commands_xfa(char *command)
++{
++    unsigned n = XFA_LEN(shell_command_t*, shell_commands_xfa);
++
++    for (unsigned i = 0; i < n; i++) {
++        const volatile shell_command_t *entry = shell_commands_xfa[i];
++        if (strcmp(entry->name, command) == 0) {
++            return entry->handler;
++        }
++    }
++    return NULL;
++}
++
++static shell_command_handler_t find_handler(
++        const shell_command_t *command_list, char *command)
++{
++    shell_command_handler_t handler = NULL;
++    if (command_list != NULL) {
++        handler = search_commands(command_list, command);
++    }
++
++    if (handler == NULL) {
++        handler = search_commands_xfa(command);
++    }
++
++    return handler;
++}
++
++static void print_commands(const shell_command_t *entry)
++{
++    for (; entry->name != NULL; entry++) {
++        printf("%-20s %s\n", entry->name, entry->desc);
++    }
++}
++
++static void print_commands_xfa(void)
++{
++    unsigned n = XFA_LEN(shell_command_t*, shell_commands_xfa);
++    for (unsigned i = 0; i < n; i++) {
++        const volatile shell_command_t *entry = shell_commands_xfa[i];
++        printf("%-20s %s\n", entry->name, entry->desc);
++    }
++}
++
++static void print_help(const shell_command_t *command_list)
++{
++    puts("Command              Description"
++         "\n---------------------------------------");
++    if (command_list != NULL) {
++        print_commands(command_list);
++    }
++
++    print_commands_xfa();
++}
++
++/**
++ * Break input line into words, create argv and call the command handler.
++ *
++ * Words are broken up at spaces. A backslash escapes the character that comes
++ * after (meaning if it is taken literally and if it is a space it does not break
++ * the word). Spaces can also be protected by quoting with double or single
++ * quotes.
++ *
++ * There are two unquoted states (PARSE_BLANK and PARSE_UNQUOTED) and two quoted
++ * states (PARSE_SINGLEQUOTE and PARSE_DOUBLEQUOTE). In addition, every state
++ * (except PARSE_BLANK) has an escaped pair state (e.g PARSE_SINGLEQUOTE and
++ * PARSE_SINGLEQUOTE_ESC).
++ *
++ * For the following let's define some things
++ *      - Function transit(character, state) to change to 'state' after
++ *        'character' was read. The order of a list of transit-functions matters.
++ *      - A BLANK is either SPACE or TAB
++ *      - '*' means any character
++ *
++ *      PARSE_BLANK
++ *          transit(SQUOTE, PARSE_SINGLEQUOTE)
++ *          transit(DQUOTE, PARSE_DOUBLEQUOTE)
++ *          transit(ESCAPECHAR, PARSE_UNQUOTED_ESC)
++ *          transit(BLANK, PARSE_BLANK)
++ *          transit(*, PARSE_UNQUOTED) -> store character
++ *
++ *      PARSE_UNQUOTED
++ *          transit(SQUOTE, PARSE_SINGLEQUOTE)
++ *          transit(DQUOTE, PARSE_DOUBLEQUOTE)
++ *          transit(BLANK, PARSE_BLANK)
++ *          transit(ESCAPECHAR, PARSE_UNQUOTED_ESC)
++ *          transit(*, PARSE_UNQUOTED) -> store character
++ *
++ *      PARSE_UNQUOTED_ESC
++ *          transit(*, PARSE_UNQUOTED) -> store character
++ *
++ *      PARSE_SINGLEQUOTE
++ *          transit(SQUOTE, PARSE_UNQUOTED)
++ *          transit(ESCAPECHAR, PARSE_SINGLEQUOTE_ESC)
++ *          transit(*, PARSE_SINGLEQUOTE) -> store character
++ *
++ *      PARSE_SINGLEQUOTE_ESC
++ *          transit(*, PARSE_SINGLEQUOTE) -> store character
++ *
++ *      PARSE_DOUBLEQUOTE
++ *          transit(DQUOTE, PARSE_UNQUOTED)
++ *          transit(ESCAPECHAR, PARSE_DOUBLEQUOTE_ESC)
++ *          transit(*, PARSE_DOUBLEQUOTE) -> store character
++ *
++ *      PARSE_DOUBLEQUOTE_ESC
++ *          transit(*, PARSE_DOUBLEQUOTE) -> store character
++ *
++ *
++ */
++static void handle_input_line(const shell_command_t *command_list, char *line)
++{
++    /* first we need to calculate the number of arguments */
++    int argc = 0;
++    char *readpos = line;
++    char *writepos = readpos;
++
++    uint8_t pstate = PARSE_BLANK;
++    if (IS_USED(MODULE_SHELL_HOOKS)) {
++        shell_post_readline_hook();
++    }
++    for (; *readpos != '\0'; readpos++) {
++
++        char wordbreak = SPACE;
++        bool is_wordbreak = false;
++
++        switch (pstate) {
++
++            case PARSE_BLANK:
++                if (*readpos != SPACE && *readpos != TAB) {
++                    argc++;
++                }
++
++                if (*readpos == SQUOTE) {
++                    pstate = PARSE_SINGLEQUOTE;
++                }
++                else if (*readpos == DQUOTE) {
++                    pstate = PARSE_DOUBLEQUOTE;
++                }
++                else if (*readpos == ESCAPECHAR) {
++                    pstate = PARSE_UNQUOTED_ESC;
++                }
++                else if (*readpos != SPACE && *readpos != TAB) {
++                    pstate = PARSE_UNQUOTED;
++                    *writepos++ = *readpos;
++                }
++                break;
++
++            case PARSE_UNQUOTED:
++                if (*readpos == SQUOTE) {
++                    pstate = PARSE_SINGLEQUOTE;
++                }
++                else if (*readpos == DQUOTE) {
++                    pstate = PARSE_DOUBLEQUOTE;
++                }
++                else if (*readpos == ESCAPECHAR) {
++                    pstate = escape_toggle(pstate);
++                }
++                else if (*readpos == SPACE || *readpos == TAB) {
++                    pstate = PARSE_BLANK;
++                    *writepos++ = '\0';
++                }
++                else {
++                    *writepos++ = *readpos;
++                }
++                break;
++
++            case PARSE_SINGLEQUOTE:
++                wordbreak = SQUOTE;
++                is_wordbreak = true;
++                break;
++
++            case PARSE_DOUBLEQUOTE:
++                wordbreak = DQUOTE;
++                is_wordbreak = true;
++                break;
++
++            default: /* QUOTED state */
++                pstate = escape_toggle(pstate);
++                *writepos++ = *readpos;
++                break;
++        }
++
++        if (is_wordbreak) {
++            if (*readpos == wordbreak) {
++                if (wordbreak == SQUOTE || wordbreak == DQUOTE) {
++                    pstate = PARSE_UNQUOTED;
++                }
++            }
++            else if (*readpos == ESCAPECHAR) {
++                pstate = escape_toggle(pstate);
++            }
++            else {
++                *writepos++ = *readpos;
++            }
++        }
++    }
++    *writepos = '\0';
++
++    if (pstate != PARSE_BLANK && pstate != PARSE_UNQUOTED) {
++        puts("shell: incorrect quoting");
++        return;
++    }
++
++    if (argc == 0) {
++        return;
++    }
++
++    /* then we fill the argv array */
++    int collected;
++    char *argv[argc];
++
++    readpos = line;
++    for (collected = 0; collected < argc; collected++) {
++        argv[collected] = readpos;
++        readpos += strlen(readpos) + 1;
++    }
++
++    /* then we call the appropriate handler */
++    shell_command_handler_t handler = find_handler(command_list, argv[0]);
++    if (handler != NULL) {
++        if (IS_USED(MODULE_SHELL_HOOKS)) {
++            shell_pre_command_hook(argc, argv);
++            int res = handler(argc, argv);
++            shell_post_command_hook(res, argc, argv);
++        }
++        else {
++            handler(argc, argv);
++        }
++    }
++    else {
++        if (strcmp("help", argv[0]) == 0) {
++            print_help(command_list);
++        }
++        else {
++            printf("shell: command not found: %s\n", argv[0]);
++        }
++    }
++}
++
++__attribute__((weak)) void shell_post_readline_hook(void)
++{
++
++}
++
++__attribute__((weak)) void shell_pre_command_hook(int argc, char **argv)
++{
++    (void)argv;
++    (void)argc;
++}
++
++__attribute__((weak)) void shell_post_command_hook(int ret, int argc,
++                                                   char **argv)
++{
++    (void)ret;
++    (void)argv;
++    (void)argc;
++}
++
++static inline void print_prompt(void)
++{
++    if (!IS_ACTIVE(CONFIG_SHELL_NO_PROMPT) && !IS_ACTIVE(SHELL_NO_PROMPT)) {
++        putchar('>');
++        putchar(' ');
++    }
++
++    flush_if_needed();
++}
++
++static inline void echo_char(char c)
++{
++    if (!IS_ACTIVE(CONFIG_SHELL_NO_ECHO) && !IS_ACTIVE(SHELL_NO_ECHO)) {
++        putchar(c);
++    }
++}
++
++static inline void white_tape(void)
++{
++    if (!IS_ACTIVE(CONFIG_SHELL_NO_ECHO) && !IS_ACTIVE(SHELL_NO_ECHO)) {
++        putchar('\b');
++        putchar(' ');
++        putchar('\b');
++    }
++}
++
++static inline void new_line(void)
++{
++    if (!IS_ACTIVE(CONFIG_SHELL_NO_ECHO) && !IS_ACTIVE(SHELL_NO_ECHO)) {
++        putchar('\r');
++        putchar('\n');
++    }
++}
++
++/**
++ * @brief   Read a single line from standard input into a buffer.
++ *
++ * In addition to copying characters, this routine echoes the line back to
++ * stdout and also supports primitive line editing.
++ *
++ * If the input line is too long, the input will still be consumed until the end
++ * to prevent the next line from containing garbage.
++ *
++ * We allow Unix (\n), DOS (\r\n), and Mac linebreaks (\r).
++ * QEMU transmits only a single '\r' == 13 on hitting enter ("-serial stdio").
++ * DOS newlines are handled like hitting enter twice.
++ *
++ * @param   buf     Buffer where the input will be placed.
++ * @param   size    Size of the buffer. The maximum line length will be one less
++ *                  than size, to accommodate for the null terminator.
++ *                  The minimum buffer size is 1.
++ *
++ * @return  length of the read line, excluding the terminator, if reading was
++ *          successful.
++ * @return  EOF, if the end of the input stream was reached.
++ * @return  -ENOBUFS if the buffer size was exceeded.
++ */
++static int readline(char *buf, size_t size)
++{
++    int curr_pos = 0;
++    bool length_exceeded = false;
++
++    assert((size_t) size > 0);
++
++    while (1) {
++        assert((size_t) curr_pos < size);
++
++        int c = getchar();
++
++        switch (c) {
++
++            case EOT:
++                /* Ctrl-D terminates the current shell instance. */
++                /* fall-thru */
++            case EOF:
++                return EOF;
++
++            case ETX:
++                /* Ctrl-C cancels the current line. */
++                curr_pos = 0;
++                length_exceeded = false;
++                /* fall-thru */
++            case '\r':
++                /* fall-thru */
++            case '\n':
++                buf[curr_pos] = '\0';
++
++                new_line();
++
++                return (length_exceeded) ? -ENOBUFS : curr_pos;
++
++            /* check for backspace: */
++            case BS:    /* 0x08 (BS) for most terminals */
++                /* fall-thru */
++            case DEL:   /* 0x7f (DEL) when using QEMU */
++                if (curr_pos > 0) {
++                    curr_pos--;
++                    if ((size_t) curr_pos < size) {
++                        buf[curr_pos] = '\0';
++                        length_exceeded = false;
++                    }
++                    white_tape();
++                }
++                break;
++
++            default:
++                /* Always consume characters, but do not not always store them */
++                if ((size_t) curr_pos < size - 1) {
++                    buf[curr_pos++] = c;
++                }
++                else {
++                    length_exceeded = true;
++                }
++                echo_char(c);
++                break;
++        }
++
++        flush_if_needed();
++    }
++}
++
++void shell_run_once(const shell_command_t *shell_commands,
++                    char *line_buf, int len)
++{
++    print_prompt();
++
++    while (1) {
++        int res = readline(line_buf, len);
++
++        switch (res) {
++
++            case EOF:
++                return;
++
++            case -ENOBUFS:
++                puts("shell: maximum line length exceeded");
++                break;
++
++            default:
++                handle_input_line(shell_commands, line_buf);
++                break;
++        }
++
++        print_prompt();
++    }
++}
+diff --git a/sys/shell/shell_lock_arch.h b/sys/shell/shell_lock_arch.h
+new file mode 100644
+index 0000000..b8be8b8
+--- /dev/null
++++ b/sys/shell/shell_lock_arch.h
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (C) 2024 FU Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @brief       Architecture header for shell locking
++ *
++ * This header provides forward declarations for shell locking functions.
++ */
++
++#ifndef SHELL_LOCK_ARCH_H
++#define SHELL_LOCK_ARCH_H
++
++#include <stdbool.h>
++#include "kernel_defines.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Forward declarations */
++#if IS_USED(MODULE_SHELL_LOCK)
++/* Real implementations will be linked from shell_lock module */
++bool shell_is_locked(void);
++void shell_lock_check_and_prompt(void);
++#else
++/* Weak implementations that do nothing when module is not enabled */
++__attribute__((weak)) bool shell_is_locked(void) { return false; }
++__attribute__((weak)) void shell_lock_check_and_prompt(void) { }
++#endif
++
++#if IS_USED(MODULE_SHELL_LOCK_AUTO_LOCKING)
++/* Real implementations will be linked from shell_lock_auto_locking module */
++void shell_lock_auto_locking_reset_timer(void);
++void shell_lock_auto_locking_init(void);
++#else
++/* Weak implementations that do nothing when module is not enabled */
++__attribute__((weak)) void shell_lock_auto_locking_reset_timer(void) { }
++__attribute__((weak)) void shell_lock_auto_locking_init(void) { }
++#endif
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_LOCK_ARCH_H */
+diff --git a/sys/shell_lock/Kconfig b/sys/shell_lock/Kconfig
+new file mode 100644
+index 0000000..1d0b45c
+--- /dev/null
++++ b/sys/shell_lock/Kconfig
+@@ -0,0 +1,13 @@
++config MODULE_SHELL_LOCK
++    bool "Shell Lock module"
++    depends on USEMODULE_SHELL
++    select MODULE_ZTIMER
++    help
++      This module makes the shell require a password before allowing commands.
++
++config CONFIG_SHELL_LOCK_PASSWORD
++    string "Shell lock password"
++    depends on MODULE_SHELL_LOCK
++    default "password"
++    help
++      The password required to unlock the shell.
+diff --git a/sys/shell_lock/Makefile b/sys/shell_lock/Makefile
+new file mode 100644
+index 0000000..7131b8f
+--- /dev/null
++++ b/sys/shell_lock/Makefile
+@@ -0,0 +1,5 @@
++include $(RIOTBASE)/Makefile.base
++
++USEMODULE += shell
++
++INCLUDES += -I$(RIOTBASE)/sys/shell_lock/include
+diff --git a/sys/shell_lock/include/shell_lock.h b/sys/shell_lock/include/shell_lock.h
+new file mode 100644
+index 0000000..5d132b1
+--- /dev/null
++++ b/sys/shell_lock/include/shell_lock.h
+@@ -0,0 +1,62 @@
++/*
++ * Copyright (C) 2024 FU Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup sys_shell_lock Shell Lock
++ * @ingroup sys_shell
++ * @{
++ *
++ * @file
++ * @brief       Shell Locking Module
++ *
++ * Makes the shell require a password before allowing commands.
++ *
++ * @author      John Doe <john.doe@fu-berlin.de>
++ *
++ * @}
++ */
++
++#ifndef SHELL_LOCK_H
++#define SHELL_LOCK_H
++
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   Lock the shell immediately
++ */
++void shell_lock(void);
++
++/**
++ * @brief   Unlock the shell
++ */
++void shell_unlock(void);
++
++/**
++ * @brief   Check if the shell is currently locked
++ *
++ * @return  true if shell is locked, false otherwise
++ */
++bool shell_is_locked(void);
++
++/**
++ * @brief   Check if shell is locked and prompt for password if needed
++ *
++ * This function will block until a valid password is entered.
++ */
++void shell_lock_check_and_prompt(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_LOCK_H */
++/** @} */
+diff --git a/sys/shell_lock/shell_lock.c b/sys/shell_lock/shell_lock.c
+new file mode 100644
+index 0000000..a767000
+--- /dev/null
++++ b/sys/shell_lock/shell_lock.c
+@@ -0,0 +1,104 @@
++/*
++ * Copyright (C) 2024 FU Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_shell_lock
++ * @{
++ *
++ * @file
++ * @brief       Shell Locking Implementation
++ *
++ * @author      John Doe <john.doe@fu-berlin.de>
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdbool.h>
++#include <unistd.h>
++
++#include "shell_lock.h"
++#include "shell.h"
++
++#ifndef CONFIG_SHELL_LOCK_PASSWORD
++#define CONFIG_SHELL_LOCK_PASSWORD "password"
++#endif
++
++#define FAILED_ATTEMPTS_MAX 3
++#define LOCKOUT_DELAY_SEC 7
++
++static bool shell_locked = true;
++static int failed_attempts = 0;
++
++void shell_lock(void)
++{
++    shell_locked = true;
++    failed_attempts = 0;
++}
++
++void shell_unlock(void)
++{
++    shell_locked = false;
++    failed_attempts = 0;
++}
++
++bool shell_is_locked(void)
++{
++    return shell_locked;
++}
++
++void shell_lock_check_and_prompt(void)
++{
++    char password[64];
++    
++    puts("The shell is locked. Enter a valid password to unlock.");
++    
++    while (shell_is_locked()) {
++        printf("Password: ");
++        fflush(stdout);
++        
++        if (fgets(password, sizeof(password), stdin) == NULL) {
++            continue;
++        }
++        
++        /* Remove trailing newline */
++        size_t len = strlen(password);
++        if (len > 0 && password[len - 1] == '\n') {
++            password[len - 1] = '\0';
++        }
++        
++        if (strcmp(password, CONFIG_SHELL_LOCK_PASSWORD) == 0) {
++            shell_unlock();
++            puts("Shell was unlocked.");
++            break;
++        }
++        else {
++            failed_attempts++;
++            puts("Wrong password");
++            
++            if (failed_attempts >= FAILED_ATTEMPTS_MAX) {
++                puts("Too many failed attempts. Please wait...");
++                sleep(LOCKOUT_DELAY_SEC);
++                failed_attempts = 0;
++            }
++        }
++    }
++}
++
++static int lock_command(int argc, char **argv)
++{
++    (void)argc;
++    (void)argv;
++    shell_lock();
++    printf("Shell locked.\n");
++    return 0;
++}
++
++/* Add lock command using XFA */
++SHELL_COMMAND(lock, "Lock the shell", lock_command);
+diff --git a/sys/shell_lock_auto_locking/Kconfig b/sys/shell_lock_auto_locking/Kconfig
+new file mode 100644
+index 0000000..ba4b112
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/Kconfig
+@@ -0,0 +1,13 @@
++config MODULE_SHELL_LOCK_AUTO_LOCKING
++    bool "Shell Auto-Locking module"
++    depends on USEMODULE_SHELL_LOCK
++    select MODULE_ZTIMER
++    help
++      This module automatically locks the shell after a period of inactivity.
++
++config CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS
++    int "Auto-lock timeout (ms)"
++    depends on MODULE_SHELL_LOCK_AUTO_LOCKING
++    default 7000
++    help
++      The timeout in milliseconds after which the shell will be automatically locked.
+diff --git a/sys/shell_lock_auto_locking/Makefile b/sys/shell_lock_auto_locking/Makefile
+new file mode 100644
+index 0000000..6c5a0b8
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/Makefile
+@@ -0,0 +1,8 @@
++include $(RIOTBASE)/Makefile.base
++
++USEMODULE += shell_lock
++USEMODULE += ztimer
++USEMODULE += ztimer_msec
++USEMODULE += ztimer_sec
++
++INCLUDES += -I$(RIOTBASE)/sys/shell_lock_auto_locking/include
+diff --git a/sys/shell_lock_auto_locking/include/shell_lock_auto_locking.h b/sys/shell_lock_auto_locking/include/shell_lock_auto_locking.h
+new file mode 100644
+index 0000000..ace21bb
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/include/shell_lock_auto_locking.h
+@@ -0,0 +1,52 @@
++/*
++ * Copyright (C) 2024 FU Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup sys_shell_lock_auto_locking Shell Lock Auto-Locking
++ * @ingroup sys_shell
++ * @{
++ *
++ * @file
++ * @brief       Shell Auto-Locking Module
++ *
++ * Automatically locks the shell after a period of inactivity.
++ *
++ * @author      John Doe <john.doe@fu-berlin.de>
++ *
++ * @}
++ */
++
++#ifndef SHELL_LOCK_AUTO_LOCKING_H
++#define SHELL_LOCK_AUTO_LOCKING_H
++
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   Restart the auto-lock timer
++ *
++ * Call this after user input to restart the inactivity timer.
++ */
++void shell_lock_auto_locking_reset_timer(void);
++
++/**
++ * @brief   Initialize the auto-lock timer
++ *
++ * Should be called when the shell is unlocked.
++ */
++void shell_lock_auto_locking_init(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_LOCK_AUTO_LOCKING_H */
++/** @} */
+diff --git a/sys/shell_lock_auto_locking/shell_lock_auto_locking.c b/sys/shell_lock_auto_locking/shell_lock_auto_locking.c
+new file mode 100644
+index 0000000..3ea687e
+--- /dev/null
++++ b/sys/shell_lock_auto_locking/shell_lock_auto_locking.c
+@@ -0,0 +1,57 @@
++/*
++ * Copyright (C) 2024 FU Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_shell_lock_auto_locking
++ * @{
++ *
++ * @file
++ * @brief       Shell Auto-Locking Implementation
++ *
++ * @author      John Doe <john.doe@fu-berlin.de>
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include <stdbool.h>
++
++#include "shell_lock_auto_locking.h"
++#include "../shell_lock/include/shell_lock.h"
++#include "ztimer.h"
++#include "thread.h"
++
++#ifndef CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS
++#define CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS 7000
++#endif
++
++static ztimer_t auto_lock_timer;
++
++static void auto_lock_callback(void *arg)
++{
++    (void)arg;
++    shell_lock();
++    puts("\nShell auto-locked due to inactivity.");
++}
++
++void shell_lock_auto_locking_reset_timer(void)
++{
++    /* Only reset if shell is unlocked */
++    if (!shell_is_locked()) {
++        ztimer_remove(ZTIMER_MSEC, &auto_lock_timer);
++        auto_lock_timer.callback = auto_lock_callback;
++        auto_lock_timer.arg = NULL;
++        ztimer_set(ZTIMER_MSEC, &auto_lock_timer, CONFIG_SHELL_LOCK_AUTO_LOCK_TIMEOUT_MS);
++    }
++}
++
++void shell_lock_auto_locking_init(void)
++{
++    ztimer_remove(ZTIMER_MSEC, &auto_lock_timer);
++    shell_lock_auto_locking_reset_timer();
++}

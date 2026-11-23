@@ -1,0 +1,323 @@
+diff --git a/sched/pthread/pthread_completejoin.c b/sched/pthread/pthread_completejoin.c
+index bcc3637c..228d94f3 100644
+--- a/sched/pthread/pthread_completejoin.c
++++ b/sched/pthread/pthread_completejoin.c
+@@ -16,11 +16,13 @@
+  * License for the specific language governing permissions and limitations
+  * under the License.
+  *
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ /****************************************************************************
+  * Included Files
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ #include <nuttx/config.h>
+ 
+@@ -38,7 +40,8 @@
+ 
+ /****************************************************************************
+  * Public Functions
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ /****************************************************************************
+  * Name: pthread_completejoin
+@@ -58,12 +61,13 @@
+  *
+  * Assumptions:
+  *
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+ {
+   FAR struct tcb_s *tcb = nxsched_get_tcb(pid);
+-  FAR struct task_group_s *group = tcb->group;
++  FAR struct task_group_s *group;
+   FAR struct task_join_s *join;
+   FAR struct tcb_s *wtcb;
+   FAR sq_entry_t *curr;
+@@ -72,6 +76,15 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+ 
+   sinfo("pid=%d exit_value=%p\n", pid, exit_value);
+ 
++  /* If tcb is NULL, the thread has already been destroyed */
++
++  if (tcb == NULL)
++    {
++      return OK;
++    }
++
++  group = tcb->group;
++
+   nxrmutex_lock(&group->tg_joinlock);
+ 
+   if (!sq_empty(&tcb->join_queue))
+@@ -95,8 +108,12 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+           nxsem_post(&wtcb->join_sem);
+         }
+     }
+-  else if (!sq_is_singular(&tcb->group->tg_members))
++  else
+     {
++      /* Create join info for detached threads so that pthread_join can
++       * return ESRCH instead of EINVAL.
++       */
++
+       ret = pthread_findjoininfo(tcb->group, pid, &join, true);
+       if (ret == OK)
+         {
+@@ -126,7 +143,8 @@ int pthread_completejoin(pid_t pid, FAR void *exit_value)
+  * Assumptions:
+  *   The caller holds tg_joinlock
+  *
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ void pthread_destroyjoin(FAR struct task_group_s *group,
+                          FAR struct task_join_s *pjoin)
+diff --git a/sched/pthread/pthread_findjoininfo.c b/sched/pthread/pthread_findjoininfo.c
+index 4e9511b5..bfc0da0a 100644
+--- a/sched/pthread/pthread_findjoininfo.c
++++ b/sched/pthread/pthread_findjoininfo.c
+@@ -39,7 +39,9 @@
+ 
+ /****************************************************************************
+  * Public Functions
+- ****************************************************************************/
++ ********************************************************
++
++ */
+ 
+ /****************************************************************************
+  * Name: pthread_findjoininfo
+@@ -65,7 +67,9 @@
+  * Assumptions:
+  *   The caller has provided protection from re-entrancy.
+  *
+- ****************************************************************************/
++ ********************************************************
++
++ */
+ 
+ int pthread_findjoininfo(FAR struct task_group_s *group, pid_t pid,
+                          FAR struct task_join_s **pjoin, bool create)
+@@ -90,7 +94,7 @@ int pthread_findjoininfo(FAR struct task_group_s *group, pid_t pid,
+ 
+   if (!create)
+     {
+-      return EINVAL;
++      return ESRCH;
+     }
+ 
+   join = kmm_zalloc(sizeof(struct task_join_s));
+diff --git a/sched/pthread/pthread_join.c b/sched/pthread/pthread_join.c
+index 27422008..b3870a68 100644
+--- a/sched/pthread/pthread_join.c
++++ b/sched/pthread/pthread_join.c
+@@ -16,11 +16,13 @@
+  * License for the specific language governing permissions and limitations
+  * under the License.
+  *
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ /****************************************************************************
+  * Included Files
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ #include <nuttx/config.h>
+ 
+@@ -36,9 +38,10 @@
+ #include "sched/sched.h"
+ #include "pthread/pthread.h"
+ 
+-/****************************************************************************
++/******************************************************************************
+  * Public Functions
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ /****************************************************************************
+  * Name: pthread_join
+@@ -67,7 +70,8 @@
+  *
+  * Assumptions:
+  *
+- ****************************************************************************/
++ *****************************************************************************
++ */
+ 
+ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+ {
+@@ -90,7 +94,7 @@ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+       if (ret == OK)
+         {
+           /* If the task is terminated, maintain the same behavior as Linux:
+-           * 1. Join detached task will always return EINVAL.
++           * 1. Join detached task will always return ESRCH.
+            * 2. Other threads will destroy the join information after
+            *    obtain the exit value, ESRCH will return if calling
+            *    pthread_join() again
+@@ -98,7 +102,7 @@ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
+ 
+           if (join->detached)
+             {
+-              ret = EINVAL;
++              ret = ESRCH;
+             }
+           else
+             {
+diff --git a/verify_fix b/verify_fix
+new file mode 100755
+index 0000000000000000000000000000000000000000..18b4ee16f4e8426913edc3745312ca787cf5303d
+GIT binary patch
+literal 70688
+zcmeI0e{3AZ702J*8Is`qutNy6p~)tsEztVnBvwdLO78q4wpAx_9YbA|vaIjcz9Z+m
+z<8Ci?5(+6rY7qSqLsX&`P)h%C5UNm%Xi}+QQVB)0LID(-Qh|~bC>4?F2&i&x%=Nw9
+zdG_4iIZdVZufDO?Z{|Diy_x;&?CkB{*VeT$7zhBD5c~?LH8#^zBC5lfGvyP3wJ-}J
+za4jr?%dx)(5BBrh^D2z3N(&(sw>F3sEPlJllW_#E@aSYOQ(85Xn&YW#!95%AKh3pc
+z!t3vt@G`PJrsi>6S&pM7#r3JUJ{89n*k4&bKVm{huhRXt75k{LC0{Dt?>cd+_sw>j
+z6_)+ka@<!jj^=r(rA|5asPU%ba#+ouEnkNfsbv3(RJ<XTOc#b5EGrjFtZ548GvSrq
+zc`v~HbdB3L-wNNl^5d8P^3uKMzVH?MyFdHmE8kzYW&SprH_d_akq;H}pW)U#o%(n@
+zC0~*WK`o4OA}t~W3$eu)%<JetGhg%J>hoAJxS`qGvA#@ebCu4eS{_=z)$}(}H}LS6
+z9VpcMMQmsBsFsJ$sG3gPs_E;d(f^9Nfrq~&QK**Zi__?kbrLz-ikorUv0@3xr))b5
+z*@BY?)6Ao^-Hau+n*&xdHR*a+CYhdW#4y^i(HR$5j3RQ5Ib@-OX~u>vb0C?vQpsI5
+zWOK>1GXPe9Cg+r;9xPb7I8Zb#$2CxWk+yerHn*6o!YgkAuC8tZv$J;-&OB!iCi9M+
+z>)q6n%B1aHt3O3E8XU@`)r?HfwW^~+7{s+3a{mIj6HqOPf27e04B+3xXldOTcsx4t
+zBfNcUU=-_A0_e3DE%j6J`a^C%Y0tX;LHMQHOZysKalD7rhH!kA*U|0M_b7e5RPKLP
+z=`-EgP37VCapfPt{JiJT2q!gN-<MBmI`4_(|GuWHAxVbwnm*T6ynk7x2XRo^AGi!_
+zx<2k6P1pCsy_&9X4f`}*pXUKhzk&xvdr;GBHGNdm)z<CyKBMXC(d6ofHGQ6zXH3)i
+z+Ee!uBXnY7_X~$6LNL+|uzzCri=$&9^Nn%T#sS9bpKCAHJ^AGkBe>)Z^5w(r`!)6*
+z_4?fQ^VmM4wU1&uc#9kB_P>PfWm@}XY&UD|SFqi$wO_;b{aX7CY(J^B-^BJ&t^GE(
+z&uHy4*bZ)R$JbC?QkBm0GqC5i#dy3Mf~QW0BE>V;!N_~a=@fE-^X<hD_SN9=n^Nh~
+z<9N9GczZE|x6!du>1yK0yzs``2N4*-pG5nXqTK-S!5BWqPh+m7@3$8%j2RCFo&w}d
+zaen`$0KZ#y;l9_Sv%me&(hJc?UPS*h7~6cIz1Z)@1}9@_%njGkb$#Bwt{>Jy@k$)`
+z&gRIvNC0kf=XtihxCi6hacUyPeK`L=;9<a?o;#ai-G{Z2;>7Nwqc30{nvc0WbmC8V
+zPNf!j_0$X~0-iV4N2ss#TX=P1cks}}cNCkC+KT~*6i?3sw0m9ypmT2+c?k2rgA9oq
+zX~8=`KSKSdLN!l)kNC}iBd2CWjw}JV8|T=28tZN>gh%$Ox!nk`0DX%0T+IJqc!c`t
+zTo$80*=?>r&I#wdQ^ii^kE|HUdi_V1%!a#vietOuj;$EE19iObXv`x^`n0}C<H*;r
+z5BG=#lX*@xy8g(f=X3~e#B&%2Wbx;Dkzx>e#31-V5YIP)`ERE2LV+76b~hhFelAD4
+zZhSBDeMtK?m0mmV7%SHst?uK`ung~UXjtjELC-nE8o&pOk#r1uIEfF%ww|6XJ?jmA
+zYI;vUgC37|e7*76IPX0^Kkw;U#g7xYW94k8kV}^(>W*&Ry54BdI7Zvno|X>7%Hu?`
+zcFeKk?)*1KJG)eW=jPj@UB>nOg+U{Y{sYNjJAQ-fg#V`e3TaMY;M3YE<lR{Z7KOgl
+zihi`$CN7jp+t40Hn??IR+6T~HKT#?jKs$_f4DBAYC(-UlJC2r0oo67hs|RX^7Y7#2
+zUgB!kpk9M{ny5cIV=?*BZ;}XVjig~AErQ23)NV#gWjP+SX!fGkO+vIGI@fr-=7~`A
+zBf-sYzxDcDR8XehulL~b4EpKM1=9E9aS(N?Lv(Ik3qG)}#p=^|JcfElz||Y0j|ZO!
+z1h>5Pw*ElFE-6Al2nYcoAOwVf5D)@FKnMr{As_^VfDjM@LO=)z0U;m+gn$qb0zyCt
+z2mv7=1cZPP5CTF#2nYcoAOwVf5D)@FKnMr{As_^VfDjM@LO=)z0U;m+gn$qb0zyCt
+z2mv7=1cZPP5CTF#2nYcoAOwVf5D)@FKnMr{As_^VfDjM@LO=)z0U;m+gn$qb0zyCt
+z2mv7=1cZPP5CTF#2nYcoAOwVf5D)@FKnMr{As_^VfDjM@LO=)z0U;m+gn$qb0zyCt
+z2mv7=1cZPP5CTF#2nYcoAOwVf5D)@FKnMr{As_^VfDjM@LO=)z0U;m+gn$qb0zyCt
+z2mv7=1cZPP5CTF#2nYcoAOwVf5D)@FKnMr{As_^VfDjM@LO=)z0U;m+gn$qb0zyCt
+z2mv7=1cZPP5CTF#2nYcoAOwVf5D)@FKnMr{As_^VfDjM@LO=)z0U;m+gn$qb0zyCt
+z2mv7=1cZPP5CTF#2nYcoAOwVf5D)@FKnMr{A@Ki8;P@=>-1jIOP$>2)%k76%d$zKp
+zGrY<i)o!ZwDxXsAjtMVvk!sIW_S4FCtNv?!{U3i)%8+y*=yhDC`nzkq%H^tkSoL3_
+z+95SjH4V5%=~pSsCZsBTB`-jwftf0Pf$CSM2Un~1K{YVz$JE65yiO`Vg>iEH#Y$(t
+zf0n%S!{J=%6V)D8`AVwI^BPy}Ue#YzZG}T+|KFQ2b>jbR+o#sSzdM7o4A$p36FgGw
+zEiLPf>u>EZq@9AXa&>rhxUpeP!ELU(cU4oku_?Ur2G!w9QPB)R0M_ya(0W5SR&P~3
+z1jAMJn#pynrGXG!2E2aD^~-_RdAU9V`1+UYGlADlxjqYceU|H20I%b6y%zX>F4t!R
+zU+;2#4vg`F);dBk7kD4gWIW$_(7`vR))9g_=;IBgOs|K7RrUG6`-<j{`L6`tPs;TL
+zP;GsM;40wzzubQzHY+b=2zP<Hsygp7Q(0&mseyB)DaEUK%eQi!&}jzn40!z*Dv)LZ
+zP|4ZLQxDJj_;`9HXWEae&4=@U<hzar`Ui1b)_Fhl{43Xqr&nJ0hKr6{3x|0lML#N>
+zC*oTtP1tv_`PcdOg$?LW^Y`mfrAK`JUUMOC#^u+&SNZdE5u0wg3;zeS^`IUb;N_`Y
+zhdW&VO8s%vX`cN2b(7;iFHhw<Kjh}A)II-tI97E%RIb}&nCD_VPkIS?I&cDOG*8xf
+zJ$P>Opxbx7cs`B%!$4)4?mDu6!smY);{s3*ex1@)oB!Wj|8ph({eGSTs_Zkhc;Nzg
+zpB_`c16()!=dHuaeQzoH&u1si-h#TJwYmCpSEp>{>*{vY>$LU5{t48VaYM8Fl>arp
+zJomf$!is(ALDc65EAPi2PLt;+<gbm#)u&Z{|NM_k<9`BmgM&5u4(jz<o2voDQXj0m
+z@8+UjZ9YrLUwe-5@1O8A{<ln{_n}Vw{XBo+p4ZfVOY4=&H>UBomF|Bo-0hA#2l)3&
+z2j-=+!_~dI{(m3p#KE8EG1Lv+QPrQDCeN{H^i!k<EB9^K8p}B=!x>l}2h+6rlcr-0
+z!t!B2If-)2N~O$i+SYb+AWd4Dw49T73IhY-7{u+IJ($cpcFuH$%vdUuw)2=Lo-qeg
+znSLu}#+^(qZ(0RRm>J5ZY{!m=8>@Sm1IcvKv~oFXr)j61+)fzCSwprNFANRs#1O4z
+zqNh{ly2H*T2X<nLVVsqd$k|rh94Mq?7`L$}x~a`<+uUlJV77jJb97T@3(D=AZ#COG
+zRBuOX518#;TbiR?=9Y~cx3=|~z0u~bHjFS+$^Mv`cdVRa4q3@`q`j-Nxy4)+Ufl#{
+zXYVF+ib3zD79!AV^`~qM?9b;_9Hog3TXcq2D!I#^%(3z&FzvYISm2($3bNC2oNGR1
+z+u1TtlRUkY=!sK`Z8u{HyfjuaRqi-Alu2u2Pq_{jtX#a@H=fU!2`e4PIa~dioKx1@
+zxdqe2lWDV%x8sm4IC;H0t4POfoJ(S|hsfYL;2ga((NF*(1dfa0b#kU?P@IVn`C<`W
+zUSDNwv$<s28JHXoDRRcUGQKNBD+M5&-#O%1{b-$>XA@k*Om;2{;dI8a!-MHUxWAB0
+z#T$}wB}JP%8|a>J`w~_@0pa-0H0JZHlk<9T0p^pLbXmj1zMP%1C_vS+DF?#toWhPh
+zjCES{*q3n^LD){HWuAy*EVsM}Z@qgFT*t)LP%?(2W-ynR1D73y@opQ!o2bgp@t;Zb
+z-cDN=ZXa%0t14{yy<T;@zFa4J9Uk-(kK_5hiS2T7(hBeAEUm$c9?!pz*&6JqtUtaL
+z^}pl0GLL^iRoL=(2mZd``xy+IF`j<faQtCaVS7OB>-1TGzA11#zY*M~bdKluI=1}1
+z0^QuA(s2{+z#4rE;CO!jW4law^8DG4?RM;^ZwuV!_e8ecDxT&~K0JRV!!E24Q;z5N
+zNw)mGgU9E1KK}<)e6vc(@11P<dke+WHyVHZ4^Sf}{Jn?YPucP~=;9Xt^?wjmJ)YlV
+z*&bJMZ0fk8?0&Rm@oIu&$~p{2`A3vx^JA>&@%&!Qb^$vo>!1HY70<))`!m}*O0E^=
+z$I>WP$c5wiJ)3PSJ1XlR|2bbgzmK#1y)WKB{uuVp#e=`M@q2s6gcs=d=Qdl)KTnJ2
+z_xtWkjHmU<_a=?V?*)A-p26_?;&FK$oW>a9$Mfg!1%2wxew31Gh2z=2hkbhd)RiEW
+zeuI`5j$`#KR!HOV`S)R+n|11bVSg_xw*byzm9)kw$*plby`Sra<8{kxNB4`U@zske
+t(D&SCJb3<mU($OW&%G>umN&wCzT`YE`_el@wfN7?_B{W=j>`Ju{{?_C-}L|h
+
+literal 0
+HcmV?d00001
+
+diff --git a/verify_fix.c b/verify_fix.c
+new file mode 100644
+index 00000000..e545197f
+--- /dev/null
++++ b/verify_fix.c
+@@ -0,0 +1,53 @@
++/* Simple test to verify the fix for detached thread join */
++
++#include <pthread.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <errno.h>
++
++static void *thread_func(void *arg)
++{
++  return NULL;
++}
++
++int main()
++{
++  pthread_t thread;
++  void *result;
++  int status;
++
++  printf("Test 1: Detach a thread and join after it exits\n");
++  status = pthread_create(&thread, NULL, thread_func, NULL);
++  if (status != 0)
++    {
++      printf("ERROR: pthread_create failed: %d\n", status);
++      return 1;
++    }
++
++  status = pthread_detach(thread);
++  if (status != 0)
++    {
++      printf("ERROR: pthread_detach failed: %d\n", status);
++      return 1;
++    }
++
++  sleep(1);  /* Let thread exit */
++
++  status = pthread_join(thread, &result);
++  printf("pthread_join returned: %d\n", status);
++  
++  if (status == ESRCH)
++    {
++      printf("PASS: Got ESRCH as expected\n");
++    }
++  else if (status == EINVAL)
++    {
++      printf("FAIL: Got EINVAL (bug not fixed)\n");
++    }
++  else
++    {
++      printf("FAIL: Got unexpected status %d\n", status);
++    }
++
++  return 0;
++}

@@ -1,0 +1,79 @@
+diff --git a/core/lib/include/rmutex.h b/core/lib/include/rmutex.h
+index eee8c8bb..a6ca9aed 100644
+--- a/core/lib/include/rmutex.h
++++ b/core/lib/include/rmutex.h
+@@ -24,6 +24,23 @@
+ #include "mutex.h"
+ #include "sched.h"
+ 
++/**
++ * @brief Locks a recursive mutex, blocking, with a maximum nesting limit.
++ *
++ * The function behaves like @ref rmutex_lock() but limits the number of recursive
++ * acquisitions a single thread may perform.  The @p max argument is the inclusive
++ * limit for the number of times the calling thread may own the mutex concurrently.
++ * If the calling thread already holds the mutex and the current nesting level
++ * equals @p max, the function returns 0 and leaves the mutex unchanged.
++ * Otherwise the mutex is acquired (or the recursion level increased) and the
++ * function returns 1.
++ *
++ * @param[in] rmutex Recursive mutex object to lock. Must be initialized.
++ * @param[in] max    Maximum number of nested acquisitions for the calling
++ *                   thread. Must be greater than 0.
++ * @return 1 if the mutex was (re)acquired, 0 if the nesting limit was
++ *         already reached and the mutex was not acquired.
++ */
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -100,7 +117,7 @@ void rmutex_lock(rmutex_t *rmutex);
+  * @param[in] rmutex Recursive mutex object to unlock, must not be NULL.
+  */
+ void rmutex_unlock(rmutex_t *rmutex);
+-
++int rmutex_lock_max(rmutex_t *rmutex, uint16_t max);
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/core/lib/rmutex.c b/core/lib/rmutex.c
+index 25cac17b..1f6c6ebf 100644
+--- a/core/lib/rmutex.c
++++ b/core/lib/rmutex.c
+@@ -147,3 +147,37 @@ void rmutex_unlock(rmutex_t *rmutex)
+         mutex_unlock(&rmutex->mutex);
+     }
+ }
++
++/**
++ * @brief Locks a recursive mutex with a maximum recursion depth.
++ *
++ * This function is similar to @ref rmutex_lock() but adds a limit on how
++ * many times the calling thread may recursively lock the mutex.  If the
++ * calling thread already owns the mutex and the current @p refcount is equal to
++ * @p max, the function returns 0 and leaves the mutex unchanged.  Otherwise
++ * the mutex is acquired (or the recursion level increased) and the function
++ * returns 1.
++ */
++int rmutex_lock_max(rmutex_t *rmutex, uint16_t max)
++{
++    kernel_pid_t owner = atomic_load_kernel_pid(&rmutex->owner);
++    kernel_pid_t me = thread_getpid();
++
++    /* If we already own the mutex, just check the nesting limit */
++    if (owner == me) {
++        if (rmutex->refcount >= max) {
++            return 0; /* limit reached */
++        }
++        /* increase nesting depth */
++        rmutex->refcount++;
++        return 1;
++    }
++
++    /* Otherwise we need to acquire the underlying mutex (blocking) */
++    mutex_lock(&rmutex->mutex);
++
++    /* We are now the exclusive owner – initialise recursion depth */
++    atomic_store_kernel_pid(&rmutex->owner, me);
++    rmutex->refcount = 1;
++    return 1;
++}

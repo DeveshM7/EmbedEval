@@ -1,0 +1,339 @@
+diff --git a/drivers/include/mtd_emulated.h b/drivers/include/mtd_emulated.h
+new file mode 100644
+index 00000000..6a81384c
+--- /dev/null
++++ b/drivers/include/mtd_emulated.h
+@@ -0,0 +1,78 @@
++/*
++ * Copyright (C) 2023
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    drivers_mtd_emulated MTD Emulated Driver
++ * @ingroup     drivers_mtd
++ * @brief       MTD driver emulated in RAM
++ *
++ * @{
++ *
++ * @file
++ * @brief       MTD emulated driver interface
++ *
++ * @author
++ */
++
++#ifndef MTD_EMULATED_H
++#define MTD_EMULATED_H
++
++#include "mtd.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   MTD emulated device driver
++ */
++extern const mtd_desc_t mtd_emulated_driver;
++
++/**
++ * @brief   Define an emulated MTD device
++ *
++ * @param   name    Instance name (e.g. 0 for mtd_emulated_dev0)
++ * @param   sc      Number of sectors
++ * @param   pps     Pages per sector
++ * @param   ps      Page size in bytes
++ *
++ * This macro defines an emulated MTD device with the given configuration.
++ * The device is backed by RAM and supports all standard MTD operations.
++ */
++#define MTD_EMULATED_DEV(name, sc, pps, ps) \
++    struct { \
++        mtd_dev_t base; \
++        uint8_t *buffer; \
++        uint32_t buffer_size; \
++    } mtd_emulated_dev##name = { \
++        .base = { \
++            .driver = &mtd_emulated_driver, \
++            .sector_count = (sc), \
++            .pages_per_sector = (pps), \
++            .page_size = (ps), \
++            .write_size = 1, \
++        }, \
++        .buffer = NULL, \
++        .buffer_size = 0, \
++    }
++
++/**
++ * @brief   Get pointer to emulated MTD device
++ *
++ * @param   name    Instance name
++ *
++ * @return  Pointer to the MTD device instance
++ */
++#define MTD_EMULATED_GET(name) (&(mtd_emulated_dev##name).base)
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* MTD_EMULATED_H */
++/** @} */
+diff --git a/drivers/mtd/Kconfig b/drivers/mtd/Kconfig
+index fc18a5c5..72a13984 100644
+--- a/drivers/mtd/Kconfig
++++ b/drivers/mtd/Kconfig
+@@ -90,6 +90,12 @@ config MODULE_MTD_AT25XXX
+     bool "MTD implementation for AT25XXX"
+     depends on MODULE_AT25XXX
+ 
++config MODULE_MTD_EMULATED
++    bool "MTD emulated driver"
++    help
++        MTD driver that emulates MTD device operations in RAM.
++        Useful for boards without a hardware MTD.
++
+ config MODULE_MTD_MCI
+     bool "MTD interface for LPC23XX MCI"
+     depends on CPU_FAM_LPC23XX
+diff --git a/drivers/mtd_emulated/Kconfig b/drivers/mtd_emulated/Kconfig
+new file mode 100644
+index 00000000..3862e3a9
+--- /dev/null
++++ b/drivers/mtd_emulated/Kconfig
+@@ -0,0 +1,12 @@
++# Copyright (C) 2023
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++#
++
++config MODULE_MTD_EMULATED
++    bool "MTD emulated driver"
++    help
++        MTD driver that emulates MTD device operations in RAM.
++        Useful for boards without a hardware MTD.
+diff --git a/drivers/mtd_emulated/Makefile b/drivers/mtd_emulated/Makefile
+new file mode 100644
+index 00000000..48422e90
+--- /dev/null
++++ b/drivers/mtd_emulated/Makefile
+@@ -0,0 +1 @@
++include $(RIOTBASE)/Makefile.base
+diff --git a/drivers/mtd_emulated/mtd_emulated.c b/drivers/mtd_emulated/mtd_emulated.c
+new file mode 100644
+index 00000000..cd4021df
+--- /dev/null
++++ b/drivers/mtd_emulated/mtd_emulated.c
+@@ -0,0 +1,207 @@
++/*
++ * Copyright (C) 2023
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     drivers_mtd_emulated
++ * @brief       MTD driver emulated in RAM
++ *
++ * @{
++ *
++ * @file
++ * @brief       Implementation of the emulated MTD memory driver
++ *
++ * @author
++ */
++
++#include <string.h>
++#include <errno.h>
++#include <stdlib.h>
++
++#include "mtd.h"
++#include "mtd_emulated.h"
++#include "fmt.h"
++
++#define ENABLE_DEBUG 0
++#include "debug.h"
++
++typedef struct {
++    mtd_dev_t base;           /**< MTD base device */
++    uint8_t *buffer;          /**< RAM buffer backing the device */
++    uint32_t buffer_size;     /**< Size of the RAM buffer */
++} mtd_emulated_t;
++
++static int _init(mtd_dev_t *dev)
++{
++    mtd_emulated_t *emulated = (mtd_emulated_t *)dev;
++    
++    /* Calculate total device size */
++    emulated->buffer_size = dev->sector_count * 
++                           dev->pages_per_sector * 
++                           dev->page_size;
++    
++    /* Allocate RAM buffer */
++    emulated->buffer = malloc(emulated->buffer_size);
++    if (!emulated->buffer) {
++        return -ENOMEM;
++    }
++    
++    /* Initialize to erased state (0xff) */
++    memset(emulated->buffer, 0xff, emulated->buffer_size);
++    
++    DEBUG("mtd_emulated: initialized with %u bytes\n", emulated->buffer_size);
++    return 0;
++}
++
++static int _read(mtd_dev_t *dev, void *buf, uint32_t addr, uint32_t size)
++{
++    mtd_emulated_t *emulated = (mtd_emulated_t *)dev;
++    
++    /* Check bounds */
++    if (addr + size > emulated->buffer_size) {
++        DEBUG("mtd_emulated: read out of bounds (addr=%"PRIu32", size=%"PRIu32", buffer_size=%"PRIu32")\n", 
++              addr, size, emulated->buffer_size);
++        return -EOVERFLOW;
++    }
++    
++    /* Copy from buffer */
++    memcpy(buf, emulated->buffer + addr, size);
++    DEBUG("mtd_emulated: read %u bytes from addr 0x%"PRIx32"\n", size, addr);
++    return 0;
++}
++
++static int _read_page(mtd_dev_t *dev, void *buf, uint32_t page, 
++                     uint32_t offset, uint32_t size)
++{
++    mtd_emulated_t *emulated = (mtd_emulated_t *)dev;
++    uint32_t addr = page * dev->page_size + offset;
++    
++    /* Check bounds */
++    if (offset >= dev->page_size || addr + size > emulated->buffer_size) {
++        DEBUG("mtd_emulated: read_page out of bounds\n");
++        return -EOVERFLOW;
++    }
++    
++    /* Copy from buffer */
++    memcpy(buf, emulated->buffer + addr, size);
++    DEBUG("mtd_emulated: read_page %u bytes from page %"PRIu32" offset %"PRIu32"\n", 
++          size, page, offset);
++    return size;
++}
++
++static int _write(mtd_dev_t *dev, const void *buf, uint32_t addr, uint32_t size)
++{
++    mtd_emulated_t *emulated = (mtd_emulated_t *)dev;
++    uint32_t page_start = addr / dev->page_size;
++    uint32_t page_end = (addr + size - 1) / dev->page_size;
++    
++    /* Check bounds */
++    if (addr + size > emulated->buffer_size) {
++        DEBUG("mtd_emulated: write out of bounds\n");
++        return -EOVERFLOW;
++    }
++    
++    /* Check if write crosses page boundary */
++    if (page_start != page_end) {
++        DEBUG("mtd_emulated: write crosses page boundary (start_page=%"PRIu32", end_page=%"PRIu32")\n",
++              page_start, page_end);
++        return -EOVERFLOW;
++    }
++    
++    /* Copy to buffer */
++    memcpy(emulated->buffer + addr, buf, size);
++    DEBUG("mtd_emulated: write %u bytes to addr 0x%"PRIx32"\n", size, addr);
++    return 0;
++}
++
++static int _write_page(mtd_dev_t *dev, const void *buf, uint32_t page,
++                      uint32_t offset, uint32_t size)
++{
++    mtd_emulated_t *emulated = (mtd_emulated_t *)dev;
++    uint32_t addr = page * dev->page_size + offset;
++    
++    /* Check bounds */
++    if (offset >= dev->page_size || addr + size > emulated->buffer_size) {
++        DEBUG("mtd_emulated: write_page out of bounds\n");
++        return -EOVERFLOW;
++    }
++    
++    /* Copy to buffer */
++    memcpy(emulated->buffer + addr, buf, size);
++    DEBUG("mtd_emulated: write_page %u bytes to page %"PRIu32" offset %"PRIu32"\n", 
++          size, page, offset);
++    return size;
++}
++
++static int _erase(mtd_dev_t *dev, uint32_t addr, uint32_t size)
++{
++    mtd_emulated_t *emulated = (mtd_emulated_t *)dev;
++    uint32_t sector_size = dev->pages_per_sector * dev->page_size;
++    
++    /* Check if addr is sector aligned */
++    if (addr % sector_size != 0) {
++        DEBUG("mtd_emulated: erase addr not sector aligned (addr=%"PRIu32", sector_size=%"PRIu32")\n",
++              addr, sector_size);
++        return -EOVERFLOW;
++    }
++    
++    /* Check if size is multiple of sector size */
++    if (size % sector_size != 0) {
++        DEBUG("mtd_emulated: erase size not multiple of sector size (size=%"PRIu32", sector_size=%"PRIu32")\n",
++              size, sector_size);
++        return -EOVERFLOW;
++    }
++    
++    /* Check bounds */
++    if (addr + size > emulated->buffer_size) {
++        DEBUG("mtd_emulated: erase out of bounds\n");
++        return -EOVERFLOW;
++    }
++    
++    /* Set memory to erased state (0xff) */
++    memset(emulated->buffer + addr, 0xff, size);
++    DEBUG("mtd_emulated: erase %u bytes from addr 0x%"PRIx32"\n", size, addr);
++    return 0;
++}
++
++static int _erase_sector(mtd_dev_t *dev, uint32_t sector, uint32_t count)
++{
++    mtd_emulated_t *emulated = (mtd_emulated_t *)dev;
++    uint32_t sector_size = dev->pages_per_sector * dev->page_size;
++    uint32_t addr = sector * sector_size;
++    uint32_t size = count * sector_size;
++    
++    /* Check bounds */
++    if (sector >= dev->sector_count || sector + count > dev->sector_count) {
++        DEBUG("mtd_emulated: erase_sector out of bounds\n");
++        return -EOVERFLOW;
++    }
++    
++    /* Set memory to erased state (0xff) */
++    memset(emulated->buffer + addr, 0xff, size);
++    DEBUG("mtd_emulated: erase_sector %"PRIu32" sectors starting from %"PRIu32"\n", count, sector);
++    return 0;
++}
++
++static int _power(mtd_dev_t *dev, enum mtd_power_state power)
++{
++    (void)dev;
++    (void)power;
++    /* No power management needed for RAM-backed device */
++    return 0;
++}
++
++const mtd_desc_t mtd_emulated_driver = {
++    .init = _init,
++    .read = _read,
++    .read_page = _read_page,
++    .write = _write,
++    .write_page = _write_page,
++    .erase = _erase,
++    .erase_sector = _erase_sector,
++    .power = _power,
++};

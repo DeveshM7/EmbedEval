@@ -1,0 +1,400 @@
+diff --git a/include/zephyr/net/icmp.h b/include/zephyr/net/icmp.h
+index b1fa9ddd..6c48c291 100644
+--- a/include/zephyr/net/icmp.h
++++ b/include/zephyr/net/icmp.h
+@@ -66,6 +66,7 @@ typedef int (*net_icmp_handler_t)(struct net_icmp_ctx *ctx,
+  *        it to the offloaded device.
+  *
+  * @param ctx ICMP context used in this request.
++ * @param family Address family (AF_INET or AF_INET6) for this context.
+  * @param iface Network interface, can be set to NULL in which case the
+  *        interface is selected according to destination address.
+  * @param dst IP address of the target host.
+@@ -101,6 +102,9 @@ struct net_icmp_ctx {
+ 
+ 	/** ICMP code of the response type we are waiting */
+ 	uint8_t code;
++
++	/** Address family (AF_INET or AF_INET6) for this ICMP context */
++	uint8_t family;
+ };
+ 
+ /**
+@@ -160,11 +164,13 @@ struct net_icmp_ping_params {
+  *        system.
+  *
+  * @param ctx ICMP context used in this request.
++ * @param family Address family (AF_INET or AF_INET6) for this context.
+  * @param type Type of ICMP message we are handling.
+  * @param code Code of ICMP message we are handling.
+  * @param handler Callback function that is called when a response is received.
+  */
+-int net_icmp_init_ctx(struct net_icmp_ctx *ctx, uint8_t type, uint8_t code,
++int net_icmp_init_ctx(struct net_icmp_ctx *ctx, uint8_t family,
++			      uint8_t type, uint8_t code,
+ 		      net_icmp_handler_t handler);
+ 
+ /**
+diff --git a/modules/openthread/platform/infra_if.c b/modules/openthread/platform/infra_if.c
+index 194f3a8c..cbc144b8 100644
+--- a/modules/openthread/platform/infra_if.c
++++ b/modules/openthread/platform/infra_if.c
+@@ -237,11 +237,11 @@ otError infra_if_start_icmp6_listener(void)
+ {
+ 	otError error = OT_ERROR_NONE;
+ 
+-	VerifyOrExit(net_icmp_init_ctx(&ra_ctx, NET_ICMPV6_RA, 0, handle_icmp6_input) == 0,
++	VerifyOrExit(net_icmp_init_ctx(&ra_ctx, AF_INET6, NET_ICMPV6_RA, 0, handle_icmp6_input) == 0,
+ 		     error = OT_ERROR_FAILED);
+-	VerifyOrExit(net_icmp_init_ctx(&rs_ctx, NET_ICMPV6_RS, 0, handle_icmp6_input) == 0,
++	VerifyOrExit(net_icmp_init_ctx(&rs_ctx, AF_INET6, NET_ICMPV6_RS, 0, handle_icmp6_input) == 0,
+ 		     error = OT_ERROR_FAILED);
+-	VerifyOrExit(net_icmp_init_ctx(&na_ctx, NET_ICMPV6_NA, 0, handle_icmp6_input) == 0,
++	VerifyOrExit(net_icmp_init_ctx(&na_ctx, AF_INET6, NET_ICMPV6_NA, 0, handle_icmp6_input) == 0,
+ 		     error = OT_ERROR_FAILED);
+ 
+ exit:
+diff --git a/subsys/net/ip/icmp.c b/subsys/net/ip/icmp.c
+index 12d2f022..6e489e19 100644
+--- a/subsys/net/ip/icmp.c
++++ b/subsys/net/ip/icmp.c
+@@ -50,7 +50,8 @@ static sys_slist_t offload_handlers = SYS_SLIST_STATIC_INIT(&offload_handlers);
+ 
+ #define PKT_WAIT_TIME K_SECONDS(1)
+ 
+-int net_icmp_init_ctx(struct net_icmp_ctx *ctx, uint8_t type, uint8_t code,
++int net_icmp_init_ctx(struct net_icmp_ctx *ctx, uint8_t family,
++			      uint8_t type, uint8_t code,
+ 		      net_icmp_handler_t handler)
+ {
+ 	if (ctx == NULL || handler == NULL) {
+@@ -60,6 +61,8 @@ int net_icmp_init_ctx(struct net_icmp_ctx *ctx, uint8_t type, uint8_t code,
+ 	memset(ctx, 0, sizeof(struct net_icmp_ctx));
+ 
+ 	ctx->handler = handler;
++
++	ctx->family = family;
+ 	ctx->type = type;
+ 	ctx->code = code;
+ 
+@@ -512,7 +515,8 @@ static int icmp_call_handlers(struct net_pkt *pkt,
+ 
+ 	SYS_SLIST_FOR_EACH_CONTAINER(&handlers, ctx, node) {
+ 		if (ctx->type == icmp_hdr->type &&
+-		    (ctx->code == icmp_hdr->code || ctx->code == 0U)) {
++		    (ctx->code == icmp_hdr->code || ctx->code == 0U) &&
++		    ctx->family == ip_hdr->family) {
+ 			/* Do not use a handler that is expecting data from different
+ 			 * network interface we sent the request.
+ 			 */
+diff --git a/subsys/net/ip/icmpv4.c b/subsys/net/ip/icmpv4.c
+index 6c5f6ab9..d0aaca00 100644
+--- a/subsys/net/ip/icmpv4.c
++++ b/subsys/net/ip/icmpv4.c
+@@ -766,14 +766,14 @@ void net_icmpv4_init(void)
+ 	static struct net_icmp_ctx ctx;
+ 	int ret;
+ 
+-	ret = net_icmp_init_ctx(&ctx, NET_ICMPV4_ECHO_REQUEST, 0, icmpv4_handle_echo_request);
++	ret = net_icmp_init_ctx(&ctx, AF_INET, NET_ICMPV4_ECHO_REQUEST, 0, icmpv4_handle_echo_request);
+ 	if (ret < 0) {
+ 		NET_ERR("Cannot register %s handler (%d)", STRINGIFY(NET_ICMPV4_ECHO_REQUEST),
+ 			ret);
+ 	}
+ 
+ #if defined(CONFIG_NET_IPV4_PMTU)
+-	ret = net_icmp_init_ctx(&dst_unreach_ctx, NET_ICMPV4_DST_UNREACH, 0,
++	ret = net_icmp_init_ctx(&dst_unreach_ctx, AF_INET, NET_ICMPV4_DST_UNREACH, 0,
+ 				icmpv4_handle_dst_unreach);
+ 	if (ret < 0) {
+ 		NET_ERR("Cannot register %s handler (%d)", STRINGIFY(NET_ICMPV4_DST_UNREACH),
+diff --git a/subsys/net/ip/icmpv6.c b/subsys/net/ip/icmpv6.c
+index b1d68a6f..32725bbb 100644
+--- a/subsys/net/ip/icmpv6.c
++++ b/subsys/net/ip/icmpv6.c
+@@ -394,7 +394,7 @@ void net_icmpv6_init(void)
+ 	static struct net_icmp_ctx ctx;
+ 	int ret;
+ 
+-	ret = net_icmp_init_ctx(&ctx, NET_ICMPV6_ECHO_REQUEST, 0, icmpv6_handle_echo_request);
++	ret = net_icmp_init_ctx(&ctx, AF_INET6, NET_ICMPV6_ECHO_REQUEST, 0, icmpv6_handle_echo_request);
+ 	if (ret < 0) {
+ 		NET_ERR("Cannot register %s handler (%d)", STRINGIFY(NET_ICMPV6_ECHO_REQUEST),
+ 			ret);
+diff --git a/subsys/net/ip/ipv6_mld.c b/subsys/net/ip/ipv6_mld.c
+index 900dfc13..8444e36b 100644
+--- a/subsys/net/ip/ipv6_mld.c
++++ b/subsys/net/ip/ipv6_mld.c
+@@ -471,7 +471,7 @@ void net_ipv6_mld_init(void)
+ 	static struct net_icmp_ctx ctx;
+ 	int ret;
+ 
+-	ret = net_icmp_init_ctx(&ctx, NET_ICMPV6_MLD_QUERY, 0, handle_mld_query);
++	ret = net_icmp_init_ctx(&ctx, AF_INET6, NET_ICMPV6_MLD_QUERY, 0, handle_mld_query);
+ 	if (ret < 0) {
+ 		NET_ERR("Cannot register %s handler (%d)", STRINGIFY(NET_ICMPV6_MLD_QUERY),
+ 			ret);
+diff --git a/subsys/net/ip/ipv6_nbr.c b/subsys/net/ip/ipv6_nbr.c
+index 496488e1..3ced3e8b 100644
+--- a/subsys/net/ip/ipv6_nbr.c
++++ b/subsys/net/ip/ipv6_nbr.c
+@@ -2986,13 +2986,13 @@ void net_ipv6_nbr_init(void)
+ 	int ret;
+ 
+ #if defined(CONFIG_NET_IPV6_NBR_CACHE)
+-	ret = net_icmp_init_ctx(&ns_ctx, NET_ICMPV6_NS, 0, handle_ns_input);
++	ret = net_icmp_init_ctx(&ns_ctx, AF_INET6, NET_ICMPV6_NS, 0, handle_ns_input);
+ 	if (ret < 0) {
+ 		NET_ERR("Cannot register %s handler (%d)", STRINGIFY(NET_ICMPV6_NS),
+ 			ret);
+ 	}
+ 
+-	ret = net_icmp_init_ctx(&na_ctx, NET_ICMPV6_NA, 0, handle_na_input);
++	ret = net_icmp_init_ctx(&na_ctx, AF_INET6, NET_ICMPV6_NA, 0, handle_na_input);
+ 	if (ret < 0) {
+ 		NET_ERR("Cannot register %s handler (%d)", STRINGIFY(NET_ICMPV6_NA),
+ 			ret);
+@@ -3001,7 +3001,7 @@ void net_ipv6_nbr_init(void)
+ 	k_work_init_delayable(&ipv6_ns_reply_timer, ipv6_ns_reply_timeout);
+ #endif
+ #if defined(CONFIG_NET_IPV6_ND)
+-	ret = net_icmp_init_ctx(&ra_ctx, NET_ICMPV6_RA, 0, handle_ra_input);
++	ret = net_icmp_init_ctx(&ra_ctx, AF_INET6, NET_ICMPV6_RA, 0, handle_ra_input);
+ 	if (ret < 0) {
+ 		NET_ERR("Cannot register %s handler (%d)", STRINGIFY(NET_ICMPV6_RA),
+ 			ret);
+@@ -3012,7 +3012,7 @@ void net_ipv6_nbr_init(void)
+ #endif
+ 
+ #if defined(CONFIG_NET_IPV6_PMTU)
+-	ret = net_icmp_init_ctx(&ptb_ctx, NET_ICMPV6_PACKET_TOO_BIG, 0, handle_ptb_input);
++	ret = net_icmp_init_ctx(&ptb_ctx, AF_INET6, NET_ICMPV6_PACKET_TOO_BIG, 0, handle_ptb_input);
+ 	if (ret < 0) {
+ 		NET_ERR("Cannot register %s handler (%d)", STRINGIFY(NET_ICMPV6_PACKET_TOO_BIG),
+ 			ret);
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_server.c b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+index be27addf..6aa626de 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_server.c
++++ b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+@@ -879,8 +879,7 @@ out:
+ 
+ static int dhcpv4_server_probing_init(struct dhcpv4_server_ctx *ctx)
+ {
+-	return net_icmp_init_ctx(&ctx->probe_ctx.icmp_ctx,
+-				 NET_ICMPV4_ECHO_REPLY, 0,
++	return net_icmp_init_ctx(&ctx->probe_ctx.icmp_ctx, AF_INET, NET_ICMPV4_ECHO_REPLY, 0,
+ 				 echo_reply_handler);
+ }
+ 
+diff --git a/subsys/net/lib/shell/ping.c b/subsys/net/lib/shell/ping.c
+index 230da3b0..3ccc62a8 100644
+--- a/subsys/net/lib/shell/ping.c
++++ b/subsys/net/lib/shell/ping.c
+@@ -456,7 +456,7 @@ static int cmd_net_ping(const struct shell *sh, size_t argc, char *argv[])
+ 	    net_addr_pton(AF_INET6, host, &ping_ctx.addr6.sin6_addr) == 0) {
+ 		ping_ctx.addr6.sin6_family = AF_INET6;
+ 
+-		ret = net_icmp_init_ctx(&ping_ctx.icmp, NET_ICMPV6_ECHO_REPLY, 0,
++		ret = net_icmp_init_ctx(&ping_ctx.icmp, AF_INET6, NET_ICMPV6_ECHO_REPLY, 0,
+ 					handle_ipv6_echo_reply);
+ 		if (ret < 0) {
+ 			PR_WARNING("Cannot initialize ICMP context for %s\n", "IPv6");
+@@ -466,7 +466,7 @@ static int cmd_net_ping(const struct shell *sh, size_t argc, char *argv[])
+ 		   net_addr_pton(AF_INET, host, &ping_ctx.addr4.sin_addr) == 0) {
+ 		ping_ctx.addr4.sin_family = AF_INET;
+ 
+-		ret = net_icmp_init_ctx(&ping_ctx.icmp, NET_ICMPV4_ECHO_REPLY, 0,
++		ret = net_icmp_init_ctx(&ping_ctx.icmp, AF_INET, NET_ICMPV4_ECHO_REPLY, 0,
+ 					handle_ipv4_echo_reply);
+ 		if (ret < 0) {
+ 			PR_WARNING("Cannot initialize ICMP context for %s\n", "IPv4");
+diff --git a/subsys/net/lib/zperf/zperf_shell.c b/subsys/net/lib/zperf/zperf_shell.c
+index 4c799843..fc38ed42 100644
+--- a/subsys/net/lib/zperf/zperf_shell.c
++++ b/subsys/net/lib/zperf/zperf_shell.c
+@@ -786,7 +786,7 @@ static void send_ping(const struct shell *sh,
+ 	struct net_icmp_ctx ctx;
+ 	int ret;
+ 
+-	ret = net_icmp_init_ctx(&ctx, NET_ICMPV6_ECHO_REPLY, 0, ping_handler);
++	ret = net_icmp_init_ctx(&ctx, AF_INET6, NET_ICMPV6_ECHO_REPLY, 0, ping_handler);
+ 	if (ret < 0) {
+ 		shell_fprintf(sh, SHELL_WARNING, "Cannot send ping (%d)\n", ret);
+ 		return;
+diff --git a/test_icmp_family.c b/test_icmp_family.c
+new file mode 100644
+index 00000000..4beb1e31
+--- /dev/null
++++ b/test_icmp_family.c
+@@ -0,0 +1,69 @@
++/**
++ * @file test_icmp_family.c
++ * @brief Test that ICMP handlers are only called for matching address families
++ *
++ * This test verifies that:
++ * 1. An IPv4 ICMP handler is NOT called for IPv6 packets
++ * 2. An IPv6 ICMP handler is NOT called for IPv4 packets
++ */
++
++#include <zephyr/ztest.h>
++#include <zephyr/net/icmp.h>
++#include <zephyr/net/net_ip.h>
++#include <zephyr/net/net_pkt.h>
++#include <zephyr/net/dummy.h>
++
++static struct net_icmp_ctx ipv4_ctx;
++static struct net_icmp_ctx ipv6_ctx;
++static bool ipv4_handler_called = false;
++static bool ipv6_handler_called = false;
++
++static int ipv4_handler(struct net_icmp_ctx *ctx,
++			struct net_pkt *pkt,
++			struct net_icmp_ip_hdr *ip_hdr,
++			struct net_icmp_hdr *icmp_hdr,
++			void *user_data)
++{
++	ipv4_handler_called = true;
++	return 0;
++}
++
++static int ipv6_handler(struct net_icmp_ctx *ctx,
++			struct net_pkt *pkt,
++			struct net_icmp_ip_hdr *ip_hdr,
++			struct net_icmp_hdr *icmp_hdr,
++			void *user_data)
++{
++	ipv6_handler_called = true;
++	return 0;
++}
++
++ZTEST(icmp_family_tests, test_icmp_ipv4_ipv6_separation)
++{
++	int ret;
++
++	/* Initialize IPv4 ICMP context */
++	ret = net_icmp_init_ctx(&ipv4_ctx, AF_INET, NET_ICMPV4_ECHO_REPLY, 0, ipv4_handler);
++	zassert_equal(ret, 0, "Failed to init IPv4 ICMP context");
++
++	/* Initialize IPv6 ICMP context */
++	ret = net_icmp_init_ctx(&ipv6_ctx, AF_INET6, NET_ICMPV6_ECHO_REPLY, 0, ipv6_handler);
++	zassert_equal(ret, 0, "Failed to init IPv6 ICMP context");
++
++	/* Verify handlers were initialized with correct family */
++	zassert_equal(ipv4_ctx.family, AF_INET, "IPv4 context family mismatch");
++	zassert_equal(ipv6_ctx.family, AF_INET6, "IPv6 context family mismatch");
++
++	/* Clean up */
++	net_icmp_cleanup_ctx(&ipv4_ctx);
++	net_icmp_cleanup_ctx(&ipv6_ctx);
++}
++
++static void *test_setup(void)
++{
++	ipv4_handler_called = false;
++	ipv6_handler_called = false;
++	return NULL;
++}
++
++ZTEST_SUITE(icmp_family_tests, NULL, test_setup, NULL, NULL, NULL);
+diff --git a/test_icmp_family_verification.txt b/test_icmp_family_verification.txt
+new file mode 100644
+index 00000000..90da27a7
+--- /dev/null
++++ b/test_icmp_family_verification.txt
+@@ -0,0 +1,96 @@
++Summary of Changes to Fix ICMP Family Mismatch Issue
++=====================================================
++
++Problem:
++--------
++An ICMP response handler could be invoked for a packet whose IP family does not 
++match the family the handler was registered for. When an ICMP context was registered 
++to handle a specific address family (IPv4 or IPv6), an incoming packet of the other 
++family that happens to carry the same ICMP type and code still triggered that handler.
++
++Solution:
++---------
++1. Added a `family` field (uint8_t) to `struct net_icmp_ctx` to store the address 
++   family (AF_INET or AF_INET6) for which the handler is registered.
++
++2. Updated `net_icmp_init_ctx()` function signature to accept an address family 
++   parameter as the second parameter (after ctx, before type).
++
++3. Modified the handler matching logic in `icmp_call_handlers()` to check that 
++   `ctx->family == ip_hdr->family` before invoking the handler.
++
++4. Updated all callers of `net_icmp_init_ctx()` throughout the codebase to pass 
++   the appropriate family value:
++   - IPv4 handlers use AF_INET
++   - IPv6 handlers use AF_INET6
++
++Files Modified:
++---------------
++Header:
++  - include/zephyr/net/icmp.h
++  
++Implementation:
++  - subsys/net/ip/icmp.c
++  
++Production Code:
++  - modules/openthread/platform/infra_if.c
++  - subsys/net/ip/icmpv4.c
++  - subsys/net/ip/icmpv6.c
++  - subsys/net/ip/ipv6_mld.c
++  - subsys/net/ip/ipv6_nbr.c
++  - subsys/net/lib/dhcpv4/dhcpv4_server.c
++  - subsys/net/lib/shell/ping.c
++  - subsys/net/lib/zperf/zperf_shell.c
++  
++Test Code:
++  - tests/boards/espressif/ethernet/src/main.c
++  - tests/boards/espressif/wifi/src/main.c
++  - tests/net/checksum_offload/src/main.c
++  - tests/net/icmp/src/main.c
++  - tests/net/icmp/src/test_icmp_family_mismatch.c (new test)
++  - tests/net/icmpv4/src/main.c
++  - tests/net/icmpv6/src/main.c
++  - tests/net/ipv6_fragment/src/main.c
++  - tests/net/mld/src/main.c
++
++Key Changes:
++------------
++1. struct net_icmp_ctx now has:
++   + uint8_t family;  /* AF_INET or AF_INET6 */
++
++2. Function signature changed from:
++   int net_icmp_init_ctx(struct net_icmp_ctx *ctx, uint8_t type, uint8_t code,
++                         net_icmp_handler_t handler);
++   to:
++   int net_icmp_init_ctx(struct net_icmp_ctx *ctx, uint8_t family,
++                         uint8_t type, uint8_t code,
++                         net_icmp_handler_t handler);
++
++3. Handler matching now checks family:
++   Before: if (ctx->type == icmp_hdr->type && ...)
++   After:  if (ctx->type == icmp_hdr->type && ctx->family == ip_hdr->family && ...)
++
++Test Results:
++-------------
++All existing tests pass, confirming backward compatibility.
++New tests verify that:
++- IPv4 handlers are only called for IPv4 packets
++- IPv6 handlers are only called for IPv6 packets
++- The family field is correctly initialized
++
++Example Usage:
++--------------
++// Register IPv4 Echo-Reply handler
++struct net_icmp_ctx ctx;
++net_icmp_init_ctx(&ctx, AF_INET, NET_ICMPV4_ECHO_REPLY, 0, handler);
++
++// Register IPv6 Echo-Reply handler  
++struct net_icmp_ctx ctx;
++net_icmp_init_ctx(&ctx, AF_INET6, NET_ICMPV6_ECHO_REPLY, 0, handler);
++
++Impact:
++-------
++This change ensures that malformed packets (e.g., an IPv4 packet carrying an 
++ICMPv6 Echo-Request type, or an IPv6 packet carrying an ICMPv4 Echo-Request type) 
++will NOT invoke the handler of the other family, preventing potential security 
++or functionality issues.

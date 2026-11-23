@@ -1,0 +1,46 @@
+diff --git a/sched/wqueue/kwork_cancel.c b/sched/wqueue/kwork_cancel.c
+index fd8055ea..dbcd935e 100644
+--- a/sched/wqueue/kwork_cancel.c
++++ b/sched/wqueue/kwork_cancel.c
+@@ -83,17 +83,36 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue,
+ 
+       if (WDOG_ISACTIVE(&work->u.timer))
+         {
++          /* Work is pending in a delay timer - cancel the timer */
++
+           wd_cancel(&work->u.timer);
+         }
+       else
+         {
+-          dq_rem((FAR dq_entry_t *)work, &wqueue->q);
+-
+-          /* Semaphore count should be consistent with the number of
+-           * work entries.
++          /* Check if the work is actually in the work queue.
++           * The work may have been dequeued by the worker thread but
++           * not yet marked as complete (work->worker still non-NULL
++           * indicates it's queued). We must verify it's in the queue
++           * before removing to avoid corrupting the semaphore count.
+            */
+ 
+-          wqueue->sem.semcount--;
++          bool in_queue = (work->u.s.dq.blink != NULL ||
++                           work->u.s.dq.flink != NULL ||
++                           wqueue->q.head == (FAR dq_entry_t *)work);
++
++          if (in_queue)
++            {
++              /* Remove from the work queue and decrement the semaphore
++               * count to maintain consistency.
++               */
++
++              dq_rem((FAR dq_entry_t *)work, &wqueue->q);
++              wqueue->sem.semcount--;
++            }
++          /* else: Work was dequeued by worker but not yet marked complete.
++           * In this case, we should NOT decrement the semaphore count
++           * because the worker will handle it.
++           */
+         }
+ 
+       work->worker = NULL;

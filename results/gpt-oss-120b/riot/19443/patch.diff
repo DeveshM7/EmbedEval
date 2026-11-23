@@ -1,0 +1,292 @@
+diff --git a/drivers/mtd/Kconfig b/drivers/mtd/Kconfig
+index fc18a5c5..a189a801 100644
+--- a/drivers/mtd/Kconfig
++++ b/drivers/mtd/Kconfig
+@@ -104,6 +104,12 @@ config MODULE_MTD_SDCARD_DEFAULT
+ config MODULE_MTD_SDCARD
+     bool "MTD interface for SPI SD-Card"
+     depends on MODULE_SDCARD_SPI
++config MODULE_MTD_EMULATED
++    bool "Emulated RAM-backed MTD driver"
++    depends on MODULE_MTD
++    help
++        Provides a simple MTD implementation that stores the device contents
++        in RAM. Useful for boards without a hardware MTD device.
+ 
+ config MODULE_SAM0_SDHC
+     bool "MTD interface for SAM0 SD Host Controller"
+@@ -115,3 +121,4 @@ config MODULE_MTD_WRITE_PAGE
+     bool "MTD write page API"
+ 
+ endif
++
+diff --git a/drivers/mtd/Kconfig.bak b/drivers/mtd/Kconfig.bak
+new file mode 100644
+index 00000000..fc18a5c5
+--- /dev/null
++++ b/drivers/mtd/Kconfig.bak
+@@ -0,0 +1,117 @@
++# Copyright (c) 2020 HAW Hamburg
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++#
++
++config HAVE_MTD_AT24CXXX
++    bool
++    imply MODULE_MTD_AT24CXXX if MODULE_MTD
++    help
++        Indicates that a at24cxxx EEPROM MTD is present
++
++config HAVE_MTD_AT25XXX
++    bool
++    imply MODULE_MTD_AT25XXX if MODULE_MTD
++    help
++        Indicates that a at25xxx SPI-EEPROM MTD is present
++
++config HAVE_MTD_NATIVE
++    bool
++    imply MODULE_MTD_NATIVE if MODULE_MTD
++    help
++        Indicates that a native MTD is present.
++
++config HAVE_MTD_SDCARD_DEFAULT
++    bool
++    imply MODULE_MTD_SDCARD if MODULE_MTD
++    imply MODULE_MTD_SDCARD_DEFAULT if MODULE_MTD
++    imply MODULE_SDCARD_SPI if MODULE_MTD
++    select HAS_SDCARD_SPI
++    help
++        Indicates that a sdcard MTD is present with generic configuration
++
++config HAVE_MTD_SDCARD
++    bool
++    imply MODULE_MTD_SDCARD if MODULE_MTD
++    help
++        Indicates that a sdcard MTD is present
++
++config HAVE_MTD_SPI_NOR
++    bool
++    imply MODULE_MTD_SPI_NOR if MODULE_MTD
++    help
++        Indicates that a spi-nor MTD is present
++
++config HAVE_SAM0_SDHC
++    bool
++    imply MODULE_SAM0_SDHC if MODULE_MTD
++    help
++        Indicates that a SAM0 SD Host Controller MTD is present
++
++config HAVE_MTD_SPI_MCI
++    bool
++    imply MODULE_MTD_MCI if MODULE_MTD
++    help
++        Indicates that a Multimedia Card Interface (MCI) MTD is present
++
++menuconfig MODULE_MTD
++    bool "Memory Technology Device interface (MTD)"
++    depends on TEST_KCONFIG
++
++if MODULE_MTD
++
++menu "MTD Interefaces"
++
++config MODULE_MTD_SPI_NOR
++    bool "MTD interface for SPI NOR Flash"
++    depends on HAS_PERIPH_SPI
++    select MODULE_PERIPH_SPI
++
++config MODULE_MTD_FLASHPAGE
++    bool "MTD interface for Flashpage"
++    depends on HAS_PERIPH_FLASHPAGE
++    depends on HAS_PERIPH_FLASHPAGE_PAGEWISE
++    select MODULE_PERIPH_FLASHPAGE
++    select MODULE_PERIPH_FLASHPAGE_PAGEWISE
++    help
++        Driver for internal flash devices implementing flashpage interface.
++
++config MODULE_MTD_NATIVE
++    bool "MTD native driver"
++    depends on NATIVE_OS_LINUX
++
++config MODULE_MTD_AT24CXXX
++    bool "MTD implementation for AT24CXXX"
++    depends on MODULE_AT24CXXX
++
++config MODULE_MTD_AT25XXX
++    bool "MTD implementation for AT25XXX"
++    depends on MODULE_AT25XXX
++
++config MODULE_MTD_MCI
++    bool "MTD interface for LPC23XX MCI"
++    depends on CPU_FAM_LPC23XX
++    select MODULE_MCI
++
++config MODULE_MTD_SDCARD_DEFAULT
++    bool "Use Generic SD card configuration"
++    depends on MODULE_MTD_SDCARD
++    help
++        Automatically create a MTD device and mount point for the SD card.
++
++config MODULE_MTD_SDCARD
++    bool "MTD interface for SPI SD-Card"
++    depends on MODULE_SDCARD_SPI
++
++config MODULE_SAM0_SDHC
++    bool "MTD interface for SAM0 SD Host Controller"
++    depends on CPU_COMMON_SAM0
++
++endmenu # MTD Interfacs
++
++config MODULE_MTD_WRITE_PAGE
++    bool "MTD write page API"
++
++endif
+diff --git a/drivers/mtd_emulated/Makefile b/drivers/mtd_emulated/Makefile
+new file mode 100644
+index 00000000..ca2f5059
+--- /dev/null
++++ b/drivers/mtd_emulated/Makefile
+@@ -0,0 +1,3 @@
++MODULE = mtd_emulated
++
++include $(RIOTBASE)/Makefile.base
+diff --git a/drivers/mtd_emulated/mtd_emulated.c b/drivers/mtd_emulated/mtd_emulated.c
+new file mode 100644
+index 00000000..ca21a0af
+--- /dev/null
++++ b/drivers/mtd_emulated/mtd_emulated.c
+@@ -0,0 +1,89 @@
++/*
++ * Copyright (C) 2024
++ *
++ * This file is part of the RIOT operating system.
++ *
++ * Emulated MTD driver that stores the whole device contents in RAM.
++ * It is useful for boards that do not have a real MTD device.
++ */
++
++#include <string.h>
++#include <assert.h>
++#include <errno.h>
++
++#include "mtd.h"
++
++/* The private structure used by the macro defined in mtd_emulated.h.
++ * The first member must be the generic mtd_dev_t base so that a pointer to
++ * the base can be safely cast back to this container type.
++ */
++typedef struct {
++    mtd_dev_t base;   /**< MTD device descriptor (public part) */
++    uint8_t *buf;     /**< RAM backing store */
++} mtd_emulated_dev_t;
++
++/* Helper to get the container from a generic mtd_dev_t pointer. */
++static inline mtd_emulated_dev_t *emul_dev(mtd_dev_t *dev)
++{
++    return (mtd_emulated_dev_t *)dev;
++}
++
++static int _emul_init(mtd_dev_t *dev)
++{
++    mtd_emulated_dev_t *e = emul_dev(dev);
++    size_t total = (size_t)dev->sector_count * dev->pages_per_sector * dev->page_size;
++    memset(e->buf, 0xff, total);
++    return 0;
++}
++
++static int _emul_read_page(mtd_dev_t *dev, void *dest,
++                           uint32_t page, uint32_t offset, uint32_t size)
++{
++    mtd_emulated_dev_t *e = emul_dev(dev);
++    uint32_t page_size = dev->page_size;
++    if (offset + size > page_size) {
++        return -EOVERFLOW;
++    }
++    memcpy(dest, e->buf + ((size_t)page * page_size) + offset, size);
++    return (int)size;
++}
++
++static int _emul_write_page(mtd_dev_t *dev, const void *src,
++                            uint32_t page, uint32_t offset, uint32_t size)
++{
++    mtd_emulated_dev_t *e = emul_dev(dev);
++    uint32_t page_size = dev->page_size;
++    if (offset + size > page_size) {
++        return -EOVERFLOW; /* write must not cross a page boundary */
++    }
++    memcpy(e->buf + ((size_t)page * page_size) + offset, src, size);
++    return (int)size;
++}
++
++static int _emul_erase(mtd_dev_t *dev, uint32_t addr, uint32_t size)
++{
++    mtd_emulated_dev_t *e = emul_dev(dev);
++    uint32_t sector_size = dev->pages_per_sector * dev->page_size;
++    if ((addr % sector_size) != 0 || (size % sector_size) != 0) {
++        return -EOVERFLOW; /* address or length not aligned to sector */
++    }
++    memset(e->buf + addr, 0xff, size);
++    return 0;
++}
++
++static int _emul_power(mtd_dev_t *dev, enum mtd_power_state power)
++{
++    (void)dev;
++    (void)power;
++    return -ENOTSUP;
++}
++
++const mtd_desc_t mtd_emulated_driver = {
++    .init = _emul_init,
++    .read_page = _emul_read_page,
++    .write_page = _emul_write_page,
++    .erase = _emul_erase,
++    .power = _emul_power,
++    .flags = MTD_DRIVER_FLAG_DIRECT_WRITE,
++};
++
+diff --git a/drivers/mtd_emulated/mtd_emulated.h b/drivers/mtd_emulated/mtd_emulated.h
+new file mode 100644
+index 00000000..be5fd2e5
+--- /dev/null
++++ b/drivers/mtd_emulated/mtd_emulated.h
+@@ -0,0 +1,37 @@
++extern const mtd_desc_t mtd_emulated_driver;
++#ifndef MTD_EMULATED_H
++#define MTD_EMULATED_H
++
++#include "mtd.h"
++
++/**
++ * Private container type for the emulated MTD device. It must match the
++ * definition in `mtd_emulated.c`.
++ */
++typedef struct {
++    mtd_dev_t base;   /**< Public MTD device descriptor */
++    uint8_t *buf;     /**< RAM backing store */
++} mtd_emulated_dev_t;
++
++/**
++ * @brief Macro to declare an emulated MTD device.
++ *
++ * @param num  device number (used to form the variable name)
++ * @param sc   number of sectors
++ * @param pps  pages per sector
++ * @param ps   page size in bytes
++ */
++#define MTD_EMULATED_DEV(num, sc, pps, ps)                     \
++    static uint8_t _mtd_emulated_buf_##num[(sc)*(pps)*(ps)];    \
++    static mtd_emulated_dev_t mtd_emulated_dev##num = {       \
++        .base = {                                            \
++            .driver = &mtd_emulated_driver,                \
++            .sector_count = (sc),                           \
++            .pages_per_sector = (pps),                      \
++            .page_size = (ps),                              \
++            .write_size = 1,                                \
++        },                                                   \
++        .buf = _mtd_emulated_buf_##num,                     \
++    }
++
++#endif /* MTD_EMULATED_H */

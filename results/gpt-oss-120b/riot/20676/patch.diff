@@ -1,0 +1,51 @@
+diff --git a/pkg/micro-ecc/psa_uecc/p256.c b/pkg/micro-ecc/psa_uecc/p256.c
+index f07357aa..2fde160e 100644
+--- a/pkg/micro-ecc/psa_uecc/p256.c
++++ b/pkg/micro-ecc/psa_uecc/p256.c
+@@ -19,6 +19,7 @@
+ 
+ #include "psa/crypto.h"
+ #include "uECC.h"
++#include <string.h>
+ 
+ psa_status_t psa_generate_ecc_p256r1_key_pair(  const psa_key_attributes_t *attributes,
+                                                 uint8_t *priv_key_buffer, uint8_t *pub_key_buffer,
+@@ -32,10 +33,21 @@ psa_status_t psa_generate_ecc_p256r1_key_pair(  const psa_key_attributes_t *attr
+ 
+     const struct uECC_Curve_t *curve = uECC_secp256r1();
+ 
+-    ret = uECC_make_key(pub_key_buffer, priv_key_buffer, curve);
++    /* uECC_make_key writes the public key in raw format (X||Y) without the
++     * SEC1 uncompressed point prefix (0x04). The PSA Crypto API expects the
++     * exported public key to follow the SEC1 encoding: a leading 0x04 byte
++     * followed by the X and Y coordinates. Allocate a temporary buffer for the
++     * raw key, invoke uECC_make_key, then prepend the prefix before copying the
++     * data to the caller supplied buffer.
++     */
++    uint8_t raw_pub[PSA_BITS_TO_BYTES(256)];
++    ret = uECC_make_key(raw_pub, priv_key_buffer, curve);
+     if (!ret) {
+         return PSA_ERROR_GENERIC_ERROR;
+     }
++    /* Insert the uncompressed point prefix */
++    pub_key_buffer[0] = 0x04;
++    memcpy(&pub_key_buffer[1], raw_pub, sizeof(raw_pub));
+ 
+     return PSA_SUCCESS;
+ }
+@@ -90,7 +102,14 @@ psa_status_t psa_ecc_p256r1_verify_hash(const psa_key_attributes_t *attributes,
+     int ret = 0;
+     const struct uECC_Curve_t *curve = uECC_secp256r1();
+ 
+-    ret = uECC_verify(key_buffer, hash, hash_length, signature, curve);
++    /* key_buffer contains the SEC1 encoded public key (0x04 || X || Y).
++     * uECC_verify expects the raw X||Y format, so skip the leading prefix.
++     */
++    if (key_buffer[0] != 0x04) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++    const uint8_t *raw_key = &key_buffer[1];
++    ret = uECC_verify(raw_key, hash, hash_length, signature, curve);
+     if (!ret) {
+         return PSA_ERROR_GENERIC_ERROR;
+     }

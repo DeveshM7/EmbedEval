@@ -1,0 +1,111 @@
+diff --git a/include/zephyr/net/lwm2m.h b/include/zephyr/net/lwm2m.h
+index adbf990a..3706bbe2 100644
+--- a/include/zephyr/net/lwm2m.h
++++ b/include/zephyr/net/lwm2m.h
+@@ -1663,6 +1663,17 @@ int lwm2m_set_default_sockopt(struct lwm2m_ctx *ctx);
+  */
+ void lwm2m_pull_context_set_sockopt_callback(lwm2m_set_sockopt_cb_t set_sockopt_cb);
+ 
++/**
++ * @brief Get the number of free slots remaining in a resource's cache.
++ *
++ * @param path LwM2M path to the cached resource.
++ *
++ * @return Number of free slots on success, or negative errno code in case of error.
++ * @retval -ENOTSUP Resource data cache support is not configured.
++ * @retval -EINVAL Invalid parameter (NULL path).
++ */
++int lwm2m_cache_free_slots_get(const struct lwm2m_obj_path *path);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/subsys/net/lib/lwm2m/lwm2m_registry.c b/subsys/net/lib/lwm2m/lwm2m_registry.c
+index db1afb94..d8c18a50 100644
+--- a/subsys/net/lib/lwm2m/lwm2m_registry.c
++++ b/subsys/net/lib/lwm2m/lwm2m_registry.c
+@@ -1757,6 +1757,30 @@ size_t lwm2m_cache_size(const struct lwm2m_time_series_resource *cache_entry)
+ #endif
+ }
+ 
++int lwm2m_cache_free_slots_get(const struct lwm2m_obj_path *path)
++{
++#if defined(CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT)
++	struct lwm2m_time_series_resource *cache_entry;
++	uint32_t free_bytes;
++	uint32_t element_size = sizeof(struct lwm2m_time_series_elem);
++
++	if (path == NULL) {
++		return -EINVAL;
++	}
++
++	cache_entry = lwm2m_cache_entry_get_by_object(path);
++	if (cache_entry == NULL) {
++		return -ENOENT;
++	}
++
++	free_bytes = ring_buf_space_get(&cache_entry->rb);
++
++	return (int)(free_bytes / element_size);
++#else
++	return -ENOTSUP;
++#endif /* CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT */
++}
++
+ int lwm2m_set_bulk(const struct lwm2m_res_item res_list[], size_t res_list_size)
+ {
+ 	int ret;
+diff --git a/test_cache_free_slots.c b/test_cache_free_slots.c
+new file mode 100644
+index 00000000..ead1270b
+--- /dev/null
++++ b/test_cache_free_slots.c
+@@ -0,0 +1,48 @@
++#include <stdio.h>
++#include <zephyr/net/lwm2m.h>
++#include <zephyr/sys/ring_buffer.h>
++#include <errno.h>
++
++/* Simple test without the full Zephyr framework */
++int main(void)
++{
++    int ret;
++    struct lwm2m_obj_path path;
++    
++    printf("Testing lwm2m_cache_free_slots_get...\n");
++    
++    /* Test 1: NULL path should return -EINVAL */
++    ret = lwm2m_cache_free_slots_get(NULL);
++    if (ret == -EINVAL) {
++        printf("Test 1 passed: NULL path returns -EINVAL\n");
++    } else {
++        printf("Test 1 failed: Expected -EINVAL, got %d\n", ret);
++        return 1;
++    }
++    
++    /* Test 2: Valid path but resource not found */
++    path.level = LWM2M_PATH_LEVEL_RESOURCE;
++    path.obj_id = 32768;
++    path.obj_inst_id = 0;
++    path.res_id = 1;
++    
++    ret = lwm2m_cache_free_slots_get(&path);
++#if defined(CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT)
++    if (ret == -ENOENT) {
++        printf("Test 2 passed: Resource without cache returns -ENOENT\n");
++    } else {
++        printf("Test 2 failed: Expected -ENOENT, got %d\n", ret);
++        return 1;
++    }
++#else
++    if (ret == -ENOTSUP) {
++        printf("Test 2 passed: Cache disabled returns -ENOTSUP\n");
++    } else {
++        printf("Test 2 failed: Expected -ENOTSUP, got %d\n", ret);
++        return 1;
++    }
++#endif
++    
++    printf("All tests passed!\n");
++    return 0;
++}

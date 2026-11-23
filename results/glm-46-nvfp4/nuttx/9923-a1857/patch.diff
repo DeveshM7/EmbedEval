@@ -1,0 +1,99 @@
+diff --git a/sched/signal/sig_procmask.c b/sched/signal/sig_procmask.c
+index 09227354..096aad61 100644
+--- a/sched/signal/sig_procmask.c
++++ b/sched/signal/sig_procmask.c
+@@ -41,6 +41,35 @@
+ #include "sched/sched.h"
+ #include "signal/signal.h"
+ 
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++/* SIGKILL and SIGSTOP cannot be blocked according to POSIX */
++
++#define NON_BLOCKABLE_MASK  ((1U << SIGKILL) | (1U << SIGSTOP))
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: remove_nonblockable
++ *
++ * Description:
++ *   Remove non-blockable signals (SIGKILL and SIGSTOP) from the signal set
++ *
++ * Input Parameters:
++ *   set - The signal set to modify
++ *
++ ****************************************************************************/
++
++static void remove_nonblockable(FAR sigset_t *set)
++{
++  /* SIGKILL and SIGSTOP are not blockable */
++  set->_elem[0] &= ~NON_BLOCKABLE_MASK;
++}
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -89,6 +118,7 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+ {
+   FAR struct tcb_s *rtcb = this_task();
+   irqstate_t flags;
++  sigset_t tempset;
+   int        ret = OK;
+ 
+   sched_lock();
+@@ -110,6 +140,15 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+ 
+       flags = enter_critical_section();
+ 
++      /* Copy the input set to a temporary variable in case we need to
++       * modify it (to remove non-blockable signals)
++       */
++
++      tempset = *set;
++
++      /* Remove non-blockable signals from the input set */
++      remove_nonblockable(&tempset);
++
+       /* Okay, determine what we are supposed to do */
+ 
+       switch (how)
+@@ -119,7 +158,7 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+            */
+ 
+           case SIG_BLOCK:
+-            sigorset(&rtcb->sigprocmask, &rtcb->sigprocmask, set);
++            sigorset(&rtcb->sigprocmask, &rtcb->sigprocmask, &tempset);
+             break;
+ 
+           /* The resulting set is the intersection of the current set and
+@@ -127,13 +166,13 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+            */
+ 
+           case SIG_UNBLOCK:
+-            nxsig_nandset(&rtcb->sigprocmask, &rtcb->sigprocmask, set);
++            nxsig_nandset(&rtcb->sigprocmask, &rtcb->sigprocmask, &tempset);
+             break;
+ 
+           /* The resulting set is the signal set pointed to by set. */
+ 
+           case SIG_SETMASK:
+-            rtcb->sigprocmask = *set;
++            rtcb->sigprocmask = tempset;
+             break;
+ 
+           default:
+@@ -141,6 +180,9 @@ int nxsig_procmask(int how, FAR const sigset_t *set, FAR sigset_t *oset)
+             break;
+         }
+ 
++      /* Ensure non-blockable signals are never in the mask */
++      remove_nonblockable(&rtcb->sigprocmask);
++
+       leave_critical_section(flags);
+ 
+       /* Now, process any pending signals that were just unmasked */

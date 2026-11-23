@@ -1,0 +1,233 @@
+diff --git a/drivers/gpio/CMakeLists.txt b/drivers/gpio/CMakeLists.txt
+index 063b3fcc..2a1e2f66 100644
+--- a/drivers/gpio/CMakeLists.txt
++++ b/drivers/gpio/CMakeLists.txt
+@@ -68,6 +68,7 @@ zephyr_library_sources_ifdef(CONFIG_GPIO_MCUX_LPC gpio_mcux_lpc.c)
+ zephyr_library_sources_ifdef(CONFIG_GPIO_MCUX_RGPIO gpio_mcux_rgpio.c)
+ zephyr_library_sources_ifdef(CONFIG_GPIO_MFXSTM32L152 gpio_mfxstm32l152.c)
+ zephyr_library_sources_ifdef(CONFIG_GPIO_MMIO32 gpio_mmio32.c)
++zephyr_library_sources_ifdef(CONFIG_GPIO_MMIO_LATCH gpio_mmio_latch.c)
+ zephyr_library_sources_ifdef(CONFIG_GPIO_MSPM0 gpio_mspm0.c)
+ zephyr_library_sources_ifdef(CONFIG_GPIO_NCT38XX gpio_nct38xx.c)
+ zephyr_library_sources_ifdef(CONFIG_GPIO_NCT38XX gpio_nct38xx_port.c)
+diff --git a/drivers/gpio/Kconfig b/drivers/gpio/Kconfig
+index a65a6a94..ba2c5670 100644
+--- a/drivers/gpio/Kconfig
++++ b/drivers/gpio/Kconfig
+@@ -154,6 +154,7 @@ source "drivers/gpio/Kconfig.mcux_lpc"
+ source "drivers/gpio/Kconfig.mcux_rgpio"
+ source "drivers/gpio/Kconfig.mfxstm32l152"
+ source "drivers/gpio/Kconfig.mmio32"
++source "drivers/gpio/Kconfig.latch"
+ source "drivers/gpio/Kconfig.mspm0"
+ source "drivers/gpio/Kconfig.nct38xx"
+ source "drivers/gpio/Kconfig.neorv32"
+diff --git a/drivers/gpio/Kconfig.latch b/drivers/gpio/Kconfig.latch
+new file mode 100644
+index 00000000..6c8da1a7
+--- /dev/null
++++ b/drivers/gpio/Kconfig.latch
+@@ -0,0 +1,13 @@
++#
++# GPIO latch driver Kconfig
++#
++
++config GPIO_MMIO_LATCH
++    bool "MMIO latch based GPIO driver"
++    depends on DT_HAS_GPIO_MMIO_LATCH
++    default y
++    help
++      This driver provides a GPIO API for a write‑only memory mapped latch
++      (e.g. 74HC574). The driver maintains a software shadow of the latch
++      state because the hardware does not support read‑back. Only output
++      pins are supported.
+diff --git a/drivers/gpio/gpio_mmio_latch.c b/drivers/gpio/gpio_mmio_latch.c
+new file mode 100644
+index 00000000..8a38aef0
+--- /dev/null
++++ b/drivers/gpio/gpio_mmio_latch.c
+@@ -0,0 +1,184 @@
++/*
++ * GPIO MMIO latch driver
++ *
++ * Provides a GPIO controller for a write‑only memory‑mapped latch (e.g. 74HC574).
++ * The hardware register is write‑only; the driver keeps a software shadow of the
++ * last written value to enable read‑back via the GPIO API.
++ */
++
++#define DT_DRV_COMPAT gpio_mmio_latch
++
++#include <zephyr/irq.h>
++#include <zephyr/logging/log.h>
++#include <errno.h>
++
++#include <zephyr/drivers/gpio/gpio_utils.h>
++
++LOG_MODULE_REGISTER(gpio_mmio_latch, CONFIG_GPIO_LOG_LEVEL);
++
++struct gpio_mmio_latch_config {
++    /* Must be first */
++    struct gpio_driver_config common;
++    volatile uint32_t *reg;          /* latch register (write‑only) */
++    uint32_t init_val;               /* initial output value */
++};
++
++struct gpio_mmio_latch_data {
++    /* Must be first */
++    struct gpio_driver_data common;
++    const struct gpio_mmio_latch_config *config;
++    uint32_t shadow;                 /* software shadow of latch state */
++};
++
++static int gpio_mmio_latch_config(const struct device *dev,
++                                   gpio_pin_t pin,
++                                   gpio_flags_t flags)
++{
++    struct gpio_mmio_latch_data *data = dev->data;
++    const struct gpio_mmio_latch_config *cfg = data->config;
++    uint32_t mask = BIT(pin);
++
++    if ((cfg->common.port_pin_mask & mask) == 0) {
++        return -EINVAL; /* Pin not in valid mask */
++    }
++
++    /* Allowed flags: output, optional init high/low, active low is not supported */
++    if (flags & ~(GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW | GPIO_OUTPUT_INIT_HIGH)) {
++        return -ENOTSUP;
++    }
++
++    if (!(flags & GPIO_OUTPUT)) {
++        /* Input configuration not supported */
++        return -ENOTSUP;
++    }
++
++    /* Update shadow according to init flags */
++    unsigned int key = irq_lock();
++    if (flags & GPIO_OUTPUT_INIT_HIGH) {
++        data->shadow |= mask;
++    } else if (flags & GPIO_OUTPUT_INIT_LOW) {
++        data->shadow &= ~mask;
++    }
++    /* Write whole shadow to latch */
++    *cfg->reg = data->shadow;
++    irq_unlock(key);
++
++    return 0;
++}
++
++static int gpio_mmio_latch_port_get_raw(const struct device *dev,
++                                         uint32_t *value)
++{
++    struct gpio_mmio_latch_data *data = dev->data;
++    const struct gpio_mmio_latch_config *cfg = data->config;
++
++    *value = data->shadow & cfg->common.port_pin_mask;
++    return 0;
++}
++
++static int gpio_mmio_latch_port_set_masked_raw(const struct device *dev,
++                                                uint32_t mask,
++                                                uint32_t value)
++{
++    struct gpio_mmio_latch_data *data = dev->data;
++    const struct gpio_mmio_latch_config *cfg = data->config;
++    uint32_t masked = mask & cfg->common.port_pin_mask;
++    unsigned int key;
++
++    key = irq_lock();
++    data->shadow = (data->shadow & ~masked) | (value & masked);
++    *cfg->reg = data->shadow;
++    irq_unlock(key);
++    return 0;
++}
++
++static int gpio_mmio_latch_port_set_bits_raw(const struct device *dev,
++                                             uint32_t mask)
++{
++    struct gpio_mmio_latch_data *data = dev->data;
++    const struct gpio_mmio_latch_config *cfg = data->config;
++    uint32_t masked = mask & cfg->common.port_pin_mask;
++    unsigned int key;
++
++    key = irq_lock();
++    data->shadow |= masked;
++    *cfg->reg = data->shadow;
++    irq_unlock(key);
++    return 0;
++}
++
++static int gpio_mmio_latch_port_clear_bits_raw(const struct device *dev,
++                                               uint32_t mask)
++{
++    struct gpio_mmio_latch_data *data = dev->data;
++    const struct gpio_mmio_latch_config *cfg = data->config;
++    uint32_t masked = mask & cfg->common.port_pin_mask;
++    unsigned int key;
++
++    key = irq_lock();
++    data->shadow &= ~masked;
++    *cfg->reg = data->shadow;
++    irq_unlock(key);
++    return 0;
++}
++
++static int gpio_mmio_latch_port_toggle_bits(const struct device *dev,
++                                            uint32_t mask)
++{
++    struct gpio_mmio_latch_data *data = dev->data;
++    const struct gpio_mmio_latch_config *cfg = data->config;
++    uint32_t masked = mask & cfg->common.port_pin_mask;
++    unsigned int key;
++
++    key = irq_lock();
++    data->shadow ^= masked;
++    *cfg->reg = data->shadow;
++    irq_unlock(key);
++    return 0;
++}
++
++static int gpio_mmio_latch_pin_interrupt_configure(const struct device *dev,
++                                                    gpio_pin_t pin,
++                                                    enum gpio_int_mode mode,
++                                                    enum gpio_int_trig trig)
++{
++    return -ENOTSUP;
++}
++
++static const struct gpio_driver_api gpio_mmio_latch_api = {
++    .pin_configure = gpio_mmio_latch_config,
++    .port_get_raw = gpio_mmio_latch_port_get_raw,
++    .port_set_masked_raw = gpio_mmio_latch_port_set_masked_raw,
++    .port_set_bits_raw = gpio_mmio_latch_port_set_bits_raw,
++    .port_clear_bits_raw = gpio_mmio_latch_port_clear_bits_raw,
++    .port_toggle_bits = gpio_mmio_latch_port_toggle_bits,
++    .pin_interrupt_configure = gpio_mmio_latch_pin_interrupt_configure,
++};
++
++int gpio_mmio_latch_init(const struct device *dev)
++{
++    struct gpio_mmio_latch_data *data = dev->data;
++    const struct gpio_mmio_latch_config *cfg = dev->config;
++
++    data->config = cfg;
++    data->shadow = cfg->init_val & cfg->common.port_pin_mask;
++    /* Write initial value to latch */
++    *cfg->reg = data->shadow;
++    return 0;
++}
++
++#define LATCH_GPIO_DEVICE(n)                                                       \
++    static struct gpio_mmio_latch_data gpio_mmio_latch_##n##_data;                 \
++    static const struct gpio_mmio_latch_config gpio_mmio_latch_##n##_cfg = {     \
++        .common = GPIO_COMMON_CONFIG_FROM_DT_INST(n),                           \
++        .reg = (volatile uint32_t *)DT_INST_REG_ADDR(n),                        \
++        .init_val = DT_INST_PROP_OR(n, initial_output, 0),                      \
++    };                                                                           \
++    DEVICE_DT_INST_DEFINE(n, gpio_mmio_latch_init, NULL,                        \
++                         &gpio_mmio_latch_##n##_data,                        \
++                         &gpio_mmio_latch_##n##_cfg,                         \
++                         PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,   \
++                         &gpio_mmio_latch_api);
++
++DT_INST_FOREACH_STATUS_OKAY(LATCH_GPIO_DEVICE)
++

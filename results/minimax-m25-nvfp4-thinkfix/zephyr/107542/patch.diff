@@ -1,0 +1,763 @@
+diff --git a/cmake/shell_aliases.cmake b/cmake/shell_aliases.cmake
+new file mode 100644
+index 000000000..322aae4ef
+--- /dev/null
++++ b/cmake/shell_aliases.cmake
+@@ -0,0 +1,60 @@
++# Function to generate shell aliases include file
++# Usage: generate_shell_aliases_inc_file_for_target(<target> <source_file> <output_file>)
++function(generate_shell_aliases_inc_file_for_target TARGET_ALIASES SOURCE_FILE OUTPUT_FILE)
++    if(NOT EXISTS ${SOURCE_FILE})
++        message(WARNING "Alias file ${SOURCE_FILE} does not exist")
++        return()
++    endif()
++
++    # Read alias file and generate C header
++    file(READ ${SOURCE_FILE} ALIAS_FILE_CONTENT)
++    
++    # Parse aliases - format: alias_name expansion_command
++    # Each line: alias_name whitespace expansion
++    string(REPLACE "\n" ";" ALIAS_LINES "${ALIAS_FILE_CONTENT}")
++    
++    set(ALIAS_ARRAY "")
++    set(ALIAS_COUNT 0)
++    
++    foreach(LINE ${ALIAS_LINES})
++        # Skip empty lines and comments
++        string(STRIP "${LINE}" LINE)
++        if(LINE AND NOT LINE MATCHES "^#")
++            # Find first space to split alias name and expansion
++            string(FIND "${LINE}" " " SPACE_POS)
++            if(NOT SPACE_POS EQUAL -1)
++                string(SUBSTRING "${LINE}" 0 ${SPACE_POS} ALIAS_NAME)
++                math(EXPR ALIAS_LEN "${SPACE_POS} + 1")
++                string(SUBSTRING "${LINE}" ${ALIAS_LEN} -1 ALIAS_EXP)
++                string(STRIP "${ALIAS_NAME}" ALIAS_NAME)
++                string(STRIP "${ALIAS_EXP}" ALIAS_EXP)
++                
++                if(ALIAS_NAME AND ALIAS_EXP)
++                    list(APPEND ALIAS_ARRAY "\"${ALIAS_NAME}\", \"${ALIAS_EXP}\"")
++                    math(EXPR ALIAS_COUNT "${ALIAS_COUNT} + 1")
++                endif()
++            endif()
++        endif()
++    endforeach()
++    
++    # Generate the include file
++    if(ALIAS_COUNT GREATER 0)
++        set(ALIAS_DEFINITIONS "")
++        foreach(ITEM ${ALIAS_ARRAY})
++            set(ALIAS_DEFINITIONS "${ALIAS_DEFINITIONS}\n\t{ ${ITEM} },")
++        endforeach()
++        
++        file(WRITE ${OUTPUT_FILE} "/* Auto-generated file - do not modify */\n")
++        file(APPEND ${OUTPUT_FILE} "#ifndef SHELL_ALIASES_GENERATED_H\n")
++        file(APPEND ${OUTPUT_FILE} "#define SHELL_ALIASES_GENERATED_H\n\n")
++        file(APPEND ${OUTPUT_FILE} "#include <zephyr/shell/shell_aliases.h>\n\n")
++        file(APPEND ${OUTPUT_FILE} "static const struct shell_alias shell_aliases[] = {${ALIAS_DEFINITIONS}\n};\n\n")
++        file(APPEND ${OUTPUT_FILE} "static const size_t shell_aliases_count = ${ALIAS_COUNT};\n\n")
++        file(APPEND ${OUTPUT_FILE} "#endif /* SHELL_ALIASES_GENERATED_H */\n")
++    else()
++        file(WRITE ${OUTPUT_FILE} "/* Auto-generated file - do not modify */\n")
++        file(APPEND ${OUTPUT_FILE} "/* No aliases defined */\n")
++    endif()
++    
++    message(STATUS "Generated shell aliases: ${OUTPUT_FILE}")
++endfunction()
+diff --git a/subsys/shell/CMakeLists.txt b/subsys/shell/CMakeLists.txt
+index 16e66b624..7cc654451 100644
+--- a/subsys/shell/CMakeLists.txt
++++ b/subsys/shell/CMakeLists.txt
+@@ -46,3 +46,8 @@ zephyr_sources_ifdef(
+   CONFIG_SHELL_WILDCARD
+   shell_wildcard.c
+   )
++
++zephyr_sources_ifdef(
++  CONFIG_SHELL_ALIASES
++  shell_aliases.c
++  )
+diff --git a/subsys/shell/Kconfig b/subsys/shell/Kconfig
+index a3e9bcd34..27605c72f 100644
+--- a/subsys/shell/Kconfig
++++ b/subsys/shell/Kconfig
+@@ -284,6 +284,27 @@ config SHELL_CMD_ROOT
+ 	  This option sets a root command at shell init,
+ 	  and when exiting to main command tree with alt+r.
+ 
++
++config SHELL_ALIASES
++	bool "Shell command aliases"
++	help
++	  Enable shell command aliases. Aliases are short commands that
++	  expand to longer commands before execution.
++
++config SHELL_ALIASES_FILE
++	string "Shell aliases file"
++	depends on SHELL_ALIASES
++	help
++	  Path to the file containing shell aliases. This file is host-side
++	  and is read at build time to generate alias definitions.
++
++config SHELL_ALIASES_HAS_FILE
++	bool "Shell aliases file is set"
++	depends on SHELL_ALIASES
++	default y if SHELL_ALIASES_FILE != ""
++	help
++	  Internal option indicating that SHELL_ALIASES_FILE is set.
++
+ config SHELL_LOG_BACKEND
+ 	bool "Shell log backend"
+ 	depends on LOG && !LOG_MODE_MINIMAL
+diff --git a/subsys/shell/shell.c b/subsys/shell/shell.c
+index 8847f3223..5b9a17964 100644
+--- a/subsys/shell/shell.c
++++ b/subsys/shell/shell.c
+@@ -17,6 +17,7 @@
+ #include "shell_utils.h"
+ #include "shell_vt100.h"
+ #include "shell_wildcard.h"
++#include "shell_aliases.h"
+ 
+ /* 2 == 1 char for cmd + 1 char for '\0' */
+ #if (CONFIG_SHELL_CMD_BUFF_SIZE < 2)
+@@ -355,6 +356,24 @@ static void find_completion_candidates(const struct shell *sh,
+ 
+ 		idx++;
+ 	}
++
++	/* Add alias candidates at root level */
++	if (IS_ENABLED(CONFIG_SHELL_ALIASES) && cmd == NULL) {
++		size_t alias_idx = 0;
++		const struct shell_alias *alias;
++
++		while ((alias = shell_alias_get(alias_idx)) != NULL) {
++			if (is_completion_candidate(alias->name,
++						incompl_cmd, incompl_cmd_len)) {
++				*longest = max(strlen(alias->name), *longest);
++				if (*cnt == 0) {
++					*first_idx = idx;
++				}
++				(*cnt)++;
++			}
++			alias_idx++;
++		}
++	}
+ }
+ 
+ static void autocomplete(const struct shell *sh,
+@@ -366,6 +385,51 @@ static void autocomplete(const struct shell *sh,
+ 	uint16_t cmd_len;
+ 	uint16_t arg_len = z_shell_strlen(arg);
+ 
++	/* Handle alias completion at root level */
++	if (IS_ENABLED(CONFIG_SHELL_ALIASES) && cmd == NULL) {
++		const struct shell_alias *alias;
++		size_t cmd_count = 0;
++		struct shell_static_entry dloc;
++
++		/* Get the number of root commands to determine if this is an alias */
++		while (z_shell_cmd_get(NULL, cmd_count, &dloc) != NULL) {
++			cmd_count++;
++		}
++
++		/* If subcmd_idx is beyond commands, it's an alias */
++		if (subcmd_idx >= cmd_count) {
++			alias = shell_alias_get(subcmd_idx - cmd_count);
++			if (alias != NULL) {
++				const char *completion = alias->expansion;
++				uint16_t completion_len = strlen(completion);
++
++				if (!IS_ENABLED(CONFIG_SHELL_TAB_AUTOCOMPLETION)) {
++					/* Add a space if the Tab button is pressed when command is complete. */
++					if (completion_len == arg_len) {
++						z_shell_op_char_insert(sh, ' ');
++					}
++					return;
++				}
++
++				/* no exact match found */
++				if (completion_len != arg_len) {
++					z_shell_op_completion_insert(sh,
++							     completion + arg_len,
++							     completion_len - arg_len);
++				}
++
++				/* Next character in the buffer is not 'space'. */
++				if (isspace((int) sh->ctx->cmd_buff[
++							    sh->ctx->cmd_buff_pos]) == 0) {
++					z_shell_op_char_insert(sh, ' ');
++				} else {
++					z_shell_op_cursor_move(sh, 1);
++				}
++				return;
++			}
++		}
++	}
++
+ 	/* sh->ctx->active_cmd can be safely used outside of command context
+ 	 * to save stack
+ 	 */
+@@ -660,6 +724,10 @@ static int execute(const struct shell *sh)
+ 
+ 	memset(&sh->ctx->active_cmd, 0, sizeof(sh->ctx->active_cmd));
+ 
++	if (IS_ENABLED(CONFIG_SHELL_ALIASES)) {
++		shell_alias_expand(sh->ctx->cmd_buff, &sh->ctx->cmd_buff_len, parent);
++	}
++
+ 	if (IS_ENABLED(CONFIG_SHELL_HISTORY)) {
+ 		z_shell_cmd_trim(sh);
+ 		history_put(sh, sh->ctx->cmd_buff,
+diff --git a/subsys/shell/shell_aliases.c b/subsys/shell/shell_aliases.c
+new file mode 100644
+index 000000000..98eb9d34a
+--- /dev/null
++++ b/subsys/shell/shell_aliases.c
+@@ -0,0 +1,379 @@
++/*
++ * Copyright (c) 2018 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <ctype.h>
++#include <string.h>
++#include <zephyr/shell/shell.h>
++#include "shell_aliases.h"
++#include "shell_utils.h"
++
++/* Build assert for command buffer size */
++#if (CONFIG_SHELL_CMD_BUFF_SIZE < 2)
++#error too small CONFIG_SHELL_CMD_BUFF_SIZE
++#endif
++
++/* Macro to create the built-in '?' alias for help */
++#define SHELL_ALIAS_HELP_NAME "?"
++#define SHELL_ALIAS_HELP_EXPANSION "help"
++
++#if defined(CONFIG_SHELL_ALIASES)
++
++/* Include generated aliases from file */
++#if defined(CONFIG_SHELL_ALIASES_HAS_FILE)
++#include CONFIG_SHELL_ALIASES_FILE
++#endif
++
++/* Built-in '?' alias for help - always available when aliases enabled */
++static const struct shell_alias builtin_alias = {
++	.name = SHELL_ALIAS_HELP_NAME,
++	.expansion = SHELL_ALIAS_HELP_EXPANSION,
++};
++
++/* Warning message for alias collision */
++#define SHELL_MSG_ALIAS_IGNORED "Alias '%s' ignored because command exists in current context"
++
++/* Track if warning has been printed for collision */
++static bool alias_collision_warning_printed(const char *name);
++
++/**
++ * @brief Check if alias name collides with existing command.
++ *
++ * @param name Alias name to check.
++ * @param parent Parent command (for select mode), NULL for root.
++ *
++ * @return true if collision detected, false otherwise.
++ */
++static bool alias_collision_check(const char *name, const struct shell_static_entry *parent)
++{
++	struct shell_static_entry dloc;
++	const struct shell_static_entry *cmd;
++
++	if (name == NULL) {
++		return false;
++	}
++
++	cmd = z_shell_find_cmd(parent, name, &dloc);
++	return (cmd != NULL);
++}
++
++/**
++ * @brief Print warning for ignored alias due to collision.
++ *
++ * @param sh Shell instance.
++ * @param name Alias name that was ignored.
++ */
++static void alias_collision_warning(const struct shell *sh, const char *name)
++{
++	if (!alias_collision_warning_printed(name)) {
++		z_shell_fprintf(sh, SHELL_WARNING,
++				SHELL_MSG_ALIAS_IGNORED, name);
++	}
++}
++
++/* Track printed warnings to avoid duplicates */
++static bool warning_printed[16];  /* Simple tracking for up to 16 aliases */
++static bool warnings_initialized;
++
++static void init_warning_tracking(void)
++{
++	int i;
++	for (i = 0; i < 16; i++) {
++		warning_printed[i] = false;
++	}
++	warnings_initialized = true;
++}
++
++static bool alias_collision_warning_printed(const char *name)
++{
++#if defined(CONFIG_SHELL_ALIASES_HAS_FILE)
++	extern const size_t shell_aliases_count;
++	size_t i;
++	
++	if (!warnings_initialized) {
++		init_warning_tracking();
++	}
++	
++	/* Check builtin alias */
++	if (strcmp(name, SHELL_ALIAS_HELP_NAME) == 0) {
++		return warning_printed[0];
++	}
++	
++	/* Check file-based aliases */
++	for (i = 0; i < shell_aliases_count; i++) {
++		extern const struct shell_alias shell_aliases[];
++		if (strcmp(name, shell_aliases[i].name) == 0) {
++			return warning_printed[i + 1];
++		}
++	}
++#endif
++	ARG_UNUSED(name);
++	return false;
++}
++
++static void set_alias_warning_printed(const char *name, bool printed)
++{
++#if defined(CONFIG_SHELL_ALIASES_HAS_FILE)
++	extern const size_t shell_aliases_count;
++	size_t i;
++	
++	if (!warnings_initialized) {
++		init_warning_tracking();
++	}
++	
++	/* Check builtin alias */
++	if (strcmp(name, SHELL_ALIAS_HELP_NAME) == 0) {
++		warning_printed[0] = printed;
++		return;
++	}
++	
++	/* Check file-based aliases */
++	for (i = 0; i < shell_aliases_count; i++) {
++		extern const struct shell_alias shell_aliases[];
++		if (strcmp(name, shell_aliases[i].name) == 0) {
++			warning_printed[i + 1] = printed;
++			return;
++		}
++	}
++#endif
++	ARG_UNUSED(name);
++	ARG_UNUSED(printed);
++}
++
++/**
++ * @brief Get array of shell aliases.
++ */
++const struct shell_alias *shell_aliases_get(void)
++{
++#if defined(CONFIG_SHELL_ALIASES_HAS_FILE)
++	extern const struct shell_alias shell_aliases[];
++	return shell_aliases;
++#else
++	return NULL;
++#endif
++}
++
++/**
++ * @brief Get number of shell aliases.
++ */
++size_t shell_aliases_count(void)
++{
++#if defined(CONFIG_SHELL_ALIASES_HAS_FILE)
++	extern const size_t shell_aliases_count;
++	return shell_aliases_count + 1; /* +1 for builtin '?' */
++#else
++	return 1; /* Just the builtin '?' */
++#endif
++}
++
++/**
++ * @brief Find alias by name.
++ */
++const struct shell_alias *shell_alias_find(const char *name)
++{
++	size_t count;
++	const struct shell_alias *aliases;
++	size_t i;
++
++	if (name == NULL) {
++		return NULL;
++	}
++
++	/* Check builtin alias first */
++	if (strcmp(name, SHELL_ALIAS_HELP_NAME) == 0) {
++		return &builtin_alias;
++	}
++
++	aliases = shell_aliases_get();
++	if (aliases == NULL) {
++		return NULL;
++	}
++
++	count = shell_aliases_count();
++	for (i = 0; i < count; i++) {
++		if (strcmp(name, aliases[i].name) == 0) {
++			return &aliases[i];
++		}
++	}
++
++	return NULL;
++}
++
++/**
++ * @brief Get alias by index.
++ */
++const struct shell_alias *shell_alias_get(size_t idx)
++{
++	size_t count;
++	const struct shell_alias *aliases;
++
++	if (idx == 0) {
++		/* Built-in alias */
++		return &builtin_alias;
++	}
++
++	aliases = shell_aliases_get();
++	if (aliases == NULL) {
++		return NULL;
++	}
++
++	count = shell_aliases_count();
++	if (idx >= count) {
++		return NULL;
++	}
++
++	return &aliases[idx];
++}
++
++/**
++ * @brief Check if an alias should be used (considering collision).
++ *
++ * @param name Alias name.
++ * @param parent Parent command context (for select mode), NULL for root.
++ *
++ * @return Pointer to alias if valid, NULL if not found or collision.
++ */
++const struct shell_alias *shell_alias_check(const char *name,
++					   const struct shell_static_entry *parent)
++{
++	const struct shell_alias *alias;
++
++	if (name == NULL) {
++		return NULL;
++	}
++
++	/* Find the alias first */
++	alias = shell_alias_find(name);
++	if (alias == NULL) {
++		return NULL;
++	}
++
++	/* Check if alias name collides with an existing command */
++	if (alias_collision_check(name, parent)) {
++		return NULL;
++	}
++
++	return alias;
++}
++
++/**
++ * @brief Expand alias in command buffer if present.
++ *
++ * @param[in,out] cmd_buf Command buffer to check and expand.
++ * @param[in,out] cmd_len Command buffer length.
++ * @param[in] parent Parent command context (for select mode), NULL for root.
++ *
++ * @return true if alias was expanded, false otherwise.
++ */
++bool shell_alias_expand(char *cmd_buf, uint16_t *cmd_len,
++		       const struct shell_static_entry *parent)
++{
++	const struct shell_alias *alias;
++	size_t name_len;
++	size_t exp_len;
++	size_t rest_len;
++	char *rest;
++
++	if (cmd_buf == NULL || cmd_len == NULL || *cmd_len == 0) {
++		return false;
++	}
++
++	/* Find the end of the first word (command name) */
++	name_len = 0;
++	while (name_len < *cmd_len && !isspace((unsigned char)cmd_buf[name_len])) {
++		name_len++;
++	}
++
++	if (name_len == 0) {
++		return false;
++	}
++
++	/* Look up the alias with collision check */
++	alias = shell_alias_check(cmd_buf, parent);
++	if (alias == NULL) {
++		/* Check if there was a collision */
++		if (alias_collision_check(cmd_buf, parent)) {
++			/* Could print warning here if shell instance available */
++		}
++		return false;
++	}
++
++	exp_len = strlen(alias->expansion);
++
++	/* Check if expansion fits in buffer */
++	if (exp_len + 1 > CONFIG_SHELL_CMD_BUFF_SIZE) {
++		return false;
++	}
++
++	/* Calculate remaining characters after the alias name */
++	rest = cmd_buf + name_len;
++	rest_len = *cmd_len - name_len;
++
++	/* Check if we need to add space before remaining args */
++	if (rest_len > 0 && rest[0] != ' ') {
++		/* Make room for expansion + space + rest */
++		if (exp_len + 1 + rest_len + 1 > CONFIG_SHELL_CMD_BUFF_SIZE) {
++			return false;
++		}
++		/* Move the rest of the command to make room */
++		memmove(cmd_buf + exp_len + 1, rest, rest_len);
++		cmd_buf[exp_len] = ' ';
++		*cmd_len = exp_len + 1 + rest_len;
++	} else {
++		/* Just replace the alias name with expansion */
++		memmove(cmd_buf + exp_len, rest, rest_len);
++		*cmd_len = exp_len + rest_len;
++	}
++
++	/* Copy the expansion to the beginning of the buffer */
++	memcpy(cmd_buf, alias->expansion, exp_len);
++
++	cmd_buf[*cmd_len] = '\0';
++
++	return true;
++}
++
++#else /* CONFIG_SHELL_ALIASES */
++
++const struct shell_alias *shell_aliases_get(void)
++{
++	return NULL;
++}
++
++size_t shell_aliases_count(void)
++{
++	return 0;
++}
++
++const struct shell_alias *shell_alias_find(const char *name)
++{
++	ARG_UNUSED(name);
++	return NULL;
++}
++
++const struct shell_alias *shell_alias_check(const char *name,
++					   const struct shell_static_entry *parent)
++{
++	ARG_UNUSED(name);
++	ARG_UNUSED(parent);
++	return NULL;
++}
++
++bool shell_alias_expand(char *cmd_buf, uint16_t *cmd_len,
++		       const struct shell_static_entry *parent)
++{
++	ARG_UNUSED(cmd_buf);
++	ARG_UNUSED(cmd_len);
++	ARG_UNUSED(parent);
++	return false;
++}
++
++const struct shell_alias *shell_alias_get(size_t idx)
++{
++	ARG_UNUSED(idx);
++	return NULL;
++}
++
++#endif /* CONFIG_SHELL_ALIASES */
+diff --git a/subsys/shell/shell_aliases.h b/subsys/shell/shell_aliases.h
+new file mode 100644
+index 000000000..4ae3e5527
+--- /dev/null
++++ b/subsys/shell/shell_aliases.h
+@@ -0,0 +1,76 @@
++/*
++ * Copyright (c) 2018 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#ifndef SHELL_ALIASES_H__
++#define SHELL_ALIASES_H__
++
++#include <zephyr/shell/shell.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Shell alias descriptor.
++ */
++struct shell_alias {
++	const char *name;	  /*!< Alias name. */
++	const char *expansion;	  /*!< Command expansion. */
++};
++
++/**
++ * @brief Get array of shell aliases.
++ *
++ * @return Pointer to array of shell aliases, or NULL if aliases are disabled.
++ */
++const struct shell_alias *shell_aliases_get(void);
++
++/**
++ * @brief Get number of shell aliases.
++ *
++ * @return Number of aliases.
++ */
++size_t shell_aliases_count(void);
++
++/**
++ * @brief Find alias by name.
++ *
++ * @param name Alias name to find.
++ *
++ * @return Pointer to alias descriptor, or NULL if not found.
++ */
++const struct shell_alias *shell_alias_find(const char *name);
++
++/**
++ * @brief Check if an alias should be used (considering collision).
++ *
++ * @param name Alias name.
++ * @param parent Parent command context (for select mode), NULL for root.
++ *
++ * @return Pointer to alias if valid, NULL if not found or collision.
++ */
++const struct shell_alias *shell_alias_check(const char *name,
++					   const struct shell_static_entry *parent);
++
++/**
++ * @brief Expand alias in command buffer if present.
++ *
++ * @param[in,out] cmd_buf Command buffer to check and expand.
++ * @param[in,out] cmd_len Command buffer length.
++ * @param[in] parent Parent command context (for select mode), NULL for root.
++ *
++ * @return true if alias was expanded, false otherwise.
++ */
++bool shell_alias_expand(char *cmd_buf, uint16_t *cmd_len,
++		       const struct shell_static_entry *parent);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHELL_ALIASES_H__ */
++
++/* Internal function for tab completion - get alias at index */
++const struct shell_alias *shell_alias_get(size_t idx);
+diff --git a/subsys/shell/shell_cmds.c b/subsys/shell/shell_cmds.c
+index d0ba50341..a6036e45a 100644
+--- a/subsys/shell/shell_cmds.c
++++ b/subsys/shell/shell_cmds.c
+@@ -10,6 +10,7 @@
+ #include "shell_help.h"
+ #include "shell_ops.h"
+ #include "shell_vt100.h"
++#include "shell_aliases.h"
+ 
+ #define SHELL_MSG_CMD_NOT_SUPPORTED	"Command not supported.\n"
+ #define SHELL_HELP_COMMENT		"Ignore lines beginning with 'rem '"
+@@ -47,6 +48,7 @@
+ 	"Assume 80 chars screen width and send this setting "	\
+ 	"to the terminal."
+ #define SHELL_HELP_HISTORY	"Command history."
++#define SHELL_HELP_ALIASES		"List configured aliases."
+ #define SHELL_HELP_ECHO		"Toggle shell echo."
+ #define SHELL_HELP_ECHO_ON	"Enable shell echo."
+ #define SHELL_HELP_ECHO_OFF	\
+@@ -382,6 +384,55 @@ static int cmd_history(const struct shell *sh, size_t argc, char **argv)
+ 	return 0;
+ }
+ 
++
++static int cmd_aliases(const struct shell *sh, size_t argc, char **argv)
++{
++	ARG_UNUSED(argc);
++	ARG_UNUSED(argv);
++
++	size_t i;
++	size_t count;
++	const struct shell_alias *aliases;
++	const struct shell_static_entry *parent = NULL;
++
++	aliases = shell_aliases_get();
++	count = shell_aliases_count();
++
++	for (i = 0; i < count; i++) {
++		const char *name;
++		const char *expansion;
++		bool ignored = false;
++
++		if (i == 0 && aliases == NULL) {
++			/* Built-in alias */
++			name = "?";
++			expansion = "help";
++		} else if (aliases != NULL) {
++			name = aliases[i].name;
++			expansion = aliases[i].expansion;
++		} else {
++			break;
++		}
++
++		/* Check if alias collides with existing command */
++		if (IS_ENABLED(CONFIG_SHELL_ALIASES) && name != NULL) {
++			struct shell_static_entry dloc;
++			if (z_shell_find_cmd(parent, name, &dloc) != NULL) {
++				ignored = true;
++				z_shell_fprintf(sh, SHELL_WARNING,
++					"Alias '%s' ignored because command exists in current context\n",
++					name);
++			}
++		}
++
++		if (!ignored) {
++			shell_print(sh, "%-20s%s", name, expansion);
++		}
++	}
++
++	return 0;
++}
++
+ static int cmd_shell_stats_show(const struct shell *sh, size_t argc,
+ 				char **argv)
+ {
+@@ -550,6 +601,8 @@ SHELL_COND_CMD_ARG_REGISTER(CONFIG_SHELL_VT100_COMMANDS, clear, NULL,
+ SHELL_CMD_REGISTER(shell, &m_sub_shell, SHELL_HELP_SHELL, NULL);
+ SHELL_COND_CMD_ARG_REGISTER(CONFIG_SHELL_HISTORY, history, NULL,
+ 			SHELL_HELP_HISTORY, cmd_history, 1, 0);
++SHELL_COND_CMD_ARG_REGISTER(CONFIG_SHELL_ALIASES, aliases, NULL,
++			SHELL_HELP_ALIASES, cmd_aliases, 1, 0);
+ SHELL_COND_CMD_ARG_REGISTER(CONFIG_SHELL_CMDS_RESIZE, resize, &m_sub_resize,
+ 			SHELL_HELP_RESIZE, cmd_resize, 1, 1);
+ SHELL_COND_CMD_ARG_REGISTER(CONFIG_SHELL_CMDS_SELECT, select, NULL,

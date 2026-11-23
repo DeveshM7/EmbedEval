@@ -1,0 +1,1658 @@
+diff --git a/include/nuttx/event.h b/include/nuttx/event.h
+new file mode 100644
+index 00000000..48231648
+--- /dev/null
++++ b/include/nuttx/event.h
+@@ -0,0 +1,105 @@
++/****************************************************************************
++ * include/nuttx/event.h
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#ifndef __INCLUDE_NUTTX_EVENT_H
++#define __INCLUDE_NUTTX_EVENT_H
++
++/****************************************************************************
++ * Included Files
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#include <stdint.h>
++#include <stddef.h>
++
++#ifdef __cplusplus
++#define EXTERN extern "C"
++extern "C"
++{
++#else
++#define EXTERN extern
++#endif
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ******** *******************************************************************/
++
++/* Event wait flags */
++
++#define NXEVENT_WAIT_ALL 0x0001  /* Wait for all events in the mask */
++#define NXEVENT_ANY       0x0000  /* Wait for any event (default) */
++
++/* Initialization macro */
++
++#define NXEVENT_INITIALIZER(event, initial_mask) \
++  {(initial_mask), NULL}
++
++/* Access to internal waitlist (for kernel use only) */
++
++#define NXEVENT_WAITLIST(event) (&((event)->waitlist))
++
++/****************************************************************************
++ * Public Type Definitions
++ ******** *******************************************************************/
++
++/* Event group structure */
++
++typedef struct nxevent_s
++{
++  volatile uint32_t  events;    /* Pending events */
++  FAR struct nxevent_wait_s *waitlist; /* List of waiting tasks (kernel internal) */
++} nxevent_t;
++
++/* Event group wait queue entry (for kernel use only) */
++
++struct nxevent_wait_s
++{
++  uint32_t            events;   /* The events we're waiting for */
++  uint8_t             flags;    /* Wait flags (NXEVENT_WAIT_ALL, etc.) */
++  FAR struct nxevent_wait_s *flink;
++  FAR struct tcb_s   *wtcb;     /* The waiting task */
++};
++
++/****************************************************************************
++ * Public Function Prototypes
++ ******** *******************************************************************/
++
++/* Event group manipulation */
++
++int nxevent_init(FAR nxevent_t *event, uint32_t events);
++int nxevent_destroy(FAR nxevent_t *event);
++int nxevent_reset(FAR nxevent_t *event, uint32_t events);
++int nxevent_post(FAR nxevent_t *event, uint32_t events, uint8_t flags);
++
++/* Event group wait operations */
++
++uint32_t nxevent_wait(FAR nxevent_t *event, uint32_t events, uint8_t flags);
++uint32_t nxevent_tickwait(FAR nxevent_t *event, uint32_t events, 
++                          uint8_t flags, uint32_t ticks);
++uint32_t nxevent_trywait(FAR nxevent_t *event, uint32_t events, uint8_t flags);
++
++#undef EXTERN
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __ASSEMBLY__ */
++#endif /* __INCLUDE_NUTTX_EVENT_H */
+diff --git a/include/nuttx/sched.h b/include/nuttx/sched.h
+index f08ed4e3..2d8413d4 100644
+--- a/include/nuttx/sched.h
++++ b/include/nuttx/sched.h
+@@ -231,6 +231,7 @@ enum tstate_e
+   TSTATE_TASK_RUNNING,        /* READY_TO_RUN - And running */
+ 
+   TSTATE_TASK_INACTIVE,       /* BLOCKED      - Initialized but not yet activated */
++  TSTATE_WAIT_EVENT,           /* BLOCKED      - Waiting for an event group */
+   TSTATE_WAIT_SEM,            /* BLOCKED      - Waiting for a semaphore */
+   TSTATE_WAIT_SIG,            /* BLOCKED      - Waiting for a signal */
+ #if !defined(CONFIG_DISABLE_MQUEUE) || !defined(CONFIG_DISABLE_MQUEUE_SYSV)
+diff --git a/sched/Makefile b/sched/Makefile
+index fcddb0c4..79d9c553 100644
+--- a/sched/Makefile
++++ b/sched/Makefile
+@@ -34,6 +34,7 @@ include paging/Make.defs
+ include pthread/Make.defs
+ include sched/Make.defs
+ include semaphore/Make.defs
++include event/Make.defs
+ include signal/Make.defs
+ include task/Make.defs
+ include timer/Make.defs
+diff --git a/sched/event/CMakeLists.txt b/sched/event/CMakeLists.txt
+new file mode 100644
+index 00000000..77bee89b
+--- /dev/null
++++ b/sched/event/CMakeLists.txt
+@@ -0,0 +1,36 @@
++############################################################################
++# sched/event/CMakeLists.txt
++#
++# Licensed to the Apache Software Foundation (ASF) under one or more
++# contributor license agreements.  See the NOTICE file distributed with
++# this work for additional information regarding copyright ownership.  The
++# ASF licenses this file to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance with the
++# License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++# License for the specific language governing permissions and limitations
++# under the License.
++#
++############################################################################
++
++if(CONFIG_SCHED_EVENTS)
++
++  set(SRCS
++    nxevent_init.c
++    nxevent_destroy.c
++    nxevent_reset.c
++    nxevent_post.c
++    nxevent_wait.c
++    nxevent_tickwait.c
++    nxevent_trywait.c
++    nxevent_waitirq.c
++  )
++
++  target_sources(nuttx PRIVATE ${SRCS})
++
++endif()
+diff --git a/sched/event/Make.defs b/sched/event/Make.defs
+new file mode 100644
+index 00000000..c061adfb
+--- /dev/null
++++ b/sched/event/Make.defs
+@@ -0,0 +1,27 @@
++############################################################################
++# sched/event/Make.defs
++#
++# Licensed to the Apache Software Foundation (ASF) under one or more
++# contributor license agreements.  See the NOTICE file distributed with
++# this work for additional information regarding copyright ownership.  The
++# ASF licenses this file to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance with the
++# License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++# License for the specific language governing permissions and limitations
++# under the License.
++#
++############################################################################
++
++ifeq ($(CONFIG_SCHED_EVENTS),y)
++CSRCS += nxevent_init.c nxevent_destroy.c nxevent_reset.c nxevent_post.c
++CSRCS += nxevent_wait.c nxevent_tickwait.c nxevent_trywait.c nxevent_waitirq.c
++
++DEPPATH += --dep-path event
++VPATH += :event
++endif
+diff --git a/sched/event/event.c b/sched/event/event.c
+new file mode 100644
+index 00000000..9cd711b8
+--- /dev/null
++++ b/sched/event/event.c
+@@ -0,0 +1,31 @@
++/****************************************************************************
++ * sched/event/event.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <nuttx/event.h>
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/event/nxevent.h b/sched/event/nxevent.h
+new file mode 100644
+index 00000000..1a18973e
+--- /dev/null
++++ b/sched/event/nxevent.h
+@@ -0,0 +1,69 @@
++/****************************************************************************
++ * sched/event/nxevent.h
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#ifndef __SCHED_EVENT_NXEVENT_H
++#define __SCHED_EVENT_NXEVENT_H
++
++/****************************************************************************
++ * Included Files
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <nuttx/event.h>
++#include <nuttx/queue.h>
++#include <nuttx/sched.h>
++
++/* Macros for managing wait queues */
++
++#define NXEVENT_WAITLIST(event) (&((event)->waitlist))
++
++/* Event group wait queue entry - extends tcb */
++
++struct nxevent_wait_s
++{
++  uint32_t            events;   /* The events we're waiting for */
++  uint8_t             flags;    /* Wait flags (NXEVENT_WAIT_ALL, etc.) */
++};
++
++/* Access wait structure from TCB */
++
++#define NXEVENT_WAITFROMTCB(wtcb) ((FAR struct nxevent_wait_s *)(&(wtcb)->waitobj[0]))
++
++/****************************************************************************
++ * Public Function Prototypes
++ ******** *******************************************************************/
++
++/* Wake up a thread that is waiting on an event group */
++
++void nxevent_wait_irq(FAR struct tcb_s *wtcb, int errcode);
++
++/* Handle event group timer expiration */
++
++void nxevent_timeout(wdparm_t pid);
++
++/* Recover event group resources when a task is destroyed */
++
++void nxevent_recover(FAR struct tcb_s *tcb);
++
++#endif /* CONFIG_SCHED_EVENTS */
++#endif /* __SCHED_EVENT_NXEVENT_H */
+diff --git a/sched/event/nxevent_destroy.c b/sched/event/nxevent_destroy.c
+new file mode 100644
+index 00000000..90cdb3da
+--- /dev/null
++++ b/sched/event/nxevent_destroy.c
+@@ -0,0 +1,115 @@
++/****************************************************************************
++ * sched/event/nxevent_destroy.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <stdlib.h>
++#include <errno.h>
++#include <nuttx/irq.h>
++
++#include "sched/sched.h"
++#include "event/nxevent.h"
++
++/****************************************************************************
++ * Public Functions
++ ******** *******************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_destroy
++ *
++ * Description:
++ *   This function destroys the event group referenced by 'event'.
++ *
++ * Input Parameters:
++ *   event - Event group to be destroyed
++ *
++ * Returned Value:
++ *   This is an internal OS interface and should not be used by applications.
++ *   It follows the NuttX internal error return policy:  Zero (OK) is
++ *   returned on success.  A negated errno value is returned on failure.
++ *
++ ******** *******************************************************************/
++
++int nxevent_destroy(FAR nxevent_t *event)
++{
++  irqstate_t flags;
++  FAR struct nxevent_wait_s *waiter;
++  FAR struct tcb_s *wtcb;
++
++  if (event == NULL)
++    {
++      return -EINVAL;
++    }
++
++  /* Disable interrupts to safely access the wait list */
++
++  flags = enter_critical_section();
++
++  /* Wake up all waiting tasks */
++
++  while ((waiter = event->waitlist) != NULL)
++    {
++      /* Remove from list */
++
++      event->waitlist = waiter->flink;
++
++      /* Wake up the task */
++
++      wtcb = waiter->wtcb;
++
++      /* Stop the watchdog timer if active */
++
++      if (WDOG_ISACTIVE(&wtcb->waitdog))
++        {
++          wd_cancel(&wtcb->waitdog);
++        }
++
++      /* Indicate that the wait is over */
++
++      wtcb->waitobj = NULL;
++
++      /* Mark errno for the task */
++
++      wtcb->errcode = ECANCELED;
++
++      /* Add the task to ready-to-run task list */
++
++      if (nxsched_add_readytorun(wtcb))
++        {
++          /* We need to do a context switch to the awoken task */
++
++          up_switch_context(wtcb, this_task());
++        }
++
++      /* Free the waiter structure */
++
++      kmm_free(waiter);
++    }
++
++  /* Interrupts may now be enabled */
++
++  leave_critical_section(flags);
++
++  return OK;
++}
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/event/nxevent_init.c b/sched/event/nxevent_init.c
+new file mode 100644
+index 00000000..26dfd43d
+--- /dev/null
++++ b/sched/event/nxevent_init.c
+@@ -0,0 +1,62 @@
++/****************************************************************************
++ * sched/event/nxevent_init.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <stddef.h>
++#include <errno.h>
++#include <nuttx/event.h>
++
++/****************************************************************************
++ * Public Functions
++ ******** *******************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_init
++ *
++ * Description:
++ *   This function initializes the event group referenced by 'event' with
++ *   the initial pending events in 'events'.
++ *
++ * Input Parameters:
++ *   event  - Event group to be initialized
++ *   events - Initial pending events
++ *
++ * Returned Value:
++ *   This is an internal OS interface and should not be used by applications.
++ *   It follows the NuttX internal error return policy:  Zero (OK) is
++ *   returned on success.  A negated errno value is returned on failure.
++ *
++ ******** *******************************************************************/
++
++int nxevent_init(FAR nxevent_t *event, uint32_t events)
++{
++  if (event == NULL)
++    {
++      return -EINVAL;
++    }
++
++  event->events = events;
++  return OK;
++}
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/event/nxevent_post.c b/sched/event/nxevent_post.c
+new file mode 100644
+index 00000000..e81e5232
+--- /dev/null
++++ b/sched/event/nxevent_post.c
+@@ -0,0 +1,200 @@
++/****************************************************************************
++ * sched/event/nxevent_post.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <errno.h>
++#include <nuttx/irq.h>
++
++#include "sched/sched.h"
++#include "event/nxevent.h"
++
++/****************************************************************************
++ * Public Functions
++ ******** *******************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_post
++ *
++ * Description:
++ *   This function adds the events in 'events' to the pending event set of
++ *   the event group referenced by 'event'. If a zero event mask is passed,
++ *   this is treated as an "any delivery" and must wake blocked waiters
++ *   immediately.
++ *
++ * Input Parameters:
++ *   event  - Event group to post to
++ *   events - Events to post
++ *   flags  - Post flags (currently unused)
++ *
++ * Returned Value:
++ *   This is an internal OS interface and should not be used by applications.
++ *   It follows the NuttX internal error return policy:  Zero (OK) is
++ *   returned on success.  A negated errno value is returned on failure.
++ *
++ ******** *******************************************************************/
++
++int nxevent_post(FAR nxevent_t *event, uint32_t events, uint8_t flags)
++{
++  irqstate_t state;
++  FAR struct nxevent_wait_s *waiter;
++  FAR struct tcb_s *wtcb;
++  FAR struct nxevent_wait_s *prev_waiter;
++  uint32_t pending_events;
++  uint32_t matched;
++
++  if (event == NULL)
++    {
++      return -EINVAL;
++    }
++
++  /* Disable interrupts to safely access the event and wait list */
++
++  state = enter_critical_section();
++
++  /* If events is zero, this is an "any delivery" - wake up all waiters */
++
++  if (events == 0)
++    {
++      pending_events = event->events;
++    }
++  else
++    {
++      /* Merge the events into the pending mask */
++
++      event->events |= events;
++      pending_events = event->events;
++    }
++
++  /* Check and wake up waiters whose conditions are satisfied */
++
++  prev_waiter = NULL;
++  for (waiter = event->waitlist; waiter != NULL; )
++    {
++      bool wake_up = false;
++
++      if (waiter->events == 0)
++        {
++          /* Waiting for any event - wake up if there are any pending events */
++
++          wake_up = pending_events != 0;
++        }
++      else if ((waiter->flags & NXEVENT_WAIT_ALL) != 0)
++        {
++          /* Waiting for all specific events */
++
++          wake_up = (pending_events & waiter->events) == waiter->events;
++        }
++      else
++        {
++          /* Waiting for any of the specific events */
++
++          wake_up = (pending_events & waiter->events) != 0;
++        }
++
++      if (wake_up)
++        {
++          /* Calculate matched events */
++
++          if (waiter->events == 0)
++            {
++              matched = pending_events;
++            }
++          else if ((waiter->flags & NXEVENT_WAIT_ALL) != 0)
++            {
++              matched = waiter->events;
++            }
++          else
++            {
++              matched = pending_events & waiter->events;
++            }
++
++          /* Update pending events */
++
++          pending_events &= ~matched;
++
++          /* We'll remove this waiter from the list */
++
++          wtcb = waiter->wtcb;
++
++          /* Stop the watchdog timer if active */
++
++          if (WDOG_ISACTIVE(&wtcb->waitdog))
++            {
++              wd_cancel(&wtcb->waitdog);
++            }
++
++          /* Save the matched events in the waiter structure for later retrieval */
++
++          waiter->events = matched;
++
++          /* Indicate that the wait is over */
++
++          wtcb->waitobj = NULL;
++
++          /* Mark errno for the task */
++
++          wtcb->errcode = OK;
++
++          /* Add the task to ready-to-run task list */
++
++          if (nxsched_add_readytorun(wtcb))
++            {
++              /* We need to do a context switch to the awoken task */
++
++              up_switch_context(wtcb, this_task());
++            }
++
++          /* Remove from wait list and free waiter structure */
++
++          if (prev_waiter == NULL)
++            {
++              event->waitlist = waiter->flink;
++              kmm_free(waiter);
++              waiter = event->waitlist;
++            }
++          else
++            {
++              prev_waiter->flink = waiter->flink;
++              kmm_free(waiter);
++              waiter = prev_waiter->flink;
++            }
++        }
++      else
++        {
++          prev_waiter = waiter;
++          waiter = waiter->flink;
++        }
++    }
++
++  /* Update the pending events */
++
++  event->events = pending_events;
++
++  /* Interrupts may now be enabled */
++
++  leave_critical_section(state);
++
++  return OK;
++}
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/event/nxevent_reset.c b/sched/event/nxevent_reset.c
+new file mode 100644
+index 00000000..c3a1bf8a
+--- /dev/null
++++ b/sched/event/nxevent_reset.c
+@@ -0,0 +1,185 @@
++/****************************************************************************
++ * sched/event/nxevent_reset.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <errno.h>
++#include <nuttx/irq.h>
++
++#include "sched/sched.h"
++#include "event/nxevent.h"
++
++/****************************************************************************
++ * Public Functions
++ ******** *******************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_reset
++ *
++ * Description:
++ *   This function resets the pending events of the event group to the
++ *   specified value. Tasks waiting on the event group will be checked
++ *   and woken up if their wait conditions are satisfied.
++ *
++ * Input Parameters:
++ *   event  - Event group to reset
++ *   events - New pending events value
++ *
++ * Returned Value:
++ *   This is an internal OS interface and should not be used by applications.
++ *   It follows the NuttX internal error return policy:  Zero (OK) is
++ *   returned on success.  A negated errno value is returned on failure.
++ *
++ ******** *******************************************************************/
++
++int nxevent_reset(FAR nxevent_t *event, uint32_t events)
++{
++  irqstate_t flags;
++  FAR struct nxevent_wait_s *waiter;
++  FAR struct tcb_s *wtcb;
++  FAR struct nxevent_wait_s *prev_waiter;
++  uint32_t pending_events;
++
++  if (event == NULL)
++    {
++      return -EINVAL;
++    }
++
++  /* Disable interrupts to safely access the wait list */
++
++  flags = enter_critical_section();
++
++  /* Set the new events mask */
++
++  event->events = events;
++  pending_events = events;
++
++  /* Check and wake up waiters whose conditions are satisfied */
++
++  prev_waiter = NULL;
++  for (waiter = event->waitlist; waiter != NULL; )
++    {
++      bool wake_up = false;
++      uint32_t matched;
++
++      if (waiter->events == 0)
++        {
++          /* Waiting for any event - wake up if there are any pending events */
++
++          wake_up = pending_events != 0;
++        }
++      else if ((waiter->flags & NXEVENT_WAIT_ALL) != 0)
++        {
++          /* Waiting for all specific events */
++
++          wake_up = (pending_events & waiter->events) == waiter->events;
++        }
++      else
++        {
++          /* Waiting for any of the specific events */
++
++          wake_up = (pending_events & waiter->events) != 0;
++        }
++
++      if (wake_up)
++        {
++          /* Calculate matched events */
++
++          if (waiter->events == 0)
++            {
++              matched = pending_events;
++            }
++          else if ((waiter->flags & NXEVENT_WAIT_ALL) != 0)
++            {
++              matched = waiter->events;
++            }
++          else
++            {
++              matched = pending_events & waiter->events;
++            }
++
++          /* Update pending events */
++
++          pending_events &= ~matched;
++
++          /* We'll remove this waiter from the list */
++
++          wtcb = waiter->wtcb;
++
++          /* Stop the watchdog timer if active */
++
++          if (WDOG_ISACTIVE(&wtcb->waitdog))
++            {
++              wd_cancel(&wtcb->waitdog);
++            }
++
++          /* Save the matched events in the waiter structure for later retrieval */
++
++          waiter->events = matched;
++
++          /* Indicate that the wait is over */
++
++          wtcb->waitobj = NULL;
++
++          /* Mark errno for the task */
++
++          wtcb->errcode = OK;
++
++          /* Add the task to ready-to-run task list */
++
++          if (nxsched_add_readytorun(wtcb))
++            {
++              /* We need to do a context switch to the awoken task */
++
++              up_switch_context(wtcb, this_task());
++            }
++
++          /* Remove from wait list and free waiter structure */
++
++          if (prev_waiter == NULL)
++            {
++              event->waitlist = waiter->flink;
++              kmm_free(waiter);
++              waiter = event->waitlist;
++            }
++          else
++            {
++              prev_waiter->flink = waiter->flink;
++              kmm_free(waiter);
++              waiter = prev_waiter->flink;
++            }
++        }
++      else
++        {
++          prev_waiter = waiter;
++          waiter = waiter->flink;
++        }
++    }
++
++  /* Interrupts may now be enabled */
++
++  leave_critical_section(flags);
++
++  return OK;
++}
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/event/nxevent_tickwait.c b/sched/event/nxevent_tickwait.c
+new file mode 100644
+index 00000000..eabbfa3b
+--- /dev/null
++++ b/sched/event/nxevent_tickwait.c
+@@ -0,0 +1,193 @@
++/****************************************************************************
++ * sched/event/nxevent_tickwait.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <stdlib.h>
++#include <stdbool.h>
++#include <errno.h>
++#include <nuttx/irq.h>
++#include <nuttx/arch.h>
++#include <nuttx/clock.h>
++#include <nuttx/wdog.h>
++
++#include "sched/sched.h"
++#include "event/nxevent.h"
++
++/****************************************************************************
++ * Public Functions
++ ******** *******************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_tickwait
++ *
++ * Description:
++ *   This function is a lighter weight version of event_timedwait().  It is
++ *   non-standard and intended only for use within the RTOS.
++ *
++ *   The function behaves the same as nxevent_wait, but will only wait for
++ *   up to 'ticks' system ticks.
++ *
++ * Input Parameters:
++ *   event  - Event group to wait on
++ *   events - Events to wait for (0 means any event)
++ *   flags  - Wait flags (NXEVENT_WAIT_ALL, etc.)
++ *   ticks  - Number of ticks to wait
++ *
++ * Returned Value:
++ *   Returns the matched event mask. Returns 0 if timeout or if the
++ *   condition was not satisfied.
++ *
++ ******** *******************************************************************/
++
++uint32_t nxevent_tickwait(FAR nxevent_t *event, uint32_t events,
++                          uint8_t flags, uint32_t ticks)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR struct nxevent_wait_s *waiter;
++  irqstate_t state;
++  uint32_t matched;
++  bool switch_needed;
++
++  /* This API should not be called from interrupt handlers */
++
++  DEBUGASSERT(event != NULL && up_interrupt_context() == false);
++
++  /* Allocate a wait structure */
++
++  waiter = (FAR struct nxevent_wait_s *)kmm_malloc(sizeof(struct nxevent_wait_s));
++  if (waiter == NULL)
++    {
++      return 0;
++    }
++
++  waiter->events = events;
++  waiter->flags = flags;
++
++  /* Disable interrupts to safely access the event and manage wait list */
++
++  state = enter_critical_section();
++
++  /* Try to get the event without blocking */
++
++  matched = nxevent_trywait(event, events, flags);
++  if (matched != 0)
++    {
++      /* We got the events - no need to wait */
++
++      leave_critical_section(state);
++      kmm_free(waiter);
++      return matched;
++    }
++
++  /* If ticks is zero, return immediately (non-blocking try-wait) */
++
++  if (ticks == 0)
++    {
++      leave_critical_section(state);
++      kmm_free(waiter);
++      return 0;
++    }
++
++  /* Start the watchdog with interrupts still disabled */
++
++  wd_start(&rtcb->waitdog, ticks, nxevent_timeout, nxsched_gettid());
++
++  /* We will have to wait - add ourselves to the wait list */
++
++  waiter->flink = event->waitlist;
++  waiter->wtcb = rtcb;
++  event->waitlist = waiter;
++
++  /* Save the event in the TCB for use by nxevent_wait_irq */
++
++  rtcb->waitobj = event;
++
++  /* Remove the tcb task from the ready-to-run list */
++
++  switch_needed = nxsched_remove_readytorun(rtcb, true);
++
++  /* Add the task to the event wait queue */
++
++  rtcb->task_state = TSTATE_WAIT_EVENT;
++  nxsched_add_prioritized(rtcb, NXEVENT_WAITLIST(event));
++
++  /* Now, perform the context switch if one is needed */
++
++  if (switch_needed)
++    {
++      up_switch_context(this_task(), rtcb);
++    }
++
++  /* When we resume at this point, either (1) the events have been
++   * assigned to this task of execution, or (2) the event wait
++   * has been interrupted by a signal or a timeout.  We can detect
++   * these latter cases by examining the per-thread errno value.
++   *
++   * In the event that the event wait was interrupted by a signal
++   * or a timeout, certain event clean-up operations have already
++   * been performed (see nxevent_waitirq.c).
++   */
++
++  /* Stop the watchdog timer */
++
++  wd_cancel(&rtcb->waitdog);
++
++  /* Check if an error occurred while we were sleeping.  Expected
++   * errors include EINTR meaning that we were awakened by a signal
++   * or ETIMEDOUT meaning that the timer expired.
++   */
++
++  if (rtcb->errcode != OK)
++    {
++      matched = 0;
++    }
++  else
++    {
++      /* Get the matched events from the wait structure */
++
++      matched = waiter->events;
++    }
++
++  /* Remove from the wait list and free the waiter structure */
++
++  if (event->waitlist == waiter)
++    {
++      event->waitlist = waiter->flink;
++    }
++  else
++    {
++      FAR struct nxevent_wait_s *prev;
++      for (prev = event->waitlist; prev->flink != waiter; prev = prev->flink);
++      prev->flink = waiter->flink;
++    }
++
++  kmm_free(waiter);
++
++  /* Interrupts may now be enabled */
++
++  leave_critical_section(state);
++
++  return matched;
++}
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/event/nxevent_trywait.c b/sched/event/nxevent_trywait.c
+new file mode 100644
+index 00000000..cb91dc65
+--- /dev/null
++++ b/sched/event/nxevent_trywait.c
+@@ -0,0 +1,106 @@
++/****************************************************************************
++ * sched/event/nxevent_trywait.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <errno.h>
++#include <nuttx/irq.h>
++
++#include "sched/sched.h"
++#include "event/nxevent.h"
++
++/****************************************************************************
++ * Public Functions
++ ******** *******************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_trywait
++ *
++ * Description:
++ *   This function is a non-blocking version of nxevent_wait(). If the
++ *   requested events are already satisfied, this function returns the
++ *   matching event mask. Otherwise it returns 0.
++ *
++ * Input Parameters:
++ *   event  - Event group to wait on
++ *   events - Events to wait for (0 means any event)
++ *   flags  - Wait flags (NXEVENT_WAIT_ALL, etc.)
++ *
++ * Returned Value:
++ *   If the condition is satisfied, returns the matched event mask.
++ *   Returns 0 if the condition is not satisfied.
++ *
++ ******** *******************************************************************/
++
++uint32_t nxevent_trywait(FAR nxevent_t *event, uint32_t events, uint8_t flags)
++{
++  irqstate_t state;
++  uint32_t matched = 0;
++
++  if (event == NULL)
++    {
++      return 0;
++    }
++
++  /* Disable interrupts to safely access the event */
++
++  state = enter_critical_section();
++
++  /* Check if the condition is satisfied */
++
++  if (events == 0)
++    {
++      /* Waiting for any event */
++
++      matched = event->events;
++    }
++  else if ((flags & NXEVENT_WAIT_ALL) != 0)
++    {
++      /* Waiting for all events */
++
++      if ((event->events & events) == events)
++        {
++          matched = events;
++        }
++    }
++  else
++    {
++      /* Waiting for any of the events */
++
++      matched = event->events & events;
++    }
++
++  /* Clear the matched events from the pending mask */
++
++  if (matched != 0)
++    {
++      event->events &= ~matched;
++    }
++
++  /* Interrupts may now be enabled */
++
++  leave_critical_section(state);
++
++  return matched;
++}
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/event/nxevent_wait.c b/sched/event/nxevent_wait.c
+new file mode 100644
+index 00000000..c9397d3b
+--- /dev/null
++++ b/sched/event/nxevent_wait.c
+@@ -0,0 +1,177 @@
++/****************************************************************************
++ * sched/event/nxevent_wait.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <stdlib.h>
++#include <stdbool.h>
++#include <errno.h>
++#include <nuttx/irq.h>
++#include <nuttx/arch.h>
++
++#include "sched/sched.h"
++#include "event/nxevent.h"
++
++/****************************************************************************
++ * Public Functions
++ ******** *******************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_wait
++ *
++ * Description:
++ *   This function atomically releases the 'waitlist' and waits for any
++ *   of the specified events in 'events' to be posted. If the events are
++ *   already posted, this function returns immediately.
++ *
++ *   By default, the condition is satisfied if any of the events in the
++ *   mask is posted. If NXEVENT_WAIT_ALL is set in 'flags', the condition
++ *   is satisfied only if all events in the mask are posted.
++ *
++ *   The events consumed by a successful wait are cleared from the pending
++ *   event mask.
++ *
++ * Input Parameters:
++ *   event  - Event group to wait on
++ *   events - Events to wait for (0 means any event)
++ *   flags  - Wait flags (NXEVENT_WAIT_ALL, etc.)
++ *
++ * Returned Value:
++ *   Returns the matched event mask. The events returned are those that
++ *   satisfied the wait condition and have been consumed.
++ *
++ ******** *******************************************************************/
++
++uint32_t nxevent_wait(FAR nxevent_t *event, uint32_t events, uint8_t flags)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR struct nxevent_wait_s *waiter;
++  irqstate_t state;
++  uint32_t matched;
++  bool switch_needed;
++
++  /* This API should not be called from interrupt handlers */
++
++  DEBUGASSERT(event != NULL && up_interrupt_context() == false);
++
++  /* Allocate a wait structure */
++
++  waiter = (FAR struct nxevent_wait_s *)kmm_malloc(sizeof(struct nxevent_wait_s));
++  if (waiter == NULL)
++    {
++      return 0;
++    }
++
++  waiter->events = events;
++  waiter->flags = flags;
++
++  /* Disable interrupts to safely access the event and manage wait list */
++
++  state = enter_critical_section();
++
++  /* Try to get the event without blocking */
++
++  matched = nxevent_trywait(event, events, flags);
++  if (matched != 0)
++    {
++      /* We got the events - no need to wait */
++
++      leave_critical_section(state);
++      kmm_free(waiter);
++      return matched;
++    }
++
++  /* We will have to wait - add ourselves to the wait list */
++
++  waiter->flink = event->waitlist;
++  waiter->wtcb = rtcb;
++  event->waitlist = waiter;
++
++  /* Save the event in the TCB for use by nxevent_wait_irq */
++
++  rtcb->waitobj = event;
++
++  /* Remove the tcb task from the ready-to-run list */
++
++  switch_needed = nxsched_remove_readytorun(rtcb, true);
++
++  /* Add the task to the event wait queue */
++
++  rtcb->task_state = TSTATE_WAIT_EVENT;
++  nxsched_add_prioritized(rtcb, NXEVENT_WAITLIST(event));
++
++  /* Now, perform the context switch if one is needed */
++
++  if (switch_needed)
++    {
++      up_switch_context(this_task(), rtcb);
++    }
++
++  /* When we resume at this point, either (1) the events have been
++   * assigned to this task of execution, or (2) the event wait
++   * has been interrupted by a signal or a timeout.  We can detect
++   * these latter cases by examining the per-thread errno value.
++   *
++   * In the event that the event wait was interrupted by a signal
++   * or a timeout, certain event clean-up operations have already
++   * been performed (see nxevent_waitirq.c).
++   */
++
++  /* Check if an error occurred while we were sleeping.  Expected
++   * errors include EINTR meaning that we were awakened by a signal
++   * or ETIMEDOUT meaning that the timer expired.
++   */
++
++  if (rtcb->errcode != OK)
++    {
++      matched = 0;
++    }
++  else
++    {
++      /* Get the matched events from the wait structure */
++
++      matched = waiter->events;
++    }
++
++  /* Remove from the wait list and free the waiter structure */
++
++  if (event->waitlist == waiter)
++    {
++      event->waitlist = waiter->flink;
++    }
++  else
++    {
++      FAR struct nxevent_wait_s *prev;
++      for (prev = event->waitlist; prev->flink != waiter; prev = prev->flink);
++      prev->flink = waiter->flink;
++    }
++
++  kmm_free(waiter);
++
++  /* Interrupts may now be enabled */
++
++  leave_critical_section(state);
++
++  return matched;
++}
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/event/nxevent_waitirq.c b/sched/event/nxevent_waitirq.c
+new file mode 100644
+index 00000000..027c8b9f
+--- /dev/null
++++ b/sched/event/nxevent_waitirq.c
+@@ -0,0 +1,230 @@
++/****************************************************************************
++ * sched/event/nxevent_waitirq.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ******** *******************************************************************/
++
++#include <nuttx/config.h>
++
++#ifdef CONFIG_SCHED_EVENTS
++
++#include <stdlib.h>
++#include <sched.h>
++#include <assert.h>
++#include <errno.h>
++
++#include <nuttx/irq.h>
++#include <nuttx/arch.h>
++
++#include "sched/sched.h"
++#include "event/nxevent.h"
++
++/****************************************************************************
++ * Public Functions
++ ******** *******************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_wait_irq
++ *
++ * Description:
++ *   This function is called when either:
++ *
++ *   1. A signal is received by a task that is waiting on an event group.
++ *      According to the POSIX spec, "...the calling thread shall not return
++ *      from the call to [nxevent_wait] until it either acquires the event
++ *      or the call is interrupted by a signal."
++ *   2. From logic associated with nxevent_tickwait().  This function is
++ *      called when the timeout elapses without receiving the events.
++ *
++ * Note: this function should used within critical_section
++ *
++ * Input Parameters:
++ *   wtcb    - A pointer to the TCB of the task that is waiting on an
++ *             event group, but has received a signal or timeout instead.
++ *   errcode - EINTR if the event wait was awakened by a signal;
++ *             ETIMEDOUT if awakened by a timeout
++ *
++ * Returned Value:
++ *   None
++ *
++ ******** *******************************************************************/
++
++void nxevent_wait_irq(FAR struct tcb_s *wtcb, int errcode)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR nxevent_t *event = wtcb->waitobj;
++  FAR struct nxevent_wait_s *waiter;
++  FAR struct nxevent_wait_s *prev;
++
++  /* It is possible that an interrupt/context switch beat us to the punch
++   * and already changed the task's state.
++   */
++
++  DEBUGASSERT(event != NULL);
++
++  /* Find the waiter in the event's wait list */
++
++  for (prev = NULL, waiter = event->waitlist;
++       waiter != NULL;
++       prev = waiter, waiter = waiter->flink)
++    {
++      if (waiter->wtcb == wtcb)
++        {
++          /* Remove the waiter from the list */
++
++          if (prev == NULL)
++            {
++              event->waitlist = waiter->flink;
++            }
++          else
++            {
++              prev->flink = waiter->flink;
++            }
++          break;
++        }
++    }
++
++  /* Indicate that the wait is over */
++
++  wtcb->waitobj = NULL;
++
++  /* Mark the errno value for the thread */
++
++  wtcb->errcode = errcode;
++
++  /* Add the task to ready-to-run task list */
++
++  if (nxsched_add_readytorun(wtcb))
++    {
++      up_switch_context(wtcb, rtcb);
++    }
++
++  /* Free the waiter structure */
++
++  if (waiter != NULL)
++    {
++      kmm_free(waiter);
++    }
++}
++
++/****************************************************************************
++ * Name: nxevent_timeout
++ *
++ * Description:
++ *   This function is called if the timeout elapses before before an
++ *   event is acquired.
++ *
++ * Input Parameters:
++ *   pid  - The task ID of the task to wakeup
++ *
++ * Returned Value:
++ *   None
++ *
++ * Assumptions:
++ *   - Called from the context of the timer interrupt handler.
++ *
++ ******** *******************************************************************/
++
++void nxevent_timeout(wdparm_t pid)
++{
++  FAR struct tcb_s *wtcb;
++  irqstate_t flags;
++
++  /* Disable interrupts to avoid race conditions */
++
++  flags = enter_critical_section();
++
++  /* Get the TCB associated with this PID.  It is possible that
++   * task may no longer be active when this watchdog goes off.
++   */
++
++  wtcb = nxsched_get_tcb(pid);
++
++  /* It is also possible that an interrupt/context switch beat us to the
++   * punch and already changed the task's state.
++   */
++
++  if (wtcb && wtcb->task_state == TSTATE_WAIT_EVENT)
++    {
++      /* Cancel the event wait */
++
++      nxevent_wait_irq(wtcb, ETIMEDOUT);
++    }
++
++  /* Interrupts may now be enabled */
++
++  leave_critical_section(flags);
++}
++
++/****************************************************************************
++ * Name: nxevent_recover
++ *
++ * Description:
++ *   Recover event group resources with a task or thread is destroyed
++ *
++ * Input Parameters:
++ *   tcb - The TCB of the task that is being destroyed
++ *
++ * Returned Value:
++ *   None
++ *
++ ******** *******************************************************************/
++
++void nxevent_recover(FAR struct tcb_s *tcb)
++{
++  FAR nxevent_t *event;
++  FAR struct nxevent_wait_s *waiter;
++  FAR struct nxevent_wait_s *prev;
++
++  if (tcb->waitobj == NULL)
++    {
++      return;
++    }
++
++  event = (FAR nxevent_t *)tcb->waitobj;
++
++  /* Find and remove the waiter from the event's wait list */
++
++  for (prev = NULL, waiter = event->waitlist;
++       waiter != NULL;
++       prev = waiter, waiter = waiter->flink)
++    {
++      if (waiter->wtcb == tcb)
++        {
++          /* Remove the waiter from the list */
++
++          if (prev == NULL)
++            {
++              event->waitlist = waiter->flink;
++            }
++          else
++            {
++              prev->flink = waiter->flink;
++            }
++          break;
++        }
++    }
++
++  /* Free the waiter structure */
++
++  if (waiter != NULL)
++    {
++      kmm_free(waiter);
++    }
++}
++
++#endif /* CONFIG_SCHED_EVENTS */
+diff --git a/sched/task/task_recover.c b/sched/task/task_recover.c
+index 85ed087a..f7a1143a 100644
+--- a/sched/task/task_recover.c
++++ b/sched/task/task_recover.c
+@@ -31,6 +31,7 @@
+ #include <nuttx/sched.h>
+ 
+ #include "semaphore/semaphore.h"
++#include "event/nxevent.h"
+ #include "wdog/wdog.h"
+ #include "mqueue/mqueue.h"
+ #include "pthread/pthread.h"
+@@ -77,6 +78,7 @@ void nxtask_recover(FAR struct tcb_s *tcb)
+    */
+ 
+   nxsem_recover(tcb);
++  nxevent_recover(tcb);
+ 
+ #if !defined(CONFIG_DISABLE_MQUEUE) || !defined(CONFIG_DISABLE_MQUEUE_SYSV)
+   /* Handle cases where the thread was waiting for a message queue event */

@@ -1,0 +1,306 @@
+diff --git a/makefiles/pseudomodules.inc.mk b/makefiles/pseudomodules.inc.mk
+index fb283022..45d089b1 100644
+--- a/makefiles/pseudomodules.inc.mk
++++ b/makefiles/pseudomodules.inc.mk
+@@ -616,3 +616,4 @@ NO_PSEUDOMODULES += auto_init_wdt_thread
+ # Packages and drivers may also add modules to PSEUDOMODULES in their `Makefile.include`.
+ 
+ ## @}
++PSEUDOMODULES += psa_riot_cipher_chacha20
+diff --git a/sys/crypto/psa_riot_cipher/chacha20.c b/sys/crypto/psa_riot_cipher/chacha20.c
+new file mode 100644
+index 00000000..6d0aa4c7
+--- /dev/null
++++ b/sys/crypto/psa_riot_cipher/chacha20.c
+@@ -0,0 +1,115 @@
++/*
++ * Copyright (C) 2024 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_psa_crypto
++ * @{
++ *
++ * @file
++ * @brief       Glue code translating between PSA Crypto and the RIOT ChaCha20 cipher
++ *
++ * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++ *
++ * @}
++ */
++
++#include "psa/crypto.h"
++#include "crypto/chacha.h"
++
++#define ENABLE_DEBUG    0
++#include "debug.h"
++
++/* ChaCha20 uses 12-byte (96-bit) nonces */
++#define CHACHA20_NONCE_LENGTH 12
++
++/* ChaCha20 always uses 20 rounds */
++#define CHACHA20_ROUNDS 20
++
++psa_status_t psa_cipher_chacha20_encrypt(const psa_key_attributes_t *attributes,
++                                         const uint8_t *key_buffer,
++                                         size_t key_buffer_size,
++                                         psa_algorithm_t alg,
++                                         const uint8_t *input,
++                                         size_t input_length,
++                                         uint8_t *output,
++                                         size_t output_size,
++                                         size_t *output_length)
++{
++    DEBUG("RIOT ChaCha20 Cipher");
++    (void)attributes;
++    (void)alg;
++
++    size_t iv_length = CHACHA20_NONCE_LENGTH;
++    size_t required_output_buf_size = PSA_CIPHER_ENCRYPT_OUTPUT_SIZE(PSA_KEY_TYPE_CHACHA20,
++                                        PSA_ALG_STREAM_CIPHER, input_length);
++
++    if (output_size < required_output_buf_size) {
++        return PSA_ERROR_BUFFER_TOO_SMALL;
++    }
++
++    /* Generate a random nonce using PSA random API */
++    psa_status_t status = psa_generate_random(output, iv_length);
++    if (status != PSA_SUCCESS) {
++        return status;
++    }
++
++    /* Initialize ChaCha20 context */
++    chacha_ctx ctx;
++    if (chacha_init(&ctx, CHACHA20_ROUNDS, key_buffer, key_buffer_size, output) != 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Encrypt the plaintext */
++    chacha_encrypt_bytes(&ctx, input, output + iv_length);
++
++    /* Set output length: nonce + ciphertext */
++    *output_length = iv_length + input_length;
++
++    return PSA_SUCCESS;
++}
++
++psa_status_t psa_cipher_chacha20_decrypt(const psa_key_attributes_t *attributes,
++                                         const uint8_t *key_buffer,
++                                         size_t key_buffer_size,
++                                         psa_algorithm_t alg,
++                                         const uint8_t *input,
++                                         size_t input_length,
++                                         uint8_t *output,
++                                         size_t output_size,
++                                         size_t *output_length)
++{
++    DEBUG("RIOT ChaCha20 Cipher");
++    (void)attributes;
++    (void)alg;
++
++    size_t iv_length = CHACHA20_NONCE_LENGTH;
++    size_t required_output_buf_size = PSA_CIPHER_DECRYPT_OUTPUT_SIZE(PSA_KEY_TYPE_CHACHA20,
++                                        PSA_ALG_STREAM_CIPHER, input_length);
++
++    if (output_size < required_output_buf_size) {
++        return PSA_ERROR_BUFFER_TOO_SMALL;
++    }
++
++    if (input_length < iv_length) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Initialize ChaCha20 context with the nonce from the input */
++    chacha_ctx ctx;
++    if (chacha_init(&ctx, CHACHA20_ROUNDS, key_buffer, key_buffer_size, input) != 0) {
++        return PSA_ERROR_INVALID_ARGUMENT;
++    }
++
++    /* Decrypt the ciphertext (skip the nonce at the start of input) */
++    chacha_decrypt_bytes(&ctx, input + iv_length, output);
++
++    /* Set output length: input_length - nonce */
++    *output_length = input_length - iv_length;
++
++    return PSA_SUCCESS;
++}
+diff --git a/sys/include/psa_crypto/psa/crypto_sizes.h b/sys/include/psa_crypto/psa/crypto_sizes.h
+index bdcc1be4..6c8b0bc1 100644
+--- a/sys/include/psa_crypto/psa/crypto_sizes.h
++++ b/sys/include/psa_crypto/psa/crypto_sizes.h
+@@ -592,7 +592,8 @@ extern "C" {
+  */
+ #define PSA_CIPHER_IV_LENGTH(key_type, alg) \
+     (PSA_BLOCK_CIPHER_BLOCK_LENGTH(key_type) > 1 && \
+-     ((alg) == PSA_ALG_CBC_NO_PADDING) ? 16 : 0)
++     ((alg) == PSA_ALG_CBC_NO_PADDING) ? 16 : \
++     ((key_type) == PSA_KEY_TYPE_CHACHA20 && ((alg) == PSA_ALG_STREAM_CIPHER)) ? 12 : 0)
+ 
+ /**
+  * @brief   A sufficient buffer size for storing the IV generated by @ref psa_cipher_generate_iv(),
+diff --git a/sys/psa_crypto/Makefile.dep b/sys/psa_crypto/Makefile.dep
+index cba3fb23..25a59d56 100644
+--- a/sys/psa_crypto/Makefile.dep
++++ b/sys/psa_crypto/Makefile.dep
+@@ -143,6 +143,19 @@ ifneq (,$(filter psa_cipher_aes_192_cbc_backend_riot,$(USEMODULE)))
+   USEMODULE += psa_riot_cipher_aes_192_cbc
+ endif
+ 
++## ChaCha20
++ifneq (,$(filter psa_cipher_chacha20,$(USEMODULE)))
++  ifeq (,$(filter psa_cipher_chacha20_custom_backend,$(USEMODULE)))
++    USEMODULE += psa_cipher_chacha20_backend_riot
++  endif
++endif
++
++ifneq (,$(filter psa_cipher_chacha20_backend_riot,$(USEMODULE)))
++  USEMODULE += crypto
++  USEMODULE += psa_riot_cipher
++  USEMODULE += psa_riot_cipher_chacha20
++endif
++
+ # Hash
+ 
+ ## MD5
+diff --git a/sys/psa_crypto/Makefile.include b/sys/psa_crypto/Makefile.include
+index 2fa1d4aa..fbd3580c 100644
+--- a/sys/psa_crypto/Makefile.include
++++ b/sys/psa_crypto/Makefile.include
+@@ -47,6 +47,10 @@ ifneq (,$(filter psa_asymmetric_ecc_ed25519,$(USEMODULE)))
+ endif
+ 
+ ## Cipher
++PSEUDOMODULES += psa_cipher_chacha20
++PSEUDOMODULES += psa_cipher_chacha20_backend_riot
++PSEUDOMODULES += psa_cipher_chacha20_custom_backend
++
+ PSEUDOMODULES += psa_cipher
+ PSEUDOMODULES += psa_cipher_aes_128_ecb
+ PSEUDOMODULES += psa_cipher_aes_128_ecb_backend_riot
+@@ -85,6 +89,13 @@ ifneq (,$(filter psa_cipher_aes_256_cbc,$(USEMODULE)))
+   endif
+ endif
+ 
++# check that one and only one backend has been selected
++ifneq (,$(filter psa_cipher_chacha20,$(USEMODULE)))
++  ifneq (1,$(call backends,psa_cipher_chacha20))
++    $(error "One (and only one) backend should be selected for psa_cipher_chacha20")
++  endif
++endif
++
+ ## Hash
+ PSEUDOMODULES += psa_hash
+ PSEUDOMODULES += psa_hash_md5
+diff --git a/sys/psa_crypto/include/psa_ciphers.h b/sys/psa_crypto/include/psa_ciphers.h
+index 65c5601b..c9140f97 100644
+--- a/sys/psa_crypto/include/psa_ciphers.h
++++ b/sys/psa_crypto/include/psa_ciphers.h
+@@ -128,6 +128,56 @@ psa_status_t psa_cipher_cbc_aes_256_encrypt(const psa_key_attributes_t *attribut
+                                             size_t output_size,
+                                             size_t *output_length);
+ 
++/**
++ * @brief   Low level wrapper function to call a driver for a ChaCha20 stream encryption.
++ *          See @ref psa_cipher_encrypt()
++ *
++ * @param attributes
++ * @param key_buffer
++ * @param key_buffer_size
++ * @param alg
++ * @param input
++ * @param input_length
++ * @param output
++ * @param output_size
++ * @param output_length
++ * @return psa_status_t
++ */
++psa_status_t psa_cipher_chacha20_encrypt(const psa_key_attributes_t *attributes,
++                                         const uint8_t *key_buffer,
++                                         size_t key_buffer_size,
++                                         psa_algorithm_t alg,
++                                         const uint8_t *input,
++                                         size_t input_length,
++                                         uint8_t *output,
++                                         size_t output_size,
++                                         size_t *output_length);
++
++/**
++ * @brief   Low level wrapper function to call a driver for a ChaCha20 stream decryption.
++ *          See @ref psa_cipher_decrypt()
++ *
++ * @param attributes
++ * @param key_buffer
++ * @param key_buffer_size
++ * @param alg
++ * @param input
++ * @param input_length
++ * @param output
++ * @param output_size
++ * @param output_length
++ * @return psa_status_t
++ */
++psa_status_t psa_cipher_chacha20_decrypt(const psa_key_attributes_t *attributes,
++                                         const uint8_t *key_buffer,
++                                         size_t key_buffer_size,
++                                         psa_algorithm_t alg,
++                                         const uint8_t *input,
++                                         size_t input_length,
++                                         uint8_t *output,
++                                         size_t output_size,
++                                         size_t *output_length);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/sys/psa_crypto/include/psa_crypto_operation_encoder.h b/sys/psa_crypto/include/psa_crypto_operation_encoder.h
+index 6ddd7b04..75eecb16 100644
+--- a/sys/psa_crypto/include/psa_crypto_operation_encoder.h
++++ b/sys/psa_crypto/include/psa_crypto_operation_encoder.h
+@@ -42,6 +42,7 @@ extern "C" {
+  * @details To be expanded with the development of this implementation.
+  */
+ typedef enum {
++    PSA_CHACHA20_STREAM_256,
+     PSA_CBC_NO_PAD_AES_128,
+     PSA_CBC_NO_PAD_AES_192,
+     PSA_CBC_NO_PAD_AES_256,
+@@ -146,6 +147,7 @@ typedef enum {
+ #define GET_CIPHER_OPERATION_256(alg, type) \
+     (((alg == PSA_ALG_CBC_NO_PADDING) && (type == PSA_KEY_TYPE_AES)) ? PSA_CBC_NO_PAD_AES_256 : \
+      ((alg == PSA_ALG_CBC_PKCS7) && (type == PSA_KEY_TYPE_AES)) ? PSA_CBC_PKCS7_AES_256 : \
++     ((alg == PSA_ALG_STREAM_CIPHER) && (type == PSA_KEY_TYPE_CHACHA20)) ? PSA_CHACHA20_STREAM_256 : \
+      PSA_INVALID_OPERATION)
+ 
+ /**
+diff --git a/sys/psa_crypto/psa_crypto_algorithm_dispatch.c b/sys/psa_crypto/psa_crypto_algorithm_dispatch.c
+index eda63609..72ecad8f 100644
+--- a/sys/psa_crypto/psa_crypto_algorithm_dispatch.c
++++ b/sys/psa_crypto/psa_crypto_algorithm_dispatch.c
+@@ -627,6 +627,11 @@ psa_status_t psa_algorithm_dispatch_cipher_encrypt( const psa_key_attributes_t *
+     case PSA_CBC_NO_PAD_AES_256:
+         return psa_cipher_cbc_aes_256_encrypt(attributes, key_data, *key_bytes, alg, input,
+                                               input_length, output, output_size, output_length);
++#endif
++#if IS_USED(MODULE_PSA_CIPHER_CHACHA20)
++    case PSA_CHACHA20_STREAM_256:
++        return psa_cipher_chacha20_encrypt(attributes, key_data, *key_bytes, alg, input,
++                                              input_length, output, output_size, output_length);
+ #endif
+     default:
+         (void)slot;
+@@ -673,6 +678,11 @@ psa_status_t psa_algorithm_dispatch_cipher_decrypt( const psa_key_attributes_t *
+     case PSA_CBC_NO_PAD_AES_256:
+         return psa_cipher_cbc_aes_256_decrypt(attributes, key_data, *key_bytes, alg, input,
+                                               input_length, output, output_size, output_length);
++#endif
++#if IS_USED(MODULE_PSA_CIPHER_CHACHA20)
++    case PSA_CHACHA20_STREAM_256:
++        return psa_cipher_chacha20_decrypt(attributes, key_data, *key_bytes, alg, input,
++                                              input_length, output, output_size, output_length);
+ #endif
+     default:
+         (void)slot;

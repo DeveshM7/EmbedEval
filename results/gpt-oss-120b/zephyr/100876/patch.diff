@@ -1,0 +1,2188 @@
+diff --git a/drivers/usb/udc/udc_ambiq.c b/drivers/usb/udc/udc_ambiq.c
+index ca1673e0..33f584f5 100644
+--- a/drivers/usb/udc/udc_ambiq.c
++++ b/drivers/usb/udc/udc_ambiq.c
+@@ -262,10 +262,9 @@ static int udc_ambiq_ep_dequeue(const struct device *dev, struct udc_ep_config *
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++t}
+ 
+ 	udc_ep_set_busy(ep_cfg, false);
+ 	am_hal_usb_ep_state_reset(priv->usb_handle, ep_cfg->addr);
+diff --git a/drivers/usb/udc/udc_bflb_v1.c b/drivers/usb/udc/udc_bflb_v1.c
+index e9721651..ac67010c 100644
+--- a/drivers/usb/udc/udc_bflb_v1.c
++++ b/drivers/usb/udc/udc_bflb_v1.c
+@@ -1350,10 +1350,8 @@ static int udc_bflb_v1_ep_dequeue(const struct device *dev,
+ 		fifo_rx_clear(base, ep_idx);
+ 	}
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf != NULL) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
+ 
+ 	/* Clear pending completion signal to prevent stale processing */
+ 	atomic_and(&priv->xfer_finished, ~BIT(ep_to_bnum(ep_cfg->addr)));
+diff --git a/drivers/usb/udc/udc_dwc2.c b/drivers/usb/udc/udc_dwc2.c
+index 6acdd598..d705d997 100644
+--- a/drivers/usb/udc/udc_dwc2.c
++++ b/drivers/usb/udc/udc_dwc2.c
+@@ -1679,24 +1679,20 @@ static int udc_dwc2_ep_dequeue(const struct device *dev,
+ 
+ 	udc_dwc2_ep_disable(dev, cfg, false, true);
+ 
+-	buf = udc_buf_get_all(cfg);
+-
+-	if (dwc2_in_buffer_dma_mode(dev) && USB_EP_DIR_IS_OUT(cfg->addr)) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
++t}
++		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+ 		for (struct net_buf *iter = buf; iter; iter = iter->frags) {
+ 			sys_cache_data_invd_range(iter->data, iter->len);
+-		}
+-	}
+ 
+ 	if (buf) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
+ 
+ 	udc_ep_set_busy(cfg, false);
+ 
+ 	LOG_DBG("dequeue ep 0x%02x", cfg->addr);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_dwc2_set_address(const struct device *dev, const uint8_t addr)
+ {
+@@ -1706,7 +1702,6 @@ static int udc_dwc2_set_address(const struct device *dev, const uint8_t addr)
+ 
+ 	if (addr > (USB_DWC2_DCFG_DEVADDR_MASK >> USB_DWC2_DCFG_DEVADDR_POS)) {
+ 		return -EINVAL;
+-	}
+ 
+ 	dcfg = sys_read32(dcfg_reg);
+ 	dcfg &= ~USB_DWC2_DCFG_DEVADDR_MASK;
+@@ -1715,7 +1710,6 @@ static int udc_dwc2_set_address(const struct device *dev, const uint8_t addr)
+ 	LOG_DBG("Set new address %u for %p", addr, dev);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_dwc2_test_mode(const struct device *dev,
+ 			      const uint8_t mode, const bool dryrun)
+@@ -1726,24 +1720,20 @@ static int udc_dwc2_test_mode(const struct device *dev,
+ 
+ 	if (mode == 0U || mode > USB_DWC2_DCTL_TSTCTL_TESTFE) {
+ 		return -EINVAL;
+-	}
+ 
+ 	dctl = sys_read32(dctl_reg);
+ 	if (usb_dwc2_get_dctl_tstctl(dctl) != USB_DWC2_DCTL_TSTCTL_DISABLED) {
+ 		return -EALREADY;
+-	}
+ 
+ 	if (dryrun) {
+ 		LOG_DBG("Test Mode %u supported", mode);
+ 		return 0;
+-	}
+ 
+ 	dctl |= usb_dwc2_set_dctl_tstctl(mode);
+ 	sys_write32(dctl, dctl_reg);
+ 	LOG_DBG("Enable Test Mode %u", mode);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_dwc2_host_wakeup(const struct device *dev)
+ {
+@@ -1754,7 +1744,6 @@ static int udc_dwc2_host_wakeup(const struct device *dev)
+ 	k_event_post(&priv->drv_evt, BIT(DWC2_DRV_EVT_REMOTE_WAKEUP));
+ 
+ 	return 0;
+-}
+ 
+ /* Return actual USB device speed */
+ static enum udc_bus_speed udc_dwc2_device_speed(const struct device *dev)
+@@ -1773,8 +1762,6 @@ static enum udc_bus_speed udc_dwc2_device_speed(const struct device *dev)
+ 		__fallthrough;
+ 	default:
+ 		return UDC_BUS_SPEED_FS;
+-	}
+-}
+ 
+ static int dwc2_core_soft_reset(const struct device *dev)
+ {
+@@ -1791,8 +1778,6 @@ static int dwc2_core_soft_reset(const struct device *dev)
+ 			LOG_ERR("Wait for AHB idle timeout, GRSTCTL 0x%08x",
+ 				sys_read32(grstctl_reg));
+ 			return -EIO;
+-		}
+-	}
+ 
+ 	/* Apply Core Soft Reset */
+ 	sys_write32(USB_DWC2_GRSTCTL_CSFTRST, grstctl_reg);
+@@ -1803,14 +1788,12 @@ static int dwc2_core_soft_reset(const struct device *dev)
+ 			LOG_ERR("Wait for CSR done timeout, GRSTCTL 0x%08x",
+ 				sys_read32(grstctl_reg));
+ 			return -EIO;
+-		}
+ 
+ 		k_busy_wait(1);
+ 
+ 		if (dwc2_quirk_is_phy_clk_off(dev)) {
+ 			/* Software reset won't finish without PHY clock */
+ 			return -EIO;
+-		}
+ 	} while (sys_read32(grstctl_reg) & USB_DWC2_GRSTCTL_CSFTRST &&
+ 		 !(sys_read32(grstctl_reg) & USB_DWC2_GRSTCTL_CSFTRSTDONE));
+ 
+@@ -1818,7 +1801,6 @@ static int dwc2_core_soft_reset(const struct device *dev)
+ 	sys_clear_bits(grstctl_reg, USB_DWC2_GRSTCTL_CSFTRST);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_dwc2_init_controller(const struct device *dev)
+ {
+@@ -1846,7 +1828,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 	ret = dwc2_core_soft_reset(dev);
+ 	if (ret) {
+ 		return ret;
+-	}
+ 
+ 	/* Enable RTL workarounds based on controller revision */
+ 	gsnpsid = sys_read32((mem_addr_t)&base->gsnpsid);
+@@ -1860,7 +1841,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 	if (!(ghwcfg4 & USB_DWC2_GHWCFG4_DEDFIFOMODE)) {
+ 		LOG_ERR("Only dedicated TX FIFO mode is supported");
+ 		return -ENOTSUP;
+-	}
+ 
+ 	/*
+ 	 * Force device mode as we do no support role changes.
+@@ -1880,12 +1860,10 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 		priv->bufferdma = 0;
+ 	} else if (priv->bufferdma) {
+ 		LOG_WRN("Experimental DMA enabled");
+-	}
+ 
+ 	if (ghwcfg2 & USB_DWC2_GHWCFG2_DYNFIFOSIZING) {
+ 		LOG_DBG("Dynamic FIFO Sizing is enabled");
+ 		priv->dynfifosizing = true;
+-	}
+ 
+ 	if (IS_ENABLED(CONFIG_UDC_DWC2_HIBERNATION) &&
+ 	    ghwcfg4 & USB_DWC2_GHWCFG4_HIBERNATION) {
+@@ -1893,7 +1871,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 		priv->suspend_type = DWC2_SUSPEND_HIBERNATION;
+ 	} else {
+ 		priv->suspend_type = DWC2_SUSPEND_NO_POWER_SAVING;
+-	}
+ 
+ 	/* Get the number or endpoints and IN endpoints we can use later */
+ 	priv->numdeveps = usb_dwc2_get_ghwcfg2_numdeveps(ghwcfg2) + 1U;
+@@ -1931,7 +1908,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 
+ 	if (ghwcfg3 & USB_DWC2_GHWCFG3_RSTTYPE) {
+ 		priv->syncrst = 1;
+-	}
+ 
+ 	/* Configure AHB, select Completer or DMA mode */
+ 	gahbcfg = sys_read32(gahbcfg_reg);
+@@ -1940,7 +1916,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 		gahbcfg |= USB_DWC2_GAHBCFG_DMAEN;
+ 	} else {
+ 		gahbcfg &= ~USB_DWC2_GAHBCFG_DMAEN;
+-	}
+ 
+ 	sys_write32(gahbcfg, gahbcfg_reg);
+ 
+@@ -1960,7 +1935,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 			dcfg |= usb_dwc2_set_dcfg_devspd(USB_DWC2_DCFG_DEVSPD_USBHS20);
+ 		} else {
+ 			dcfg |= usb_dwc2_set_dcfg_devspd(USB_DWC2_DCFG_DEVSPD_USBFS20);
+-		}
+ 		hs_phy = true;
+ 		break;
+ 	case USB_DWC2_GHWCFG2_HSPHYTYPE_UTMIPLUS:
+@@ -1970,7 +1944,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 			dcfg |= usb_dwc2_set_dcfg_devspd(USB_DWC2_DCFG_DEVSPD_USBHS20);
+ 		} else {
+ 			dcfg |= usb_dwc2_set_dcfg_devspd(USB_DWC2_DCFG_DEVSPD_USBFS20);
+-		}
+ 		hs_phy = true;
+ 		break;
+ 	case USB_DWC2_GHWCFG2_HSPHYTYPE_NO_HS:
+@@ -1979,15 +1952,12 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 		if (usb_dwc2_get_ghwcfg2_fsphytype(ghwcfg2) !=
+ 		    USB_DWC2_GHWCFG2_FSPHYTYPE_NO_FS) {
+ 			gusbcfg |= USB_DWC2_GUSBCFG_PHYSEL_USB11;
+-		}
+ 
+ 		dcfg |= usb_dwc2_set_dcfg_devspd(USB_DWC2_DCFG_DEVSPD_USBFS1148);
+ 		hs_phy = false;
+-	}
+ 
+ 	if (usb_dwc2_get_ghwcfg4_phydatawidth(ghwcfg4)) {
+ 		gusbcfg |= USB_DWC2_GUSBCFG_PHYIF_16_BIT;
+-	}
+ 
+ 	/* Update PHY configuration */
+ 	sys_write32(gusbcfg, gusbcfg_reg);
+@@ -1997,7 +1967,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 	dctl = USB_DWC2_DCTL_SFTDISCON;
+ 	if (IS_ENABLED(CONFIG_UDC_DWC2_PTI)) {
+ 		dctl |= USB_DWC2_DCTL_IGNRFRMNUM;
+-	}
+ 	sys_write32(dctl, dctl_reg);
+ 
+ 	priv->outeps = 0U;
+@@ -2010,8 +1979,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 
+ 			sys_write32(USB_DWC2_DEPCTL_SNAK, doepctl_reg);
+ 			priv->outeps++;
+-		}
+-	}
+ 
+ 	LOG_DBG("Number of OUT endpoints %u", priv->outeps);
+ 
+@@ -2022,7 +1989,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 	priv->max_txfifo_depth[0] = usb_dwc2_get_gnptxfsiz_nptxfdep(val);
+ 	for (uint8_t i = 1; i < priv->ineps; i++) {
+ 		priv->max_txfifo_depth[i] = dwc2_get_txfdep(dev, i - 1);
+-	}
+ 
+ 	priv->rxfifo_depth = usb_dwc2_get_grxfsiz(sys_read32(grxfsiz_reg));
+ 
+@@ -2049,7 +2015,6 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 			default_depth = UDC_DWC2_GRXFSIZ_HS_DEFAULT;
+ 		} else {
+ 			default_depth = UDC_DWC2_GRXFSIZ_FS_DEFAULT;
+-		}
+ 		default_depth += priv->outeps * 2U;
+ 
+ 		/* Driver does not dynamically resize RxFIFO so there is no need
+@@ -2065,25 +2030,21 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 			    usb_dwc2_set_gnptxfsiz_nptxfstaddr(priv->rxfifo_depth);
+ 
+ 		sys_write32(gnptxfsiz, (mem_addr_t)&base->gnptxfsiz);
+-	}
+ 
+ 	LOG_DBG("RX FIFO size %u bytes", priv->rxfifo_depth * 4);
+ 	for (uint8_t i = 1U; i < priv->ineps; i++) {
+ 		LOG_DBG("TX FIFO%u depth %u addr %u",
+ 			i, priv->max_txfifo_depth[i], dwc2_get_txfaddr(dev, i));
+-	}
+ 
+ 	if (udc_ep_enable_internal(dev, USB_CONTROL_EP_OUT,
+ 				   USB_EP_TYPE_CONTROL, 64, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	if (udc_ep_enable_internal(dev, USB_CONTROL_EP_IN,
+ 				   USB_EP_TYPE_CONTROL, 64, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	/* Unmask interrupts */
+ 	gintmsk = USB_DWC2_GINTSTS_OEPINT | USB_DWC2_GINTSTS_IEPINT |
+@@ -2097,13 +2058,10 @@ static int udc_dwc2_init_controller(const struct device *dev)
+ 		if (!IS_ENABLED(CONFIG_UDC_DWC2_PTI)) {
+ 			gintmsk |= USB_DWC2_GINTSTS_INCOMPISOOUT |
+ 				   USB_DWC2_GINTSTS_INCOMPISOIN;
+-		}
+-	}
+ 
+ 	sys_write32(gintmsk, (mem_addr_t)&base->gintmsk);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_dwc2_enable(const struct device *dev)
+ {
+@@ -2115,12 +2073,10 @@ static int udc_dwc2_enable(const struct device *dev)
+ 	if (err) {
+ 		LOG_ERR("Quirk pre enable failed %d", err);
+ 		return err;
+-	}
+ 
+ 	err = udc_dwc2_init_controller(dev);
+ 	if (err) {
+ 		return err;
+-	}
+ 
+ 	/* Enable global interrupt */
+ 	sys_set_bits((mem_addr_t)&base->gahbcfg, USB_DWC2_GAHBCFG_GLBINTRMASK);
+@@ -2134,10 +2090,8 @@ static int udc_dwc2_enable(const struct device *dev)
+ 	if (err) {
+ 		LOG_ERR("Quirk post enable failed %d", err);
+ 		return err;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_dwc2_disable(const struct device *dev)
+ {
+@@ -2153,12 +2107,10 @@ static int udc_dwc2_disable(const struct device *dev)
+ 	if (udc_ep_disable_internal(dev, USB_CONTROL_EP_OUT)) {
+ 		LOG_DBG("Failed to disable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	if (udc_ep_disable_internal(dev, USB_CONTROL_EP_IN)) {
+ 		LOG_DBG("Failed to disable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	config->irq_disable_func(dev);
+ 	cancel_hibernation_request(priv);
+@@ -2167,7 +2119,6 @@ static int udc_dwc2_disable(const struct device *dev)
+ 		dwc2_exit_hibernation(dev, false, true);
+ 		priv->hibernated = 0;
+ 		priv->pending_tx_flush = 0;
+-	}
+ 
+ 	sys_clear_bits((mem_addr_t)&base->gahbcfg, USB_DWC2_GAHBCFG_GLBINTRMASK);
+ 
+@@ -2181,19 +2132,16 @@ static int udc_dwc2_disable(const struct device *dev)
+ 	 * triggering Soft Reset seems to be enough on shutdown clean up.
+ 	 */
+ 	dwc2_core_soft_reset(dev);
+-	buf = udc_buf_get_all(udc_get_ep_cfg(dev, USB_CONTROL_EP_OUT));
+-	if (buf) {
+-		net_buf_unref(buf);
+-	}
++t}
++	while ((buf = udc_buf_get(cfg)) != NULL) {
++		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+ 
+ 	err = dwc2_quirk_disable(dev);
+ 	if (err) {
+ 		LOG_ERR("Quirk disable failed %d", err);
+ 		return err;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_dwc2_init(const struct device *dev)
+ {
+@@ -2203,10 +2151,8 @@ static int udc_dwc2_init(const struct device *dev)
+ 	if (ret) {
+ 		LOG_ERR("Quirk init failed %d", ret);
+ 		return ret;
+-	}
+ 
+ 	return dwc2_init_pinctrl(dev);
+-}
+ 
+ static int udc_dwc2_shutdown(const struct device *dev)
+ {
+@@ -2216,10 +2162,8 @@ static int udc_dwc2_shutdown(const struct device *dev)
+ 	if (ret) {
+ 		LOG_ERR("Quirk shutdown failed %d", ret);
+ 		return ret;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int dwc2_driver_preinit(const struct device *dev)
+ {
+@@ -2249,7 +2193,6 @@ static int dwc2_driver_preinit(const struct device *dev)
+ 	(void)dwc2_quirk_caps(dev);
+ 	if (data->caps.hs) {
+ 		mps = 1024;
+-	}
+ 
+ 	/*
+ 	 * At this point, we cannot or do not want to access the hardware
+@@ -2270,7 +2213,6 @@ static int dwc2_driver_preinit(const struct device *dev)
+ 		if (epdir != USB_DWC2_GHWCFG1_EPDIR_OUT &&
+ 		    epdir != USB_DWC2_GHWCFG1_EPDIR_BDIR) {
+ 			continue;
+-		}
+ 
+ 		if (i == 0) {
+ 			config->ep_cfg_out[n].caps.control = 1;
+@@ -2281,7 +2223,6 @@ static int dwc2_driver_preinit(const struct device *dev)
+ 			config->ep_cfg_out[n].caps.iso = 1;
+ 			config->ep_cfg_out[n].caps.high_bandwidth = data->caps.hs;
+ 			config->ep_cfg_out[n].caps.mps = mps;
+-		}
+ 
+ 		config->ep_cfg_out[n].caps.out = 1;
+ 		config->ep_cfg_out[n].addr = USB_EP_DIR_OUT | i;
+@@ -2291,14 +2232,11 @@ static int dwc2_driver_preinit(const struct device *dev)
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+ 
+ 		n++;
+ 		/* Also check the number of desired OUT endpoints in devicetree. */
+ 		if (n >= config->num_out_eps) {
+ 			break;
+-		}
+-	}
+ 
+ 	for (uint32_t i = 0, n = 0; i < numdeveps; i++) {
+ 		uint32_t epdir = usb_dwc2_get_ghwcfg1_epdir(config->ghwcfg1, i);
+@@ -2306,7 +2244,6 @@ static int dwc2_driver_preinit(const struct device *dev)
+ 		if (epdir != USB_DWC2_GHWCFG1_EPDIR_IN &&
+ 		    epdir != USB_DWC2_GHWCFG1_EPDIR_BDIR) {
+ 			continue;
+-		}
+ 
+ 		if (i == 0) {
+ 			config->ep_cfg_in[n].caps.control = 1;
+@@ -2317,7 +2254,6 @@ static int dwc2_driver_preinit(const struct device *dev)
+ 			config->ep_cfg_in[n].caps.iso = 1;
+ 			config->ep_cfg_in[n].caps.high_bandwidth = data->caps.hs;
+ 			config->ep_cfg_in[n].caps.mps = mps;
+-		}
+ 
+ 		config->ep_cfg_in[n].caps.in = 1;
+ 		config->ep_cfg_in[n].addr = USB_EP_DIR_IN | i;
+@@ -2327,31 +2263,25 @@ static int dwc2_driver_preinit(const struct device *dev)
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+ 
+ 		n++;
+ 		/* Also check the number of desired IN endpoints in devicetree. */
+ 		if (n >= MIN(ineps, config->num_in_eps)) {
+ 			break;
+-		}
+-	}
+ 
+ 	config->make_thread(dev);
+ 
+ 	return 0;
+-}
+ 
+ static void udc_dwc2_lock(const struct device *dev)
+ {
+ 	k_sched_lock();
+ 	udc_lock_internal(dev, K_FOREVER);
+-}
+ 
+ static void udc_dwc2_unlock(const struct device *dev)
+ {
+ 	udc_unlock_internal(dev);
+ 	k_sched_unlock();
+-}
+ 
+ static void dwc2_on_bus_reset(const struct device *dev)
+ {
+@@ -2370,13 +2300,10 @@ static void dwc2_on_bus_reset(const struct device *dev)
+ 		    epdir == USB_DWC2_GHWCFG1_EPDIR_BDIR) {
+ 			doepctl_reg = dwc2_get_dxepctl_reg(dev, i);
+ 			sys_write32(USB_DWC2_DEPCTL_SNAK, doepctl_reg);
+-		}
+-	}
+ 
+ 	doepmsk = USB_DWC2_DOEPINT_SETUP | USB_DWC2_DOEPINT_EPDISBLD | USB_DWC2_DOEPINT_XFERCOMPL;
+ 	if (dwc2_in_buffer_dma_mode(dev)) {
+ 		doepmsk |= USB_DWC2_DOEPINT_STSPHSERCVD;
+-	}
+ 
+ 	sys_write32(doepmsk, (mem_addr_t)&base->doepmsk);
+ 
+@@ -2388,14 +2315,12 @@ static void dwc2_on_bus_reset(const struct device *dev)
+ 	if (dwc2_in_completer_mode(dev)) {
+ 		sys_set_bits((mem_addr_t)&base->gintmsk,
+ 			     USB_DWC2_GINTSTS_RXFLVL);
+-	}
+ 
+ 	/* Clear device address during reset. */
+ 	sys_clear_bits((mem_addr_t)&base->dcfg, USB_DWC2_DCFG_DEVADDR_MASK);
+ 
+ 	/* Speed enumeration must happen after reset. */
+ 	priv->enumdone = 0;
+-}
+ 
+ static void dwc2_handle_enumdone(const struct device *dev)
+ {
+@@ -2408,7 +2333,6 @@ static void dwc2_handle_enumdone(const struct device *dev)
+ 	priv->enumdone = 1;
+ 
+ 	k_event_post(&priv->drv_evt, BIT(DWC2_DRV_EVT_ENUM_DONE));
+-}
+ 
+ static inline int dwc2_read_fifo_setup(const struct device *dev, uint8_t ep,
+ 				       const size_t size)
+@@ -2421,7 +2345,6 @@ static inline int dwc2_read_fifo_setup(const struct device *dev, uint8_t ep,
+ 
+ 	if (size != 8) {
+ 		LOG_ERR("%d bytes SETUP", size);
+-	}
+ 
+ 	/*
+ 	 * We store the setup packet temporarily in the driver's private data
+@@ -2433,16 +2356,13 @@ static inline int dwc2_read_fifo_setup(const struct device *dev, uint8_t ep,
+ 	for (offset = 0; offset < MIN(size, 8); offset += 4) {
+ 		sys_put_le32(sys_read32(UDC_DWC2_EP_FIFO(base, ep)),
+ 			     &priv->setup[offset]);
+-	}
+ 
+ 	/* On protocol error simply discard extra data */
+ 	while (offset < size) {
+ 		sys_read32(UDC_DWC2_EP_FIFO(base, ep));
+ 		offset += 4;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static inline void dwc2_handle_rxflvl(const struct device *dev)
+ {
+@@ -2483,8 +2403,6 @@ static inline void dwc2_handle_rxflvl(const struct device *dev)
+ 		break;
+ 	default:
+ 		break;
+-	}
+-}
+ 
+ static inline void dwc2_handle_in_xfercompl(const struct device *dev,
+ 					    const uint8_t ep_idx)
+@@ -2498,17 +2416,14 @@ static inline void dwc2_handle_in_xfercompl(const struct device *dev,
+ 	if (buf == NULL) {
+ 		udc_submit_event(dev, UDC_EVT_ERROR, -ENOBUFS);
+ 		return;
+-	}
+ 
+ 	net_buf_pull(buf, priv->tx_len[ep_idx]);
+ 	if (buf->len  && dwc2_tx_fifo_write(dev, ep_cfg, buf) == 0) {
+ 		return;
+-	}
+ 
+ 	atomic_set_bit(&priv->xfer_finished, ep_idx);
+ 	k_event_post(&priv->ep_disabled, BIT(ep_idx));
+ 	k_event_post(&priv->drv_evt, BIT(DWC2_DRV_EVT_EP_FINISHED));
+-}
+ 
+ static inline void dwc2_handle_iepint(const struct device *dev)
+ {
+@@ -2537,7 +2452,6 @@ static inline void dwc2_handle_iepint(const struct device *dev)
+ 
+ 		if (status & USB_DWC2_DIEPINT_XFERCOMPL) {
+ 			dwc2_handle_in_xfercompl(dev, n);
+-		}
+ 
+ 		if (status & USB_DWC2_DIEPINT_INEPNAKEFF) {
+ 			uint32_t diepctl = sys_read32(diepctl_reg);
+@@ -2554,8 +2468,6 @@ static inline void dwc2_handle_iepint(const struct device *dev)
+ 				sys_write32(diepctl, diepctl_reg);
+ 			} else if (priv->iso_in_rearm & (BIT(n))) {
+ 				priv->iso_in_rearm &= ~BIT(n);
+-			}
+-		}
+ 
+ 		if (status & USB_DWC2_DIEPINT_EPDISBLD) {
+ 			uint32_t diepctl = sys_read32(diepctl_reg);
+@@ -2578,21 +2490,16 @@ static inline void dwc2_handle_iepint(const struct device *dev)
+ 				buf = udc_buf_get(cfg);
+ 				if (buf) {
+ 					udc_submit_ep_event(dev, buf, 0);
+-				}
+ 
+ 				/* Try to queue next packet before SOF */
+ 				dwc2_handle_xfer_next(dev, cfg);
+ 
+ 				priv->iso_in_rearm &= ~BIT(n);
+-			}
+-		}
+ 
+ 		epint &= ~BIT(n);
+-	}
+ 
+ 	/* Clear IEPINT interrupt */
+ 	sys_write32(USB_DWC2_GINTSTS_IEPINT, (mem_addr_t)&base->gintsts);
+-}
+ 
+ static inline void dwc2_handle_out_xfercompl(const struct device *dev,
+ 					     const uint8_t ep_idx)
+@@ -2612,7 +2519,6 @@ static inline void dwc2_handle_out_xfercompl(const struct device *dev,
+ 		LOG_ERR("No buffer for ep 0x%02x", ep_cfg->addr);
+ 		udc_submit_event(dev, UDC_EVT_ERROR, -ENOBUFS);
+ 		return;
+-	}
+ 
+ 	/* The original transfer size value is necessary here because controller
+ 	 * decreases the value for every byte stored.
+@@ -2640,24 +2546,19 @@ static inline void dwc2_handle_out_xfercompl(const struct device *dev,
+ 		default:
+ 			valid = false;
+ 			break;
+-		}
+ 
+ 		if (!valid) {
+ 			if (dwc2_in_completer_mode(dev)) {
+ 				/* RxFlvl added data to net buf, rollback */
+ 				net_buf_remove_mem(buf, bcnt);
+-			}
+ 			/* Data is not valid, discard it */
+ 			bcnt = 0;
+-		}
+-	}
+ 
+ 	if (dwc2_in_buffer_dma_mode(dev) && bcnt) {
+ 		/* Update just the length, cache will be invalidated in thread
+ 		 * context after transfer if finished or cancelled.
+ 		 */
+ 		net_buf_add(buf, bcnt);
+-	}
+ 
+ 	if (!is_iso && bcnt && (bcnt % udc_mps_ep_size(ep_cfg)) == 0 &&
+ 	    net_buf_tailroom(buf)) {
+@@ -2666,8 +2567,6 @@ static inline void dwc2_handle_out_xfercompl(const struct device *dev,
+ 		atomic_set_bit(&priv->xfer_finished, 16 + ep_idx);
+ 		k_event_post(&priv->ep_disabled, BIT(16 + ep_idx));
+ 		k_event_post(&priv->drv_evt, BIT(DWC2_DRV_EVT_EP_FINISHED));
+-	}
+-}
+ 
+ static inline void dwc2_handle_oepint(const struct device *dev)
+ {
+@@ -2712,11 +2611,9 @@ static inline void dwc2_handle_oepint(const struct device *dev)
+ 			addr = sys_read32((mem_addr_t)&base->out_ep[0].doepdma);
+ 			sys_cache_data_invd_range((void *)(addr - 8), 8);
+ 			memcpy(priv->setup, (void *)(addr - 8), sizeof(priv->setup));
+-		}
+ 
+ 		if (status & USB_DWC2_DOEPINT_SETUP) {
+ 			k_event_post(&priv->drv_evt, BIT(DWC2_DRV_EVT_SETUP));
+-		}
+ 
+ 		if (status & USB_DWC2_DOEPINT_STSPHSERCVD) {
+ 			/* Allow IN Status stage after control transfer with
+@@ -2728,11 +2625,9 @@ static inline void dwc2_handle_oepint(const struct device *dev)
+ 			 * device to host.
+ 			 */
+ 			dwc2_clear_control_in_nak(dev);
+-		}
+ 
+ 		if (status & USB_DWC2_DOEPINT_XFERCOMPL) {
+ 			dwc2_handle_out_xfercompl(dev, n);
+-		}
+ 
+ 		if (status & USB_DWC2_DOEPINT_EPDISBLD) {
+ 			uint32_t doepctl = sys_read32(doepctl_reg);
+@@ -2750,21 +2645,16 @@ static inline void dwc2_handle_oepint(const struct device *dev)
+ 				buf = udc_buf_get(cfg);
+ 				if (buf) {
+ 					udc_submit_ep_event(dev, buf, 0);
+-				}
+ 
+ 				/* Try to queue next packet before SOF */
+ 				dwc2_handle_xfer_next(dev, cfg);
+ 
+ 				priv->iso_out_rearm &= ~BIT(n);
+-			}
+-		}
+ 
+ 		epint &= ~BIT(n);
+-	}
+ 
+ 	/* Clear OEPINT interrupt */
+ 	sys_write32(USB_DWC2_GINTSTS_OEPINT, (mem_addr_t)&base->gintsts);
+-}
+ 
+ /* In DWC2 otg context incomplete isochronous IN transfer means that the host
+  * did not issue IN token to at least one isochronous endpoint and software has
+@@ -2804,16 +2694,13 @@ static void dwc2_handle_incompisoin(const struct device *dev)
+ 			udc_dwc2_ep_disable(dev, cfg, false, false);
+ 
+ 			rearm |= BIT(i);
+-		}
+ 
+ 		eps &= ~BIT(i);
+-	}
+ 
+ 	/* Mark endpoints to re-arm in EPDISBLD handler */
+ 	priv->iso_in_rearm = rearm;
+ 
+ 	sys_write32(USB_DWC2_GINTSTS_INCOMPISOIN, gintsts_reg);
+-}
+ 
+ /* In DWC2 otg context incomplete isochronous OUT transfer means that the host
+  * did not issue OUT token to at least one isochronous endpoint and software has
+@@ -2854,16 +2741,13 @@ static void dwc2_handle_incompisoout(const struct device *dev)
+ 			udc_dwc2_ep_disable(dev, cfg, false, false);
+ 
+ 			rearm |= BIT(i);
+-		}
+ 
+ 		eps &= ~BIT(i);
+-	}
+ 
+ 	/* Mark endpoints to re-arm in EPDISBLD handler */
+ 	priv->iso_out_rearm = rearm;
+ 
+ 	sys_write32(USB_DWC2_GINTSTS_INCOMPISOOUT, gintsts_reg);
+-}
+ 
+ static void dwc2_handle_goutnakeff(const struct device *dev)
+ {
+@@ -2897,20 +2781,17 @@ static void dwc2_handle_goutnakeff(const struct device *dev)
+ 			 */
+ 			if (priv->iso_out_rearm & BIT(ep_idx)) {
+ 				priv->iso_out_rearm &= ~BIT(ep_idx);
+-			}
+ 
+ 			/* If application requested STALL then set it here, but
+ 			 * otherwise there's nothing to do.
+ 			 */
+ 			if (!(priv->ep_out_stall & BIT(ep_idx))) {
+ 				continue;
+-			}
+ 		} else if (ep_idx != 0) {
+ 			/* Only set EPDIS if EPENA is set, but do not set it for
+ 			 * endpoint 0 which cannot be disabled by application.
+ 			 */
+ 			doepctl |= USB_DWC2_DEPCTL_EPDIS;
+-		}
+ 
+ 		if (priv->ep_out_stall & BIT(ep_idx)) {
+ 			/* For OUT endpoints STALL is set instead of SNAK */
+@@ -2918,20 +2799,16 @@ static void dwc2_handle_goutnakeff(const struct device *dev)
+ 			priv->ep_out_stall &= ~BIT(ep_idx);
+ 		} else {
+ 			doepctl |= USB_DWC2_DEPCTL_SNAK;
+-		}
+ 
+ 		sys_write32(doepctl, doepctl_reg);
+ 
+ 		if (ep_idx == 0) {
+ 			/* Consider endpoint to be disabled */
+ 			k_event_post(&priv->ep_disabled, BIT(16));
+-		}
+-	}
+ 
+ 	sys_set_bits((mem_addr_t)&base->dctl, USB_DWC2_DCTL_CGOUTNAK);
+ 
+ 	k_spin_unlock(&priv->lock, key);
+-}
+ 
+ static void udc_dwc2_isr_handler(const struct device *dev)
+ {
+@@ -2952,22 +2829,18 @@ static void udc_dwc2_isr_handler(const struct device *dev)
+ 		if (gpwrdn & USB_DWC2_GPWRDN_LNSTSCHNG) {
+ 			resume = usb_dwc2_get_gpwrdn_linestate(gpwrdn) ==
+ 				 USB_DWC2_GPWRDN_LINESTATE_DM1DP0;
+-		}
+ 
+ 		reset = gpwrdn & USB_DWC2_GPWRDN_RESETDETECTED;
+ 
+ 		if (resume) {
+ 			k_event_post(&priv->drv_evt,
+ 				     BIT(DWC2_DRV_EVT_HIBERNATION_EXIT_HOST_RESUME));
+-		}
+ 
+ 		if (reset) {
+ 			k_event_post(&priv->drv_evt, BIT(DWC2_DRV_EVT_HIBERNATION_EXIT_BUS_RESET));
+-		}
+ 
+ 		(void)dwc2_quirk_irq_clear(dev);
+ 		return;
+-	}
+ 
+ 	gintmsk = sys_read32((mem_addr_t)&base->gintmsk);
+ 
+@@ -2986,7 +2859,6 @@ static void udc_dwc2_isr_handler(const struct device *dev)
+ 			dsts = sys_read32((mem_addr_t)&base->dsts);
+ 			priv->sof_num = usb_dwc2_get_dsts_soffn(dsts);
+ 			udc_submit_sof_event(dev);
+-		}
+ 
+ 		if (int_status & USB_DWC2_GINTSTS_USBRST) {
+ 			/* Clear and handle USB Reset interrupt. */
+@@ -2995,14 +2867,12 @@ static void udc_dwc2_isr_handler(const struct device *dev)
+ 			LOG_DBG("USB Reset interrupt");
+ 
+ 			cancel_hibernation_request(priv);
+-		}
+ 
+ 		if (int_status & USB_DWC2_GINTSTS_ENUMDONE) {
+ 			/* Clear and handle Enumeration Done interrupt. */
+ 			sys_write32(USB_DWC2_GINTSTS_ENUMDONE, gintsts_reg);
+ 			dwc2_handle_enumdone(dev);
+ 			udc_submit_event(dev, UDC_EVT_RESET, 0);
+-		}
+ 
+ 		if (int_status & USB_DWC2_GINTSTS_WKUPINT) {
+ 			/* Clear Resume/Remote Wakeup Detected interrupt. */
+@@ -3011,41 +2881,34 @@ static void udc_dwc2_isr_handler(const struct device *dev)
+ 			udc_submit_event(dev, UDC_EVT_RESUME, 0);
+ 
+ 			cancel_hibernation_request(priv);
+-		}
+ 
+ 		if (int_status & USB_DWC2_GINTSTS_IEPINT) {
+ 			/* Handle IN Endpoints interrupt */
+ 			dwc2_handle_iepint(dev);
+-		}
+ 
+ 		if (int_status & USB_DWC2_GINTSTS_RXFLVL) {
+ 			/* Handle RxFIFO Non-Empty interrupt */
+ 			dwc2_handle_rxflvl(dev);
+-		}
+ 
+ 		if (int_status & USB_DWC2_GINTSTS_OEPINT) {
+ 			/* Handle OUT Endpoints interrupt */
+ 			dwc2_handle_oepint(dev);
+-		}
+ 
+ 		if (IS_ENABLED(CONFIG_UDC_ENABLE_SOF) &&
+ 		    !IS_ENABLED(CONFIG_UDC_DWC2_PTI) &&
+ 		    int_status & USB_DWC2_GINTSTS_INCOMPISOIN) {
+ 			dwc2_handle_incompisoin(dev);
+-		}
+ 
+ 		if (IS_ENABLED(CONFIG_UDC_ENABLE_SOF) &&
+ 		    !IS_ENABLED(CONFIG_UDC_DWC2_PTI) &&
+ 		    int_status & USB_DWC2_GINTSTS_INCOMPISOOUT) {
+ 			dwc2_handle_incompisoout(dev);
+-		}
+ 
+ 		if (int_status & USB_DWC2_GINTSTS_GOUTNAKEFF) {
+ 			/* Clear Global OUT NAK Effective interrupt. */
+ 			sys_write32(USB_DWC2_GINTSTS_GOUTNAKEFF, gintsts_reg);
+ 
+ 			dwc2_handle_goutnakeff(dev);
+-		}
+ 
+ 		if (int_status & USB_DWC2_GINTSTS_USBSUSP) {
+ 			/* Clear USB Suspend interrupt. */
+@@ -3056,11 +2919,8 @@ static void udc_dwc2_isr_handler(const struct device *dev)
+ 			udc_submit_event(dev, UDC_EVT_SUSPEND, 0);
+ 
+ 			request_hibernation(priv);
+-		}
+-	}
+ 
+ 	(void)dwc2_quirk_irq_clear(dev);
+-}
+ 
+ static void dwc2_handle_hibernation_exit(const struct device *dev,
+ 					 bool rwup, bool bus_reset)
+@@ -3074,7 +2934,6 @@ static void dwc2_handle_hibernation_exit(const struct device *dev,
+ 	priv->hibernated = 0;
+ 	if (!rwup) {
+ 		LOG_DBG("Hibernation exit complete");
+-	}
+ 
+ 	/* Let stack know we are no longer suspended */
+ 	udc_set_suspended(dev, false);
+@@ -3087,11 +2946,9 @@ static void dwc2_handle_hibernation_exit(const struct device *dev,
+ 		k_msleep(1);
+ 
+ 		sys_clear_bits((mem_addr_t)&base->dctl, USB_DWC2_DCTL_RMTWKUPSIG);
+-	}
+ 
+ 	if (rwup) {
+ 		LOG_DBG("Hibernation exit on Remote Wakeup complete");
+-	}
+ 
+ 	if (bus_reset) {
+ 		/* Clear all pending transfers */
+@@ -3102,20 +2959,15 @@ static void dwc2_handle_hibernation_exit(const struct device *dev,
+ 		/* Resume any pending transfer handling */
+ 		if (atomic_get(&priv->xfer_new)) {
+ 			k_event_post(&priv->drv_evt, BIT(DWC2_DRV_EVT_XFER));
+-		}
+ 
+ 		if (atomic_get(&priv->xfer_finished)) {
+ 			k_event_post(&priv->drv_evt, BIT(DWC2_DRV_EVT_EP_FINISHED));
+-		}
+-	}
+ 
+ 	while (priv->pending_tx_flush) {
+ 		unsigned int fifo = find_lsb_set(priv->pending_tx_flush) - 1;
+ 
+ 		priv->pending_tx_flush &= ~BIT(fifo);
+ 		dwc2_flush_tx_fifo(dev, fifo);
+-	}
+-}
+ 
+ static uint8_t pull_next_ep_from_bitmap(uint32_t *bitmap)
+ {
+@@ -3130,8 +2982,6 @@ static uint8_t pull_next_ep_from_bitmap(uint32_t *bitmap)
+ 		return USB_EP_DIR_OUT | (bit - 16);
+ 	} else {
+ 		return USB_EP_DIR_IN | bit;
+-	}
+-}
+ 
+ static ALWAYS_INLINE void dwc2_thread_handler(void *const arg)
+ {
+@@ -3163,7 +3013,6 @@ static ALWAYS_INLINE void dwc2_thread_handler(void *const arg)
+ 		} else {
+ 			/* Events will be handled after hibernation exit */
+ 			eps = 0;
+-		}
+ 
+ 		while (eps) {
+ 			ep = pull_next_ep_from_bitmap(&eps);
+@@ -3173,9 +3022,6 @@ static ALWAYS_INLINE void dwc2_thread_handler(void *const arg)
+ 				dwc2_handle_xfer_next(dev, ep_cfg);
+ 			} else {
+ 				LOG_DBG("ep 0x%02x busy", ep_cfg->addr);
+-			}
+-		}
+-	}
+ 
+ 	if (evt & BIT(DWC2_DRV_EVT_EP_FINISHED)) {
+ 		k_event_clear(&priv->drv_evt, BIT(DWC2_DRV_EVT_EP_FINISHED));
+@@ -3185,7 +3031,6 @@ static ALWAYS_INLINE void dwc2_thread_handler(void *const arg)
+ 		} else {
+ 			/* Events will be handled after hibernation exit */
+ 			eps = 0;
+-		}
+ 
+ 		while (eps) {
+ 			ep = pull_next_ep_from_bitmap(&eps);
+@@ -3197,22 +3042,17 @@ static ALWAYS_INLINE void dwc2_thread_handler(void *const arg)
+ 			} else {
+ 				LOG_DBG("DOUT event ep 0x%02x", ep_cfg->addr);
+ 				dwc2_handle_evt_dout(dev, ep_cfg);
+-			}
+ 
+ 			if (!udc_ep_is_busy(ep_cfg)) {
+ 				dwc2_handle_xfer_next(dev, ep_cfg);
+ 			} else {
+ 				LOG_DBG("ep 0x%02x busy", ep_cfg->addr);
+-			}
+-		}
+-	}
+ 
+ 	if (evt & BIT(DWC2_DRV_EVT_SETUP)) {
+ 		k_event_clear(&priv->drv_evt, BIT(DWC2_DRV_EVT_SETUP));
+ 
+ 		LOG_DBG("SETUP event");
+ 		dwc2_handle_evt_setup(dev);
+-	}
+ 
+ 	if (evt & BIT(DWC2_DRV_EVT_REMOTE_WAKEUP)) {
+ 		k_event_clear(&priv->drv_evt, BIT(DWC2_DRV_EVT_REMOTE_WAKEUP) |
+@@ -3234,8 +3074,6 @@ static ALWAYS_INLINE void dwc2_thread_handler(void *const arg)
+ 			k_msleep(2);
+ 
+ 			sys_clear_bits((mem_addr_t)&base->dctl, USB_DWC2_DCTL_RMTWKUPSIG);
+-		}
+-	}
+ 
+ 	if (evt & BIT(DWC2_DRV_EVT_ENTER_HIBERNATION)) {
+ 		config->irq_disable_func(dev);
+@@ -3245,10 +3083,8 @@ static ALWAYS_INLINE void dwc2_thread_handler(void *const arg)
+ 		/* Only enter hibernation if IRQ did not cancel the request */
+ 		if (prev & BIT(DWC2_DRV_EVT_ENTER_HIBERNATION)) {
+ 			dwc2_enter_hibernation(dev);
+-		}
+ 
+ 		config->irq_enable_func(dev);
+-	}
+ 
+ 	if (evt & hibernation_exit_events) {
+ 		bool bus_reset;
+@@ -3261,17 +3097,13 @@ static ALWAYS_INLINE void dwc2_thread_handler(void *const arg)
+ 
+ 		if (priv->hibernated) {
+ 			dwc2_handle_hibernation_exit(dev, false, bus_reset);
+-		}
+ 
+ 		config->irq_enable_func(dev);
+-	}
+ 
+ 	if (evt & BIT(DWC2_DRV_EVT_ENUM_DONE)) {
+ 		k_event_clear(&priv->drv_evt, BIT(DWC2_DRV_EVT_ENUM_DONE));
+-	}
+ 
+ 	udc_unlock_internal(dev);
+-}
+ 
+ static const struct udc_api udc_dwc2_api = {
+ 	.lock = udc_dwc2_lock,
+@@ -3317,7 +3149,6 @@ static const struct udc_api udc_dwc2_api = {
+ 	static void udc_dwc2_irq_disable_func_##n(const struct device *dev)	\
+ 	{									\
+ 		irq_disable(DT_INST_IRQN(n));					\
+-	}
+ #endif
+ 
+ #define UDC_DWC2_PINCTRL_DT_INST_DEFINE(n)					\
+diff --git a/drivers/usb/udc/udc_it82xx2.c b/drivers/usb/udc/udc_it82xx2.c
+index 145ff490..3dd71b1c 100644
+--- a/drivers/usb/udc/udc_it82xx2.c
++++ b/drivers/usb/udc/udc_it82xx2.c
+@@ -522,15 +522,13 @@ static int it82xx2_ep_dequeue(const struct device *dev, struct udc_ep_config *co
+ 	}
+ 	irq_unlock(lock_key);
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++t}
+ 
+ 	udc_ep_set_busy(cfg, false);
+ 
+ 	return 0;
+-}
+ 
+ static inline void ctrl_ep_stall_workaround(const struct device *dev)
+ {
+@@ -557,11 +555,9 @@ static inline void ctrl_ep_stall_workaround(const struct device *dev)
+ 		/* wait 15.15us */
+ 		gctrl_regs->GCTRL_WNCKR = 0;
+ 		idx++;
+-	}
+ 
+ 	if (idx < 198) {
+ 		it82xx2_usb_set_ep_ctrl(dev, 0, EP_STALL_SEND, false);
+-	}
+ 	irq_unlock(lock_key);
+ }
+ 
+diff --git a/drivers/usb/udc/udc_kinetis.c b/drivers/usb/udc/udc_kinetis.c
+index 9f42cb55..979cae9e 100644
+--- a/drivers/usb/udc/udc_kinetis.c
++++ b/drivers/usb/udc/udc_kinetis.c
+@@ -573,15 +573,13 @@ static int usbfsotg_ep_dequeue(const struct device *dev,
+ 	irq_unlock(lock_key);
+ 
+ 	cfg->stat.halted = false;
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++t}
+ 
+ 	udc_ep_set_busy(cfg, false);
+ 
+ 	return 0;
+-}
+ 
+ static int usbfsotg_ep_set_halt(const struct device *dev,
+ 				struct udc_ep_config *const cfg)
+@@ -594,7 +592,6 @@ static int usbfsotg_ep_set_halt(const struct device *dev,
+ 	LOG_DBG("Halt ep 0x%02x bd %p", cfg->addr, bd);
+ 
+ 	return 0;
+-}
+ 
+ static int usbfsotg_ep_clear_halt(const struct device *dev,
+ 				  struct udc_ep_config *const cfg)
+@@ -612,7 +609,6 @@ static int usbfsotg_ep_clear_halt(const struct device *dev,
+ 		bd->set.bd_ctrl = USBFSOTG_BD_DTS;
+ 	} else {
+ 		LOG_WRN("bd %p is not halted", bd);
+-	}
+ 
+ 	cfg->stat.data1 = false;
+ 	cfg->stat.halted = false;
+@@ -621,10 +617,8 @@ static int usbfsotg_ep_clear_halt(const struct device *dev,
+ 	if (USB_EP_GET_IDX(cfg->addr) != 0) {
+ 		/* trigger queued transfers */
+ 		usbfsotg_event_submit(dev, cfg->addr, USBFSOTG_EVT_XFER);
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int usbfsotg_ep_enable(const struct device *dev,
+ 			      struct udc_ep_config *const cfg)
+@@ -656,21 +650,17 @@ static int usbfsotg_ep_enable(const struct device *dev,
+ 			base->ENDPOINT[ep_idx].ENDPT |= USB_ENDPT_EPRXEN_MASK;
+ 		} else {
+ 			base->ENDPOINT[ep_idx].ENDPT |= USB_ENDPT_EPTXEN_MASK;
+-		}
+ 		break;
+ 	case USB_EP_TYPE_ISO:
+ 		if (USB_EP_DIR_IS_OUT(cfg->addr)) {
+ 			base->ENDPOINT[ep_idx].ENDPT |= USB_ENDPT_EPRXEN_MASK;
+ 		} else {
+ 			base->ENDPOINT[ep_idx].ENDPT |= USB_ENDPT_EPTXEN_MASK;
+-		}
+ 		break;
+ 	default:
+ 		return -EINVAL;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int usbfsotg_ep_disable(const struct device *dev,
+ 			       struct udc_ep_config *const cfg)
+@@ -687,11 +677,9 @@ static int usbfsotg_ep_disable(const struct device *dev,
+ 		base->ENDPOINT[ep_idx].ENDPT &= ~USB_ENDPT_EPRXEN_MASK;
+ 	} else {
+ 		base->ENDPOINT[ep_idx].ENDPT &= ~USB_ENDPT_EPTXEN_MASK;
+-	}
+ 
+ 	if (usbfsotg_bd_is_busy(bd_even) || usbfsotg_bd_is_busy(bd_odd)) {
+ 		LOG_DBG("Endpoint buffer is busy");
+-	}
+ 
+ 	bd_even->bd_fields = 0U;
+ 	bd_even->buf_addr = 0U;
+@@ -701,12 +689,10 @@ static int usbfsotg_ep_disable(const struct device *dev,
+ 	LOG_DBG("Disable ep 0x%02x", cfg->addr);
+ 
+ 	return 0;
+-}
+ 
+ static int usbfsotg_host_wakeup(const struct device *dev)
+ {
+ 	return -ENOTSUP;
+-}
+ 
+ static int usbfsotg_set_address(const struct device *dev, const uint8_t addr)
+ {
+@@ -716,7 +702,6 @@ static int usbfsotg_set_address(const struct device *dev, const uint8_t addr)
+ 	base->ADDR = addr;
+ 
+ 	return 0;
+-}
+ 
+ static int usbfsotg_enable(const struct device *dev)
+ {
+@@ -727,7 +712,6 @@ static int usbfsotg_enable(const struct device *dev)
+ 	base->CONTROL = USB_CONTROL_DPPULLUPNONOTG_MASK;
+ 
+ 	return 0;
+-}
+ 
+ static int usbfsotg_disable(const struct device *dev)
+ {
+@@ -738,7 +722,6 @@ static int usbfsotg_disable(const struct device *dev)
+ 	base->CONTROL &= ~USB_CONTROL_DPPULLUPNONOTG_MASK;
+ 
+ 	return 0;
+-}
+ 
+ static bool usbfsotg_is_supported(const struct device *dev)
+ {
+@@ -747,10 +730,8 @@ static bool usbfsotg_is_supported(const struct device *dev)
+ 
+ 	if ((base->PERID != USBFSOTG_PERID) || (base->REV != USBFSOTG_REV)) {
+ 		return false;
+-	}
+ 
+ 	return true;
+-}
+ 
+ static int usbfsotg_init(const struct device *dev)
+ {
+@@ -771,11 +752,9 @@ static int usbfsotg_init(const struct device *dev)
+ 
+ 	if (!usbfsotg_is_supported(dev)) {
+ 		return -ENOTSUP;
+-	}
+ 
+ 	for (uint8_t i = 0; i < 16U; i++) {
+ 		base->ENDPOINT[i].ENDPT = 0;
+-	}
+ 
+ 	base->BDTPAGE1 = (uint8_t)(POINTER_TO_UINT(config->bdt) >> 8);
+ 	base->BDTPAGE2 = (uint8_t)(POINTER_TO_UINT(config->bdt) >> 16);
+@@ -804,14 +783,12 @@ static int usbfsotg_init(const struct device *dev)
+ 				   USBFSOTG_EP0_SIZE, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	if (udc_ep_enable_internal(dev, USB_CONTROL_EP_IN,
+ 				   USB_EP_TYPE_CONTROL,
+ 				   USBFSOTG_EP0_SIZE, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	/* Connect and enable USB interrupt */
+ 	config->irq_enable_func(dev);
+@@ -819,7 +796,6 @@ static int usbfsotg_init(const struct device *dev)
+ 	LOG_DBG("Initialized USB controller %p", base);
+ 
+ 	return 0;
+-}
+ 
+ static int usbfsotg_shutdown(const struct device *dev)
+ {
+@@ -830,12 +806,10 @@ static int usbfsotg_shutdown(const struct device *dev)
+ 	if (udc_ep_disable_internal(dev, USB_CONTROL_EP_OUT)) {
+ 		LOG_ERR("Failed to disable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	if (udc_ep_disable_internal(dev, USB_CONTROL_EP_IN)) {
+ 		LOG_ERR("Failed to disable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	/* Disable USB module */
+ 	config->base->CTL = 0;
+@@ -852,20 +826,16 @@ static int usbfsotg_shutdown(const struct device *dev)
+ 	for (int i = 0; i < config->num_of_eps; i++) {
+ 		config->ep_cfg_in[i].stat.odd = false;
+ 		config->ep_cfg_out[i].stat.odd = false;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static void usbfsotg_lock(const struct device *dev)
+ {
+ 	udc_lock_internal(dev, K_FOREVER);
+-}
+ 
+ static void usbfsotg_unlock(const struct device *dev)
+ {
+ 	udc_unlock_internal(dev);
+-}
+ 
+ static int usbfsotg_driver_preinit(const struct device *dev)
+ {
+@@ -888,15 +858,12 @@ static int usbfsotg_driver_preinit(const struct device *dev)
+ 			config->ep_cfg_out[i].caps.interrupt = 1;
+ 			config->ep_cfg_out[i].caps.iso = 1;
+ 			config->ep_cfg_out[i].caps.mps = 1023;
+-		}
+ 
+ 		config->ep_cfg_out[i].addr = USB_EP_DIR_OUT | i;
+ 		err = udc_register_ep(dev, &config->ep_cfg_out[i]);
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+-	}
+ 
+ 	for (int i = 0; i < config->num_of_eps; i++) {
+ 		config->ep_cfg_in[i].caps.in = 1;
+@@ -908,21 +875,17 @@ static int usbfsotg_driver_preinit(const struct device *dev)
+ 			config->ep_cfg_in[i].caps.interrupt = 1;
+ 			config->ep_cfg_in[i].caps.iso = 1;
+ 			config->ep_cfg_in[i].caps.mps = 1023;
+-		}
+ 
+ 		config->ep_cfg_in[i].addr = USB_EP_DIR_IN | i;
+ 		err = udc_register_ep(dev, &config->ep_cfg_in[i]);
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+-	}
+ 
+ 	data->caps.rwup = false;
+ 	data->caps.mps0 = USBFSOTG_MPS0;
+ 
+ 	return 0;
+-}
+ 
+ static const struct udc_api usbfsotg_api = {
+ 	.ep_enqueue = usbfsotg_ep_enqueue,
+diff --git a/drivers/usb/udc/udc_max32.c b/drivers/usb/udc/udc_max32.c
+index 9b289fc3..f65e9476 100644
+--- a/drivers/usb/udc/udc_max32.c
++++ b/drivers/usb/udc/udc_max32.c
+@@ -344,12 +344,10 @@ static int udc_max32_ep_dequeue(const struct device *dev, struct udc_ep_config *
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+ 	} else {
+ 		LOG_INF("ep 0x%02x queue is empty", cfg->addr);
+-	}
+ 
+ 	irq_unlock(lock_key);
+ 
+diff --git a/drivers/usb/udc/udc_mcux_ip3511.c b/drivers/usb/udc/udc_mcux_ip3511.c
+index 273a1375..3d2d4d33 100644
+--- a/drivers/usb/udc/udc_mcux_ip3511.c
++++ b/drivers/usb/udc/udc_mcux_ip3511.c
+@@ -514,23 +514,20 @@ static int udc_mcux_ep_dequeue(const struct device *dev,
+ 	struct net_buf *buf;
+ 
+ 	cfg->stat.halted = false;
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++t}
+ 
+ 	udc_mcux_lock(dev);
+ 	udc_ep_set_busy(cfg, false);
+ 	udc_mcux_unlock(dev);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_mcux_ep_set_halt(const struct device *dev,
+ 				struct udc_ep_config *const cfg)
+ {
+ 	return udc_mcux_control(dev, kUSB_DeviceControlEndpointStall, &cfg->addr);
+-}
+ 
+ static int udc_mcux_ep_clear_halt(const struct device *dev,
+ 				  struct udc_ep_config *const cfg)
+@@ -538,7 +535,6 @@ static int udc_mcux_ep_clear_halt(const struct device *dev,
+ 	(void)udc_mcux_control(dev, kUSB_DeviceControlEndpointUnstall, &cfg->addr);
+ 	/* transfer is enqueued after stalled */
+ 	return udc_mcux_ep_try_feed(dev, cfg);
+-}
+ 
+ static int udc_mcux_ep_enable(const struct device *dev,
+ 			      struct udc_ep_config *const cfg)
+@@ -568,10 +564,8 @@ static int udc_mcux_ep_enable(const struct device *dev,
+ 		break;
+ 	default:
+ 		return -EINVAL;
+-	}
+ 
+ 	return udc_mcux_control(dev, kUSB_DeviceControlEndpointInit, &ep_init);
+-}
+ 
+ static int udc_mcux_ep_disable(const struct device *dev,
+ 			       struct udc_ep_config *const cfg)
+@@ -579,34 +573,28 @@ static int udc_mcux_ep_disable(const struct device *dev,
+ 	LOG_DBG("Disable ep 0x%02x", cfg->addr);
+ 
+ 	return udc_mcux_control(dev, kUSB_DeviceControlEndpointDeinit, &cfg->addr);
+-}
+ 
+ static int udc_mcux_host_wakeup(const struct device *dev)
+ {
+ 	return -ENOTSUP;
+-}
+ 
+ static int udc_mcux_set_address(const struct device *dev, const uint8_t addr)
+ {
+ 	uint8_t temp_addr = addr;
+ 
+ 	return udc_mcux_control(dev, kUSB_DeviceControlSetDeviceAddress, &temp_addr);
+-}
+ 
+ static int udc_mcux_enable(const struct device *dev)
+ {
+ 	if (udc_ep_enable_internal(dev, USB_CONTROL_EP_OUT, USB_EP_TYPE_CONTROL,
+ 				   USB_MCUX_EP0_SIZE, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+-	}
+ 
+ 	if (udc_ep_enable_internal(dev, USB_CONTROL_EP_IN, USB_EP_TYPE_CONTROL,
+ 				   USB_MCUX_EP0_SIZE, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+-	}
+ 
+ 	return udc_mcux_control(dev, kUSB_DeviceControlRun, NULL);
+-}
+ 
+ static int udc_mcux_disable(const struct device *dev)
+ {
+@@ -615,14 +603,11 @@ static int udc_mcux_disable(const struct device *dev)
+ 	cfg = udc_get_ep_cfg(dev, USB_CONTROL_EP_OUT);
+ 	if (cfg->stat.enabled) {
+ 		udc_ep_disable_internal(dev, USB_CONTROL_EP_OUT);
+-	}
+ 	cfg = udc_get_ep_cfg(dev, USB_CONTROL_EP_IN);
+ 	if (cfg->stat.enabled) {
+ 		udc_ep_disable_internal(dev, USB_CONTROL_EP_IN);
+-	}
+ 
+ 	return udc_mcux_control(dev, kUSB_DeviceControlStop, NULL);
+-}
+ 
+ static int udc_mcux_init(const struct device *dev)
+ {
+@@ -633,12 +618,10 @@ static int udc_mcux_init(const struct device *dev)
+ 
+ 	if (priv->controller_id == 0xFFu) {
+ 		return -ENOMEM;
+-	}
+ 
+ #ifdef CONFIG_DT_HAS_NXP_USBPHY_ENABLED
+ 	if (config->phy_config != NULL) {
+ 		USB_EhciPhyInit(priv->controller_id, 0u, config->phy_config);
+-	}
+ #endif
+ 
+ 	/* Init MCUX USB device driver. */
+@@ -646,7 +629,6 @@ static int udc_mcux_init(const struct device *dev)
+ 		&priv->mcux_device, &(priv->mcux_device.controllerHandle));
+ 	if (status != kStatus_USB_Success) {
+ 		return -ENOMEM;
+-	}
+ 
+ 	/* enable USB interrupt */
+ 	config->irq_enable_func(dev);
+@@ -654,7 +636,6 @@ static int udc_mcux_init(const struct device *dev)
+ 	LOG_DBG("Initialized USB controller %x", (uint32_t)config->base);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_mcux_shutdown(const struct device *dev)
+ {
+@@ -670,10 +651,8 @@ static int udc_mcux_shutdown(const struct device *dev)
+ 	status = mcux_if->deviceDeinit(priv->mcux_device.controllerHandle);
+ 	if (status != kStatus_USB_Success) {
+ 		return -ENOMEM;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static inline void udc_mcux_get_hal_driver_id(struct udc_mcux_data *priv,
+ 			const struct udc_mcux_config *config)
+@@ -697,8 +676,6 @@ static inline void udc_mcux_get_hal_driver_id(struct udc_mcux_data *priv,
+ 		if (ip3511_fs_base[i] == config->base) {
+ 			priv->controller_id = kUSB_ControllerLpcIp3511Fs0 + i;
+ 			break;
+-		}
+-	}
+ #endif
+ 
+ #ifdef USBHSD_BASE_ADDRS
+@@ -707,11 +684,7 @@ static inline void udc_mcux_get_hal_driver_id(struct udc_mcux_data *priv,
+ 			if (ip3511_hs_base[i] == config->base) {
+ 				priv->controller_id = kUSB_ControllerLpcIp3511Hs0 + i;
+ 				break;
+-			}
+-		}
+-	}
+ #endif
+-}
+ 
+ static int udc_mcux_driver_preinit(const struct device *dev)
+ {
+@@ -723,7 +696,6 @@ static int udc_mcux_driver_preinit(const struct device *dev)
+ 	udc_mcux_get_hal_driver_id(priv, config);
+ 	if (priv->controller_id == 0xFFu) {
+ 		return -ENOMEM;
+-	}
+ 
+ 	k_mutex_init(&data->mutex);
+ 	k_fifo_init(&priv->fifo);
+@@ -742,16 +714,12 @@ static int udc_mcux_driver_preinit(const struct device *dev)
+ 			if ((priv->controller_id == kUSB_ControllerLpcIp3511Hs0) ||
+ 			    (priv->controller_id == kUSB_ControllerLpcIp3511Hs1)) {
+ 				config->ep_cfg_out[i].caps.high_bandwidth = 1;
+-			}
+-		}
+ 
+ 		config->ep_cfg_out[i].addr = USB_EP_DIR_OUT | i;
+ 		err = udc_register_ep(dev, &config->ep_cfg_out[i]);
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+-	}
+ 
+ 	for (int i = 0; i < config->num_of_eps; i++) {
+ 		config->ep_cfg_in[i].caps.in = 1;
+@@ -766,16 +734,12 @@ static int udc_mcux_driver_preinit(const struct device *dev)
+ 			if ((priv->controller_id == kUSB_ControllerLpcIp3511Hs0) ||
+ 			    (priv->controller_id == kUSB_ControllerLpcIp3511Hs1)) {
+ 				config->ep_cfg_in[i].caps.high_bandwidth = 1;
+-			}
+-		}
+ 
+ 		config->ep_cfg_in[i].addr = USB_EP_DIR_IN | i;
+ 		err = udc_register_ep(dev, &config->ep_cfg_in[i]);
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+-	}
+ 
+ 	/* Requires udc_mcux_host_wakeup() implementation */
+ 	data->caps.rwup = false;
+@@ -783,13 +747,11 @@ static int udc_mcux_driver_preinit(const struct device *dev)
+ 	if ((priv->controller_id == kUSB_ControllerLpcIp3511Hs0) ||
+ 	    (priv->controller_id == kUSB_ControllerLpcIp3511Hs1)) {
+ 		data->caps.hs = true;
+-	}
+ 	priv->dev = dev;
+ 
+ 	pinctrl_apply_state(config->pincfg, PINCTRL_STATE_DEFAULT);
+ 
+ 	return 0;
+-}
+ 
+ static const struct udc_api udc_mcux_api = {
+ 	.device_speed = udc_mcux_device_speed,
+@@ -821,7 +783,6 @@ static usb_phy_config_struct_t phy_config_##n = {					\
+ 	.D_CAL = DT_PROP_OR(DT_INST_PHANDLE(n, phy_handle), tx_d_cal, 0),		\
+ 	.TXCAL45DP = DT_PROP_OR(DT_INST_PHANDLE(n, phy_handle), tx_cal_45_dp_ohms, 0),	\
+ 	.TXCAL45DM = DT_PROP_OR(DT_INST_PHANDLE(n, phy_handle), tx_cal_45_dm_ohms, 0),	\
+-}
+ 
+ #define UDC_MCUX_PHY_DEFINE_OR(n)							\
+ 	COND_CODE_1(DT_NODE_HAS_PROP(DT_DRV_INST(n), phy_handle),			\
+diff --git a/drivers/usb/udc/udc_nrf.c b/drivers/usb/udc/udc_nrf.c
+index d911106f..1cc9add7 100644
+--- a/drivers/usb/udc/udc_nrf.c
++++ b/drivers/usb/udc/udc_nrf.c
+@@ -1507,17 +1507,12 @@ static int udc_nrf_ep_dequeue(const struct device *dev,
+ 
+ 	nrf_usbd_legacy_ep_abort(cfg->addr);
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	} else {
+-		LOG_INF("ep 0x%02x queue is empty", cfg->addr);
+ 	}
+-
+ 	udc_ep_set_busy(cfg, false);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_nrf_ep_enable(const struct device *dev,
+ 			     struct udc_ep_config *cfg)
+@@ -1533,12 +1528,10 @@ static int udc_nrf_ep_enable(const struct device *dev,
+ 		 */
+ 		nrf_usbd_legacy_ep_dtoggle_clear(cfg->addr);
+ 		nrf_usbd_legacy_ep_stall_clear(cfg->addr);
+-	}
+ 
+ 	LOG_DBG("Enable ep 0x%02x", cfg->addr);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_nrf_ep_disable(const struct device *dev,
+ 			      struct udc_ep_config *cfg)
+@@ -1548,7 +1541,6 @@ static int udc_nrf_ep_disable(const struct device *dev,
+ 	LOG_DBG("Disable ep 0x%02x", cfg->addr);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_nrf_ep_set_halt(const struct device *dev,
+ 				struct udc_ep_config *cfg)
+@@ -1560,10 +1552,8 @@ static int udc_nrf_ep_set_halt(const struct device *dev,
+ 		NRF_USBD->TASKS_EP0STALL = 1;
+ 	} else {
+ 		nrf_usbd_legacy_ep_stall(cfg->addr);
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_nrf_ep_clear_halt(const struct device *dev,
+ 				struct udc_ep_config *cfg)
+@@ -1574,7 +1564,6 @@ static int udc_nrf_ep_clear_halt(const struct device *dev,
+ 	nrf_usbd_legacy_ep_stall_clear(cfg->addr);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_nrf_set_address(const struct device *dev, const uint8_t addr)
+ {
+@@ -1603,10 +1592,8 @@ static int udc_nrf_set_address(const struct device *dev, const uint8_t addr)
+ 		 * SETUP transfer.
+ 		 */
+ 		k_event_post(&drv_evt, BIT(UDC_NRF_EVT_SETUP));
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_nrf_host_wakeup(const struct device *dev)
+ {
+@@ -1615,10 +1602,8 @@ static int udc_nrf_host_wakeup(const struct device *dev)
+ 	LOG_DBG("Host wakeup request");
+ 	if (!res) {
+ 		return -EAGAIN;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_nrf_enable(const struct device *dev)
+ {
+@@ -1629,20 +1614,17 @@ static int udc_nrf_enable(const struct device *dev)
+ 				   USB_EP_TYPE_CONTROL, UDC_NRF_EP0_SIZE, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	if (udc_ep_enable_internal(dev, USB_CONTROL_EP_IN,
+ 				   USB_EP_TYPE_CONTROL, UDC_NRF_EP0_SIZE, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	sys_notify_init_spinwait(&hfxo_cli.notify);
+ 	ret = onoff_request(hfxo_mgr, &hfxo_cli);
+ 	if (ret < 0) {
+ 		LOG_ERR("Failed to start HFXO %d", ret);
+ 		return ret;
+-	}
+ 
+ 	/* Disable interrupts until USBD is enabled */
+ 	key = irq_lock();
+diff --git a/drivers/usb/udc/udc_numaker.c b/drivers/usb/udc/udc_numaker.c
+index 99c31568..214a81b2 100644
+--- a/drivers/usb/udc/udc_numaker.c
++++ b/drivers/usb/udc/udc_numaker.c
+@@ -2617,13 +2617,10 @@ static int udc_numaker_ep_dequeue(const struct device *dev, struct udc_ep_config
+ 
+ 	numaker_usbd_ep_abort(ep_cur, false);
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_numaker_ep_set_halt(const struct device *dev, struct udc_ep_config *const ep_cfg)
+ {
+@@ -2636,13 +2633,11 @@ static int udc_numaker_ep_set_halt(const struct device *dev, struct udc_ep_confi
+ 	if (!ep_cur) {
+ 		LOG_ERR("Bind EP H/W context: ep=0x%02x", ep_cfg->addr);
+ 		return -ENODEV;
+-	}
+ 
+ 	/* Set EP to stalled */
+ 	numaker_usbd_ep_set_stall(ep_cur);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_numaker_ep_clear_halt(const struct device *dev, struct udc_ep_config *const ep_cfg)
+ {
+@@ -2656,7 +2651,6 @@ static int udc_numaker_ep_clear_halt(const struct device *dev, struct udc_ep_con
+ 	if (!ep_cur) {
+ 		LOG_ERR("Bind EP H/W context: ep=0x%02x", ep_cfg->addr);
+ 		return -ENODEV;
+-	}
+ 
+ 	/* Reset EP to unstalled and data toggle bit to 0 */
+ 	numaker_usbd_ep_clear_stall_n_data_toggle(ep_cur);
+@@ -2667,7 +2661,6 @@ static int udc_numaker_ep_clear_halt(const struct device *dev, struct udc_ep_con
+ 	numaker_usbd_send_msg(dev, &msg);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_numaker_ep_enable(const struct device *dev, struct udc_ep_config *const ep_cfg)
+ {
+@@ -2684,7 +2677,6 @@ static int udc_numaker_ep_enable(const struct device *dev, struct udc_ep_config
+ 	if (!ep_cur) {
+ 		LOG_ERR("Bind EP H/W context: ep=0x%02x", ep_cfg->addr);
+ 		return -ENODEV;
+-	}
+ 
+ 	/* Configure EP DMA buffer */
+ 	if (!ep_cur->dmabuf_valid || ep_cur->dmabuf_size < ep_cfg->mps) {
+@@ -2694,28 +2686,23 @@ static int udc_numaker_ep_enable(const struct device *dev, struct udc_ep_config
+ 		if (err < 0) {
+ 			LOG_ERR("Allocate DMA buffer failed");
+ 			return err;
+-		}
+ 
+ 		/* Configure EP DMA buffer */
+ 		numaker_usbd_ep_config_dmabuf(ep_cur, dmabuf_base, dmabuf_size);
+-	}
+ 
+ 	/* Configure EP majorly */
+ 	if (config->is_hsusbd) {
+ 		numaker_hsusbd_ep_config_major(ep_cur, ep_cfg);
+ 	} else {
+ 		numaker_usbd_ep_config_major(ep_cur, ep_cfg);
+-	}
+ 
+ 	/* Enable EP */
+ 	if (config->is_hsusbd) {
+ 		numaker_hsusbd_ep_enable(ep_cur);
+ 	} else {
+ 		numaker_usbd_ep_enable(ep_cur);
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_numaker_ep_disable(const struct device *dev, struct udc_ep_config *const ep_cfg)
+ {
+@@ -2729,17 +2716,14 @@ static int udc_numaker_ep_disable(const struct device *dev, struct udc_ep_config
+ 	if (!ep_cur) {
+ 		LOG_ERR("Bind EP H/W context: ep=0x%02x", ep_cfg->addr);
+ 		return -ENODEV;
+-	}
+ 
+ 	/* Disable EP */
+ 	if (config->is_hsusbd) {
+ 		numaker_hsusbd_ep_disable(ep_cur);
+ 	} else {
+ 		numaker_usbd_ep_disable(ep_cur);
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static void udc_numaker_usbd_gen_K(const struct device *dev)
+ {
+@@ -2749,7 +2733,6 @@ static void udc_numaker_usbd_gen_K(const struct device *dev)
+ 	base->ATTR |= USBD_ATTR_RWAKEUP_Msk;
+ 	k_sleep(K_USEC(NUMAKER_USBD_BUS_RESUME_DRV_K_US));
+ 	base->ATTR ^= USBD_ATTR_RWAKEUP_Msk;
+-}
+ 
+ static void udc_numaker_hsusbd_gen_K(const struct device *dev)
+ {
+@@ -2757,7 +2740,6 @@ static void udc_numaker_hsusbd_gen_K(const struct device *dev)
+ 	HSUSBD_T *base = config->base;
+ 
+ 	base->OPER |= HSUSBD_OPER_RESUMEEN_Msk;
+-}
+ 
+ static int udc_numaker_host_wakeup(const struct device *dev)
+ {
+@@ -2769,17 +2751,14 @@ static int udc_numaker_host_wakeup(const struct device *dev)
+ 	if (err < 0) {
+ 		LOG_ERR("Enable USB/PHY failed");
+ 		return -EIO;
+-	}
+ 
+ 	/* Then generate 'K' */
+ 	if (config->is_hsusbd) {
+ 		udc_numaker_hsusbd_gen_K(dev);
+ 	} else {
+ 		udc_numaker_usbd_gen_K(dev);
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_numaker_set_address(const struct device *dev, const uint8_t addr)
+ {
+@@ -2795,10 +2774,8 @@ static int udc_numaker_set_address(const struct device *dev, const uint8_t addr)
+ 		USBD_T *base = config->base;
+ 
+ 		base->FADDR = addr;
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_numaker_enable(const struct device *dev)
+ {
+@@ -2808,7 +2785,6 @@ static int udc_numaker_enable(const struct device *dev)
+ 	numaker_usbd_sw_connect(dev);
+ 
+ 	return 0;
+-}
+ 
+ static int udc_numaker_disable(const struct device *dev)
+ {
+@@ -2818,7 +2794,6 @@ static int udc_numaker_disable(const struct device *dev)
+ 	numaker_usbd_sw_disconnect(dev);
+ 
+ 	return 0;
+-}
+ 
+ static void udc_numaker_usbd_init_int_early(const struct device *dev)
+ {
+@@ -2831,11 +2806,9 @@ static void udc_numaker_usbd_init_int_early(const struct device *dev)
+ 		base->INTEN = USBD_INT_FLDET;
+ 	} else {
+ 		base->INTEN = 0;
+-	}
+ 
+ 	/* Enable USB wake-up early */
+ 	base->INTEN |= USBD_INT_WAKEUP;
+-}
+ 
+ static void udc_numaker_hsusbd_init_int_early(const struct device *dev)
+ {
+@@ -2848,11 +2821,9 @@ static void udc_numaker_hsusbd_init_int_early(const struct device *dev)
+ 		base->BUSINTEN = HSUSBD_BUSINTEN_VBUSDETIEN_Msk;
+ 	} else {
+ 		base->BUSINTEN = 0;
+-	}
+ 
+ 	/* Enable USB wake-up early */
+ 	base->PHYCTL |= HSUSBD_PHYCTL_VBUSWKEN_Msk;
+-}
+ 
+ static int udc_numaker_init(const struct device *dev)
+ {
+@@ -2864,7 +2835,6 @@ static int udc_numaker_init(const struct device *dev)
+ 	if (err < 0) {
+ 		LOG_ERR("Set up H/W: %d", err);
+ 		return err;
+-	}
+ 
+ 	/* USB device address defaults to 0 */
+ 	numaker_usbd_reset_addr(dev);
+@@ -2875,22 +2845,18 @@ static int udc_numaker_init(const struct device *dev)
+ 	if (udc_ep_enable_internal(dev, USB_CONTROL_EP_OUT, USB_EP_TYPE_CONTROL, 64, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	if (udc_ep_enable_internal(dev, USB_CONTROL_EP_IN, USB_EP_TYPE_CONTROL, 64, 0)) {
+ 		LOG_ERR("Failed to enable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	/* Initialize interrupt early */
+ 	if (config->is_hsusbd) {
+ 		udc_numaker_hsusbd_init_int_early(dev);
+ 	} else {
+ 		udc_numaker_usbd_init_int_early(dev);
+-	}
+ 
+ 	return 0;
+-}
+ 
+ static int udc_numaker_shutdown(const struct device *dev)
+ {
+@@ -2899,12 +2865,10 @@ static int udc_numaker_shutdown(const struct device *dev)
+ 	if (udc_ep_disable_internal(dev, USB_CONTROL_EP_OUT)) {
+ 		LOG_ERR("Failed to disable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	if (udc_ep_disable_internal(dev, USB_CONTROL_EP_IN)) {
+ 		LOG_ERR("Failed to disable control endpoint");
+ 		return -EIO;
+-	}
+ 
+ 	/* Uninitialize UDC H/W */
+ 	numaker_usbd_hw_shutdown(dev);
+@@ -2913,17 +2877,14 @@ static int udc_numaker_shutdown(const struct device *dev)
+ 	k_msgq_purge(priv->msgq);
+ 
+ 	return 0;
+-}
+ 
+ static void udc_numaker_lock(const struct device *dev)
+ {
+ 	udc_lock_internal(dev, K_FOREVER);
+-}
+ 
+ static void udc_numaker_unlock(const struct device *dev)
+ {
+ 	udc_unlock_internal(dev);
+-}
+ 
+ static int udc_numaker_driver_preinit(const struct device *dev)
+ {
+@@ -2938,10 +2899,8 @@ static int udc_numaker_driver_preinit(const struct device *dev)
+ 		if (config->speed_idx >= 2) {
+ 			data->caps.hs = true;
+ 			mps = 1024;
+-		}
+ 	} else {
+ 		/* For USBD, support just full-speed */
+-	}
+ 	data->caps.rwup = true;
+ 	data->caps.addr_before_status = false;
+ 	data->caps.can_detect_vbus = true;
+@@ -2956,7 +2915,6 @@ static int udc_numaker_driver_preinit(const struct device *dev)
+ 		/* Limit all OUT EP numbers to 0, 1~7 */
+ 		if (config->disallow_iso_inout_same && i != 0 && i >= 8) {
+ 			continue;
+-		}
+ 
+ 		config->ep_cfg_out[i].caps.out = 1;
+ 		if (i == 0) {
+@@ -2967,21 +2925,17 @@ static int udc_numaker_driver_preinit(const struct device *dev)
+ 			config->ep_cfg_out[i].caps.interrupt = 1;
+ 			config->ep_cfg_out[i].caps.iso = 1;
+ 			config->ep_cfg_out[i].caps.mps = mps;
+-		}
+ 
+ 		config->ep_cfg_out[i].addr = USB_EP_DIR_OUT | i;
+ 		err = udc_register_ep(dev, &config->ep_cfg_out[i]);
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+-	}
+ 
+ 	for (int i = 0; i < config->ep_cfg_in_size; i++) {
+ 		/* Limit all IN EP numbers to 0, 8~15 */
+ 		if (config->disallow_iso_inout_same && i != 0 && i < 8) {
+ 			continue;
+-		}
+ 
+ 		config->ep_cfg_in[i].caps.in = 1;
+ 		if (i == 0) {
+@@ -2992,15 +2946,12 @@ static int udc_numaker_driver_preinit(const struct device *dev)
+ 			config->ep_cfg_in[i].caps.interrupt = 1;
+ 			config->ep_cfg_in[i].caps.iso = 1;
+ 			config->ep_cfg_in[i].caps.mps = mps;
+-		}
+ 
+ 		config->ep_cfg_in[i].addr = USB_EP_DIR_IN | i;
+ 		err = udc_register_ep(dev, &config->ep_cfg_in[i]);
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+-	}
+ 
+ 	config->make_thread(dev);
+ 
+@@ -3009,7 +2960,6 @@ static int udc_numaker_driver_preinit(const struct device *dev)
+ #endif
+ 
+ 	return 0;
+-}
+ 
+ static const struct udc_api udc_numaker_api = {
+ 	.device_speed = udc_numaker_device_speed,
+diff --git a/drivers/usb/udc/udc_renesas_ra.c b/drivers/usb/udc/udc_renesas_ra.c
+index 24bd88bd..f77fa6e1 100644
+--- a/drivers/usb/udc/udc_renesas_ra.c
++++ b/drivers/usb/udc/udc_renesas_ra.c
+@@ -326,14 +326,12 @@ static int udc_renesas_ra_ep_dequeue(const struct device *dev, struct udc_ep_con
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf != NULL) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++t}
+ 
+ 	if (FSP_SUCCESS != R_USBD_XferAbort(&data->udc, cfg->addr)) {
+ 		return -EIO;
+-	}
+ 
+ 	udc_ep_set_busy(cfg, false);
+ 
+diff --git a/drivers/usb/udc/udc_rpi_pico.c b/drivers/usb/udc/udc_rpi_pico.c
+index 73242816..bc287aac 100644
+--- a/drivers/usb/udc/udc_rpi_pico.c
++++ b/drivers/usb/udc/udc_rpi_pico.c
+@@ -739,10 +739,9 @@ static int udc_rpi_pico_ep_dequeue(const struct device *dev,
+ 	lock_key = irq_lock();
+ 
+ 	rpi_pico_ep_cancel(dev, cfg->addr);
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
++t}
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
+ 
+ 	irq_unlock(lock_key);
+ 
+diff --git a/drivers/usb/udc/udc_sam0.c b/drivers/usb/udc/udc_sam0.c
+index 96c0bbf4..a565c5c9 100644
+--- a/drivers/usb/udc/udc_sam0.c
++++ b/drivers/usb/udc/udc_sam0.c
+@@ -652,11 +652,9 @@ static int udc_sam0_ep_dequeue(const struct device *dev, struct udc_ep_config *c
+ 		endpoint->EPSTATUSSET.bit.BK0RDY = 1;
+ 	}
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+ 		udc_ep_set_busy(ep_cfg, false);
+-	}
+ 
+ 	irq_unlock(lock_key);
+ 
+diff --git a/drivers/usb/udc/udc_sam_usbc.c b/drivers/usb/udc/udc_sam_usbc.c
+index 96a26b19..3d500a3c 100644
+--- a/drivers/usb/udc/udc_sam_usbc.c
++++ b/drivers/usb/udc/udc_sam_usbc.c
+@@ -905,11 +905,9 @@ static int udc_sam_usbc_ep_dequeue(const struct device *const dev,
+ 	}
+ 
+ 	/* Always dequeue pending buffers and notify class layer */
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+ 		udc_ep_set_busy(ep_cfg, false);
+-	}
+ 
+ 	irq_unlock(lock_key);
+ 
+diff --git a/drivers/usb/udc/udc_sam_usbhs.c b/drivers/usb/udc/udc_sam_usbhs.c
+index ee18e50f..0c5fb679 100644
+--- a/drivers/usb/udc/udc_sam_usbhs.c
++++ b/drivers/usb/udc/udc_sam_usbhs.c
+@@ -1059,11 +1059,9 @@ static int udc_sam_usbhs_ep_dequeue(const struct device *dev,
+ 	 */
+ 	atomic_clear_bit(&priv->xfer_finished, bit);
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+ 		udc_ep_set_busy(ep_cfg, false);
+-	}
+ 
+ 	irq_unlock(lock_key);
+ 
+diff --git a/drivers/usb/udc/udc_skeleton.c b/drivers/usb/udc/udc_skeleton.c
+index 5c40cfd5..b9264b3b 100644
+--- a/drivers/usb/udc/udc_skeleton.c
++++ b/drivers/usb/udc/udc_skeleton.c
+@@ -123,8 +123,7 @@ static int udc_skeleton_ep_dequeue(const struct device *dev,
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+ 	}
+ 
+diff --git a/drivers/usb/udc/udc_stm32.c b/drivers/usb/udc/udc_stm32.c
+index 0ac6c8e2..cf5a6504 100644
+--- a/drivers/usb/udc/udc_stm32.c
++++ b/drivers/usb/udc/udc_stm32.c
+@@ -1117,15 +1117,13 @@ static int udc_stm32_ep_dequeue(const struct device *dev,
+ 	status = HAL_PCD_EP_Flush(&priv->pcd, ep_cfg->addr);
+ 	__ASSERT_NO_MSG(status == HAL_OK);
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf != NULL) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++t}
+ 
+ 	udc_ep_set_busy(ep_cfg, false);
+ 
+ 	return 0;
+-}
+ 
+ static enum udc_bus_speed udc_stm32_device_speed(const struct device *dev)
+ {
+@@ -1139,15 +1137,12 @@ static enum udc_bus_speed udc_stm32_device_speed(const struct device *dev)
+ 
+ 	if (priv->pcd.Init.speed == PCD_SPEED_HIGH) {
+ 		return UDC_BUS_SPEED_HS;
+-	}
+ 
+ 	if (priv->pcd.Init.speed == PCD_SPEED_HIGH_IN_FULL ||
+ 	    priv->pcd.Init.speed == PCD_SPEED_FULL) {
+ 		return UDC_BUS_SPEED_FS;
+-	}
+ 
+ 	return UDC_BUS_UNKNOWN;
+-}
+ 
+ static const struct udc_api udc_stm32_api = {
+ 	.lock = udc_stm32_lock,
+@@ -1185,15 +1180,12 @@ static int udc_stm32_driver_preinit(const struct device *dev)
+ 			cfg->out_eps[i].caps.interrupt = 1;
+ 			cfg->out_eps[i].caps.iso = 1;
+ 			cfg->out_eps[i].caps.mps = cfg->ep_mps;
+-		}
+ 
+ 		cfg->out_eps[i].addr = USB_EP_DIR_OUT | i;
+ 		err = udc_register_ep(dev, cfg->out_eps + i);
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+-	}
+ 
+ 	for (unsigned int i = 0; i < cfg->num_endpoints; i++) {
+ 		cfg->in_eps[i].caps.in = 1;
+@@ -1205,22 +1197,18 @@ static int udc_stm32_driver_preinit(const struct device *dev)
+ 			cfg->in_eps[i].caps.interrupt = 1;
+ 			cfg->in_eps[i].caps.iso = 1;
+ 			cfg->in_eps[i].caps.mps = cfg->ep_mps;
+-		}
+ 
+ 		cfg->in_eps[i].addr = USB_EP_DIR_IN | i;
+ 		err = udc_register_ep(dev, cfg->in_eps + i);
+ 		if (err != 0) {
+ 			LOG_ERR("Failed to register endpoint");
+ 			return err;
+-		}
+-	}
+ 
+ 	data->caps.rwup = true;
+ 	data->caps.addr_before_status = true;
+ 	data->caps.mps0 = UDC_MPS0_64;
+ 	if (cfg->selected_speed == PCD_SPEED_HIGH) {
+ 		data->caps.hs = true;
+-	}
+ 
+ 	priv->dev = dev;
+ 
+@@ -1245,7 +1233,6 @@ static int udc_stm32_driver_preinit(const struct device *dev)
+ 	if (err < 0 && err != -ENOENT) {
+ 		LOG_ERR("USB pinctrl setup failed (%d)", err);
+ 		return err;
+-	}
+ 
+ #ifdef SYSCFG_CFGR1_USB_IT_RMP
+ 	/*
+@@ -1258,22 +1245,17 @@ static int udc_stm32_driver_preinit(const struct device *dev)
+ 	} else {
+ 		LOG_ERR("System Configuration Controller clock is "
+ 			"disabled. Unable to enable IRQ remapping.");
+-	}
+ #endif
+ 
+ 	if (cfg->ulpi_reset_gpio.port != NULL) {
+ 		if (!gpio_is_ready_dt(&cfg->ulpi_reset_gpio)) {
+ 			LOG_ERR("Reset GPIO device not ready");
+ 			return -EINVAL;
+-		}
+ 		if (gpio_pin_configure_dt(&cfg->ulpi_reset_gpio, GPIO_OUTPUT_INACTIVE) != 0) {
+ 			LOG_ERR("Couldn't configure reset pin");
+ 			return -EIO;
+-		}
+-	}
+ 
+ 	return 0;
+-}
+ 
+ /*
+  * Note the usage of device ordinals to create per-instance symbol
+diff --git a/drivers/usb/udc/udc_virtual.c b/drivers/usb/udc/udc_virtual.c
+index 0d5e1340..52a5358d 100644
+--- a/drivers/usb/udc/udc_virtual.c
++++ b/drivers/usb/udc/udc_virtual.c
+@@ -310,8 +310,7 @@ static int udc_vrt_ep_dequeue(const struct device *dev,
+ 
+ 	lock_key = irq_lock();
+ 	/* Draft dequeue implementation */
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while ((buf = udc_buf_get(cfg)) != NULL) {
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+ 	}
+ 	irq_unlock(lock_key);

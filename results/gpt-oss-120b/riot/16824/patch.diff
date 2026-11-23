@@ -1,0 +1,113 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..ac56da4
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,35 @@
++*** Begin Patch
++*** Update File: sys/include/net/gnrc/netif.h
++@@
++-#include "net/gnrc/netif.h"
++-#include "net/l2util.h"
++-#include "net/netopt.h"
+++#include "net/gnrc/netif.h"
+++#include "net/l2util.h"
+++#include "net/netopt.h"
+++#include "xtimer.h"
++@@
++-static inline int gnrc_netif_ipv6_addr_add(const gnrc_netif_t *netif,
++-                                           ipv6_addr_t *addr, unsigned pfx_len,
++-                                           uint8_t flags)
+++static inline int gnrc_netif_ipv6_addr_add(const gnrc_netif_t *netif,
+++                                           const ipv6_addr_t *addr, unsigned pfx_len,
+++                                           uint8_t flags)
++@@
++-    return gnrc_netapi_set(netif->pid, NETOPT_IPV6_ADDR,
++-                           ((pfx_len << 8U) | flags), addr,
++-                           sizeof(ipv6_addr_t));
+++    return gnrc_netapi_set(netif->pid, NETOPT_IPV6_ADDR,
+++                           ((pfx_len << 8U) | flags), addr,
+++                           sizeof(ipv6_addr_t));
++@@
++-static inline int gnrc_netif_ipv6_addr_remove(const gnrc_netif_t *netif,
++-                                              ipv6_addr_t *addr)
+++static inline int gnrc_netif_ipv6_addr_remove(const gnrc_netif_t *netif,
+++                                              const ipv6_addr_t *addr)
++@@
++-    return gnrc_netapi_set(netif->pid, NETOPT_IPV6_ADDR_REMOVE,
++-                           0, addr, sizeof(ipv6_addr_t));
+++    return gnrc_netapi_set(netif->pid, NETOPT_IPV6_ADDR_REMOVE,
+++                           0, addr, sizeof(ipv6_addr_t));
++*** End Patch
+diff --git a/sys/include/net/gnrc/netif.h b/sys/include/net/gnrc/netif.h
+index e2a3e51..a7d68fa 100644
+--- a/sys/include/net/gnrc/netif.h
++++ b/sys/include/net/gnrc/netif.h
+@@ -66,6 +66,7 @@
+ #include "net/ndp.h"
+ #include "net/netdev.h"
+ #include "net/netopt.h"
++#include "xtimer.h"
+ #ifdef MODULE_NETSTATS_L2
+ #include "net/netstats.h"
+ #endif
+@@ -529,6 +530,59 @@ static inline int gnrc_netif_ipv6_group_leave(const gnrc_netif_t *netif,
+     return gnrc_netapi_set(netif->pid, NETOPT_IPV6_GROUP_LEAVE, 0, group,
+                            sizeof(ipv6_addr_t));
+ }
++/**
++ * @brief   Wait for a global IPv6 address on an interface.
++ *
++ * @param[in] netif   The network interface to check. If NULL, all
++ *                    interfaces are considered.
++ * @param[in] timeout Timeout in milliseconds.
++ *
++ * @return true  if a global IPv6 address is present before timeout.
++ * @return false otherwise.
++ */
++static inline bool gnrc_netif_ipv6_wait_for_global_address(gnrc_netif_t *netif, uint32_t timeout)
++{
++    uint64_t start = xtimer_now_usec64();
++    uint64_t timeout_us = (uint64_t)timeout * 1000ULL;
++    ipv6_addr_t addrs[CONFIG_GNRC_NETIF_IPV6_ADDRS_NUMOF];
++    while (1) {
++        if (netif != NULL) {
++            /* check specific interface */
++            int res = gnrc_netif_ipv6_addrs_get(netif, addrs, sizeof(addrs));
++            if (res > 0) {
++                int cnt = res / (int)sizeof(ipv6_addr_t);
++                for (int i = 0; i < cnt; i++) {
++                    if (ipv6_addr_is_global(&addrs[i])) {
++                        return true;
++                    }
++                }
++            }
++        } else {
++            gnrc_netif_t *it = NULL;
++            while ((it = gnrc_netif_iter(it))) {
++                int res = gnrc_netif_ipv6_addrs_get(it, addrs, sizeof(addrs));
++                if (res > 0) {
++                    int cnt = res / (int)sizeof(ipv6_addr_t);
++                    for (int i = 0; i < cnt; i++) {
++                        if (ipv6_addr_is_global(&addrs[i])) {
++                            return true;
++                        }
++                    }
++                }
++            }
++        }
++        uint64_t now = xtimer_now_usec64();
++        if ((now - start) >= timeout_us) {
++            return false;
++        }
++        uint32_t remaining_ms = (uint32_t)((timeout_us - (now - start)) / 1000ULL);
++        if (remaining_ms > 100) {
++            remaining_ms = 100;
++        }
++        xtimer_msleep(remaining_ms);
++    }
++}
++
+ 
+ /**
+  * @brief   Default operation for gnrc_netif_ops_t::init()

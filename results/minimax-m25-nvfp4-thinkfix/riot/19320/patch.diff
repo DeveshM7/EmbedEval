@@ -1,0 +1,95 @@
+diff --git a/sys/include/vfs.h b/sys/include/vfs.h
+index a7df6110..ffb29ce7 100644
+--- a/sys/include/vfs.h
++++ b/sys/include/vfs.h
+@@ -969,11 +969,12 @@ int vfs_mount_by_path(const char *path);
+  * @note This assumes mount points have been configured with @ref VFS_AUTO_MOUNT.
+  *
+  * @param[in]  path     Path of the pre-configured mount point
++ * @param[in]  force    if true, unmount even when there are open files on the mount
+  *
+  * @return 0 on success
+  * @return <0 on error
+  */
+-int vfs_unmount_by_path(const char *path);
++int vfs_unmount_by_path(const char *path, bool force);
+ 
+ /**
+  * @brief Rename a file
+@@ -993,14 +994,16 @@ int vfs_rename(const char *from_path, const char *to_path);
+ /**
+  * @brief Unmount a mounted file system
+  *
+- * This will fail if there are any open files or directories on the mounted file system
++ * Unmounting a mounted filesystem with open files will fail with -EBUSY
++ * unless @p force is set to true.
+  *
+  * @param[in]  mountp    pointer to the mount structure of the file system to unmount
++ * @param[in]  force     if true, unmount even when there are open files on the mount
+  *
+  * @return 0 on success
+  * @return <0 on error
+  */
+-int vfs_umount(vfs_mount_t *mountp);
++int vfs_umount(vfs_mount_t *mountp, bool force);
+ 
+ /**
+  * @brief Unlink (delete) a file from a mounted file system
+diff --git a/sys/shell/cmds/vfs.c b/sys/shell/cmds/vfs.c
+index 4a0407a4..1f289d01 100644
+--- a/sys/shell/cmds/vfs.c
++++ b/sys/shell/cmds/vfs.c
+@@ -191,7 +191,7 @@ static int _umount_handler(int argc, char **argv)
+         return -1;
+     }
+ 
+-    int res = vfs_unmount_by_path(argv[1]);
++    int res = vfs_unmount_by_path(argv[1], false);
+     if (res < 0) {
+         puts(tiny_strerror(res));
+     }
+@@ -207,7 +207,7 @@ static int _remount_handler(int argc, char **argv)
+         return -1;
+     }
+ 
+-    vfs_unmount_by_path(argv[1]);
++    vfs_unmount_by_path(argv[1], false);
+     int res = vfs_mount_by_path(argv[1]);
+     if (res < 0) {
+         puts(tiny_strerror(res));
+diff --git a/sys/vfs/vfs.c b/sys/vfs/vfs.c
+index 3c4f65b9..769cb610 100644
+--- a/sys/vfs/vfs.c
++++ b/sys/vfs/vfs.c
+@@ -547,7 +547,7 @@ int vfs_mount(vfs_mount_t *mountp)
+     return 0;
+ }
+ 
+-int vfs_umount(vfs_mount_t *mountp)
++int vfs_umount(vfs_mount_t *mountp, bool force)
+ {
+     DEBUG("vfs_umount: %p\n", (void *)mountp);
+     int ret = check_mount(mountp);
+@@ -564,7 +564,7 @@ int vfs_umount(vfs_mount_t *mountp)
+         return -EINVAL;
+     }
+     DEBUG("vfs_umount: -> \"%s\" open=%d\n", mountp->mount_point, atomic_load(&mountp->open_files));
+-    if (atomic_load(&mountp->open_files) > 0) {
++    if ((atomic_load(&mountp->open_files) > 0) && !force) {
+         mutex_unlock(&_mount_mutex);
+         return -EBUSY;
+     }
+@@ -1204,11 +1204,11 @@ int vfs_mount_by_path(const char *path)
+     return -ENOENT;
+ }
+ 
+-int vfs_unmount_by_path(const char *path)
++int vfs_unmount_by_path(const char *path, bool force)
+ {
+     for (unsigned i = 0; i < MOUNTPOINTS_NUMOF; ++i) {
+         if (strcmp(path, vfs_mountpoints_xfa[i].mount_point) == 0) {
+-            return vfs_umount(&vfs_mountpoints_xfa[i]);
++            return vfs_umount(&vfs_mountpoints_xfa[i], force);
+         }
+     }
+ 

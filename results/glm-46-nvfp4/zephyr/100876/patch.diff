@@ -1,0 +1,669 @@
+diff --git a/drivers/usb/udc/udc_ambiq.c b/drivers/usb/udc/udc_ambiq.c
+index ca1673e0..071f9c6e 100644
+--- a/drivers/usb/udc/udc_ambiq.c
++++ b/drivers/usb/udc/udc_ambiq.c
+@@ -258,21 +258,13 @@ static int udc_ambiq_ep_dequeue(const struct device *dev, struct udc_ep_config *
+ {
+ 	unsigned int lock_key;
+ 	struct udc_ambiq_data *priv = udc_get_private(dev);
+-	struct net_buf *buf;
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	udc_ep_dequeue_all(dev, ep_cfg);
+ 
+-	udc_ep_set_busy(ep_cfg, false);
+-	am_hal_usb_ep_state_reset(priv->usb_handle, ep_cfg->addr);
+ 	irq_unlock(lock_key);
+ 
+-	LOG_DBG("dequeue ep 0x%02x", ep_cfg->addr);
+-
+ 	return 0;
+ }
+ 
+diff --git a/drivers/usb/udc/udc_bflb_v1.c b/drivers/usb/udc/udc_bflb_v1.c
+index e9721651..cc993e25 100644
+--- a/drivers/usb/udc/udc_bflb_v1.c
++++ b/drivers/usb/udc/udc_bflb_v1.c
+@@ -1336,29 +1336,11 @@ static int udc_bflb_v1_ep_dequeue(const struct device *dev,
+ 	const mm_reg_t base = config->base;
+ 	uint8_t ep_idx = USB_EP_GET_IDX(ep_cfg->addr);
+ 	unsigned int lock_key;
+-	struct net_buf *buf;
+ 
+ 	lock_key = irq_lock();
+ 
+-	if (ep_idx == 0) {
+-		ep0_set_nak(base);
+-		fifo_tx_clear(base, 0);
+-		fifo_rx_clear(base, 0);
+-	} else {
+-		epx_set_nak(base, ep_idx);
+-		fifo_tx_clear(base, ep_idx);
+-		fifo_rx_clear(base, ep_idx);
+-	}
+-
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf != NULL) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
+-
+-	/* Clear pending completion signal to prevent stale processing */
+-	atomic_and(&priv->xfer_finished, ~BIT(ep_to_bnum(ep_cfg->addr)));
++	udc_ep_dequeue_all(dev, ep_cfg);
+ 
+-	udc_ep_set_busy(ep_cfg, false);
+ 	irq_unlock(lock_key);
+ 
+ 	return 0;
+diff --git a/drivers/usb/udc/udc_common.c b/drivers/usb/udc/udc_common.c
+index 499790ab..574c4fa5 100644
+--- a/drivers/usb/udc/udc_common.c
++++ b/drivers/usb/udc/udc_common.c
+@@ -127,6 +127,24 @@ void udc_ep_buf_clear_zlp(const struct net_buf *const buf)
+ 	bi->zlp = false;
+ }
+ 
++/* Helper function to properly dequeue all buffers and submit individual events */
++void udc_ep_dequeue_all(const struct device *dev, struct udc_ep_config *cfg)
++{
++	struct net_buf *buf;
++
++	/* Get all buffers from the FIFO */
++	buf = udc_buf_get_all(cfg);
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL; /* Unchain this buffer */
++		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
++	}
++}
++
+ void udc_setup_received(const struct device *dev, const void *const setup)
+ {
+ 	struct udc_ep_config *cfg_out = udc_get_ep_cfg(dev, USB_CONTROL_EP_OUT);
+diff --git a/drivers/usb/udc/udc_dwc2.c b/drivers/usb/udc/udc_dwc2.c
+index 6acdd598..7f5a43a1 100644
+--- a/drivers/usb/udc/udc_dwc2.c
++++ b/drivers/usb/udc/udc_dwc2.c
+@@ -1681,20 +1681,19 @@ static int udc_dwc2_ep_dequeue(const struct device *dev,
+ 
+ 	buf = udc_buf_get_all(cfg);
+ 
+-	if (dwc2_in_buffer_dma_mode(dev) && USB_EP_DIR_IS_OUT(cfg->addr)) {
+-		for (struct net_buf *iter = buf; iter; iter = iter->frags) {
+-			sys_cache_data_invd_range(iter->data, iter->len);
++	/* Submit individual events for each buffer with DMA handling */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		if (dwc2_in_buffer_dma_mode(dev) && USB_EP_DIR_IS_OUT(cfg->addr)) {
++			dwc2_out_buffer_dma_done(dev, cfg, buf);
+ 		}
+-	}
+ 
+-	if (buf) {
++		buf->frags = NULL; /* Unchain this buffer */
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
+-	udc_ep_set_busy(cfg, false);
+-
+-	LOG_DBG("dequeue ep 0x%02x", cfg->addr);
+-
+ 	return 0;
+ }
+ 
+diff --git a/drivers/usb/udc/udc_it82xx2.c b/drivers/usb/udc/udc_it82xx2.c
+index 145ff490..b9a9f093 100644
+--- a/drivers/usb/udc/udc_it82xx2.c
++++ b/drivers/usb/udc/udc_it82xx2.c
+@@ -513,21 +513,22 @@ static int it82xx2_ep_dequeue(const struct device *dev, struct udc_ep_config *co
+ 	unsigned int lock_key;
+ 	uint8_t fifo_idx;
+ 
+-	fifo_idx = ep_idx > 0 ? ep_fifo_res[ep_idx % SHARED_FIFO_NUM] : 0;
++	fifo_idx = ep_idx > 0 ? ep_fifo_res[ep_idx %% SHARED_FIFO_NUM] : 0;
++
+ 	lock_key = irq_lock();
+-	if (USB_EP_DIR_IS_IN(cfg->addr)) {
+-		ff_regs[fifo_idx].ep_tx_fifo_ctrl = FIFO_FORCE_EMPTY;
+-	} else {
+-		ff_regs[fifo_idx].ep_rx_fifo_ctrl = FIFO_FORCE_EMPTY;
+-	}
+-	irq_unlock(lock_key);
++
++	ff_regs[fifo_idx].fifocfg &= ~IT82XX2_EP_FIFO_CFG_FIFO_EN;
+ 
+ 	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while (buf) {
++		struct net_buf *next = buf->frags;
++		buf->frags = NULL;
++		ep_write_complete(dev, cfg, buf);
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
+-	udc_ep_set_busy(cfg, false);
++	irq_unlock(lock_key);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/usb/udc/udc_kinetis.c b/drivers/usb/udc/udc_kinetis.c
+index 9f42cb55..3074ec87 100644
+--- a/drivers/usb/udc/udc_kinetis.c
++++ b/drivers/usb/udc/udc_kinetis.c
+@@ -570,15 +570,19 @@ static int usbfsotg_ep_dequeue(const struct device *dev,
+ 
+ 	lock_key = irq_lock();
+ 	bd->set.bd_ctrl = USBFSOTG_BD_DTS;
+-	irq_unlock(lock_key);
+ 
+-	cfg->stat.halted = false;
+ 	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	while (buf) {
++		struct net_buf *next = buf->frags;
++		struct usbfsotg_req_data *req_data = udc_get_buf_info(buf);
++
++		buf->frags = NULL;
++		req_data->status = -ECONNABORTED;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
+-	udc_ep_set_busy(cfg, false);
++	irq_unlock(lock_key);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/usb/udc/udc_max32.c b/drivers/usb/udc/udc_max32.c
+index 9b289fc3..f2a29c5c 100644
+--- a/drivers/usb/udc/udc_max32.c
++++ b/drivers/usb/udc/udc_max32.c
+@@ -345,10 +345,12 @@ static int udc_max32_ep_dequeue(const struct device *dev, struct udc_ep_config *
+ 	lock_key = irq_lock();
+ 
+ 	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	} else {
+-		LOG_INF("ep 0x%02x queue is empty", cfg->addr);
++		buf = next;
+ 	}
+ 
+ 	irq_unlock(lock_key);
+diff --git a/drivers/usb/udc/udc_mcux_ip3511.c b/drivers/usb/udc/udc_mcux_ip3511.c
+index 273a1375..ca345189 100644
+--- a/drivers/usb/udc/udc_mcux_ip3511.c
++++ b/drivers/usb/udc/udc_mcux_ip3511.c
+@@ -509,19 +509,26 @@ static int udc_mcux_ep_enqueue(const struct device *dev,
+ }
+ 
+ static int udc_mcux_ep_dequeue(const struct device *dev,
+-			       struct udc_ep_config *const cfg)
++				struct udc_ep_config *const cfg)
+ {
++	unsigned int lock_key;
+ 	struct net_buf *buf;
+ 
+-	cfg->stat.halted = false;
++	lock_key = irq_lock();
++
++	/* Get all buffers and submit individual events */
+ 	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
+-	udc_mcux_lock(dev);
+-	udc_ep_set_busy(cfg, false);
+-	udc_mcux_unlock(dev);
++	irq_unlock(lock_key);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/usb/udc/udc_nrf.c b/drivers/usb/udc/udc_nrf.c
+index d911106f..0d74b886 100644
+--- a/drivers/usb/udc/udc_nrf.c
++++ b/drivers/usb/udc/udc_nrf.c
+@@ -1501,20 +1501,27 @@ static int udc_nrf_ep_enqueue(const struct device *dev,
+ }
+ 
+ static int udc_nrf_ep_dequeue(const struct device *dev,
+-			      struct udc_ep_config *cfg)
++			      struct udc_ep_config *const ep_cfg)
+ {
++	struct udc_nrf_data *priv = udc_get_private(dev);
++	unsigned int lock_key;
+ 	struct net_buf *buf;
+ 
+-	nrf_usbd_legacy_ep_abort(cfg->addr);
++ lock_key = irq_lock();
++
++	buf = udc_buf_get_all(ep_cfg);
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
++		nrf_ep_buf_free(priv, ep_cfg, buf);
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	} else {
+-		LOG_INF("ep 0x%02x queue is empty", cfg->addr);
++		buf = next;
+ 	}
+ 
+-	udc_ep_set_busy(cfg, false);
++	irq_unlock(lock_key);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/usb/udc/udc_numaker.c b/drivers/usb/udc/udc_numaker.c
+index 99c31568..38ce60d7 100644
+--- a/drivers/usb/udc/udc_numaker.c
++++ b/drivers/usb/udc/udc_numaker.c
+@@ -2603,25 +2603,27 @@ static int udc_numaker_ep_enqueue(const struct device *dev, struct udc_ep_config
+ 	return 0;
+ }
+ 
+-static int udc_numaker_ep_dequeue(const struct device *dev, struct udc_ep_config *const ep_cfg)
++static int udc_numaker_ep_dequeue(const struct device *dev,
++				  struct udc_ep_config *const cfg)
+ {
++	unsigned int lock_key;
+ 	struct net_buf *buf;
+-	struct numaker_usbd_ep *ep_cur;
+ 
+-	/* Bind EP H/W context to EP address */
+-	ep_cur = numaker_usbd_ep_mgmt_bind_ep(dev, ep_cfg->addr);
+-	if (!ep_cur) {
+-		LOG_ERR("Bind EP H/W context: ep=0x%02x", ep_cfg->addr);
+-		return -ENODEV;
+-	}
++	lock_key = irq_lock();
+ 
+-	numaker_usbd_ep_abort(ep_cur, false);
++	buf = udc_buf_get_all(cfg);
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
++	irq_unlock(lock_key);
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/usb/udc/udc_renesas_ra.c b/drivers/usb/udc/udc_renesas_ra.c
+index 24bd88bd..28f1a942 100644
+--- a/drivers/usb/udc/udc_renesas_ra.c
++++ b/drivers/usb/udc/udc_renesas_ra.c
+@@ -318,24 +318,24 @@ static int udc_renesas_ra_ep_enqueue(const struct device *dev, struct udc_ep_con
+ 	return 0;
+ }
+ 
+-static int udc_renesas_ra_ep_dequeue(const struct device *dev, struct udc_ep_config *const cfg)
++static int udc_renesas_ra_ep_dequeue(const struct device *dev,
++				      struct udc_ep_config *const ep_cfg)
+ {
+-	struct udc_renesas_ra_data *data = udc_get_private(dev);
+ 	unsigned int lock_key;
+ 	struct net_buf *buf;
+ 
+ 	lock_key = irq_lock();
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf != NULL) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	buf = udc_buf_get_all(ep_cfg);
+ 
+-	if (FSP_SUCCESS != R_USBD_XferAbort(&data->udc, cfg->addr)) {
+-		return -EIO;
+-	}
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
+ 
+-	udc_ep_set_busy(cfg, false);
++		buf->frags = NULL;
++		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
++	}
+ 
+ 	irq_unlock(lock_key);
+ 
+diff --git a/drivers/usb/udc/udc_rpi_pico.c b/drivers/usb/udc/udc_rpi_pico.c
+index 73242816..2e3a300e 100644
+--- a/drivers/usb/udc/udc_rpi_pico.c
++++ b/drivers/usb/udc/udc_rpi_pico.c
+@@ -731,17 +731,25 @@ static int udc_rpi_pico_ep_enqueue(const struct device *dev,
+ }
+ 
+ static int udc_rpi_pico_ep_dequeue(const struct device *dev,
+-				   struct udc_ep_config *const cfg)
++				     struct udc_ep_config *const ep_cfg)
+ {
++	struct udc_rpi_pico_data *const priv = udc_get_private(dev);
++	const uint8_t ep_num = USB_EP_GET_IDX(ep_cfg->addr);
+ 	unsigned int lock_key;
+ 	struct net_buf *buf;
+ 
+ 	lock_key = irq_lock();
+ 
+-	rpi_pico_ep_cancel(dev, cfg->addr);
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	buf = udc_buf_get_all(ep_cfg);
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
++		usb_buf_free(&priv->ep_pool[ep_num], buf);
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
+ 	irq_unlock(lock_key);
+diff --git a/drivers/usb/udc/udc_sam0.c b/drivers/usb/udc/udc_sam0.c
+index 96c0bbf4..0a93e7e9 100644
+--- a/drivers/usb/udc/udc_sam0.c
++++ b/drivers/usb/udc/udc_sam0.c
+@@ -638,28 +638,32 @@ static int udc_sam0_ep_enqueue(const struct device *dev,
+ 	return 0;
+ }
+ 
+-static int udc_sam0_ep_dequeue(const struct device *dev, struct udc_ep_config *const ep_cfg)
++static int udc_sam0_ep_dequeue(const struct device *dev,
++			       struct udc_ep_config *const ep_cfg)
+ {
+-	UsbDeviceEndpoint *const endpoint = sam0_get_ep_reg(dev, ep_cfg->addr);
+-	unsigned int lock_key;
+-	struct net_buf *buf;
+-
+-	lock_key = irq_lock();
++	const struct udc_sam0_config *config = dev->config;
++	Usbd *const usb = config->regs;
++	const uint8_t ep = USB_EP_GET_IDX(ep_cfg->addr);
+ 
+-	if (USB_EP_DIR_IS_IN(ep_cfg->addr)) {
+-		endpoint->EPSTATUSCLR.bit.BK1RDY = 1;
++	if (USB_EP_DIR_IS_OUT(ep_cfg->addr)) {
++		usb->DEVICE.DeviceEndpoint[ep].EPSTATUSCLR.reg = 
++			USB_DEVICE_EPSTATUSCLR_BK0RDY;
+ 	} else {
+-		endpoint->EPSTATUSSET.bit.BK0RDY = 1;
++		usb->DEVICE.DeviceEndpoint[ep].EPSTATUSCLR.reg = 
++			USB_DEVICE_EPSTATUSCLR_BK1RDY;
+ 	}
+ 
+-	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++	struct net_buf *buf = udc_buf_get_all(ep_cfg);
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-		udc_ep_set_busy(ep_cfg, false);
++		buf = next;
+ 	}
+ 
+-	irq_unlock(lock_key);
+-
+ 	return 0;
+ }
+ 
+diff --git a/drivers/usb/udc/udc_sam_udp.c b/drivers/usb/udc/udc_sam_udp.c
+index 48e4d6dc..0bb15700 100644
+--- a/drivers/usb/udc/udc_sam_udp.c
++++ b/drivers/usb/udc/udc_sam_udp.c
+@@ -563,32 +563,26 @@ static int udc_sam_udp_ep_enqueue(const struct device *dev,
+ }
+ 
+ static int udc_sam_udp_ep_dequeue(const struct device *dev,
+-				  struct udc_ep_config *const cfg)
++				  struct udc_ep_config *const ep_cfg)
+ {
+-	Udp *base = udc_sam_udp_get_base(dev);
+-	uint8_t hw_ep = USB_EP_GET_IDX(cfg->addr);
+-	struct net_buf *buf;
+-
+-	/* Cancel pending TX data for IN endpoints per datasheet 40.6.2.5 */
+-	if (USB_EP_DIR_IS_IN(cfg->addr)) {
+-		struct udc_sam_udp_data *priv = udc_get_private(dev);
++	Udp *const base = udc_sam_udp_get_base(dev);
++	const uint8_t ep = USB_EP_GET_IDX(ep_cfg->addr);
+ 
+-		cancel_pending_tx(base, hw_ep);
+-		priv->ep_data[hw_ep].tx_banks = 0;
++	if (USB_EP_DIR_IS_IN(ep_cfg->addr)) {
++		base->UDP_CSR[ep] &= ~UDP_CSR_TXPKTRDY;
++	} else {
++		base->UDP_CSR[ep] &= ~UDP_CSR_RXDATA_BK0;
+ 	}
+-	/*
+-	 * For OUT endpoints, don't touch out_pending or IRQ state here.
+-	 * The pending bit and IRQ will self-correct through normal flow:
+-	 * - If data in FIFO and IRQ enabled: ISR will handle it
+-	 * - If data in FIFO and IRQ disabled: pending bit is set,
+-	 *   next ep_enqueue will wake thread to process
+-	 * Clearing/re-enabling here causes extra thread wake-ups in
+-	 * rapid queue/cancel cycles (unlink tests).
+-	 */
+ 
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
++	struct net_buf *buf = udc_buf_get_all(ep_cfg);
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
+ 	return 0;
+diff --git a/drivers/usb/udc/udc_sam_usbc.c b/drivers/usb/udc/udc_sam_usbc.c
+index 96a26b19..7ebbffa7 100644
+--- a/drivers/usb/udc/udc_sam_usbc.c
++++ b/drivers/usb/udc/udc_sam_usbc.c
+@@ -891,24 +891,17 @@ static int udc_sam_usbc_ep_dequeue(const struct device *const dev,
+ 
+ 	lock_key = irq_lock();
+ 
+-	/*
+-	 * Disable endpoint interrupts if physical EP is still allocated.
+-	 * The physical EP may already be freed by ep_disable, but we still
+-	 * need to dequeue pending buffers below.
+-	 */
+-	if (phys_ep < NUM_OF_EP_MAX) {
+-		if (USB_EP_DIR_IS_IN(ep_cfg->addr)) {
+-			base->UECONCLR[phys_ep] = USBC_UECON0CLR_TXINEC;
+-		} else {
+-			base->UECONCLR[phys_ep] = USBC_UECON0CLR_RXOUTEC;
+-		}
+-	}
++	usbc_clr_epr(base, phys_ep, USBC_EPR_CFG_LAST);
+ 
+-	/* Always dequeue pending buffers and notify class layer */
+ 	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-		udc_ep_set_busy(ep_cfg, false);
++		buf = next;
+ 	}
+ 
+ 	irq_unlock(lock_key);
+diff --git a/drivers/usb/udc/udc_sam_usbhs.c b/drivers/usb/udc/udc_sam_usbhs.c
+index ee18e50f..414c14fa 100644
+--- a/drivers/usb/udc/udc_sam_usbhs.c
++++ b/drivers/usb/udc/udc_sam_usbhs.c
+@@ -1042,29 +1042,22 @@ static int udc_sam_usbhs_ep_dequeue(const struct device *dev,
+ 
+ 	lock_key = irq_lock();
+ 
+-	if (USB_EP_DIR_IS_IN(ep_cfg->addr)) {
+-		base->USBHS_DEVEPTIDR[ep_idx] = USBHS_DEVEPTIDR_TXINEC;
+-	} else {
+-		base->USBHS_DEVEPTIDR[ep_idx] = USBHS_DEVEPTIDR_RXOUTEC;
+-		/*
+-		 * Clear out_pending to prevent thread from processing
+-		 * stale deferred data for this cancelled transfer.
+-		 */
+-		atomic_clear_bit(&priv->out_pending, bit);
+-	}
+-
+-	/*
+-	 * Clear xfer_finished to prevent thread from processing
+-	 * stale completion for this cancelled transfer.
+-	 */
+-	atomic_clear_bit(&priv->xfer_finished, bit);
++	base->USBHS_EPRST |= BIT(bit);
++	base->USBHS_EPRST &= ~BIT(bit);
+ 
+ 	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-		udc_ep_set_busy(ep_cfg, false);
++		buf = next;
+ 	}
+ 
++	usbhs_ep_fifo_free(priv->dev, ep_cfg);
++
+ 	irq_unlock(lock_key);
+ 
+ 	return 0;
+diff --git a/drivers/usb/udc/udc_smartbond.c b/drivers/usb/udc/udc_smartbond.c
+index 88805f12..a00ea234 100644
+--- a/drivers/usb/udc/udc_smartbond.c
++++ b/drivers/usb/udc/udc_smartbond.c
+@@ -684,12 +684,16 @@ static int udc_smartbond_ep_dequeue(const struct device *dev, struct udc_ep_conf
+ 	udc_smartbond_ep_abort(dev, ep_cfg);
+ 
+ 	buf = udc_buf_get_all(ep_cfg);
+-	if (buf) {
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
+-	udc_ep_set_busy(ep_cfg, false);
+-
+ 	irq_unlock(lock_key);
+ 
+ 	return 0;
+diff --git a/drivers/usb/udc/udc_stm32.c b/drivers/usb/udc/udc_stm32.c
+index 0ac6c8e2..a85d9e92 100644
+--- a/drivers/usb/udc/udc_stm32.c
++++ b/drivers/usb/udc/udc_stm32.c
+@@ -1118,12 +1118,16 @@ static int udc_stm32_ep_dequeue(const struct device *dev,
+ 	__ASSERT_NO_MSG(status == HAL_OK);
+ 
+ 	buf = udc_buf_get_all(ep_cfg);
+-	if (buf != NULL) {
++
++	/* Submit individual events for each buffer */
++	while (buf) {
++		struct net_buf *next = buf->frags;
++
++		buf->frags = NULL;
+ 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
++		buf = next;
+ 	}
+ 
+-	udc_ep_set_busy(ep_cfg, false);
+-
+ 	return 0;
+ }
+ 
+diff --git a/drivers/usb/udc/udc_virtual.c b/drivers/usb/udc/udc_virtual.c
+index 0d5e1340..8e7d689d 100644
+--- a/drivers/usb/udc/udc_virtual.c
++++ b/drivers/usb/udc/udc_virtual.c
+@@ -306,14 +306,10 @@ static int udc_vrt_ep_dequeue(const struct device *dev,
+ 			      struct udc_ep_config *cfg)
+ {
+ 	unsigned int lock_key;
+-	struct net_buf *buf;
+ 
+ 	lock_key = irq_lock();
+-	/* Draft dequeue implementation */
+-	buf = udc_buf_get_all(cfg);
+-	if (buf) {
+-		udc_submit_ep_event(dev, buf, -ECONNABORTED);
+-	}
++	/* Properly dequeue all buffers and submit individual events */
++	udc_ep_dequeue_all(dev, cfg);
+ 	irq_unlock(lock_key);
+ 
+ 	return 0;
+diff --git a/include/zephyr/drivers/usb/udc.h b/include/zephyr/drivers/usb/udc.h
+index d18ab591..a76a0d07 100644
+--- a/include/zephyr/drivers/usb/udc.h
++++ b/include/zephyr/drivers/usb/udc.h
+@@ -679,6 +679,10 @@ bool udc_ep_queue_is_empty(const struct device *dev, const uint8_t ep);
+  */
+ int udc_ep_dequeue(const struct device *dev, const uint8_t ep);
+ 
++/* Helper function for drivers to properly dequeue all buffers and submit individual events */
++void udc_ep_dequeue_all(const struct device *dev, struct udc_ep_config *cfg);
++/* Helper function for drivers to properly dequeue all buffers and submit individual events */
++void udc_ep_dequeue_all(const struct device *dev, struct udc_ep_config *cfg);
+ /**
+  * @brief Allocate UDC request buffer
+  *

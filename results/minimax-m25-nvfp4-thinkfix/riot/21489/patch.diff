@@ -1,0 +1,373 @@
+diff --git a/makefiles/pseudomodules.inc.mk b/makefiles/pseudomodules.inc.mk
+index 03e4c7d2..cb26a6ca 100644
+--- a/makefiles/pseudomodules.inc.mk
++++ b/makefiles/pseudomodules.inc.mk
+@@ -434,6 +434,7 @@ PSEUDOMODULES += shell_cmd_i2c_scan
+ PSEUDOMODULES += shell_cmd_iw
+ PSEUDOMODULES += shell_cmd_lwip_netif
+ PSEUDOMODULES += shell_cmd_mci
++PSEUDOMODULES += shell_cmd_mtd
+ PSEUDOMODULES += shell_cmd_md5sum
+ PSEUDOMODULES += shell_cmd_nanocoap_vfs
+ PSEUDOMODULES += shell_cmd_netstats_neighbor
+diff --git a/sys/shell/Makefile.dep b/sys/shell/Makefile.dep
+index 0563d0f1..8dd201ab 100644
+--- a/sys/shell/Makefile.dep
++++ b/sys/shell/Makefile.dep
+@@ -78,6 +78,9 @@ ifneq (,$(filter shell_cmds_default,$(USEMODULE)))
+   ifneq (,$(filter mci,$(USEMODULE)))
+     USEMODULE += shell_cmd_mci
+   endif
++  ifneq (,$(filter mtd,$(USEMODULE)))
++    USEMODULE += shell_cmd_mtd
++  endif
+   ifneq (,$(filter nanocoap_vfs,$(USEMODULE)))
+     USEMODULE += shell_cmd_nanocoap_vfs
+   endif
+@@ -209,6 +212,11 @@ endif
+ ifneq (,$(filter shell_cmd_mci,$(USEMODULE)))
+   USEMODULE += mci
+ endif
++ifneq (,$(filter shell_cmd_mtd,$(USEMODULE)))
++  USEMODULE += mtd
++  USEMODULE += od
++  USEMODULE += fmt
++endif
+ ifneq (,$(filter shell_cmd_md5sum,$(USEMODULE)))
+   USEMODULE += shell_cmd_vfs
+ endif
+diff --git a/sys/shell/cmds/mtd.c b/sys/shell/cmds/mtd.c
+new file mode 100644
+index 00000000..1d5a3072
+--- /dev/null
++++ b/sys/shell/cmds/mtd.c
+@@ -0,0 +1,329 @@
++/*
++ * Copyright (C) 2024 HAW Hamburg
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     sys_shell_commands
++ * @{
++ *
++ * @file
++ * @brief       Shell command for MTD (Memory Technology Device) access
++ *
++ * @author      HAW Hamburg
++ *
++ * @}
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++
++#include "mtd.h"
++#include "shell.h"
++#include "od.h"
++#include "fmt.h"
++
++static void _print_size(uint32_t size)
++{
++    if (size >= 1024 * 1024) {
++        printf("%u KiB", size / 1024);
++    }
++    else {
++        printf("%u B", size);
++    }
++}
++
++static int _mtd_info(int argc, char **argv)
++{
++    (void)argc;
++    (void)argv;
++
++    uint32_t mtd_count = XFA_LEN(mtd_dev_t *, mtd_dev_xfa);
++    printf("mtd devices: %u\n", (unsigned)mtd_count);
++
++    for (uint32_t i = 0; i < mtd_count; i++) {
++        mtd_dev_t *mtd = mtd_dev_xfa[i];
++        uint32_t total = mtd->sector_count * mtd->pages_per_sector * mtd->page_size;
++
++        printf(" -=[ MTD_%u ]=-\n", (unsigned)i);
++        printf("sectors: %u\n", (unsigned)mtd->sector_count);
++        printf("pages per sector: %u\n", (unsigned)mtd->pages_per_sector);
++        printf("page size: %u\n", (unsigned)mtd->page_size);
++        printf("total: ");
++        _print_size(total);
++        puts("");
++    }
++
++    return 0;
++}
++
++static int _mtd_info_device(int argc, char **argv)
++{
++    if (argc < 2) {
++        printf("Usage: %s info [<device>]\n", argv[0]);
++        return 1;
++    }
++
++    uint32_t dev_num = atoi(argv[1]);
++    uint32_t mtd_count = XFA_LEN(mtd_dev_t *, mtd_dev_xfa);
++
++    if (dev_num >= mtd_count) {
++        printf("Invalid MTD device index %u (valid range: 0-%u)\n",
++               (unsigned)dev_num, (unsigned)mtd_count - 1);
++        return 1;
++    }
++
++    mtd_dev_t *mtd = mtd_dev_xfa[dev_num];
++    uint32_t total = mtd->sector_count * mtd->pages_per_sector * mtd->page_size;
++
++    printf(" -=[ MTD_%u ]=-\n", (unsigned)dev_num);
++    printf("sectors: %u\n", (unsigned)mtd->sector_count);
++    printf("pages per sector: %u\n", (unsigned)mtd->pages_per_sector);
++    printf("page size: %u\n", (unsigned)mtd->page_size);
++    printf("total: ");
++    _print_size(total);
++    puts("");
++
++    return 0;
++}
++
++static int _mtd_read(int argc, char **argv)
++{
++    if (argc < 4) {
++        printf("Usage: %s read <device> <addr> <len>\n", argv[0]);
++        return 1;
++    }
++
++    uint32_t dev_num = atoi(argv[1]);
++    uint32_t addr = atol(argv[2]);
++    uint32_t len = atol(argv[3]);
++
++    uint32_t mtd_count = XFA_LEN(mtd_dev_t *, mtd_dev_xfa);
++    if (dev_num >= mtd_count) {
++        printf("Invalid MTD device index %u (valid range: 0-%u)\n",
++               (unsigned)dev_num, (unsigned)mtd_count - 1);
++        return 1;
++    }
++
++    mtd_dev_t *mtd = mtd_dev_xfa[dev_num];
++    char *buf = malloc(len);
++    if (!buf) {
++        puts("Error: out of memory");
++        return 1;
++    }
++
++    int res = mtd_read(mtd, buf, addr, len);
++    if (res < 0) {
++        printf("Error reading: %d\n", res);
++        free(buf);
++        return 1;
++    }
++
++    od_hex_dump_ext(buf, len, OD_WIDTH_DEFAULT, addr);
++    free(buf);
++    return 0;
++}
++
++static int _mtd_write(int argc, char **argv)
++{
++    bool hex_bytes = false;
++    int data_idx = -1;
++    int dev_idx = 1;
++    int addr_idx = 2;
++
++    /* Parse arguments: write [-b] <device> <addr> <data>
++     * After handler shifts: argv[0]=write, argv[1]=<device>, argv[2]=<addr>, argv[3]=[-b], argv[4]=<data> */
++    
++    /* Check if -b flag is present */
++    for (int i = 1; i < argc; i++) {
++        if (strcmp(argv[i], "-b") == 0) {
++            hex_bytes = true;
++            break;
++        }
++    }
++
++    if (hex_bytes) {
++        /* -b flag present: data is at argv[4] (index 4) */
++        if (argc >= 5) {
++            data_idx = 4;
++        }
++    }
++    else {
++        /* No -b flag: data is at argv[3] */
++        if (argc >= 4) {
++            data_idx = 3;
++        }
++    }
++
++    if (data_idx < 0) {
++        printf("Usage: %s write [-b] <device> <addr> <data>\n", argv[0]);
++        printf("  -b: treat data as hexadecimal bytes\n");
++        return 1;
++    }
++
++    uint32_t dev_num = atoi(argv[dev_idx]);
++    uint32_t addr = atol(argv[addr_idx]);
++    const char *data = argv[data_idx];
++
++    uint32_t mtd_count = XFA_LEN(mtd_dev_t *, mtd_dev_xfa);
++    if (dev_num >= mtd_count) {
++        printf("Invalid MTD device index %u (valid range: 0-%u)\n",
++               (unsigned)dev_num, (unsigned)mtd_count - 1);
++        return 1;
++    }
++
++    mtd_dev_t *mtd = mtd_dev_xfa[dev_num];
++
++    uint8_t *write_buf;
++    size_t data_len;
++
++    if (hex_bytes) {
++        data_len = strlen(data) / 2;
++        write_buf = malloc(data_len);
++        if (!write_buf) {
++            puts("Error: out of memory");
++            return 1;
++        }
++        fmt_hex_bytes(write_buf, data);
++    }
++    else {
++        data_len = strlen(data);
++        write_buf = (uint8_t *)data;
++    }
++
++    int res = mtd_write(mtd, write_buf, addr, data_len);
++    if (res < 0) {
++        printf("Error writing: %d\n", res);
++        if (hex_bytes) {
++            free(write_buf);
++        }
++        return 1;
++    }
++
++    printf("Wrote %u bytes\n", (unsigned)data_len);
++    if (hex_bytes) {
++        free(write_buf);
++    }
++    return 0;
++}
++
++static int _mtd_erase(int argc, char **argv)
++{
++    if (argc < 4) {
++        printf("Usage: %s erase <device> <addr> <len>\n", argv[0]);
++        return 1;
++    }
++
++    uint32_t dev_num = atoi(argv[1]);
++    uint32_t addr = atol(argv[2]);
++    uint32_t len = atol(argv[3]);
++
++    uint32_t mtd_count = XFA_LEN(mtd_dev_t *, mtd_dev_xfa);
++    if (dev_num >= mtd_count) {
++        printf("Invalid MTD device index %u (valid range: 0-%u)\n",
++               (unsigned)dev_num, (unsigned)mtd_count - 1);
++        return 1;
++    }
++
++    mtd_dev_t *mtd = mtd_dev_xfa[dev_num];
++
++    int res = mtd_erase(mtd, addr, len);
++    if (res < 0) {
++        printf("Error erasing: %d\n", res);
++        return 1;
++    }
++
++    printf("Erased %u bytes\n", (unsigned)len);
++    return 0;
++}
++
++static int _mtd_power(int argc, char **argv)
++{
++    if (argc < 3) {
++        printf("Usage: %s power <device> <up|down>\n", argv[0]);
++        return 1;
++    }
++
++    uint32_t dev_num = atoi(argv[1]);
++    enum mtd_power_state power;
++
++    if (strcmp(argv[2], "up") == 0) {
++        power = MTD_POWER_UP;
++    }
++    else if (strcmp(argv[2], "down") == 0) {
++        power = MTD_POWER_DOWN;
++    }
++    else {
++        printf("Usage: %s power <device> <up|down>\n", argv[0]);
++        return 1;
++    }
++
++    uint32_t mtd_count = XFA_LEN(mtd_dev_t *, mtd_dev_xfa);
++    if (dev_num >= mtd_count) {
++        printf("Invalid MTD device index %u (valid range: 0-%u)\n",
++               (unsigned)dev_num, (unsigned)mtd_count - 1);
++        return 1;
++    }
++
++    mtd_dev_t *mtd = mtd_dev_xfa[dev_num];
++
++    int res = mtd_power(mtd, power);
++    if (res < 0) {
++        printf("Error setting power state: %d\n", res);
++        return 1;
++    }
++
++    printf("Power state set to %s\n", argv[2]);
++    return 0;
++}
++
++static int _mtd_handler(int argc, char **argv)
++{
++    if (argc < 2) {
++        /* No device index, call info for all devices */
++        return _mtd_info(argc, argv);
++    }
++
++    /* Check if first argument is a subcommand or a device number */
++    if (strcmp(argv[1], "info") == 0) {
++        if (argc == 2) {
++            return _mtd_info(argc, argv);
++        }
++        else {
++            return _mtd_info_device(argc - 1, argv + 1);
++        }
++    }
++    else if (strcmp(argv[1], "read") == 0) {
++        return _mtd_read(argc - 1, argv + 1);
++    }
++    else if (strcmp(argv[1], "write") == 0) {
++        return _mtd_write(argc - 1, argv + 1);
++    }
++    else if (strcmp(argv[1], "erase") == 0) {
++        return _mtd_erase(argc - 1, argv + 1);
++    }
++    else if (strcmp(argv[1], "power") == 0) {
++        return _mtd_power(argc - 1, argv + 1);
++    }
++
++    /* Try to treat first arg as device index */
++    char *endptr;
++    (void)strtoul(argv[1], &endptr, 10);
++    if (endptr == argv[1]) {
++        printf("Unknown subcommand: %s\n", argv[1]);
++        printf("Usage: %s [device] <info|read|write|erase|power>\n", argv[0]);
++        return 1;
++    }
++
++    /* Device index given without subcommand - show info for that device */
++    char *new_argv[argc];
++    new_argv[0] = argv[0];
++    new_argv[1] = argv[1];
++    return _mtd_info_device(2, new_argv);
++}
++
++SHELL_COMMAND(mtd, "MTD device operations", _mtd_handler);

@@ -1,0 +1,94 @@
+diff --git a/include/zephyr/net/socket_service.h b/include/zephyr/net/socket_service.h
+index 85a9dc884..f4c50c64a 100644
+--- a/include/zephyr/net/socket_service.h
++++ b/include/zephyr/net/socket_service.h
+@@ -173,11 +173,26 @@ __syscall int net_socket_service_register(const struct net_socket_service_desc *
+  * @retval -ENOENT Service is not found.
+  * @retval -ENINVAL Invalid parameter.
+  */
+-static inline int net_socket_service_unregister(const struct net_socket_service_desc *service)
+-{
+-	return net_socket_service_register(service, NULL, 0, NULL);
++static inline int net_socket_service_unregister(const struct net_socket_service_desc *service) {
++    return net_socket_service_register(service, NULL, 0, NULL);
+ }
+ 
++/**
++ * @brief Unregister and close pollable sockets.
++ *
++ * This API unregisters a socket service (so it is no longer polled) and
++ * closes all sockets that were previously registered with the service.
++ * After a successful call the caller must not attempt to close the socket(s)
++ * again – the underlying file descriptors are already closed and any further
++ * close attempts will fail with @c -EBADF.
++ *
++ * @param service Pointer to a service description.
++ *
++ * @retval 0 No error
++ * @retval -ENOENT Service is not found.
++ * @retval -ENINVAL Invalid parameter.
++ */
++__syscall int net_socket_service_close(const struct net_socket_service_desc *service);
+ /**
+  * @typedef net_socket_service_cb_t
+  * @brief Callback used while iterating over socket services.
+diff --git a/subsys/net/lib/sntp/sntp.c b/subsys/net/lib/sntp/sntp.c
+index af8cc0362..c67387944 100644
+--- a/subsys/net/lib/sntp/sntp.c
++++ b/subsys/net/lib/sntp/sntp.c
+@@ -343,13 +343,11 @@ int sntp_read_async(struct net_socket_service_event *event, struct sntp_time *ts
+ 
+ void sntp_close_async(const struct net_socket_service_desc *service)
+ {
+-	struct sntp_ctx *ctx = service->pev->user_data;
+-	/* Detach socket from socket service */
+-	net_socket_service_unregister(service);
+-	/* CLose the socket */
+-	if (ctx) {
+-		(void)zsock_close(ctx->sock.fd);
+-	}
++    /* Unregister the service and close the underlying socket(s). The helper
++     * ensures the close is deferred until the service thread has stopped
++     * polling the socket. */
++    (void)net_socket_service_close(service);
++}
+ }
+ 
+ #endif /* CONFIG_NET_SOCKETS_SERVICE */
+diff --git a/subsys/net/lib/sockets/sockets_service.c b/subsys/net/lib/sockets/sockets_service.c
+index e60f919ac..8e91a4dac 100644
+--- a/subsys/net/lib/sockets/sockets_service.c
++++ b/subsys/net/lib/sockets/sockets_service.c
+@@ -305,3 +305,29 @@ void socket_service_init(void)
+ {
+ 	(void)init_socket_service();
+ }
++
++/**
++ * @brief Unregister a service and close its sockets.
++ */
++int z_impl_net_socket_service_close(const struct net_socket_service_desc *svc)
++{
++    int fds[CONFIG_ZVFS_POLL_MAX];
++    int count;
++    if (!svc) {
++        return -EINVAL;
++    }
++    k_mutex_lock(&lock, K_FOREVER);
++    count = svc->pev_len;
++    for (int i = 0; i < count; i++) {
++        fds[i] = svc->pev[i].event.fd;
++        svc->pev[i].event.fd = -1;
++        svc->pev[i].event.events = 0;
++    }
++    k_mutex_unlock(&lock);
++    for (int i = 0; i < count; i++) {
++        if (fds[i] >= 0) {
++            (void)zsock_close(fds[i]);
++        }
++    }
++    return 0;
++}
+diff --git a/tmp/main_new.c b/tmp/main_new.c
+new file mode 100644
+index 000000000..e69de29bb

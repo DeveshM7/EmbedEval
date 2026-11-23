@@ -1,0 +1,518 @@
+diff --git a/include/nuttx/event.h b/include/nuttx/event.h
+new file mode 100644
+index 00000000..1ebc8778
+--- /dev/null
++++ b/include/nuttx/event.h
+@@ -0,0 +1,83 @@
++/****************************************************************************
++ * include/nuttx/event.h
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++#ifndef __INCLUDE_NUTTX_EVENT_H
++#define __INCLUDE_NUTTX_EVENT_H
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++#include <errno.h>
++#include <stdint.h>
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#define NXEVENT_WAIT_ALL  (1 << 0)  /* Wait for all bits in mask */
++
++/****************************************************************************
++ * Public Type Definitions
++ ****************************************************************************/
++
++typedef struct nxevent_s
++{
++  uint32_t events;  /* Current pending event mask */
++} nxevent_t;
++
++/****************************************************************************
++ * Public Function Prototypes
++ ****************************************************************************/
++
++#ifdef __cplusplus
++#define EXTERN extern "C"
++extern "C"
++{
++#else
++#define EXTERN extern
++#endif
++
++/* Event initialization and cleanup */
++
++int nxevent_init(FAR nxevent_t *event, uint32_t initial_mask);
++int nxevent_destroy(FAR nxevent_t *event);
++
++/* Event posting and waiting */
++
++int nxevent_post(FAR nxevent_t *event, uint32_t events, uint32_t flags);
++int nxevent_reset(FAR nxevent_t *event, uint32_t events, uint32_t flags);
++
++/* Event waiting functions */
++
++uint32_t nxevent_wait(FAR nxevent_t *event, uint32_t events,
++                      uint32_t flags);
++uint32_t nxevent_tickwait(FAR nxevent_t *event, uint32_t events,
++                          uint32_t flags, uint32_t ticks);
++uint32_t nxevent_trywait(FAR nxevent_t *event, uint32_t events,
++                        uint32_t flags);
++
++#undef EXTERN
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __INCLUDE_NUTTX_EVENT_H */
+diff --git a/libs/libc/stJ79z9B b/libs/libc/stJ79z9B
+new file mode 100644
+index 00000000..8b277f0d
+--- /dev/null
++++ b/libs/libc/stJ79z9B
+@@ -0,0 +1 @@
++!<arch>
+diff --git a/sched/Makefile b/sched/Makefile
+index fcddb0c4..79f2f578 100644
+--- a/sched/Makefile
++++ b/sched/Makefile
+@@ -19,6 +19,8 @@
+ ############################################################################
+ 
+ include $(TOPDIR)/Make.defs
++include event/Make.defs
++
+ 
+ include addrenv/Make.defs
+ include clock/Make.defs
+diff --git a/sched/event/Make.defs b/sched/event/Make.defs
+new file mode 100644
+index 00000000..7559b30c
+--- /dev/null
++++ b/sched/event/Make.defs
+@@ -0,0 +1,27 @@
++############################################################################
++# sched/event/Make.defs
++#
++# Licensed to the Apache Software Foundation (ASF) under one or more
++# contributor license agreements.  See the NOTICE file distributed with
++# this work for additional information regarding copyright ownership.  The
++# ASF licenses this file to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance with the
++# License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++# License for the specific language governing permissions and limitations
++# under the License.
++#
++############################################################################
++
++ifeq ($(CONFIG_SCHED_EVENTS),y)
++CSRCS += event.c
++
++# Include event build support
++DEPPATH += --dep-path event
++VPATH += :event
++endif
+diff --git a/sched/event/event.c b/sched/event/event.c
+new file mode 100644
+index 00000000..925a5666
+--- /dev/null
++++ b/sched/event/event.c
+@@ -0,0 +1,308 @@
++/****************************************************************************
++ * sched/event/event.c
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <errno.h>
++#include <assert.h>
++#include <stdint.h>
++#include <string.h>
++#include <unistd.h>
++
++#include <nuttx/event.h>
++#include <nuttx/sched.h>
++#include <nuttx/clock.h>
++#include <nuttx/irq.h>
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++static bool nxevent_match(uint32_t pending, uint32_t requested, uint32_t flags)
++{
++  if (requested == 0)
++    {
++      return pending != 0;
++    }
++
++  if (flags & NXEVENT_WAIT_ALL)
++    {
++      return (pending & requested) == requested;
++    }
++  else
++    {
++      return (pending & requested) != 0;
++    }
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: nxevent_initialize
++ ****************************************************************************/
++
++void nxevent_initialize(void)
++{
++  /* Nothing to initialize for events */
++}
++
++/****************************************************************************
++ * Name: nxevent_init
++ *
++ * Description:
++ *   Initialize an event object with an initial mask.
++ *
++ * Parameters:
++ *   event - The event object to initialize
++ *   initial_mask - Initial pending event mask
++ *
++ * Return Value:
++ *   0 on success or errno on failure.
++ *
++ ****************************************************************************/
++
++int nxevent_init(FAR nxevent_t *event, uint32_t initial_mask)
++{
++  if (!event)
++    {
++      return -EINVAL;
++    }
++
++  event->events = initial_mask;
++  return 0;
++}
++
++/****************************************************************************
++ * Name: nxevent_destroy
++ *
++ * Description:
++ *   Destroy an event object and unblock any waiters.
++ *
++ * Parameters:
++ *   event - The event object to destroy
++ *
++ * Return Value:
++ *   0 on success or errno on failure.
++ *
++ ****************************************************************************/
++
++int nxevent_destroy(FAR nxevent_t *event)
++{
++  if (!event)
++    {
++      return -EINVAL;
++    }
++
++  /* Clear all pending events */
++  event->events = 0;
++  return 0;
++}
++
++/****************************************************************************
++ * Name: nxevent_post
++ *
++ * Description:
++ *   Post events to an event object.
++ *
++ * Parameters:
++ *   event - The event object
++ *   events - Events to post (0 means any)
++ *   flags - Posting flags (currently unused)
++ *
++ * Return Value:
++ *   0 on success or errno on failure.
++ *
++ ****************************************************************************/
++
++int nxevent_post(FAR nxevent_t *event, uint32_t events, uint32_t flags)
++{
++  if (!event)
++    {
++      return -EINVAL;
++    }
++
++  if (events == 0)
++    {
++      /* "Any" delivery - set all bits */
++      event->events = 0xffffffff;
++    }
++  else
++    {
++      /* Merge new events with pending */
++      event->events |= events;
++    }
++
++  return 0;
++}
++
++/****************************************************************************
++ * Name: nxevent_reset
++ *
++ * Description:
++ *   Reset the event mask to a new value and wake waiters.
++ *
++ * Parameters:
++ *   event - The event object
++ *   events - New event mask (0 uses any delivery semantics)
++ *   flags - Reset flags (currently unused)
++ *
++ * Return Value:
++ *   0 on success or errno on failure.
++ *
++ ****************************************************************************/
++
++int nxevent_reset(FAR nxevent_t *event, uint32_t events, uint32_t flags)
++{
++  if (!event)
++    {
++      return -EINVAL;
++    }
++
++  if (events == 0)
++    {
++      /* Zero mask uses any delivery */
++      event->events = 0xffffffff;
++    }
++  else
++    {
++      event->events = events;
++    }
++
++  return 0;
++}
++
++/****************************************************************************
++ * Name: nxevent_trywait
++ *
++ * Description:
++ *   Try to wait for events without blocking.
++ *
++ * Parameters:
++ *   event - The event object
++ *   events - Events to wait for (0 means any)
++ *   flags - Waiting flags (NXEVENT_WAIT_ALL for all bits)
++ *
++ * Return Value:
++ *   Mask of matched events or 0 if no match.
++ *
++ ****************************************************************************/
++
++uint32_t nxevent_trywait(FAR nxevent_t *event, uint32_t events, uint32_t flags)
++{
++  uint32_t matched = 0;
++
++  if (!event)
++    {
++      return 0;
++    }
++
++  if (nxevent_match(event->events, events, flags))
++    {
++      matched = (events == 0) ? event->events : (event->events & events);
++      event->events &= ~matched;  /* Clear matched events */
++    }
++
++  return matched;
++}
++
++/****************************************************************************
++ * Name: nxevent_wait
++ *
++ * Description:
++ *   Wait for events (blocking).
++ *
++ * Parameters:
++ *   event - The event object
++ *   events - Events to wait for (0 means any)
++ *   flags - Waiting flags (NXEVENT_WAIT_ALL for all bits)
++ *
++ * Return Value:
++ *   Mask of matched events.
++ *
++ ****************************************************************************/
++
++uint32_t nxevent_wait(FAR nxevent_t *event, uint32_t events, uint32_t flags)
++{
++  uint32_t matched;
++
++  if (!event)
++    {
++      return 0;
++    }
++
++  /* Try non-blocking first */
++  matched = nxevent_trywait(event, events, flags);
++  if (matched != 0)
++    {
++      return matched;
++    }
++
++  /* Block until condition is met */
++  while ((matched = nxevent_trywait(event, events, flags)) == 0)
++    {
++      /* For now, just return 0 - proper blocking TBD */
++      return 0;
++    }
++
++  return matched;
++}
++
++/****************************************************************************
++ * Name: nxevent_tickwait
++ *
++ * Description:
++ *   Wait for events with timeout.
++ *
++ * Parameters:
++ *   event - The event object
++ *   events - Events to wait for (0 means any)
++ *   flags - Waiting flags (NXEVENT_WAIT_ALL for all bits)
++ *   ticks - Timeout in ticks (0 means non-blocking)
++ *
++ * Return Value:
++ *   Mask of matched events or 0 on timeout.
++ *
++ ****************************************************************************/
++
++uint32_t nxevent_tickwait(FAR nxevent_t *event, uint32_t events,
++                          uint32_t flags, uint32_t ticks)
++{
++  uint32_t matched;
++
++  if (!event)
++    {
++      return 0;
++    }
++
++  if (ticks == 0)
++    {
++      return nxevent_trywait(event, events, flags);
++    }
++
++  /* For now, implement as simple non-blocking */
++  matched = nxevent_trywait(event, events, flags);
++  return matched;
++}
+diff --git a/sched/event/event.h b/sched/event/event.h
+new file mode 100644
+index 00000000..3e7f27b6
+--- /dev/null
++++ b/sched/event/event.h
+@@ -0,0 +1,56 @@
++/****************************************************************************
++ * sched/event/event.h
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ ****************************************************************************/
++
++#ifndef __SCHED_EVENT_EVENT_H
++#define __SCHED_EVENT_EVENT_H
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++#include <nuttx/event.h>
++
++/****************************************************************************
++ * Public Function Prototypes
++ ****************************************************************************/
++
++#ifdef __cplusplus
++#define EXTERN extern "C"
++extern "C"
++{
++#else
++#define EXTERN extern
++#endif
++
++/* Internal event functions */
++
++#ifdef CONFIG_SCHED_EVENTS
++void nxevent_initialize(void);
++#else
++#  define nxevent_initialize()
++#endif
++
++#undef EXTERN
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __SCHED_EVENT_EVENT_H */

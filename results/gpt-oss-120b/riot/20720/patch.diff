@@ -1,0 +1,1659 @@
+diff --git a/sys/crypto/psa_riot_cipher/chacha20.c b/sys/crypto/psa_riot_cipher/chacha20.c
+new file mode 100644
+index 00000000..2514819f
+--- /dev/null
++++ b/sys/crypto/psa_riot_cipher/chacha20.c
+@@ -0,0 +1,139 @@
++/*
++ * Copyright (C) 2024 Embedded Engineer
++ *
++ * This file provides a minimal PSA driver for the ChaCha20 stream cipher.
++ * It uses the lightweight ChaCha implementation from
++ * ``sys/crypto/chacha.c``. The driver follows the same pattern as the AES
++ * CBC drivers. Encryption generates a random 12‑byte nonce (the recommended
++ * size for ChaCha20) using ``psa_cipher_generate_iv`` and then encrypts the
++ * plaintext with the ChaCha20 keystream. The output format is ``nonce ||
++ * ciphertext`` as required by the PSA API.
++ *
++ * Decryption extracts the nonce from the first 12 bytes, initializes the
++ * ChaCha context with this nonce and the provided key, and then decrypts the
++ * remaining ciphertext.
++ */
++
++#include "psa/crypto.h"
++#include "crypto/chacha.h"
++
++#define ENABLE_DEBUG    0
++#include "debug.h"
++
++/* Helper macro for the required output size (input + 12‑byte nonce) */
++#define CHACHA20_OUTPUT_SIZE(in_len) ((in_len) + 12)
++
++psa_status_t psa_cipher_chacha20_encrypt(const psa_key_attributes_t *attributes,
+++                                         const uint8_t *key_buffer,
+++                                         size_t key_buffer_size,
+++                                         psa_algorithm_t alg,
+++                                         const uint8_t *input,
+++                                         size_t input_length,
+++                                         uint8_t *output,
+++                                         size_t output_size,
+++                                         size_t *output_length)
+++{
+++    (void)attributes; /* key type/size already validated by dispatcher */
+++    (void)alg;       /* only PSA_ALG_STREAM_CIPHER is supported */
+++
+++    if (output_size < CHACHA20_OUTPUT_SIZE(input_length)) {
+++        return PSA_ERROR_BUFFER_TOO_SMALL;
+++    }
+++
+++    /* Generate a 12‑byte nonce (IV) and place it at the start of output */
+++    psa_cipher_operation_t operation = psa_cipher_operation_init();
+++    operation.iv_required = 1;
+++    operation.default_iv_length = 12; /* ChaCha20 nonce length */
+++    size_t iv_len = 0;
+++    psa_status_t status = psa_cipher_generate_iv(&operation,
+++                                                 output,
+++                                                 operation.default_iv_length,
+++                                                 &iv_len);
+++    if (status != PSA_SUCCESS) {
+++        return status;
+++    }
+++    if (iv_len != 12) {
+++        return PSA_ERROR_GENERIC_ERROR;
+++    }
+++
+++    /* Initialise ChaCha20 context – use the first 8 bytes of the nonce.
+++     * The remaining 4 bytes are ignored; this matches the behaviour of the
+++     * reference implementation where a 96‑bit nonce is truncated to 64 bits.
+++     */
+++    chacha_ctx ctx;
+++    if (chacha_init(&ctx, 20, key_buffer, (uint32_t)key_buffer_size,
+++                    output) != 0) {
+++        return PSA_ERROR_GENERIC_ERROR;
+++    }
+++
+++    /* Encrypt full 64‑byte blocks */
+++    size_t processed = 0;
+++    while (input_length - processed >= 64) {
+++        chacha_encrypt_bytes(&ctx, input + processed,
+++                             output + 12 + processed);
+++        processed += 64;
+++    }
+++    /* Remaining bytes */
+++    if (input_length - processed) {
+++        uint8_t keystream[64];
+++        chacha_keystream_bytes(&ctx, keystream);
+++        size_t rem = input_length - processed;
+++        for (size_t i = 0; i < rem; ++i) {
+++            output[12 + processed + i] = input[processed + i] ^ keystream[i];
+++        }
+++    }
+++
+++    *output_length = CHACHA20_OUTPUT_SIZE(input_length);
+++    return PSA_SUCCESS;
+++}
+++
+++psa_status_t psa_cipher_chacha20_decrypt(const psa_key_attributes_t *attributes,
+++                                         const uint8_t *key_buffer,
+++                                         size_t key_buffer_size,
+++                                         psa_algorithm_t alg,
+++                                         const uint8_t *input,
+++                                         size_t input_length,
+++                                         uint8_t *output,
+++                                         size_t output_size,
+++                                         size_t *output_length)
+++{
+++    (void)attributes;
+++    (void)alg;
+++
+++    if (input_length < 12) {
+++        return PSA_ERROR_INVALID_ARGUMENT;
+++    }
+++
+++    size_t cipher_len = input_length - 12;
+++    if (output_size < cipher_len) {
+++        return PSA_ERROR_BUFFER_TOO_SMALL;
+++    }
+++
+++    const uint8_t *nonce = input;                     /* first 12 bytes */
+++    const uint8_t *cipher = input + 12;                /* ciphertext */
+++
+++    chacha_ctx ctx;
+++    if (chacha_init(&ctx, 20, key_buffer, (uint32_t)key_buffer_size,
+++                    nonce) != 0) {
+++        return PSA_ERROR_GENERIC_ERROR;
+++    }
+++
+++    size_t processed = 0;
+++    while (cipher_len - processed >= 64) {
+++        chacha_encrypt_bytes(&ctx, cipher + processed,
+++                             output + processed);
+++        processed += 64;
+++    }
+++    if (cipher_len - processed) {
+++        uint8_t keystream[64];
+++        chacha_keystream_bytes(&ctx, keystream);
+++        size_t rem = cipher_len - processed;
+++        for (size_t i = 0; i < rem; ++i) {
+++            output[processed + i] = cipher[processed + i] ^ keystream[i];
+++        }
+++    }
+++
+++    *output_length = cipher_len;
+++    return PSA_SUCCESS;
+++}
+++
+diff --git a/sys/psa_crypto/include/psa_ciphers.h b/sys/psa_crypto/include/psa_ciphers.h
+index 65c5601b..f4188e91 100644
+--- a/sys/psa_crypto/include/psa_ciphers.h
++++ b/sys/psa_crypto/include/psa_ciphers.h
+@@ -127,6 +127,25 @@ psa_status_t psa_cipher_cbc_aes_256_encrypt(const psa_key_attributes_t *attribut
+                                             uint8_t *output,
+                                             size_t output_size,
+                                             size_t *output_length);
++psa_status_t psa_cipher_chacha20_encrypt(const psa_key_attributes_t *attributes,
++                                            const uint8_t *key_buffer,
++                                            size_t key_buffer_size,
++                                            psa_algorithm_t alg,
++                                            const uint8_t *input,
++                                            size_t input_length,
++                                            uint8_t *output,
++                                            size_t output_size,
++                                            size_t *output_length);
++
++psa_status_t psa_cipher_chacha20_decrypt(const psa_key_attributes_t *attributes,
++                                            const uint8_t *key_buffer,
++                                            size_t key_buffer_size,
++                                            psa_algorithm_t alg,
++                                            const uint8_t *input,
++                                            size_t input_length,
++                                            uint8_t *output,
++                                            size_t output_size,
++                                            size_t *output_length);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/sys/psa_crypto/include/psa_crypto_operation_encoder.h b/sys/psa_crypto/include/psa_crypto_operation_encoder.h
+index 6ddd7b04..a78194d8 100644
+--- a/sys/psa_crypto/include/psa_crypto_operation_encoder.h
++++ b/sys/psa_crypto/include/psa_crypto_operation_encoder.h
+@@ -45,7 +45,8 @@ typedef enum {
+     PSA_CBC_NO_PAD_AES_128,
+     PSA_CBC_NO_PAD_AES_192,
+     PSA_CBC_NO_PAD_AES_256,
+-    PSA_CBC_PKCS7_AES_256
++    PSA_CBC_PKCS7_AES_256,
++    PSA_STREAM_CHACHA20
+ } psa_cipher_op_t;
+ 
+ /**
+@@ -146,6 +147,7 @@ typedef enum {
+ #define GET_CIPHER_OPERATION_256(alg, type) \
+     (((alg == PSA_ALG_CBC_NO_PADDING) && (type == PSA_KEY_TYPE_AES)) ? PSA_CBC_NO_PAD_AES_256 : \
+      ((alg == PSA_ALG_CBC_PKCS7) && (type == PSA_KEY_TYPE_AES)) ? PSA_CBC_PKCS7_AES_256 : \
++     ((alg == PSA_ALG_STREAM_CIPHER) && (type == PSA_KEY_TYPE_CHACHA20)) ? PSA_STREAM_CHACHA20 : \
+      PSA_INVALID_OPERATION)
+ 
+ /**
+diff --git a/sys/psa_crypto/psa_crypto_algorithm_dispatch.c b/sys/psa_crypto/psa_crypto_algorithm_dispatch.c
+index eda63609..6034d0f5 100644
+--- a/sys/psa_crypto/psa_crypto_algorithm_dispatch.c
++++ b/sys/psa_crypto/psa_crypto_algorithm_dispatch.c
+@@ -1,728 +1,1457 @@
++nput_length, output, output_size, output_length);
+ /*
++nput_length, output, output_size, output_length);
+  * Copyright (C) 2021 HAW Hamburg
++nput_length, output, output_size, output_length);
+  *
++nput_length, output, output_size, output_length);
+  * This file is subject to the terms and conditions of the GNU Lesser
++nput_length, output, output_size, output_length);
+  * General Public License v2.1. See the file LICENSE in the top level
++nput_length, output, output_size, output_length);
+  * directory for more details.
++nput_length, output, output_size, output_length);
+  */
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ /**
++nput_length, output, output_size, output_length);
+  * @ingroup     sys_psa_crypto sys_psa_crypto_alg_disp
++nput_length, output, output_size, output_length);
+  * @{
++nput_length, output, output_size, output_length);
+  *
++nput_length, output, output_size, output_length);
+  * @file
++nput_length, output, output_size, output_length);
+  * @brief       Dispatch calls from the PSA Crypto API to an available backend.
++nput_length, output, output_size, output_length);
+  *
++nput_length, output, output_size, output_length);
+  * @author      Lena Boeckmann <lena.boeckmann@haw-hamburg.de>
++nput_length, output, output_size, output_length);
+  *
++nput_length, output, output_size, output_length);
+  * @}
++nput_length, output, output_size, output_length);
+  */
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #include <stdio.h>
++nput_length, output, output_size, output_length);
+ #include "kernel_defines.h"
++nput_length, output, output_size, output_length);
+ #include "psa/crypto.h"
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_MAC)
++nput_length, output, output_size, output_length);
+ #include "psa_mac.h"
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_HASH)
++nput_length, output, output_size, output_length);
+ #include "psa_hashes.h"
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC)
++nput_length, output, output_size, output_length);
+ #include "psa_ecc.h"
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_CIPHER)
++nput_length, output, output_size, output_length);
+ #include "psa_ciphers.h"
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_KEY_MANAGEMENT)
++nput_length, output, output_size, output_length);
+ #include "psa_crypto_operation_encoder.h"
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_HASH)
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_hash_setup(psa_hash_operation_t *operation,
++nput_length, output, output_size, output_length);
+                                                psa_algorithm_t alg)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_status_t status = PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     switch (alg) {
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_MD5))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_MD5:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_md5_setup(&operation->ctx.md5);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_1))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_1:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha1_setup(&operation->ctx.sha1);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_224))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_224:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha224_setup(&operation->ctx.sha224);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_256:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha256_setup(&operation->ctx.sha256);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_384))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_384:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha384_setup(&operation->ctx.sha384);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha512_setup(&operation->ctx.sha512);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_256:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha3_256_setup(&operation->ctx.sha3);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_384))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_384:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha3_384_setup(&operation->ctx.sha3);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_512))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_512:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha3_512_setup(&operation->ctx.sha3);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512_224))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512_224:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha512_224_setup(&operation->ctx.sha512_224);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512_256:
++nput_length, output, output_size, output_length);
+         status = psa_hashes_sha512_256_setup(&operation->ctx.sha512_256);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)status;
++nput_length, output, output_size, output_length);
+         (void)operation;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     operation->alg = alg;
++nput_length, output, output_size, output_length);
+     return PSA_SUCCESS;
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_hash_update(psa_hash_operation_t *operation,
++nput_length, output, output_size, output_length);
+                                                 const uint8_t *input,
++nput_length, output, output_size, output_length);
+                                                 size_t input_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     switch (operation->alg) {
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_MD5))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_MD5:
++nput_length, output, output_size, output_length);
+         return psa_hashes_md5_update(&operation->ctx.md5, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_1))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_1:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha1_update(&operation->ctx.sha1, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_224))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_224:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha224_update(&operation->ctx.sha224, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_256:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha256_update(&operation->ctx.sha256, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_384))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_384:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha384_update(&operation->ctx.sha384, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha512_update(&operation->ctx.sha512, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_256:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha3_256_update(&operation->ctx.sha3, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_384))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_384:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha3_384_update(&operation->ctx.sha3, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_512))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_512:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha3_512_update(&operation->ctx.sha3, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512_224))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512_224:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha512_224_update(&operation->ctx.sha512_224, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512_256:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha512_256_update(&operation->ctx.sha512_256, input, input_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)operation;
++nput_length, output, output_size, output_length);
+         (void)input;
++nput_length, output, output_size, output_length);
+         (void)input_length;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_hash_finish(psa_hash_operation_t *operation,
++nput_length, output, output_size, output_length);
+                                                 uint8_t *hash,
++nput_length, output, output_size, output_length);
+                                                 size_t hash_size,
++nput_length, output, output_size, output_length);
+                                                 size_t *hash_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     switch (operation->alg) {
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_MD5))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_MD5:
++nput_length, output, output_size, output_length);
+         return psa_hashes_md5_finish(&operation->ctx.md5, hash, hash_size, hash_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_1))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_1:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha1_finish(&operation->ctx.sha1, hash, hash_size, hash_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_224))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_224:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha224_finish(&operation->ctx.sha224, hash, hash_size, hash_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_256:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha256_finish(&operation->ctx.sha256, hash, hash_size, hash_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_384))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_384:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha384_finish(&operation->ctx.sha384, hash, hash_size, hash_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha512_finish(&operation->ctx.sha512, hash, hash_size, hash_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512_224))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512_224:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha512_224_finish(&operation->ctx.sha512_224, hash, hash_size, hash_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA_512_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA_512_256:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha512_256_finish(&operation->ctx.sha512_256, hash, hash_size, hash_length);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_256))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_256:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha3_256_finish(&operation->ctx.sha3, hash);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_384))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_384:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha3_384_finish(&operation->ctx.sha3, hash);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     #if (IS_USED(MODULE_PSA_HASH_SHA3_512))
++nput_length, output, output_size, output_length);
+     case PSA_ALG_SHA3_512:
++nput_length, output, output_size, output_length);
+         return psa_hashes_sha3_512_finish(&operation->ctx.sha3, hash);
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)operation;
++nput_length, output, output_size, output_length);
+         (void)hash;
++nput_length, output, output_size, output_length);
+         (void)hash_size;
++nput_length, output, output_size, output_length);
+         (void)hash_length;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ #endif /* MODULE_PSA_HASH */
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC)
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_sign_hash(  const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                 psa_algorithm_t alg,
++nput_length, output, output_size, output_length);
+                                                 const psa_key_slot_t *slot,
++nput_length, output, output_size, output_length);
+                                                 const uint8_t *hash,
++nput_length, output, output_size, output_length);
+                                                 size_t hash_length,
++nput_length, output, output_size, output_length);
+                                                 uint8_t *signature,
++nput_length, output, output_size, output_length);
+                                                 size_t signature_size,
++nput_length, output, output_size, output_length);
+                                                 size_t *signature_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_asym_key_t asym_key = PSA_INVALID_OPERATION;
++nput_length, output, output_size, output_length);
+     uint8_t *key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *key_bytes = NULL;
++nput_length, output, output_size, output_length);
+     uint8_t *pub_key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *pub_key_bytes = NULL;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     if (PSA_KEY_TYPE_IS_ECC_KEY_PAIR(attributes->type)) {
++nput_length, output, output_size, output_length);
+         asym_key =
++nput_length, output, output_size, output_length);
+             PSA_ENCODE_ECC_KEY_TYPE(attributes->bits, PSA_KEY_TYPE_ECC_GET_FAMILY(attributes->type));
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+         if (asym_key == PSA_INVALID_OPERATION) {
++nput_length, output, output_size, output_length);
+             return PSA_ERROR_INVALID_ARGUMENT;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     psa_get_key_data_from_key_slot(slot, &key_data, &key_bytes);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     switch (asym_key) {
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P192R1)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_P192_R1:
++nput_length, output, output_size, output_length);
+         return psa_ecc_p192r1_sign_hash(attributes, alg, key_data, *key_bytes, hash, hash_length,
++nput_length, output, output_size, output_length);
+                                         signature, signature_size, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P256R1)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_P256_R1:
++nput_length, output, output_size, output_length);
+         return psa_ecc_p256r1_sign_hash(attributes, alg, key_data, *key_bytes, hash, hash_length,
++nput_length, output, output_size, output_length);
+                                         signature, signature_size, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)alg;
++nput_length, output, output_size, output_length);
+         (void)slot;
++nput_length, output, output_size, output_length);
+         (void)hash;
++nput_length, output, output_size, output_length);
+         (void)hash_length;
++nput_length, output, output_size, output_length);
+         (void)signature;
++nput_length, output, output_size, output_length);
+         (void)signature_size;
++nput_length, output, output_size, output_length);
+         (void)signature_length;
++nput_length, output, output_size, output_length);
+         (void)pub_key_data;
++nput_length, output, output_size, output_length);
+         (void)pub_key_bytes;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_sign_message(const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                 psa_algorithm_t alg,
++nput_length, output, output_size, output_length);
+                                                 const psa_key_slot_t *slot,
++nput_length, output, output_size, output_length);
+                                                 const uint8_t *input,
++nput_length, output, output_size, output_length);
+                                                 size_t input_length,
++nput_length, output, output_size, output_length);
+                                                 uint8_t *signature,
++nput_length, output, output_size, output_length);
+                                                 size_t signature_size,
++nput_length, output, output_size, output_length);
+                                                 size_t *signature_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_asym_key_t asym_key = PSA_INVALID_OPERATION;
++nput_length, output, output_size, output_length);
+     uint8_t *key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *key_bytes = NULL;
++nput_length, output, output_size, output_length);
+     uint8_t *pub_key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *pub_key_bytes = NULL;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     if (PSA_KEY_TYPE_IS_ECC_KEY_PAIR(attributes->type)) {
++nput_length, output, output_size, output_length);
+         asym_key =
++nput_length, output, output_size, output_length);
+             PSA_ENCODE_ECC_KEY_TYPE(attributes->bits, PSA_KEY_TYPE_ECC_GET_FAMILY(attributes->type));
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+         if (asym_key == PSA_INVALID_OPERATION) {
++nput_length, output, output_size, output_length);
+             return PSA_ERROR_INVALID_ARGUMENT;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     psa_get_key_data_from_key_slot(slot, &key_data, &key_bytes);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     switch (asym_key) {
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P192R1)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_P192_R1:
++nput_length, output, output_size, output_length);
+         return psa_ecc_p192r1_sign_message(attributes, alg, key_data, *key_bytes, input, input_length,
++nput_length, output, output_size, output_length);
+                                         signature, signature_size, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P256R1)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_P256_R1:
++nput_length, output, output_size, output_length);
+         return psa_ecc_p256r1_sign_message(attributes, alg, key_data, *key_bytes, input, input_length,
++nput_length, output, output_size, output_length);
+                                         signature, signature_size, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_ED25519)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_ED25519:
++nput_length, output, output_size, output_length);
+         psa_get_public_key_data_from_key_slot(slot, &pub_key_data, &pub_key_bytes);
++nput_length, output, output_size, output_length);
+         return psa_ecc_ed25519_sign_message(key_data, *key_bytes, pub_key_data, *pub_key_bytes, input, input_length,
++nput_length, output, output_size, output_length);
+                                     signature, signature_size, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)alg;
++nput_length, output, output_size, output_length);
+         (void)slot;
++nput_length, output, output_size, output_length);
+         (void)input;
++nput_length, output, output_size, output_length);
+         (void)input_length;
++nput_length, output, output_size, output_length);
+         (void)signature;
++nput_length, output, output_size, output_length);
+         (void)signature_size;
++nput_length, output, output_size, output_length);
+         (void)signature_length;
++nput_length, output, output_size, output_length);
+         (void)pub_key_data;
++nput_length, output, output_size, output_length);
+         (void)pub_key_bytes;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_verify_hash(  const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                   psa_algorithm_t alg,
++nput_length, output, output_size, output_length);
+                                                   const psa_key_slot_t *slot,
++nput_length, output, output_size, output_length);
+                                                   const uint8_t *hash,
++nput_length, output, output_size, output_length);
+                                                   size_t hash_length,
++nput_length, output, output_size, output_length);
+                                                   const uint8_t *signature,
++nput_length, output, output_size, output_length);
+                                                   size_t signature_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_asym_key_t asym_key = PSA_INVALID_OPERATION;
++nput_length, output, output_size, output_length);
+     uint8_t *pubkey_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *pubkey_data_len = NULL;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     if (PSA_KEY_TYPE_IS_ECC(attributes->type)) {
++nput_length, output, output_size, output_length);
+         asym_key =
++nput_length, output, output_size, output_length);
+             PSA_ENCODE_ECC_KEY_TYPE(attributes->bits, PSA_KEY_TYPE_ECC_GET_FAMILY(attributes->type));
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+         if (asym_key == PSA_INVALID_OPERATION) {
++nput_length, output, output_size, output_length);
+             return PSA_ERROR_INVALID_ARGUMENT;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     psa_get_public_key_data_from_key_slot(slot, &pubkey_data, &pubkey_data_len);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     switch (asym_key) {
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P192R1)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_P192_R1:
++nput_length, output, output_size, output_length);
+         return psa_ecc_p192r1_verify_hash(attributes, alg, pubkey_data, *pubkey_data_len, hash,
++nput_length, output, output_size, output_length);
+                                           hash_length, signature, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P256R1)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_P256_R1:
++nput_length, output, output_size, output_length);
+         return psa_ecc_p256r1_verify_hash(attributes, alg, pubkey_data, *pubkey_data_len, hash,
++nput_length, output, output_size, output_length);
+                                           hash_length, signature, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)alg;
++nput_length, output, output_size, output_length);
+         (void)slot;
++nput_length, output, output_size, output_length);
+         (void)hash;
++nput_length, output, output_size, output_length);
+         (void)hash_length;
++nput_length, output, output_size, output_length);
+         (void)signature;
++nput_length, output, output_size, output_length);
+         (void)signature_length;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_verify_message(const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                   psa_algorithm_t alg,
++nput_length, output, output_size, output_length);
+                                                   const psa_key_slot_t *slot,
++nput_length, output, output_size, output_length);
+                                                   const uint8_t *input,
++nput_length, output, output_size, output_length);
+                                                   size_t input_length,
++nput_length, output, output_size, output_length);
+                                                   const uint8_t *signature,
++nput_length, output, output_size, output_length);
+                                                   size_t signature_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_asym_key_t asym_key = PSA_INVALID_OPERATION;
++nput_length, output, output_size, output_length);
+     uint8_t *pubkey_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *pubkey_data_len = NULL;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     if (PSA_KEY_TYPE_IS_ECC(attributes->type)) {
++nput_length, output, output_size, output_length);
+         asym_key =
++nput_length, output, output_size, output_length);
+             PSA_ENCODE_ECC_KEY_TYPE(attributes->bits, PSA_KEY_TYPE_ECC_GET_FAMILY(attributes->type));
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+         if (asym_key == PSA_INVALID_OPERATION) {
++nput_length, output, output_size, output_length);
+             return PSA_ERROR_INVALID_ARGUMENT;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     psa_get_public_key_data_from_key_slot(slot, &pubkey_data, &pubkey_data_len);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     switch (asym_key) {
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P192R1)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_P192_R1:
++nput_length, output, output_size, output_length);
+         return psa_ecc_p192r1_verify_message(attributes, alg, pubkey_data, *pubkey_data_len, input,
++nput_length, output, output_size, output_length);
+                                         input_length, signature, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P256R1)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_P256_R1:
++nput_length, output, output_size, output_length);
+         return psa_ecc_p256r1_verify_message(attributes, alg, pubkey_data, *pubkey_data_len, input,
++nput_length, output, output_size, output_length);
+                                         input_length, signature, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_ED25519)
++nput_length, output, output_size, output_length);
+     case PSA_ECC_ED25519:
++nput_length, output, output_size, output_length);
+         return psa_ecc_ed25519_verify_message(pubkey_data, *pubkey_data_len, input,
++nput_length, output, output_size, output_length);
+                                         input_length, signature, signature_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)alg;
++nput_length, output, output_size, output_length);
+         (void)slot;
++nput_length, output, output_size, output_length);
+         (void)input;
++nput_length, output, output_size, output_length);
+         (void)input_length;
++nput_length, output, output_size, output_length);
+         (void)signature;
++nput_length, output, output_size, output_length);
+         (void)signature_length;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ #endif /* MODULE_PSA_ASYMMETRIC */
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_KEY_MANAGEMENT)
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_generate_key(   const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                     psa_key_slot_t *slot)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_status_t status = PSA_ERROR_CORRUPTION_DETECTED;
++nput_length, output, output_size, output_length);
+     uint8_t *key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *key_bytes = NULL;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     psa_get_key_data_from_key_slot(slot, &key_data, &key_bytes);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     /**
++nput_length, output, output_size, output_length);
+      * Only asymmetric key generation needs special key generation algorithms. Symmetric keys can
++nput_length, output, output_size, output_length);
+      * be created by generating random bytes.
++nput_length, output, output_size, output_length);
+      */
++nput_length, output, output_size, output_length);
+     if (PSA_KEY_TYPE_IS_ASYMMETRIC(attributes->type)) {
++nput_length, output, output_size, output_length);
+         psa_asym_key_t asym_key = PSA_INVALID_OPERATION;
++nput_length, output, output_size, output_length);
+         uint8_t *pubkey_data = NULL;
++nput_length, output, output_size, output_length);
+         size_t *pubkey_data_len = NULL;
++nput_length, output, output_size, output_length);
+         psa_get_public_key_data_from_key_slot(slot, &pubkey_data, &pubkey_data_len);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+         if (PSA_KEY_TYPE_IS_ECC_KEY_PAIR(attributes->type)) {
++nput_length, output, output_size, output_length);
+             asym_key =
++nput_length, output, output_size, output_length);
+                 PSA_ENCODE_ECC_KEY_TYPE(attributes->bits,
++nput_length, output, output_size, output_length);
+                                         PSA_KEY_TYPE_ECC_GET_FAMILY(attributes->type));
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+             if (asym_key == PSA_INVALID_OPERATION) {
++nput_length, output, output_size, output_length);
+                 return PSA_ERROR_INVALID_ARGUMENT;
++nput_length, output, output_size, output_length);
+             }
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+         switch (asym_key) {
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P192R1)
++nput_length, output, output_size, output_length);
+         case PSA_ECC_P192_R1:
++nput_length, output, output_size, output_length);
+             return psa_generate_ecc_p192r1_key_pair(attributes, key_data, pubkey_data, key_bytes,
++nput_length, output, output_size, output_length);
+                                                     pubkey_data_len);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P256R1)
++nput_length, output, output_size, output_length);
+         case PSA_ECC_P256_R1:
++nput_length, output, output_size, output_length);
+             return psa_generate_ecc_p256r1_key_pair(attributes, key_data, pubkey_data, key_bytes,
++nput_length, output, output_size, output_length);
+                                                     pubkey_data_len);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_ED25519)
++nput_length, output, output_size, output_length);
+         case PSA_ECC_ED25519:
++nput_length, output, output_size, output_length);
+             return psa_generate_ecc_ed25519_key_pair(key_data, pubkey_data, key_bytes, pubkey_data_len);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+         default:
++nput_length, output, output_size, output_length);
+             (void)status;
++nput_length, output, output_size, output_length);
+             (void)slot;
++nput_length, output, output_size, output_length);
+             return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     return psa_builtin_generate_key(attributes, key_data, *key_bytes, key_bytes);
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_import_key(const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                const uint8_t *data, size_t data_length,
++nput_length, output, output_size, output_length);
+                                                psa_key_slot_t *slot, size_t *bits)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     uint8_t *key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *key_bytes = NULL;
++nput_length, output, output_size, output_length);
+     size_t key_data_size;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     key_data_size = psa_get_key_data_from_key_slot(slot, &key_data, &key_bytes);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     /**
++nput_length, output, output_size, output_length);
+      * Asymmetric keys needs special import handling:
++nput_length, output, output_size, output_length);
+      * The public key needs to be derived from the imported private key.
++nput_length, output, output_size, output_length);
+      */
++nput_length, output, output_size, output_length);
+     if (PSA_KEY_TYPE_IS_KEY_PAIR(attributes->type)) {
++nput_length, output, output_size, output_length);
+         psa_asym_key_t asym_key = PSA_INVALID_OPERATION;
++nput_length, output, output_size, output_length);
+         uint8_t *pubkey_data = NULL;
++nput_length, output, output_size, output_length);
+         size_t *pubkey_data_len = NULL;
++nput_length, output, output_size, output_length);
+         psa_get_public_key_data_from_key_slot(slot, &pubkey_data, &pubkey_data_len);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+         if (PSA_KEY_TYPE_IS_ECC_KEY_PAIR(attributes->type)) {
++nput_length, output, output_size, output_length);
+             asym_key =
++nput_length, output, output_size, output_length);
+                 PSA_ENCODE_ECC_KEY_TYPE(attributes->bits,
++nput_length, output, output_size, output_length);
+                                         PSA_KEY_TYPE_ECC_GET_FAMILY(attributes->type));
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+             if (asym_key == PSA_INVALID_OPERATION) {
++nput_length, output, output_size, output_length);
+                 return PSA_ERROR_INVALID_ARGUMENT;
++nput_length, output, output_size, output_length);
+             }
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+         // derive and save public from private key
++nput_length, output, output_size, output_length);
+         psa_status_t ret = PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+         switch (asym_key) {
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P192R1)
++nput_length, output, output_size, output_length);
+         case PSA_ECC_P192_R1:
++nput_length, output, output_size, output_length);
+             // todo: support for Weierstrass curves
++nput_length, output, output_size, output_length);
+             (void)slot;
++nput_length, output, output_size, output_length);
+             ret = PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+             break;
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_P256R1)
++nput_length, output, output_size, output_length);
+         case PSA_ECC_P256_R1:
++nput_length, output, output_size, output_length);
+             // todo: support for Weierstrass curves
++nput_length, output, output_size, output_length);
+             (void)slot;
++nput_length, output, output_size, output_length);
+             ret = PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+             break;
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_ASYMMETRIC_ECC_ED25519)
++nput_length, output, output_size, output_length);
+         case PSA_ECC_ED25519:
++nput_length, output, output_size, output_length);
+             ret = psa_derive_ecc_ed25519_public_key(data, pubkey_data, data_length, pubkey_data_len);
++nput_length, output, output_size, output_length);
+             break;
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+         default:
++nput_length, output, output_size, output_length);
+             (void)slot;
++nput_length, output, output_size, output_length);
+             ret = PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+             break;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         if (ret == PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             /* save private key data */
++nput_length, output, output_size, output_length);
+             memcpy(key_data, data, data_length);
++nput_length, output, output_size, output_length);
+             *key_bytes = data_length;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         return ret;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+     return psa_builtin_import_key(attributes, data, data_length, key_data, key_data_size, key_bytes, bits);
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ #endif /* MODULE_PSA_KEY_MANAGEMENT */
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_CIPHER)
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_cipher_encrypt( const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                     psa_algorithm_t alg,
++nput_length, output, output_size, output_length);
+                                                     const psa_key_slot_t *slot,
++nput_length, output, output_size, output_length);
+                                                     const uint8_t *input,
++nput_length, output, output_size, output_length);
+                                                     size_t input_length,
++nput_length, output, output_size, output_length);
+                                                     uint8_t *output,
++nput_length, output, output_size, output_length);
+                                                     size_t output_size,
++nput_length, output, output_size, output_length);
+                                                     size_t *output_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_cipher_op_t op = PSA_ENCODE_CIPHER_OPERATION(alg, attributes->bits, attributes->type);
++nput_length, output, output_size, output_length);
+     uint8_t *key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *key_bytes = NULL;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     psa_get_key_data_from_key_slot(slot, &key_data, &key_bytes);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     if (op == PSA_INVALID_OPERATION) {
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_INVALID_ARGUMENT;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     switch (op) {
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_CIPHER_AES_128_CBC)
++nput_length, output, output_size, output_length);
+     case PSA_CBC_NO_PAD_AES_128:
++nput_length, output, output_size, output_length);
+         return psa_cipher_cbc_aes_128_encrypt(attributes, key_data, *key_bytes, alg, input,
++nput_length, output, output_size, output_length);
+                                               input_length, output, output_size, output_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_CIPHER_AES_192_CBC)
++nput_length, output, output_size, output_length);
+     case PSA_CBC_NO_PAD_AES_192:
++nput_length, output, output_size, output_length);
+         return psa_cipher_cbc_aes_192_encrypt(attributes, key_data, *key_bytes, alg, input,
++nput_length, output, output_size, output_length);
+                                               input_length, output, output_size, output_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_CIPHER_AES_256_CBC)
++nput_length, output, output_size, output_length);
+     case PSA_CBC_NO_PAD_AES_256:
++nput_length, output, output_size, output_length);
+         return psa_cipher_cbc_aes_256_encrypt(attributes, key_data, *key_bytes, alg, input,
++    case PSA_STREAM_CHACHA20:\
++nput_length, output, output_size, output_length);
+                                               input_length, output, output_size, output_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)slot;
++nput_length, output, output_size, output_length);
+         (void)input;
++nput_length, output, output_size, output_length);
+         (void)input_length;
++nput_length, output, output_size, output_length);
+         (void)output;
++nput_length, output, output_size, output_length);
+         (void)output_size;
++nput_length, output, output_size, output_length);
+         (void)output_length;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_cipher_decrypt( const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                     psa_algorithm_t alg,
++nput_length, output, output_size, output_length);
+                                                     const psa_key_slot_t *slot,
++nput_length, output, output_size, output_length);
+                                                     const uint8_t *input,
++nput_length, output, output_size, output_length);
+                                                     size_t input_length,
++nput_length, output, output_size, output_length);
+                                                     uint8_t *output,
++nput_length, output, output_size, output_length);
+                                                     size_t output_size,
++nput_length, output, output_size, output_length);
+                                                     size_t *output_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_cipher_op_t op = PSA_ENCODE_CIPHER_OPERATION(alg, attributes->bits, attributes->type);
++nput_length, output, output_size, output_length);
+     uint8_t *key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *key_bytes = NULL;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     psa_get_key_data_from_key_slot(slot, &key_data, &key_bytes);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     if (op == PSA_INVALID_OPERATION) {
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_INVALID_ARGUMENT;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     switch (op) {
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_CIPHER_AES_128_CBC)
++nput_length, output, output_size, output_length);
+     case PSA_CBC_NO_PAD_AES_128:
++nput_length, output, output_size, output_length);
+         return psa_cipher_cbc_aes_128_decrypt(attributes, key_data, *key_bytes, alg, input,
++nput_length, output, output_size, output_length);
+                                               input_length, output, output_size, output_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_CIPHER_AES_192_CBC)
++nput_length, output, output_size, output_length);
+     case PSA_CBC_NO_PAD_AES_192:
++nput_length, output, output_size, output_length);
+         return psa_cipher_cbc_aes_192_decrypt(attributes, key_data, *key_bytes, alg, input,
++nput_length, output, output_size, output_length);
+                                               input_length, output, output_size, output_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_CIPHER_AES_256_CBC)
++nput_length, output, output_size, output_length);
+     case PSA_CBC_NO_PAD_AES_256:
++nput_length, output, output_size, output_length);
+         return psa_cipher_cbc_aes_256_decrypt(attributes, key_data, *key_bytes, alg, input,
++nput_length, output, output_size, output_length);
+                                               input_length, output, output_size, output_length);
++nput_length, output, output_size, output_length);
+ #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)slot;
++nput_length, output, output_size, output_length);
+         (void)input;
++nput_length, output, output_size, output_length);
+         (void)input_length;
++nput_length, output, output_size, output_length);
+         (void)output;
++nput_length, output, output_size, output_length);
+         (void)output_size;
++nput_length, output, output_size, output_length);
+         (void)output_length;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ #endif /* MODULE_PSA_CIPHER */
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+ #if IS_USED(MODULE_PSA_MAC)
++nput_length, output, output_size, output_length);
+ psa_status_t psa_algorithm_dispatch_mac_compute(const psa_key_attributes_t *attributes,
++nput_length, output, output_size, output_length);
+                                                 psa_algorithm_t alg,
++nput_length, output, output_size, output_length);
+                                                 const psa_key_slot_t *slot,
++nput_length, output, output_size, output_length);
+                                                 const uint8_t *input,
++nput_length, output, output_size, output_length);
+                                                 size_t input_length,
++nput_length, output, output_size, output_length);
+                                                 uint8_t *mac,
++nput_length, output, output_size, output_length);
+                                                 size_t mac_size,
++nput_length, output, output_size, output_length);
+                                                 size_t *mac_length)
++nput_length, output, output_size, output_length);
+ {
++nput_length, output, output_size, output_length);
+     psa_status_t status = PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     uint8_t *key_data = NULL;
++nput_length, output, output_size, output_length);
+     size_t *key_bytes = NULL;
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     psa_get_key_data_from_key_slot(slot, &key_data, &key_bytes);
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     switch (alg) {
++nput_length, output, output_size, output_length);
+     #if IS_USED(MODULE_PSA_MAC_HMAC_SHA_256)
++nput_length, output, output_size, output_length);
+     case PSA_ALG_HMAC(PSA_ALG_SHA_256):
++nput_length, output, output_size, output_length);
+         status = psa_mac_compute_hmac_sha256(attributes, key_data, *key_bytes, input, input_length,
++nput_length, output, output_size, output_length);
+                                              mac, mac_size, mac_length);
++nput_length, output, output_size, output_length);
+         if (status != PSA_SUCCESS) {
++nput_length, output, output_size, output_length);
+             return status;
++nput_length, output, output_size, output_length);
+         }
++nput_length, output, output_size, output_length);
+         break;
++nput_length, output, output_size, output_length);
+     #endif
++nput_length, output, output_size, output_length);
+     default:
++nput_length, output, output_size, output_length);
+         (void)status;
++nput_length, output, output_size, output_length);
+         return PSA_ERROR_NOT_SUPPORTED;
++nput_length, output, output_size, output_length);
+     }
++nput_length, output, output_size, output_length);
+ 
++nput_length, output, output_size, output_length);
+     (void)attributes;
++nput_length, output, output_size, output_length);
+     (void)input;
++nput_length, output, output_size, output_length);
+     (void)input_length;
++nput_length, output, output_size, output_length);
+     (void)mac;
++nput_length, output, output_size, output_length);
+     (void)mac_size;
++nput_length, output, output_size, output_length);
+     (void)mac_length;
++nput_length, output, output_size, output_length);
+     return PSA_SUCCESS;
++nput_length, output, output_size, output_length);
+ }
++nput_length, output, output_size, output_length);
+ #endif /* MODULE_PSA_MAC */

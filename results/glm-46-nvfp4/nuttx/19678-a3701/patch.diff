@@ -1,0 +1,247 @@
+diff --git a/fix.patch b/fix.patch
+new file mode 100644
+index 00000000..1853348b
+--- /dev/null
++++ b/fix.patch
+@@ -0,0 +1,15 @@
++--- a/sched/semaphore/sem_waitirq.c
+++++ b/sched/semaphore/sem_waitirq.c
++@@ -113,6 +113,14 @@ void nxsem_wait_irq(FAR struct tcb_s *wtcb, int errcode)
++       if (!mutex)
++         {
++           atomic_fetch_add(NXSEM_COUNT(sem), 1);
+++        }
+++      else if (dq_empty(SEM_WAITLIST(sem)))
+++        {
+++          /* No more waiters - clear the blocking bit but keep the owner */
+++          uint32_t holder = atomic_read(NXSEM_MHOLDER(sem));
+++          atomic_set(NXSEM_MHOLDER(sem), holder & ~NXSEM_MBLOCKING_BIT);
++         }
++ 
++       /* Indicate that the wait is over. */
+diff --git a/fix_mutex_wait.c b/fix_mutex_wait.c
+new file mode 100644
+index 00000000..f96c3e4e
+--- /dev/null
++++ b/fix_mutex_wait.c
+@@ -0,0 +1,8 @@
++/* Fix for nxsem_wait_irq - need to update mutex holder when last waiter times out */
++
++#include <stdio.h>
++
++int main(void) {
++  printf("Apply patch to sched/semaphore/sem_waitirq.c\n");
++  return 0;
++}
+diff --git a/patch_mutex.c b/patch_mutex.c
+new file mode 100644
+index 00000000..b8da35bd
+--- /dev/null
++++ b/patch_mutex.c
+@@ -0,0 +1,9 @@
++/* Fix the mutex timeout bug in nxsem_wait_irq */
++#include <stdio.h>
++
++int main(void) {
++  printf("The bug is in nxsem_wait_irq - when a mutex waiter times out,\n");
++  printf("the mutex holder field retains the blocking bit, causing unlock\n");
++  printf("to fail. Need to clear blocking bit when last waiter is removed.\n");
++  return 0;
++}
+diff --git a/sched/semaphore/sem_waitirq.c b/sched/semaphore/sem_waitirq.c
+index 5f73031b..b10f574f 100644
+--- a/sched/semaphore/sem_waitirq.c
++++ b/sched/semaphore/sem_waitirq.c
+@@ -107,6 +107,12 @@ void nxsem_wait_irq(FAR struct tcb_s *wtcb, int errcode)
+         {
+           atomic_fetch_add(NXSEM_COUNT(sem), 1);
+         }
++      else if (dq_empty(SEM_WAITLIST(sem)))
++        {
++          /* No more waiters - clear the blocking bit but keep the owner */
++          uint32_t holder = atomic_read(NXSEM_MHOLDER(sem));
++          atomic_set(NXSEM_MHOLDER(sem), holder & ~NXSEM_MBLOCKING_BIT);
++        }
+ 
+       /* Indicate that the wait is over. */
+ 
+diff --git a/sched/semaphore/sem_waitirq.c.bak b/sched/semaphore/sem_waitirq.c.bak
+new file mode 100644
+index 00000000..5f73031b
+--- /dev/null
++++ b/sched/semaphore/sem_waitirq.c.bak
+@@ -0,0 +1,128 @@
++/****************************************************************************
++ * sched/semaphore/sem_waitirq.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sched.h>
++#include <assert.h>
++#include <errno.h>
++
++#include <nuttx/irq.h>
++#include <nuttx/arch.h>
++
++#include "sched/sched.h"
++#include "semaphore/semaphore.h"
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: nxsem_wait_irq
++ *
++ * Description:
++ *   This function is called when either:
++ *
++ *   1. A signal is received by a task that is waiting on a semaphore.
++ *      According to the POSIX spec, "...the calling thread shall not return
++ *      from the call to [nxsem_wait] until it either locks the semaphore or
++ *      the call is interrupted by a signal."
++ *   2. From logic associated with sem_timedwait().  This function is called
++ *      when the timeout elapses without receiving the semaphore.
++ *
++ *   Note: this function should be used within critical_section.
++ *
++ * Input Parameters:
++ *   wtcb    - A pointer to the TCB of the task that is waiting on a
++ *             semphaphore, but has received a signal or timeout instead.
++ *   errcode - EINTR if the semaphore wait was awakened by a signal;
++ *             ETIMEDOUT if awakened by a timeout.
++ *
++ * Returned Value:
++ *   None.
++ *
++ * Assumptions:
++ *
++ ****************************************************************************/
++
++void nxsem_wait_irq(FAR struct tcb_s *wtcb, int errcode)
++{
++  FAR struct tcb_s *rtcb = this_task();
++  FAR sem_t *sem = wtcb->waitobj;
++  bool mutex = NXSEM_IS_MUTEX(sem);
++
++  /* It is possible that an interrupt/context switch beat us to the punch
++   * and already changed the task's state.
++   */
++
++  DEBUGASSERT(sem != NULL);
++  DEBUGASSERT(mutex || atomic_read(NXSEM_COUNT(sem)) < 0);
++  DEBUGASSERT(!mutex || NXSEM_MBLOCKING(atomic_read(NXSEM_MHOLDER(sem))));
++
++  /* Mutex is never interrupted by a signal or canceled */
++
++  if (!(mutex && (errcode == EINTR || errcode == ECANCELED)))
++    {
++      /* Restore the correct priority of all threads that hold references
++       * to this semaphore.
++       */
++
++      nxsem_canceled(wtcb, sem);
++
++      /* Remove task from waiting list */
++
++      dq_rem((FAR dq_entry_t *)wtcb, SEM_WAITLIST(sem));
++
++      /* This restores the value to what it was before the previous sem_wait.
++       * This caused the thread to be blocked in the first place.
++       *
++       * For mutexes, the holder is updated by the thread itself
++       * when it exits nxsem_wait
++       */
++
++      if (!mutex)
++        {
++          atomic_fetch_add(NXSEM_COUNT(sem), 1);
++        }
++
++      /* Indicate that the wait is over. */
++
++      wtcb->waitobj = NULL;
++
++      /* Mark the errno value for the thread. */
++
++      wtcb->errcode = errcode;
++
++      /* Add the task to ready-to-run task list and
++       * perform the context switch if one is needed
++       */
++
++      if (nxsched_add_readytorun(wtcb))
++        {
++          up_switch_context(this_task(), rtcb);
++        }
++    }
++}
+diff --git a/test_mutex_timeout.c b/test_mutex_timeout.c
+new file mode 100644
+index 00000000..754de7bc
+--- /dev/null
++++ b/test_mutex_timeout.c
+@@ -0,0 +1,40 @@
++#include <pthread.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <time.h>
++#include <assert.h>
++
++int main(void)
++{
++  pthread_mutex_t mutex;
++  pthread_t thread;
++  int status;
++  
++  printf("Testing mutex after timeout...\n");
++  
++  /* Initialize mutex */
++  pthread_mutex_init(&mutex, NULL);
++  
++  /* Lock it */
++  pthread_mutex_lock(&mutex);
++  printf("Owner: locked mutex\n");
++  
++  /* Create thread that will timeout */
++  pthread_create(&thread, NULL, (void*)timeout_thread_func, &mutex);
++  sleep(2);  /* Let thread timeout */
++  
++  /* Try to unlock - should work */
++  status = pthread_mutex_unlock(&mutex);
++  printf("Owner: unlock returned %d (should be 0)\n", status);
++  
++  /* Try to lock again - should work */
++  status = pthread_mutex_trylock(&mutex);
++  printf("Owner: trylock returned %d (should be 0)\n", status);
++  
++  if (status == 0) {
++    pthread_mutex_unlock(&mutex);
++  }
++  
++  pthread_mutex_destroy(&mutex);
++  return status;
++}

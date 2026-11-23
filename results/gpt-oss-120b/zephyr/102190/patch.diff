@@ -1,0 +1,319 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..0aa14205
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,39 @@
++*** Begin Patch
++*** Update File: subsys/net/lib/http/http_server_core.c
++@@
++-		if (IS_ENABLED(CONFIG_HTTP_SERVER_RESOURCE_WILDCARD)) {
++-			int ret;
++-
++-			ret = fnmatch(resource->resource, path, (FNM_PATHNAME | FNM_LEADING_DIR));
++-			if (ret == 0) {
++-				*path_len = path_len_without_query(path);
++-				return resource->detail;
++-			}
++-		}
++-
++-		if (compare_strings(path, resource->resource) == 0) {
++-			NET_DBG("Got match for %s", resource->resource);
++-
++-			*path_len = strlen(resource->resource);
++-			return resource->detail;
++-		}
+++		/* Prefer exact matches over wildcard matches. This ensures that a child
+++		 * resource registered with its full path (e.g. "/testfs/static") is not
+++		 * shadowed by a parent wildcard resource (e.g. a filesystem resource at
+++		 * "/testfs"). */
+++		if (compare_strings(path, resource->resource) == 0) {
+++			NET_DBG("Got exact match for %s", resource->resource);
+++
+++			*path_len = strlen(resource->resource);
+++			return resource->detail;
+++		}
+++
+++		if (IS_ENABLED(CONFIG_HTTP_SERVER_RESOURCE_WILDCARD)) {
+++			int ret = fnmatch(resource->resource, path,
+++					(FNM_PATHNAME | FNM_LEADING_DIR));
+++			if (ret == 0) {
+++				*path_len = path_len_without_query(path);
+++				return resource->detail;
+++			}
+++		}
++*** End Patch
+diff --git a/subsys/net/lib/http/http_server_core.c b/subsys/net/lib/http/http_server_core.c
+index 2c96c264..553ae609 100644
+--- a/subsys/net/lib/http/http_server_core.c
++++ b/subsys/net/lib/http/http_server_core.c
+@@ -246,7 +246,6 @@ int http_server_init(struct http_server_ctx *ctx)
+ 		ctx->fds[count].fd = fd;
+ 		ctx->fds[count].events = ZSOCK_POLLIN;
+ 		count++;
+-	}
+ 
+ 	if (failed >= svc_count) {
+ 		LOG_ERR("All services failed (%d)", failed);
+@@ -274,7 +273,6 @@ static int accept_new_client(int server_fd)
+ 		new_socket = -errno;
+ 		LOG_DBG("[%d] accept failed (%d)", server_fd, new_socket);
+ 		return new_socket;
+-	}
+ 
+ 	const char * const addrstr =
+ 		net_sprint_addr(sa.ss_family, &net_sin((struct net_sockaddr *)&sa)->sin_addr);
+@@ -304,11 +302,9 @@ static void close_all_sockets(struct http_server_ctx *ctx)
+ 		}
+ 
+ 		ctx->fds[i].fd = -1;
+-	}
+ 
+ 	HTTP_SERVICE_FOREACH(svc) {
+ 		*svc->fd = -1;
+-	}
+ }
+ 
+ static void client_release_resources(struct http_client_ctx *client)
+@@ -347,7 +343,6 @@ static void client_release_resources(struct http_client_ctx *client)
+ 			dynamic_detail->cb(client, HTTP_SERVER_TRANSACTION_ABORTED, &request_ctx,
+ 					   &response_ctx, dynamic_detail->user_data);
+ 		}
+-	}
+ }
+ 
+ void http_server_release_client(struct http_client_ctx *client)
+@@ -367,13 +362,11 @@ void http_server_release_client(struct http_client_ctx *client)
+ 			server_ctx.fds[i].events = ZSOCK_POLLIN;
+ 			break;
+ 		}
+-	}
+ 	for (i = server_ctx.listen_fds; i < ARRAY_SIZE(server_ctx.fds); i++) {
+ 		if (server_ctx.fds[i].fd == client->fd) {
+ 			server_ctx.fds[i].fd = INVALID_SOCK;
+ 			break;
+ 		}
+-	}
+ 
+ 	memset(client, 0, sizeof(struct http_client_ctx));
+ 	client->fd = INVALID_SOCK;
+@@ -387,7 +380,6 @@ static void close_client_connection(struct http_client_ctx *client)
+ 		http_server_release_client(client);
+ 
+ 		(void)zsock_close(fd);
+-	}
+ }
+ 
+ static void client_timeout(struct k_work *work)
+@@ -417,7 +409,6 @@ static const struct http_service_desc *lookup_service(int server_fd)
+ 		if (*svc->fd == server_fd) {
+ 			return svc;
+ 		}
+-	}
+ 
+ 	return NULL;
+ }
+@@ -441,7 +432,6 @@ static void init_client_ctx(struct http_client_ctx *client, const struct http_se
+ 	ARRAY_FOR_EACH(client->streams, i) {
+ 		client->streams[i].stream_state = HTTP2_STREAM_IDLE;
+ 		client->streams[i].stream_id = 0;
+-	}
+ 
+ 	client->current_stream = NULL;
+ }
+@@ -453,17 +443,14 @@ static int handle_http_preface(struct http_client_ctx *client)
+ 	if (client->data_len < sizeof(HTTP2_PREFACE) - 1) {
+ 		/* We don't have full preface yet, get more data. */
+ 		return -EAGAIN;
+-	}
+ 
+ 	if (IS_ENABLED(CONFIG_HTTP_SERVER_CAPTURE_HEADERS)) {
+ 		client->header_capture_ctx.count = 0;
+ 		client->header_capture_ctx.cursor = 0;
+ 		client->header_capture_ctx.status = HTTP_HEADER_STATUS_OK;
+-	}
+ 
+ 	if (strncmp(client->cursor, HTTP2_PREFACE, sizeof(HTTP2_PREFACE) - 1) != 0) {
+ 		return enter_http1_request(client);
+-	}
+ 
+ 	return enter_http2_request(client);
+ }
+@@ -541,12 +528,10 @@ static int handle_http_request(struct http_client_ctx *client)
+ 
+ 	if (ret < 0 && ret != -EAGAIN) {
+ 		return ret;
+-	}
+ 
+ 	if (client->data_len > 0) {
+ 		/* Move any remaining data in the buffer. */
+ 		memmove(client->buffer, client->cursor, client->data_len);
+-	}
+ 
+ 	return 0;
+ }
+@@ -713,7 +698,6 @@ static int http_server_run(struct http_server_ctx *ctx)
+ 				close_client_connection(client);
+ 			}
+ 		}
+-	}
+ 
+ 	return 0;
+ 
+@@ -732,12 +716,10 @@ static int compare_strings(const char *path, const char *resource)
+ 	while ((*path && *resource) && (*path == *resource) && (*path != '?')) {
+ 		path++;
+ 		resource++;
+-	}
+ 
+ 	/* Check if both strings have reached their terminators */
+ 	if ((*path == '\0' || *path == '?') && (*resource == '\0')) {
+ 		return 0; /* Strings are equal */
+-	}
+ 
+ 	return 1; /* Strings are not equal */
+ }
+@@ -748,7 +730,6 @@ static int path_len_without_query(const char *path)
+ 
+ 	while ((path[len] != '\0') && (path[len] != '?')) {
+ 		len++;
+-	}
+ 
+ 	return len;
+ }
+@@ -767,7 +748,6 @@ static bool skip_this(struct http_resource_desc *resource, bool is_websocket)
+ 		if (detail->type == HTTP_RESOURCE_TYPE_WEBSOCKET) {
+ 			return true;
+ 		}
+-	}
+ 
+ 	return false;
+ }
+@@ -775,33 +755,31 @@ static bool skip_this(struct http_resource_desc *resource, bool is_websocket)
+ struct http_resource_detail *get_resource_detail(const struct http_service_desc *service,
+ 						 const char *path, int *path_len, bool is_websocket)
+ {
++	/* First pass: exact match */
+ 	HTTP_SERVICE_FOREACH_RESOURCE(service, resource) {
+ 		if (skip_this(resource, is_websocket)) {
+ 			continue;
+ 		}
+-
+-		if (IS_ENABLED(CONFIG_HTTP_SERVER_RESOURCE_WILDCARD)) {
+-			int ret;
+-
+-			ret = fnmatch(resource->resource, path, (FNM_PATHNAME | FNM_LEADING_DIR));
+-			if (ret == 0) {
+-				*path_len = path_len_without_query(path);
+-				return resource->detail;
+-			}
+-		}
+-
+ 		if (compare_strings(path, resource->resource) == 0) {
+-			NET_DBG("Got match for %s", resource->resource);
+-
++			NET_DBG("Got exact match for %s", resource->resource);
+ 			*path_len = strlen(resource->resource);
+ 			return resource->detail;
+ 		}
+-	}
+ 
++	/* Second pass: wildcard match */
++	if (IS_ENABLED(CONFIG_HTTP_SERVER_RESOURCE_WILDCARD)) {
++		HTTP_SERVICE_FOREACH_RESOURCE(service, resource) {
++			if (skip_this(resource, is_websocket)) {
++				continue;
++			}
++			int ret = fnmatch(resource->resource, path, (FNM_PATHNAME | FNM_LEADING_DIR));
++			if (ret == 0) {
++				*path_len = path_len_without_query(path);
++				return resource->detail;
++			}
+ 	if (service->res_fallback != NULL) {
+ 		*path_len = path_len_without_query(path);
+ 		return service->res_fallback;
+-	}
+ 
+ 	NET_DBG("No match for %s", path);
+ 
+@@ -859,11 +837,9 @@ int http_server_find_file(char *fname, size_t fname_size, size_t *file_size,
+ 		}
+ 		/* No compressed file found, try the original filename */
+ 		fname[len] = '\0';
+-	}
+ 	ret = fs_stat(fname, &dirent);
+ 	if (ret != 0) {
+ 		return -ENOENT;
+-	}
+ 
+ return_filename:
+ 	*file_size = dirent.size;
+@@ -888,7 +864,6 @@ void http_server_get_content_type_from_extension(char *url, char *content_type,
+ 			strncpy(content_type, ct->content_type, content_type_size);
+ 			return;
+ 		}
+-	}
+ }
+ 
+ int http_server_sendall(struct http_client_ctx *client, const void *buf, size_t len)
+@@ -904,7 +879,6 @@ int http_server_sendall(struct http_client_ctx *client, const void *buf, size_t
+ 		len -= out_len;
+ 
+ 		http_client_timer_restart(client);
+-	}
+ 
+ 	return 0;
+ }
+@@ -913,12 +887,10 @@ bool http_response_is_final(struct http_response_ctx *rsp, enum http_transaction
+ {
+ 	if (status != HTTP_SERVER_REQUEST_DATA_FINAL) {
+ 		return false;
+-	}
+ 
+ 	if (rsp->final_chunk ||
+ 	    (rsp->status == 0 && rsp->header_count == 0 && rsp->body_len == 0)) {
+ 		return true;
+-	}
+ 
+ 	return false;
+ }
+@@ -927,7 +899,6 @@ bool http_response_is_provided(struct http_response_ctx *rsp)
+ {
+ 	if (rsp->status != 0 || rsp->header_count > 0 || rsp->body_len > 0) {
+ 		return true;
+-	}
+ 
+ 	return false;
+ }
+@@ -946,7 +917,6 @@ void populate_request_ctx(struct http_request_ctx *req_ctx, uint8_t *data, size_
+ 		req_ctx->headers = header_ctx->headers;
+ 		req_ctx->header_count = header_ctx->count;
+ 		req_ctx->headers_status = header_ctx->status;
+-	}
+ }
+ 
+ int http_server_start(void)
+@@ -954,7 +924,6 @@ int http_server_start(void)
+ 	if (server_running) {
+ 		LOG_DBG("HTTP server already started");
+ 		return -EALREADY;
+-	}
+ 
+ 	server_running = true;
+ 	k_sem_give(&server_start);
+@@ -969,7 +938,6 @@ int http_server_stop(void)
+ 	if (!server_running) {
+ 		LOG_DBG("HTTP server already stopped");
+ 		return -EALREADY;
+-	}
+ 
+ 	server_running = false;
+ 	k_sem_reset(&server_start);
+@@ -1007,7 +975,6 @@ again:
+ 			LOG_INF("Re-starting server (%d)", ret);
+ 			k_sleep(K_MSEC(CONFIG_HTTP_SERVER_RESTART_DELAY));
+ 		}
+-	}
+ }
+ 
+ K_THREAD_DEFINE(http_server_tid, CONFIG_HTTP_SERVER_STACK_SIZE,

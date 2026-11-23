@@ -1,0 +1,239 @@
+diff --git a/dts/bindings/test/vnd,controller-device-setting.yaml b/dts/bindings/test/vnd,controller-device-setting.yaml
+new file mode 100644
+index 000000000..22f4897af
+--- /dev/null
++++ b/dts/bindings/test/vnd,controller-device-setting.yaml
+@@ -0,0 +1,11 @@
++description: Generic device with required val1 property
++
++compatible: "vnd,controller-device-setting"
++
++properties:
++  val1:
++    type: int
++    required: true
++  status:
++    type: string
++    required: false
+diff --git a/dts/bindings/test/vnd,controller.yaml b/dts/bindings/test/vnd,controller.yaml
+new file mode 100644
+index 000000000..82707c189
+--- /dev/null
++++ b/dts/bindings/test/vnd,controller.yaml
+@@ -0,0 +1,13 @@
++description: Generic bus controller
++
++compatible: "vnd,controller"
++
++bus: vnd_bus
++
++properties:
++  reg:
++    type: int
++    required: true
++  val:
++    type: int
++    required: false
+diff --git a/dts/bindings/test/vnd,device-extender.yaml b/dts/bindings/test/vnd,device-extender.yaml
+new file mode 100644
+index 000000000..0fb87d8db
+--- /dev/null
++++ b/dts/bindings/test/vnd,device-extender.yaml
+@@ -0,0 +1,14 @@
++description: Generic on-bus device that is also a bus controller
++
++compatible: "vnd,device-extender"
++
++on-bus: vnd_bus
++bus: vnd_bus
++
++properties:
++  reg:
++    type: int
++    required: true
++  status:
++    type: string
++    required: false
+diff --git a/dts/bindings/test/vnd,device.yaml b/dts/bindings/test/vnd,device.yaml
+new file mode 100644
+index 000000000..4c55c0b3b
+--- /dev/null
++++ b/dts/bindings/test/vnd,device.yaml
+@@ -0,0 +1,13 @@
++description: Generic on-bus device
++
++compatible: "vnd,device"
++
++on-bus: vnd_bus
++
++properties:
++  reg:
++    type: int
++    required: true
++  status:
++    type: string
++    required: false
+diff --git a/include/zephyr/devicetree.h b/include/zephyr/devicetree.h
+index 929af69a8..e36a377bf 100644
+--- a/include/zephyr/devicetree.h
++++ b/include/zephyr/devicetree.h
+@@ -705,6 +705,32 @@
+ #define DT_CHILD_NUM_STATUS_OKAY(node_id) \
+ 	DT_CAT(node_id, _CHILD_NUM_STATUS_OKAY)
+ 
++/**
++ * @brief Get the number of descendant nodes of a given node
++ *        which are on a bus of a given type
++ *
++ * This walks through non-bus container nodes, counts a child that is
++ * itself a bus controller for the parent bus, and excludes devices
++ * behind that child bus.
++ *
++ * @param node_id a node identifier
++ * @param bus bus type as a C token (lowercase, without quotes)
++ * @return Number of descendant nodes on the bus
++ */
++#define DT_DESCENDANT_NUM_ON_BUS(node_id, bus) \
++	DT_CAT(node_id, _DESCENDANT_NUM_ON_BUS_, bus)
++
++/**
++ * @brief Get the number of descendant nodes of a given node
++ *        which are on a bus of a given type and have status "okay"
++ *
++ * @param node_id a node identifier
++ * @param bus bus type as a C token (lowercase, without quotes)
++ * @return Number of descendant nodes on the bus with status okay
++ */
++#define DT_DESCENDANT_NUM_ON_BUS_STATUS_OKAY(node_id, bus) \
++	DT_CAT(node_id, _DESCENDANT_NUM_ON_BUS_, bus, _STATUS_OKAY)
++
+ /**
+  * @brief Do @p node_id1 and @p node_id2 refer to the same node?
+  *
+@@ -4289,6 +4315,28 @@
+ #define DT_INST_CHILD_NUM_STATUS_OKAY(inst) \
+ 	DT_CHILD_NUM_STATUS_OKAY(DT_DRV_INST(inst))
+ 
++/**
++ * @brief Get the number of descendant nodes of a given instance
++ *        which are on a bus of a given type
++ *
++ * @param inst Devicetree instance number
++ * @param bus bus type as a C token (lowercase, without quotes)
++ * @return Number of descendant nodes on the bus
++ */
++#define DT_INST_DESCENDANT_NUM_ON_BUS(inst, bus) \
++	DT_DESCENDANT_NUM_ON_BUS(DT_DRV_INST(inst), bus)
++
++/**
++ * @brief Get the number of descendant nodes of a given instance
++ *        which are on a bus of a given type and have status "okay"
++ *
++ * @param inst Devicetree instance number
++ * @param bus bus type as a C token (lowercase, without quotes)
++ * @return Number of descendant nodes on the bus with status okay
++ */
++#define DT_INST_DESCENDANT_NUM_ON_BUS_STATUS_OKAY(inst, bus) \
++	DT_DESCENDANT_NUM_ON_BUS_STATUS_OKAY(DT_DRV_INST(inst), bus)
++
+ /**
+  * @brief Get a string array of DT_DRV_INST(inst)'s node labels
+  *
+diff --git a/scripts/dts/gen_defines.py b/scripts/dts/gen_defines.py
+index b37e95caa..6975475cc 100644
+--- a/scripts/dts/gen_defines.py
++++ b/scripts/dts/gen_defines.py
+@@ -102,6 +102,7 @@ def main():
+             write_dep_info(node)
+             write_idents_and_existence(node)
+             write_bus(node)
++            write_descendant_bus_counts(node)
+             write_special_props(node)
+             write_vanilla_props(node)
+ 
+@@ -270,6 +271,85 @@ def write_bus(node: edtlib.Node) -> None:
+     out_dt_define(f"{node.z_path_id}_BUS", f"DT_{bus.z_path_id}")
+ 
+ 
++def write_descendant_bus_counts(node: edtlib.Node) -> None:
++    # Generate macros for counting descendants on a bus.
++    # This is only relevant for nodes that are bus controllers (have 'bus:' in binding).
++
++    if not node.buses:
++        return
++
++    # For each bus type this node controls
++    for bus_type in node.buses:
++        # Find all descendants that are on this bus, stopping at child bus controllers
++        descendants = _get_descendants_on_bus(node, bus_type)
++
++        # Generate the macro
++        bus_ident = str2ident(bus_type)
++        out_dt_define(f"{node.z_path_id}_DESCENDANT_NUM_ON_BUS_{bus_ident}", len(descendants))
++
++        # Count status-okay nodes
++        ok_count = sum(1 for d in descendants if d.status == "okay")
++        out_dt_define(f"{node.z_path_id}_DESCENDANT_NUM_ON_BUS_{bus_ident}_STATUS_OKAY", ok_count)
++
++
++def _get_descendants_on_bus(node: edtlib.Node, bus_type: str) -> list:
++    # Get all descendants on the given bus.
++    # Algorithm:
++    # 1. Find all nodes under this node that are devices on the bus
++    # 2. Filter out any that have a bus controller in their ancestor chain
++    #    (excluding the starting node)
++    
++    result = []
++    _collect_descendants(node, bus_type, result)
++    return result
++
++
++def _collect_descendants(node: edtlib.Node, bus_type: str, result: list) -> None:
++    # Recursively collect descendants
++    
++    for child in node.children.values():
++        is_device = bool(child.compats)
++        is_on_bus = bus_type in child.on_buses
++        
++        if is_on_bus and is_device:
++            # Check if this node is behind a bus controller by checking its path
++            # A node is behind a bus controller if any ancestor (excluding start_node) is a bus controller
++            behind_bus = _is_behind_bus_controller(child, node)
++            if not behind_bus:
++                result.append(child)
++        
++        # Continue descending
++        _collect_descendants(child, bus_type, result)
++
++
++def _is_behind_bus_controller(node: edtlib.Node, start_node: edtlib.Node) -> bool:
++    # Check if any ancestor between start_node (exclusive) and node (exclusive) is a bus controller
++    current = node.parent
++    while current is not None:
++        if current is start_node:
++            break
++        if current.buses:
++            return True
++        current = current.parent
++    return False
++
++
++def _is_bus_controller_in_ancestors(node: edtlib.Node, start_node: edtlib.Node, bus_type: str) -> bool:
++    # Check if any of node's ancestors (up to but not including start_node) is a bus controller
++    
++    # Check ancestors (NOT the node itself)
++    current = node.parent
++    while current is not None:
++        if current is start_node:
++            # Reached the starting node, stop
++            break
++        if current.buses:
++            return True
++        current = current.parent
++    
++    return False
++
++
+ def write_special_props(node: edtlib.Node) -> None:
+     # Writes required macros for special case properties, when the
+     # data cannot otherwise be obtained from write_vanilla_props()

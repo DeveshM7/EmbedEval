@@ -1,0 +1,149 @@
+diff --git a/libs/libc/unistd/lib_getopt_common.c b/libs/libc/unistd/lib_getopt_common.c
+index 2d76ecfc..59b82755 100644
+--- a/libs/libc/unistd/lib_getopt_common.c
++++ b/libs/libc/unistd/lib_getopt_common.c
+@@ -42,6 +42,13 @@
+  * Prive Functions
+  ****************************************************************************/
+ 
++/****************************************************************************
++ * Name: getopt_long_option
++ *
++ * Description:
++ *   Handle one long option
++ *
++ ****************************************************************************/
+ /****************************************************************************
+  * Name: getopt_long_option
+  *
+@@ -57,6 +64,9 @@ static int getopt_long_option(FAR struct getopt_s *go,
+ {
+   int ndx;
+   int ret;
++  FAR char *eq;
++  char namebuf[256];
++  FAR char *optname;
+ 
+   /* The option list may not be NULL in this context */
+ 
+@@ -65,13 +75,39 @@ static int getopt_long_option(FAR struct getopt_s *go,
+       goto errout;
+     }
+ 
++  /* Check for "=" in the option name.  If present, then the option and
++   * its argument are combined in the same argv entry (e.g., --opt=value).
++   * We need to handle this by splitting at "=".
++   */
++
++  eq = strchr(go->go_optptr, '=');
++  if (eq != NULL)
++    {
++      /* Save the option name (up to the '=') in a local buffer since we
++       * need to modify it for comparison.
++       */
++
++      if (eq - go->go_optptr >= (int)sizeof(namebuf))
++        {
++          goto errout;
++        }
++
++      memcpy(namebuf, go->go_optptr, eq - go->go_optptr);
++      namebuf[eq - go->go_optptr] = '\0';
++      optname = namebuf;
++    }
++  else
++    {
++      optname = go->go_optptr;
++    }
++
+   /* Search the list of long options for a matching name.
+    * The last element of the option arry must be filled with zeroes.
+    */
+ 
+   for (ndx = 0; longopts[ndx].name != NULL; ndx++)
+     {
+-      if (strcmp(go->go_optptr, longopts[ndx].name) == 0)
++      if (strcmp(optname, longopts[ndx].name) == 0)
+         {
+           /* Found the option with the matching name.  Does it have an
+            * required argument?  And optional argument?
+@@ -79,18 +115,41 @@ static int getopt_long_option(FAR struct getopt_s *go,
+ 
+           switch (longopts[ndx].has_arg)
+             {
+-              FAR char *next;
++              FAR char *next = NULL;
+ 
+               case no_argument:
+-                /* No, no arguments. Just return the option that we
+-                 * found.
++                /* For no_argument, ignore any attached argument after '='
++                 * and just return the option.
+                  */
+ 
++                if (eq != NULL)
++                  {
++                    /* There is an attached argument but this option takes
++                     * no argument.  Per Linux behavior, ignore it.
++                     */
++
++                    go->go_optptr = NULL;
++                    go->go_optind++;
++                    break;
++                  }
++
++                /* No argument attached, just return the option. */
++
+                 go->go_optptr = NULL;
+                 go->go_optind++;
+                 break;
+ 
+               case optional_argument:
++                if (eq != NULL)
++                  {
++                    /* Use the attached argument */
++
++                    go->go_optarg = eq + 1;
++                    go->go_optptr = NULL;
++                    go->go_optind++;
++                    break;
++                  }
++
+                 /* Check if there is a following argument and if that
+                  * following argument is another option.
+                  */
+@@ -104,11 +163,24 @@ static int getopt_long_option(FAR struct getopt_s *go,
+                     break;
+                   }
+ 
+-                 /* Fall through and treat as a required option */
++                /* Fall through and treat as a required option */
+ 
+               case required_argument:
++                if (eq != NULL)
++                  {
++                    /* Use the attached argument - the argument is in the
++                     * same argv entry, so only increment optind by 1.
++                     */
++
++                    go->go_optarg = eq + 1;
++                    go->go_optptr = NULL;
++                    go->go_optind++;
++                    break;
++                  }
+ 
+-                /* Verify that the required option is present */
++                /* Verify that the required option is present in the next
++                 * argv entry.
++                 */
+ 
+                 next = argv[go->go_optind + 1];
+                 if (next == NULL || next[0] == '-')
+@@ -178,7 +250,6 @@ errout:
+   go->go_binitialized = false;
+   return ERROR;
+ }
+-
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/

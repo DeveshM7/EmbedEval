@@ -1,0 +1,386 @@
+diff --git a/drivers/gpio/CMakeLists.txt b/drivers/gpio/CMakeLists.txt
+index 063b3fcc..812bd957 100644
+--- a/drivers/gpio/CMakeLists.txt
++++ b/drivers/gpio/CMakeLists.txt
+@@ -151,3 +151,4 @@ if(CONFIG_GPIO_SC18IS606)
+   zephyr_library_include_directories(${ZEPHYR_BASE}/drivers/mfd)
+   zephyr_library_sources(gpio_sc18is606.c)
+ endif()
++zephyr_library_sources_ifdef(CONFIG_GPIO_MMIO_LATCH gpio_mmio_latch.c)
+diff --git a/drivers/gpio/Kconfig b/drivers/gpio/Kconfig
+index a65a6a94..db49978f 100644
+--- a/drivers/gpio/Kconfig
++++ b/drivers/gpio/Kconfig
+@@ -154,6 +154,7 @@ source "drivers/gpio/Kconfig.mcux_lpc"
+ source "drivers/gpio/Kconfig.mcux_rgpio"
+ source "drivers/gpio/Kconfig.mfxstm32l152"
+ source "drivers/gpio/Kconfig.mmio32"
++source "drivers/gpio/Kconfig.mmio_latch"
+ source "drivers/gpio/Kconfig.mspm0"
+ source "drivers/gpio/Kconfig.nct38xx"
+ source "drivers/gpio/Kconfig.neorv32"
+diff --git a/drivers/gpio/Kconfig.mmio_latch b/drivers/gpio/Kconfig.mmio_latch
+new file mode 100644
+index 00000000..c0218d22
+--- /dev/null
++++ b/drivers/gpio/Kconfig.mmio_latch
+@@ -0,0 +1,11 @@
++# Copyright (c) 2024 Linaro Ltd.
++# SPDX-License-Identifier: Apache-2.0
++
++config GPIO_MMIO_LATCH
++	bool "GPIO memory-mapped latch driver"
++	help
++	  This is a driver for accessing a memory-mapped latch-backed output
++	  port using the same APIs as GPIO drivers. This is useful for
++	  external latches such as 74HC574 connected to an FMC bank or similar.
++	  The driver maintains a software shadow of the output value since
++	  the latch may be write-only with no hardware readback.
+diff --git a/drivers/gpio/gpio_mmio_latch.c b/drivers/gpio/gpio_mmio_latch.c
+new file mode 100644
+index 00000000..e97eba13
+--- /dev/null
++++ b/drivers/gpio/gpio_mmio_latch.c
+@@ -0,0 +1,290 @@
++/*
++ * Copyright (c) 2024 Linaro Ltd.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief Driver to provide the GPIO API for a memory-mapped latch-backed
++ *        output port
++ *
++ * This is a driver for accessing a memory-mapped latch (e.g., 74HC574)
++ * using the same APIs as GPIO drivers. This is useful for
++ * external latches such as 74HC574 connected to an FMC bank or similar.
++ *
++ * The implementation maintains a software shadow of the last written value
++ * since the latch may be write-only with no hardware readback. All reads
++ * return the software shadow value.
++ *
++ * Supported register widths: 8, 16, 32 bits.
++ * The number of valid GPIO lines (ngpios) is configurable.
++ */
++
++#define DT_DRV_COMPAT gpio_mmio_latch
++
++#include <zephyr/irq.h>
++#include <errno.h>
++
++#include <zephyr/drivers/gpio/gpio_utils.h>
++
++struct gpio_mmio_latch_config {
++	/* gpio_driver_config needs to be first */
++	struct gpio_driver_config common;
++	volatile uint32_t *reg;
++	uint8_t latch_width;
++	uint32_t initial_output;
++};
++
++struct gpio_mmio_latch_context {
++	/* gpio_driver_data needs to be first */
++	struct gpio_driver_data common;
++	const struct gpio_mmio_latch_config *config;
++	uint32_t shadow;
++};
++
++static int gpio_mmio_latch_init(const struct device *dev);
++
++static int gpio_mmio_latch_config(const struct device *dev, gpio_pin_t pin, gpio_flags_t flags)
++{
++	struct gpio_mmio_latch_context *context = dev->data;
++	const struct gpio_mmio_latch_config *config = context->config;
++
++	/* Reject input mode - this is output-only */
++	if ((flags & GPIO_INPUT) != 0) {
++		return -ENOTSUP;
++	}
++
++	/* Reject pull-up/pull-down */
++	if ((flags & GPIO_PULL_UP) != 0 || (flags & GPIO_PULL_DOWN) != 0) {
++		return -ENOTSUP;
++	}
++
++	/* Reject open-drain and single-ended modes */
++	if ((flags & GPIO_SINGLE_ENDED) != 0) {
++		return -ENOTSUP;
++	}
++
++	/* Check for valid flags - allow output and initialization flags */
++	if (flags & ~(GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW | GPIO_OUTPUT_INIT_HIGH |
++		      GPIO_OUTPUT_INIT_LOGICAL | GPIO_ACTIVE_LOW)) {
++		return -ENOTSUP;
++	}
++
++	if ((flags & GPIO_OUTPUT) == 0) {
++		return -ENOTSUP;
++	}
++
++	/* Configure pin as output with initial state if specified */
++	if ((flags & GPIO_OUTPUT_INIT_HIGH) != 0) {
++		context->shadow |= (1U << pin);
++	} else if ((flags & GPIO_OUTPUT_INIT_LOW) != 0) {
++		context->shadow &= ~(1U << pin);
++	}
++
++	/* Write to the latch */
++	if (config->latch_width == 8) {
++		volatile uint8_t *reg8 = (volatile uint8_t *)config->reg;
++		*reg8 = (uint8_t)(context->shadow & 0xFF);
++	} else if (config->latch_width == 16) {
++		volatile uint16_t *reg16 = (volatile uint16_t *)config->reg;
++		*reg16 = (uint16_t)(context->shadow & 0xFFFF);
++	} else {
++		*config->reg = context->shadow;
++	}
++
++	return 0;
++}
++
++/* Wrapper that bypasses the gpio.h invert logic */
++static int gpio_mmio_latch_port_get_raw(const struct device *dev, gpio_port_value_t *value)
++{
++	struct gpio_mmio_latch_context *context = dev->data;
++	const struct gpio_mmio_latch_config *config = context->config;
++
++	/* Return shadow masked with port_pin_mask */
++	*value = context->shadow & config->common.port_pin_mask;
++
++	return 0;
++}
++
++static int gpio_mmio_latch_port_set_masked_raw(const struct device *dev, gpio_port_pins_t mask,
++					       gpio_port_value_t value)
++{
++	struct gpio_mmio_latch_context *context = dev->data;
++	const struct gpio_mmio_latch_config *config = context->config;
++	unsigned int key;
++
++	key = irq_lock();
++	context->shadow = (context->shadow & ~mask) | (value & mask);
++
++	if (config->latch_width == 8) {
++		volatile uint8_t *reg8 = (volatile uint8_t *)config->reg;
++		*reg8 = (uint8_t)(context->shadow & 0xFF);
++	} else if (config->latch_width == 16) {
++		volatile uint16_t *reg16 = (volatile uint16_t *)config->reg;
++		*reg16 = (uint16_t)(context->shadow & 0xFFFF);
++	} else {
++		*config->reg = context->shadow;
++	}
++	irq_unlock(key);
++
++	return 0;
++}
++
++static int gpio_mmio_latch_port_set_bits_raw(const struct device *dev, gpio_port_pins_t mask)
++{
++	struct gpio_mmio_latch_context *context = dev->data;
++	const struct gpio_mmio_latch_config *config = context->config;
++	unsigned int key;
++
++	key = irq_lock();
++	context->shadow |= mask;
++
++	if (config->latch_width == 8) {
++		volatile uint8_t *reg8 = (volatile uint8_t *)config->reg;
++		*reg8 = (uint8_t)(context->shadow & 0xFF);
++	} else if (config->latch_width == 16) {
++		volatile uint16_t *reg16 = (volatile uint16_t *)config->reg;
++		*reg16 = (uint16_t)(context->shadow & 0xFFFF);
++	} else {
++		*config->reg = context->shadow;
++	}
++	irq_unlock(key);
++
++	return 0;
++}
++
++static int gpio_mmio_latch_port_clear_bits_raw(const struct device *dev, gpio_port_pins_t mask)
++{
++	struct gpio_mmio_latch_context *context = dev->data;
++	const struct gpio_mmio_latch_config *config = context->config;
++	unsigned int key;
++
++	key = irq_lock();
++	context->shadow &= ~mask;
++
++	if (config->latch_width == 8) {
++		volatile uint8_t *reg8 = (volatile uint8_t *)config->reg;
++		*reg8 = (uint8_t)(context->shadow & 0xFF);
++	} else if (config->latch_width == 16) {
++		volatile uint16_t *reg16 = (volatile uint16_t *)config->reg;
++		*reg16 = (uint16_t)(context->shadow & 0xFFFF);
++	} else {
++		*config->reg = context->shadow;
++	}
++	irq_unlock(key);
++
++	return 0;
++}
++
++static int gpio_mmio_latch_port_toggle_bits(const struct device *dev, gpio_port_pins_t mask)
++{
++	struct gpio_mmio_latch_context *context = dev->data;
++	const struct gpio_mmio_latch_config *config = context->config;
++	unsigned int key;
++
++	key = irq_lock();
++	context->shadow ^= mask;
++
++	if (config->latch_width == 8) {
++		volatile uint8_t *reg8 = (volatile uint8_t *)config->reg;
++		*reg8 = (uint8_t)(context->shadow & 0xFF);
++	} else if (config->latch_width == 16) {
++		volatile uint16_t *reg16 = (volatile uint16_t *)config->reg;
++		*reg16 = (uint16_t)(context->shadow & 0xFFFF);
++	} else {
++		*config->reg = context->shadow;
++	}
++	irq_unlock(key);
++
++	return 0;
++}
++
++static int gpio_mmio_latch_pin_interrupt_configure(const struct device *port,
++						    gpio_pin_t pin,
++						    enum gpio_int_mode mode,
++						    enum gpio_int_trig trig)
++{
++	/* No interrupt support - this is output-only */
++	return -ENOTSUP;
++}
++
++#ifdef CONFIG_GPIO_GET_DIRECTION
++static int gpio_mmio_latch_port_get_direction(const struct device *dev, gpio_port_pins_t map,
++					       gpio_port_pins_t *inputs, gpio_port_pins_t *outputs)
++{
++	struct gpio_mmio_latch_context *context = dev->data;
++	const struct gpio_mmio_latch_config *config = context->config;
++	gpio_port_pins_t valid_pins = config->common.port_pin_mask;
++
++	/* This is output-only, so inputs are always 0 */
++	if (inputs != NULL) {
++		*inputs = 0;
++	}
++
++	/* All configured pins are outputs */
++	if (outputs != NULL) {
++		*outputs = map & valid_pins;
++	}
++
++	return 0;
++}
++#endif /* CONFIG_GPIO_GET_DIRECTION */
++
++DEVICE_API(gpio, gpio_mmio_latch_api) = {
++	.pin_configure = gpio_mmio_latch_config,
++	.port_get_raw = gpio_mmio_latch_port_get_raw,
++	.port_set_masked_raw = gpio_mmio_latch_port_set_masked_raw,
++	.port_set_bits_raw = gpio_mmio_latch_port_set_bits_raw,
++	.port_clear_bits_raw = gpio_mmio_latch_port_clear_bits_raw,
++	.port_toggle_bits = gpio_mmio_latch_port_toggle_bits,
++	.pin_interrupt_configure = gpio_mmio_latch_pin_interrupt_configure,
++#ifdef CONFIG_GPIO_GET_DIRECTION
++	.port_get_direction = gpio_mmio_latch_port_get_direction,
++#endif
++};
++
++static int gpio_mmio_latch_init(const struct device *dev)
++{
++	struct gpio_mmio_latch_context *context = dev->data;
++	const struct gpio_mmio_latch_config *config = dev->config;
++
++	context->config = config;
++
++	/* Initialize the shadow with the configured initial output value */
++	context->shadow = config->initial_output;
++
++	/* Write initial value to the latch */
++	if (config->latch_width == 8) {
++		volatile uint8_t *reg8 = (volatile uint8_t *)config->reg;
++		*reg8 = (uint8_t)(context->shadow & 0xFF);
++	} else if (config->latch_width == 16) {
++		volatile uint16_t *reg16 = (volatile uint16_t *)config->reg;
++		*reg16 = (uint16_t)(context->shadow & 0xFFFF);
++	} else {
++		*config->reg = context->shadow;
++	}
++
++	return 0;
++}
++
++#define MMIO_LATCH_GPIO_DEVICE(n)                                                                      \
++	static struct gpio_mmio_latch_context gpio_mmio_latch_##n##_ctx = {                        \
++		.common = { .invert = 0 },                                                         \
++		.config = NULL,                                                                     \
++		.shadow = 0,                                                                        \
++	};                                                                                         \
++                                                                                                   \
++	static const struct gpio_mmio_latch_config gpio_mmio_latch_##n##_cfg = {                      \
++		.common = GPIO_COMMON_CONFIG_FROM_DT_INST(n),                                         \
++		.reg = (volatile uint32_t *)DT_INST_REG_ADDR(n),                                      \
++		.latch_width = DT_INST_PROP(n, latch_width),                                          \
++		.initial_output = DT_INST_PROP_OR(n, initial_output, 0),                              \
++	};                                                                                         \
++                                                                                                   \
++	DEVICE_DT_INST_DEFINE(n, gpio_mmio_latch_init, NULL, &gpio_mmio_latch_##n##_ctx,             \
++			      &gpio_mmio_latch_##n##_cfg, PRE_KERNEL_1,                             \
++			      CONFIG_KERNEL_INIT_PRIORITY_DEVICE, &gpio_mmio_latch_api);
++
++DT_INST_FOREACH_STATUS_OKAY(MMIO_LATCH_GPIO_DEVICE)
+diff --git a/dts/bindings/gpio/gpio-mmio-latch.yaml b/dts/bindings/gpio/gpio-mmio-latch.yaml
+new file mode 100644
+index 00000000..1cc11580
+--- /dev/null
++++ b/dts/bindings/gpio/gpio-mmio-latch.yaml
+@@ -0,0 +1,31 @@
++description: GPIO memory-mapped latch
++
++compatible: "gpio-mmio-latch"
++
++include: [gpio-controller.yaml, base.yaml]
++
++properties:
++  reg:
++    required: true
++    description: Latch register address
++
++  ngpios:
++    required: true
++    description: Number of valid GPIO lines
++
++  initial-output:
++    type: int
++    default: 0
++    description: Initial value written to the latch at init
++
++  latch-width:
++    type: int
++    enum: [8, 16, 32]
++    default: 32
++    description: Width of the latch register in bits
++
++  "#gpio-cells":
++    const: 1
++
++gpio-cells:
++  - pin
+diff --git a/test_mmio_latch.yaml b/test_mmio_latch.yaml
+new file mode 100644
+index 00000000..79f1d5e8
+--- /dev/null
++++ b/test_mmio_latch.yaml
+@@ -0,0 +1,9 @@
++common:
++  tags:
++    - drivers
++    - gpio
++  harness: ztest
++
++tests:
++  drivers.gpio.mmio_latch:
++    filter: dt_compat_enabled("gpio-mmio-latch")

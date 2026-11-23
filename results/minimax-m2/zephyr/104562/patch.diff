@@ -1,0 +1,226 @@
+diff --git a/subsys/pm/policy/policy_latency.c b/subsys/pm/policy/policy_latency.c
+index 68e6ffcc..48de0367 100644
+--- a/subsys/pm/policy/policy_latency.c
++++ b/subsys/pm/policy/policy_latency.c
+@@ -40,7 +40,9 @@ static void update_max_latency(void)
+ 		int32_t new_max_latency_cyc = -1;
+ 
+ 		SYS_SLIST_FOR_EACH_CONTAINER(&latency_subs, sreq, node) {
+-			sreq->cb(new_max_latency_us);
++			if (sreq->cb != NULL) {
++				sreq->cb(new_max_latency_us);
++			}
+ 		}
+ 
+ 		if (new_max_latency_us != SYS_FOREVER_US) {
+@@ -91,8 +93,29 @@ void pm_policy_latency_changed_subscribe(struct pm_policy_latency_subscription *
+ {
+ 	k_spinlock_key_t key = k_spin_lock(&latency_lock);
+ 
+-	req->cb = cb;
+-	sys_slist_append(&latency_subs, &req->node);
++	/* Check if subscription already exists in the list */
++	struct pm_policy_latency_subscription *sreq;
++	bool found = false;
++	
++	SYS_SLIST_FOR_EACH_CONTAINER(&latency_subs, sreq, node) {
++		if (sreq == req) {
++			found = true;
++			break;
++		}
++	}
++	
++	if (cb == NULL) {
++		/* Disable: remove subscription from list if present */
++		if (found) {
++			(void)sys_slist_find_and_remove(&latency_subs, &req->node);
++		}
++	} else {
++		/* Enable/update: update callback and add to list if not present */
++		req->cb = cb;
++		if (!found) {
++			sys_slist_append(&latency_subs, &req->node);
++		}
++	}
+ 
+ 	k_spin_unlock(&latency_lock, key);
+ }
+diff --git a/subsys/pm/policy/policy_latency.c.backup b/subsys/pm/policy/policy_latency.c.backup
+new file mode 100644
+index 00000000..68e6ffcc
+--- /dev/null
++++ b/subsys/pm/policy/policy_latency.c.backup
+@@ -0,0 +1,107 @@
++/*
++ * Copyright (c) 2018 Intel Corporation.
++ * Copyright (c) 2022 Nordic Semiconductor ASA
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <stdint.h>
++
++#include <zephyr/pm/policy.h>
++#include <zephyr/spinlock.h>
++#include <zephyr/sys/time_units.h>
++
++/** Lock to synchronize access to the latency request list. */
++static struct k_spinlock latency_lock;
++/** List of maximum latency requests. */
++static sys_slist_t latency_reqs;
++/** Maximum CPU latency in us */
++static int32_t max_latency_us = SYS_FOREVER_US;
++/** Maximum CPU latency in cycles */
++int32_t max_latency_cyc = -1;
++/** List of latency change subscribers. */
++static sys_slist_t latency_subs;
++
++/** @brief Update maximum allowed latency. */
++static void update_max_latency(void)
++{
++	int32_t new_max_latency_us = SYS_FOREVER_US;
++	struct pm_policy_latency_request *req;
++
++	SYS_SLIST_FOR_EACH_CONTAINER(&latency_reqs, req, node) {
++		if ((new_max_latency_us == SYS_FOREVER_US) ||
++		    ((int32_t)req->value_us < new_max_latency_us)) {
++			new_max_latency_us = (int32_t)req->value_us;
++		}
++	}
++
++	if (max_latency_us != new_max_latency_us) {
++		struct pm_policy_latency_subscription *sreq;
++		int32_t new_max_latency_cyc = -1;
++
++		SYS_SLIST_FOR_EACH_CONTAINER(&latency_subs, sreq, node) {
++			sreq->cb(new_max_latency_us);
++		}
++
++		if (new_max_latency_us != SYS_FOREVER_US) {
++			new_max_latency_cyc = (int32_t)k_us_to_cyc_ceil32(new_max_latency_us);
++		}
++
++		max_latency_us = new_max_latency_us;
++		max_latency_cyc = new_max_latency_cyc;
++	}
++}
++
++void pm_policy_latency_request_add(struct pm_policy_latency_request *req,
++				   uint32_t value_us)
++{
++	req->value_us = value_us;
++
++	k_spinlock_key_t key = k_spin_lock(&latency_lock);
++
++	sys_slist_append(&latency_reqs, &req->node);
++	update_max_latency();
++
++	k_spin_unlock(&latency_lock, key);
++}
++
++void pm_policy_latency_request_update(struct pm_policy_latency_request *req,
++				      uint32_t value_us)
++{
++	k_spinlock_key_t key = k_spin_lock(&latency_lock);
++
++	req->value_us = value_us;
++	update_max_latency();
++
++	k_spin_unlock(&latency_lock, key);
++}
++
++void pm_policy_latency_request_remove(struct pm_policy_latency_request *req)
++{
++	k_spinlock_key_t key = k_spin_lock(&latency_lock);
++
++	(void)sys_slist_find_and_remove(&latency_reqs, &req->node);
++	update_max_latency();
++
++	k_spin_unlock(&latency_lock, key);
++}
++
++void pm_policy_latency_changed_subscribe(struct pm_policy_latency_subscription *req,
++					 pm_policy_latency_changed_cb_t cb)
++{
++	k_spinlock_key_t key = k_spin_lock(&latency_lock);
++
++	req->cb = cb;
++	sys_slist_append(&latency_subs, &req->node);
++
++	k_spin_unlock(&latency_lock, key);
++}
++
++void pm_policy_latency_changed_unsubscribe(struct pm_policy_latency_subscription *req)
++{
++	k_spinlock_key_t key = k_spin_lock(&latency_lock);
++
++	(void)sys_slist_find_and_remove(&latency_subs, &req->node);
++
++	k_spin_unlock(&latency_lock, key);
++}
+diff --git a/test_debug.c b/test_debug.c
+new file mode 100644
+index 00000000..369b5b7a
+--- /dev/null
++++ b/test_debug.c
+@@ -0,0 +1,18 @@
++#include <stdio.h>
++#include <zephyr/pm/policy.h>
++#include <zephyr/sys/slist.h>
++
++/* Dummy test to check if the code compiles and link */
++int main() {
++    struct pm_policy_latency_subscription subs;
++    struct pm_policy_latency_request req;
++    
++    /* Test 1: Subscribe with non-NULL */
++    pm_policy_latency_changed_subscribe(&subs, (pm_policy_latency_changed_cb_t)1);
++    
++    /* Test 2: Subscribe with NULL */
++    pm_policy_latency_changed_subscribe(&subs, NULL);
++    
++    printf("Test passed\n");
++    return 0;
++}
+diff --git a/test_slist.c b/test_slist.c
+new file mode 100644
+index 00000000..45004a58
+--- /dev/null
++++ b/test_slist.c
+@@ -0,0 +1,36 @@
++#include <stdio.h>
++#include <zephyr/sys/slist.h>
++
++struct test_node {
++    sys_snode_t node;
++    int value;
++};
++
++int main() {
++    sys_slist_t list;
++    sys_slist_init(&list);
++    
++    struct test_node n1 = { .value = 1 };
++    struct test_node n2 = { .value = 2 };
++    struct test_node n3 = { .value = 3 };
++    
++    sys_slist_append(&list, &n1.node);
++    sys_slist_append(&list, &n2.node);
++    sys_slist_append(&list, &n3.node);
++    
++    printf("Before removal:\n");
++    struct test_node *node;
++    SYS_SLIST_FOR_EACH_CONTAINER(&list, node, node) {
++        printf("  %d\n", node->value);
++    }
++    
++    printf("Removing n2...\n");
++    sys_slist_find_and_remove(&list, &n2.node);
++    
++    printf("After removal:\n");
++    SYS_SLIST_FOR_EACH_CONTAINER(&list, node, node) {
++        printf("  %d\n", node->value);
++    }
++    
++    return 0;
++}

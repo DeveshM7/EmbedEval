@@ -1,0 +1,137 @@
+diff --git a/arch/sim/src/sim/sim_oneshot.c b/arch/sim/src/sim/sim_oneshot.c
+index 06a9c262..ea1db9a1 100644
+--- a/arch/sim/src/sim/sim_oneshot.c
++++ b/arch/sim/src/sim/sim_oneshot.c
+@@ -33,6 +33,7 @@
+ #include <nuttx/arch.h>
+ #include <nuttx/clock.h>
+ #include <nuttx/list.h>
++#include <nuttx/sched.h>
+ #include <nuttx/spinlock.h>
+ #include <nuttx/timers/oneshot.h>
+ #include <nuttx/timers/arch_alarm.h>
+@@ -135,6 +136,9 @@ static int sim_timer_handler(int irq, void *context, void *arg)
+   struct sim_oneshot_lowerhalf_s *priv;
+   irqstate_t flags = enter_critical_section();
+   uint64_t   curr  = host_gettime(false);
++  
++  /* Debug: Print a message to indicate the handler is being called */
++  printf("sim_timer_handler called at %llu\n", curr);
+ 
+   /* Perform the callback if the timer is expired */
+ 
+@@ -313,6 +317,12 @@ void sim_timer_update(void)
+   until += NSEC_PER_TICK;
+   host_sleepuntil(until);
+ 
++  /* Process the system tick. This is needed for the system time to
++   * advance, which is required for hrtimers to work correctly.
++   */
++
++  nxsched_process_tick();
++
+ #ifdef CONFIG_SIM_WALLTIME_SLEEP
+   sim_timer_handler(0, NULL, NULL);
+ #endif
+diff --git a/sched/hrtimer/hrtimer.h b/sched/hrtimer/hrtimer.h
+index 606cd086..ce6f23f1 100644
+--- a/sched/hrtimer/hrtimer.h
++++ b/sched/hrtimer/hrtimer.h
+@@ -141,6 +141,13 @@ static inline_function void hrtimer_reprogram(uint64_t next_expired)
+   ret = up_timer_start(&ts);
+ #  endif
+   DEBUGASSERT(ret == 0);
++#elif defined(CONFIG_SIM) && defined(CONFIG_SIM_WALLTIME_SIGNAL)
++  /* For the simulator in tick-based mode, program the oneshot timer
++   * to expire at the next hrtimer expiration. This ensures that the
++   * timer signal is delivered at the right time, which will trigger
++   * hrtimer_process() to process expired hrtimers.
++   */
++  host_settimer(next_expired);
+ #endif
+ }
+ 
+diff --git a/sim_fix.patch b/sim_fix.patch
+new file mode 100644
+index 00000000..2e84119e
+--- /dev/null
++++ b/sim_fix.patch
+@@ -0,0 +1,35 @@
++--- a/arch/sim/src/sim/sim_oneshot.c
+++++ b/arch/sim/src/sim/sim_oneshot.c
++@@ -33,6 +33,7 @@
++ #include <nuttx/arch.h>
++ #include <nuttx/clock.h>
++ #include <nuttx/list.h>
+++#include <nuttx/sched.h>
++ #include <nuttx/spinlock.h>
++ #include <nuttx/timers/oneshot.h>
++ #include <nuttx/timers/arch_alarm.h>
++@@ -133,6 +134,15 @@ static int sim_timer_handler(int irq, void *context, void *arg)
++   struct sim_oneshot_lowerhalf_s *priv;
++   irqstate_t flags = enter_critical_section();
++   uint64_t   curr  = host_gettime(false);
+++#ifdef CONFIG_HRTIMER
+++  void (*tick_handler)(void) = nxsched_process_timer;
+++#else
+++  void (*tick_handler)(void) = nxsched_process_tick;
+++#endif
++ 
++   /* Perform the callback if the timer is expired */
++ 
++@@ -150,6 +160,12 @@ static int sim_timer_handler(int irq, void *context, void *arg)
++ 
++   leave_critical_section(flags);
++ 
+++  /* Process the system tick. In CONFIG_HRTIMER mode, this calls
+++   * nxsched_process_timer() which will call hrtimer_process() to
+++   * process expired hrtimers. In non-CONFIG_HRTIMER mode, this calls
+++   * nxsched_process_tick() to process the system tick.
+++   */
+++
+++  tick_handler();
++   return OK;
++ }
+diff --git a/sim_oneshot_fix.patch b/sim_oneshot_fix.patch
+new file mode 100644
+index 00000000..0d6a56b9
+--- /dev/null
++++ b/sim_oneshot_fix.patch
+@@ -0,0 +1,37 @@
++diff --git a/arch/sim/src/sim/sim_oneshot.c b/arch/sim/src/sim/sim_oneshot.c
++index 1a2b3c4d..5e6f7g8h 100644
++--- a/arch/sim/src/sim/sim_oneshot.c
+++++ b/arch/sim/src/sim/sim_oneshot.c
++@@ -40,6 +40,7 @@
++ #include <nuttx/arch.h>
++ #include <nuttx/clock.h>
++ #include <nuttx/list.h>
+++#include <nuttx/sched.h>
++ #include <nuttx/spinlock.h>
++ #include <nuttx/timers/oneshot.h>
++ #include <nuttx/timers/arch_alarm.h>
++@@ -133,6 +134,15 @@ static int sim_timer_handler(int irq, void *context, void *arg)
++   struct sim_oneshot_lowerhalf_s *priv;
++   irqstate_t flags = enter_critical_section();
++   uint64_t   curr  = host_gettime(false);
+++#ifdef CONFIG_HRTIMER
+++  void (*tick_handler)(void) = nxsched_process_timer;
+++#else
+++  void (*tick_handler)(void) = nxsched_process_tick;
+++#endif
++ 
++   /* Perform the callback if the timer is expired */
++ 
++@@ -150,6 +160,12 @@ static int sim_timer_handler(int irq, void *context, void *arg)
++ 
++   leave_critical_section(flags);
++ 
+++  /* Process the system tick. In CONFIG_HRTIMER mode, this calls
+++   * nxsched_process_timer() which will call hrtimer_process() to
+++   * process expired hrtimers. In non-CONFIG_HRTIMER mode, this calls
+++   * nxsched_process_tick() to process the system tick.
+++   */
+++
+++  tick_handler();
++   return OK;
++ }

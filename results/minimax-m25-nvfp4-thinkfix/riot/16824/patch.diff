@@ -1,0 +1,136 @@
+diff --git a/sys/include/net/gnrc/netif.h b/sys/include/net/gnrc/netif.h
+index e2a3e51..0f6bd6b 100644
+--- a/sys/include/net/gnrc/netif.h
++++ b/sys/include/net/gnrc/netif.h
+@@ -422,7 +422,7 @@ static inline int gnrc_netif_ipv6_addrs_get(const gnrc_netif_t *netif,
+  * @return  -ENOTSUP, if @p netif doesn't support IPv6.
+  */
+ static inline int gnrc_netif_ipv6_addr_add(const gnrc_netif_t *netif,
+-                                           ipv6_addr_t *addr, unsigned pfx_len,
++                                           const ipv6_addr_t *addr, unsigned pfx_len,
+                                            uint8_t flags)
+ {
+     assert(netif != NULL);
+@@ -447,7 +447,7 @@ static inline int gnrc_netif_ipv6_addr_add(const gnrc_netif_t *netif,
+  * @return  -ENOTSUP, if @p netif doesn't support IPv6.
+  */
+ static inline int gnrc_netif_ipv6_addr_remove(const gnrc_netif_t *netif,
+-                                              ipv6_addr_t *addr)
++                                              const ipv6_addr_t *addr)
+ {
+     assert(netif != NULL);
+     assert(addr != NULL);
+@@ -455,6 +455,22 @@ static inline int gnrc_netif_ipv6_addr_remove(const gnrc_netif_t *netif,
+                            0, addr, sizeof(ipv6_addr_t));
+ }
+ 
++/**
++ * @brief   Wait for a global IPv6 address to be configured on an interface
++ *
++ * @param[in] netif     The interface to wait on. May be NULL to wait on any
++ *                      interface.
++ * @param[in] timeout   Timeout in milliseconds. 0 means return immediately
++ *                      with false if no global address is present.
++ *
++ * @return  true if a global IPv6 address is already present or becomes present
++ *          before the timeout.
++ * @return  false if the timeout elapses without a global address being present.
++ *
++ * @note    Only available with @ref net_gnrc_ipv6 "gnrc_ipv6".
++ */
++bool gnrc_netif_ipv6_wait_for_global_address(gnrc_netif_t *netif, uint32_t timeout);
++
+ /**
+  * @brief   Gets the IPv6 multicast groups an interface is joined to (if IPv6 is
+  *          supported)
+diff --git a/sys/include/net/gnrc/netif/internal.h b/sys/include/net/gnrc/netif/internal.h
+index e56c6b9..473f47a 100644
+--- a/sys/include/net/gnrc/netif/internal.h
++++ b/sys/include/net/gnrc/netif/internal.h
+@@ -307,6 +307,22 @@ static inline void gnrc_netif_ipv6_bus_post(gnrc_netif_t *netif, int type,
+     (void) ctx;
+ #endif
+ }
++/**
++ * @brief   Wait for a global IPv6 address to be configured on an interface
++ *
++ * @param[in] netif     The interface to wait on. May be NULL to wait on any
++ *                      interface.
++ * @param[in] timeout   Timeout in milliseconds. 0 means no timeout (wait
++ *                      indefinitely).
++ *
++ * @note    Only available with @ref net_gnrc_ipv6 "gnrc_ipv6".
++ * @note    Requires @ref MODULE_GNRC_NETIF_BUS to receive address valid events.
++ *
++ * @return  true if a global IPv6 address is already present or becomes present
++ *          before the timeout.
++ * @return  false if the timeout elapses without a global address being present.
++ */
++bool gnrc_netif_ipv6_wait_for_global_address(gnrc_netif_t *netif, uint32_t timeout);
+ #endif  /* IS_USED(MODULE_GNRC_NETIF_IPV6) || defined(DOXYGEN) */
+ 
+ /**
+diff --git a/sys/net/gnrc/netif/gnrc_netif.c b/sys/net/gnrc/netif/gnrc_netif.c
+index a4d7f70..80f8112 100644
+--- a/sys/net/gnrc/netif/gnrc_netif.c
++++ b/sys/net/gnrc/netif/gnrc_netif.c
+@@ -704,6 +704,59 @@ int gnrc_netif_ipv6_addr_match(gnrc_netif_t *netif,
+     return idx;
+ }
+ 
++
++#if IS_USED(MODULE_GNRC_NETIF_IPV6) || defined(DOXYGEN)
++static bool _has_global_ipv6_addr(const gnrc_netif_t *netif)
++{
++    for (unsigned i = 0; i < CONFIG_GNRC_NETIF_IPV6_ADDRS_NUMOF; i++) {
++        if ((netif->ipv6.addrs_flags[i] != 0) &&
++            ipv6_addr_is_global(&netif->ipv6.addrs[i])) {
++            return true;
++        }
++    }
++    return false;
++}
++
++bool gnrc_netif_ipv6_wait_for_global_address(gnrc_netif_t *netif, uint32_t timeout)
++{
++    gnrc_netif_t *iter = NULL;
++    
++    /* First check if a global address already exists */
++    if (netif) {
++        if (_has_global_ipv6_addr(netif)) {
++            return true;
++        }
++    }
++    else {
++        /* Check any interface */
++        while ((iter = gnrc_netif_iter(iter))) {
++            if (_has_global_ipv6_addr(iter)) {
++                return true;
++            }
++        }
++    }
++    
++    /* If timeout is 0, return immediately */
++    if (timeout == 0) {
++        return false;
++    }
++    
++    /* Wait for timeout and check again */
++    xtimer_usleep(timeout * 1000U);
++    
++    if (netif) {
++        return _has_global_ipv6_addr(netif);
++    }
++    else {
++        while ((iter = gnrc_netif_iter(iter))) {
++            if (_has_global_ipv6_addr(iter)) {
++                return true;
++            }
++        }
++    }
++    return false;
++}
++#endif  /* IS_USED(MODULE_GNRC_NETIF_IPV6) */
+ ipv6_addr_t *gnrc_netif_ipv6_addr_best_src(gnrc_netif_t *netif,
+                                            const ipv6_addr_t *dst,
+                                            bool ll_only)

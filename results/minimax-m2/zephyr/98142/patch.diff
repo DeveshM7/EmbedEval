@@ -1,0 +1,201 @@
+diff --git a/include/zephyr/zbus/zbus.h b/include/zephyr/zbus/zbus.h
+index 01096651..1e82f251 100644
+--- a/include/zephyr/zbus/zbus.h
++++ b/include/zephyr/zbus/zbus.h
+@@ -120,6 +120,7 @@ enum __packed zbus_observer_type {
+ 	ZBUS_OBSERVER_LISTENER_TYPE,
+ 	ZBUS_OBSERVER_SUBSCRIBER_TYPE,
+ 	ZBUS_OBSERVER_MSG_SUBSCRIBER_TYPE,
++	ZBUS_OBSERVER_ASYNC_LISTENER_TYPE,
+ };
+ 
+ struct zbus_observer_data {
+@@ -132,6 +133,22 @@ struct zbus_observer_data {
+ #endif /* CONFIG_ZBUS_PRIORITY_BOOST */
+ };
+ 
++/**
++ * @brief Async listener work structure.
++ *
++ * This structure holds the work queue and work item for async listeners.
++ */
++struct zbus_async_listener_work {
++	/** Work queue where the callback will be scheduled. */
++	struct k_work_q *queue;
++	/** Work item for the async listener callback. */
++	struct k_work work;
++	/** Pointer to the observed channel. */
++	const struct zbus_channel *chan;
++	/** Pointer to the published message. */
++	const void *message;
++};
++
+ /**
+  * @brief Type used to represent an observer.
+  *
+@@ -171,6 +188,8 @@ struct zbus_observer {
+ 		 */
+ 		struct k_fifo *message_fifo;
+ #endif /* CONFIG_ZBUS_MSG_SUBSCRIBER */
++		/** Async listener work structure. It exists only if async listener is enabled. */
++		struct zbus_async_listener_work *work;
+ 	};
+ };
+ 
+@@ -517,6 +536,67 @@ struct zbus_channel_observation {
+ 
+ /* clang-format off */
+ 
++/* clang-format off */
++
++/**
++ * @brief Define and initialize an async listener.
++ *
++ * This macro defines an observer of async listener type. This macro establishes the callback where
++ * the async listener will be notified asynchronously via a work queue, and initialize the
++ * ``struct zbus_observer`` defining the async listener.
++ *
++ * @param[in] _name The async listener's name.
++ * @param[in] _cb The callback function.
++ */
++#define ZBUS_ASYNC_LISTENER_DEFINE(_name, _cb) \
++	ZBUS_ASYNC_LISTENER_DEFINE_WITH_ENABLE(_name, _cb, true)
++
++/**
++ * @brief Define and initialize an async listener.
++ *
++ * This macro defines an observer of async listener type. This macro establishes the callback where
++ * the async listener will be notified asynchronously via a work queue, and initialize the
++ * ``struct zbus_observer`` defining the async listener.
++ *
++ * @param[in] _name The async listener's name.
++ * @param[in] _cb The callback function.
++ * @param[in] _enable The async listener initial enable state.
++ */
++#define ZBUS_ASYNC_LISTENER_DEFINE_WITH_ENABLE(_name, _cb, _enable) \
++	static struct zbus_async_listener_work _CONCAT(_zbus_async_work_, _name) = { \
++		.queue = NULL, \
++		.chan = NULL, \
++		.message = NULL, \
++	}; \
++	static struct zbus_observer_data _CONCAT(_zbus_obs_data_, _name) = { \
++		.enabled = _enable, \
++		IF_ENABLED(CONFIG_ZBUS_PRIORITY_BOOST, ( \
++			.priority = ZBUS_MIN_THREAD_PRIORITY, \
++		)) \
++	}; \
++	void _CONCAT(_zbus_async_work_handler_, _name)(struct k_work *work); \
++		; \
++	; \
++	; \
++	/* Work item will be initialized in code */ \
++	_ZBUS_CPP_EXTERN const STRUCT_SECTION_ITERABLE(zbus_observer, _name) = { \
++		ZBUS_OBSERVER_NAME_INIT(_name) \
++		.type = ZBUS_OBSERVER_ASYNC_LISTENER_TYPE, \
++		.data = &_CONCAT(_zbus_obs_data_, _name), \
++		.work = &_CONCAT(_zbus_async_work_, _name) \
++	}; \
++	void _CONCAT(_zbus_async_work_handler_, _name)(struct k_work *work) \
++	{ \
++		struct zbus_async_listener_work *async_work = \
++			CONTAINER_OF(work, struct zbus_async_listener_work, work); \
++		void (*callback)(const struct zbus_channel *chan, const void *message) = (_cb); \
++		callback(async_work->chan, async_work->message); \
++	}
++
++/* clang-format on */
++
++
++
+ /**
+  * @brief Define and initialize a message subscriber.
+  *
+@@ -537,8 +617,8 @@ struct zbus_channel_observation {
+ 	};                                                                    \
+ 	_ZBUS_CPP_EXTERN const STRUCT_SECTION_ITERABLE(zbus_observer, _name) = {  \
+ 		ZBUS_OBSERVER_NAME_INIT(_name) /* Name field */               \
+-		.type = ZBUS_OBSERVER_MSG_SUBSCRIBER_TYPE,                    \
+-		.data = &_CONCAT(_zbus_obs_data_, _name),                     \
++		.type = ZBUS_OBSERVER_MSG_SUBSCRIBER_TYPE\
++		.data = &_CONCAT(_zbus_obs_data_\ _name),,                     \
+ 		.message_fifo = &_zbus_observer_fifo_##_name,                 \
+ 	}
+ /* clang-format on */
+@@ -1000,6 +1080,22 @@ int zbus_chan_rm_obs(const struct zbus_channel *chan, const struct zbus_observer
+  */
+ int zbus_obs_set_enable(const struct zbus_observer *obs, bool enabled);
+ 
++/**
++ * @brief Set the work queue for an async listener.
++ *
++ * This routine sets the work queue where the async listener's callback will be scheduled.
++ *
++ * @param[in] obs The async listener's reference.
++ * @param[in] queue The work queue to use.
++ *
++ * @retval 0 Work queue set successfully.
++ * @retval -EINVAL The observer is not an async listener or parameters are invalid.
++ * @retval -EFAULT A parameter is incorrect, or the function context is invalid (inside an ISR). The
++ * function only returns this value when the @kconfig{CONFIG_ZBUS_ASSERT_MOCK} is enabled.
++ */
++int zbus_async_listener_set_work_queue(const struct zbus_observer *obs, struct k_work_q *queue);
++
++
+ /**
+  * @brief Get the observer state.
+  *
+diff --git a/subsys/zbus/Kconfig b/subsys/zbus/Kconfig
+index 2e418f99..c2250268 100644
+--- a/subsys/zbus/Kconfig
++++ b/subsys/zbus/Kconfig
+@@ -125,4 +125,11 @@ module = ZBUS
+ module-str = zbus
+ source "subsys/logging/Kconfig.template.log_config"
+ 
++config ZBUS_ASYNC_LISTENER
++	bool "Async listener support"
++	depends on ZBUS
++	select KERNEL
++	help
++	  Enables async listeners that run in work queue context.
++
+ endif # ZBUS
+diff --git a/subsys/zbus/zbus.c b/subsys/zbus/zbus.c
+index 0fff534c..f912ebf8 100644
+--- a/subsys/zbus/zbus.c
++++ b/subsys/zbus/zbus.c
+@@ -148,6 +148,34 @@ static inline int _zbus_notify_observer(const struct zbus_channel *chan,
+ 	}
+ #endif /* CONFIG_ZBUS_MSG_SUBSCRIBER */
+ 
++#if defined(CONFIG_ZBUS_ASYNC_LISTENER)
++	case ZBUS_OBSERVER_ASYNC_LISTENER_TYPE: {
++		/* Verify the observer is enabled */
++		if (!obs->data->enabled) {
++			break;
++		}
++
++		/* Verify the work structure exists */
++		if (obs->work == NULL) {
++			return -EINVAL;
++		}
++
++		/* Set the channel and message in the work structure */
++		obs->work->chan = chan;
++		obs->work->message = zbus_chan_msg(chan);
++
++		/* Submit work to the work queue */
++		if (obs->work->queue != NULL) {
++			k_work_submit_to_queue(obs->work->queue, &obs->work->work);
++		} else {
++			/* Use system work queue by default */
++			k_work_submit(&obs->work->work);
++		}
++
++		break;
++	}
++#endif /* CONFIG_ZBUS_ASYNC_LISTENER */
++
+ 	default:
+ 		_ZBUS_ASSERT(false, "Unreachable");
+ 	}

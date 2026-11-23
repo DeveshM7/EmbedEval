@@ -1,0 +1,128 @@
+diff --git a/include/zephyr/net_buf.h b/include/zephyr/net_buf.h
+index 6f06cca3..f0a73618 100644
+--- a/include/zephyr/net_buf.h
++++ b/include/zephyr/net_buf.h
+@@ -1372,6 +1372,39 @@ struct net_buf_pool *net_buf_pool_get(int id);
+  */
+ int net_buf_id(const struct net_buf *buf);
+ 
++/** 
++ * @brief Get the number of currently available buffers in a pool. 
++ * 
++ * This function returns the current number of available buffers in the pool. 
++ * The value decreases as buffers are allocated and increases as they are freed. 
++ * 
++ * @param pool Pointer to the buffer pool. 
++ * 
++ * @return Number of currently available buffers. 
++ * 
++ * @note This function is only available when CONFIG_NET_BUF_POOL_USAGE is enabled. 
++ */ 
++#if defined(CONFIG_NET_BUF_POOL_USAGE) 
++size_t net_buf_get_available(const struct net_buf_pool *pool); 
++#endif 
++
++/** 
++ * @brief Get the maximum number of buffers simultaneously used from a pool. 
++ * 
++ * This function returns the maximum number of buffers that were simultaneously 
++ * claimed from the pool at any point in time. This value only increases 
++ * monotonically as more buffers are held at once, never decreasing. 
++ * 
++ * @param pool Pointer to the buffer pool. 
++ * 
++ * @return Maximum number of buffers simultaneously used. 
++ * 
++ * @note This function is only available when CONFIG_NET_BUF_POOL_USAGE is enabled. 
++ */ 
++#if defined(CONFIG_NET_BUF_POOL_USAGE) 
++size_t net_buf_get_max_used(const struct net_buf_pool *pool); 
++#endif
++
+ /**
+  * @brief Allocate a new fixed buffer from a pool.
+  *
+diff --git a/lib/net_buf/buf.c b/lib/net_buf/buf.c
+index 9a32aedd..7c2c52a6 100644
+--- a/lib/net_buf/buf.c
++++ b/lib/net_buf/buf.c
+@@ -85,6 +85,18 @@ static inline struct net_buf *pool_get_uninit(struct net_buf_pool *pool,
+ 	return buf;
+ }
+ 
++#if defined(CONFIG_NET_BUF_POOL_USAGE) 
++size_t net_buf_get_available(const struct net_buf_pool *pool) 
++{ 
++	return atomic_get(&pool->avail_count); 
++} 
++
++size_t net_buf_get_max_used(const struct net_buf_pool *pool) 
++{ 
++	return pool->max_used; 
++} 
++#endif /* CONFIG_NET_BUF_POOL_USAGE */ 
++
+ void net_buf_reset(struct net_buf *buf)
+ {
+ 	__ASSERT_NO_MSG(buf->frags == NULL);
+diff --git a/test_buf_usage.c b/test_buf_usage.c
+new file mode 100644
+index 00000000..695adf60
+--- /dev/null
++++ b/test_buf_usage.c
+@@ -0,0 +1,47 @@
++#include <zephyr/net_buf.h>
++#include <zephyr/sys/printk.h>
++#include <zephyr/kernel.h>
++
++NET_BUF_POOL_FIXED_DEFINE(test_pool, 5, 64, 0, NULL);
++
++void main(void)
++{
++	struct net_buf *bufs[5];
++	size_t available, max_used;
++	int i;
++	
++	if (!IS_ENABLED(CONFIG_NET_BUF_POOL_USAGE)) {
++		printk("CONFIG_NET_BUF_POOL_USAGE not enabled\n");
++		return;
++	}
++	
++	// Initial state
++	available = net_buf_get_available(&test_pool);
++	max_used = net_buf_get_max_used(&test_pool);
++	printk("Initial state: available=%zu, max_used=%zu\n", available, max_used);
++	
++	// Allocate some buffers
++	for (i = 0; i < 3; i++) {
++		bufs[i] = net_buf_alloc(&test_pool, K_NO_WAIT);
++	}
++	
++	available = net_buf_get_available(&test_pool);
++	max_used = net_buf_get_max_used(&test_pool);
++	printk("After allocating 3: available=%zu, max_used=%zu\n", available, max_used);
++	
++	// Free one
++	net_buf_unref(bufs[0]);
++	
++	available = net_buf_get_available(&test_pool);
++	max_used = net_buf_get_max_used(&test_pool);
++	printk("After freeing 1: available=%zu, max_used=%zu\n", available, max_used);
++	
++	// Free remaining
++	for (i = 1; i < 3; i++) {
++		net_buf_unref(bufs[i]);
++	}
++	
++	available = net_buf_get_available(&test_pool);
++	max_used = net_buf_get_max_used(&test_pool);
++	printk("After freeing all: available=%zu, max_used=%zu\n", available, max_used);
++}
+diff --git a/test_buf_usage.conf b/test_buf_usage.conf
+new file mode 100644
+index 00000000..c706f9df
+--- /dev/null
++++ b/test_buf_usage.conf
+@@ -0,0 +1,2 @@
++CONFIG_NET_BUF=y
++CONFIG_NET_BUF_POOL_USAGE=y

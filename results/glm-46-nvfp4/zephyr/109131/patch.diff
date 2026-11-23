@@ -1,0 +1,123 @@
+diff --git a/subsys/net/lib/dhcpv4/Kconfig b/subsys/net/lib/dhcpv4/Kconfig
+index e78dca260..c80cbb64b 100644
+--- a/subsys/net/lib/dhcpv4/Kconfig
++++ b/subsys/net/lib/dhcpv4/Kconfig
+@@ -229,3 +229,38 @@ config NET_DHCPV4_SERVER_OPTION_ROUTER
+ 	  device.
+ 
+ endif # NET_DHCPV4_SERVER
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL
++	bool "Set the captive-portal option in the DHCP server response"
++	help
++	  If enabled, set the DHCP captive-portal option (RFC 8910) with a URI that
++	  clients can use to detect captive portals. The server will send option 114
++	  (Captive-Portal URI) in Offer and Acknowledgment messages when requested
++	  by the client via Parameter Request List (option 55).
++
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI
++	string "Captive portal URI"
++	depends on NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL
++	default ""
++	help
++	  This configuration option specifies the captive portal URI that the DHCPv4
++	  server should provide to clients. If empty, the server will auto-build the
++	  URI as "http://<server-IPv4>/generate_204" where <server-IPv4> is the server's
++	  IP address.
++
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL
++	bool "Set the captive-portal option in the DHCP server response"
++	help
++	  If enabled, set the DHCP captive-portal option (RFC 8910) with a URI that
++	  clients can use to detect captive portals. The server will send option 114
++	  (Captive-Portal URI) in Offer and Acknowledgment messages when requested
++	  by the client via Parameter Request List (option 55).
++
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI
++	string "Captive portal URI"
++	depends on NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL
++	default ""
++	help
++	  This configuration option specifies the captive portal URI that the DHCPv4
++	  server should provide to clients. If empty, the server will auto-build the
++	  URI as "http://<server-IPv4>/generate_204" where <server-IPv4> is the server's
++	  IP address.
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_internal.h b/subsys/net/lib/dhcpv4/dhcpv4_internal.h
+index e6aa02d98..47ff3d233 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_internal.h
++++ b/subsys/net/lib/dhcpv4/dhcpv4_internal.h
+@@ -70,6 +70,8 @@ struct dhcp_msg {
+ #define DHCPV4_OPTIONS_REBINDING	59
+ #define DHCPV4_OPTIONS_VENDOR_CLASS_ID	60
+ #define DHCPV4_OPTIONS_CLIENT_ID	61
++#define DHCPV4_OPTIONS_CAPTIVE_PORTAL	114
++#define DHCPV4_OPTIONS_CAPTIVE_PORTAL	114
+ #define DHCPV4_OPTIONS_END		255
+ 
+ /* Useful size macros */
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_server.c b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+index d4be6a5f5..eb3dacb88 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_server.c
++++ b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+@@ -441,6 +441,40 @@ static uint8_t *dhcpv4_encode_dns_server_option(uint8_t *buf, size_t *buflen)
+ 	return buf + DHCPV4_OPTIONS_DNS_SERVER_SIZE;
+ }
+ 
++static uint8_t *dhcpv4_encode_captive_portal_option(uint8_t *buf, size_t *buflen,
++						     struct dhcpv4_server_ctx *ctx)
++{
++	char uri[128];
++	const char *configured_uri = CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI;
++	int uri_len;
++
++	if (strlen(configured_uri) > 0) {
++		uri_len = snprintf(uri, sizeof(uri), "%s", configured_uri);
++	} else {
++		/* Auto-build URI as http://<server-IPv4>/generate_204 */
++		char server_addr_str[NET_IPV4_ADDR_LEN];
++		net_addr_ntop(NET_AF_INET, &ctx->server_addr, server_addr_str,
++			      sizeof(server_addr_str));
++		uri_len = snprintf(uri, sizeof(uri), "http://%s/generate_204", server_addr_str);
++	}
++
++	if (uri_len <= 0 || uri_len >= sizeof(uri)) {
++		return NULL;
++	}
++
++	if (buf == NULL || *buflen < uri_len + 2) {
++		return NULL;
++	}
++
++	buf[0] = DHCPV4_OPTIONS_CAPTIVE_PORTAL;
++	buf[1] = (uint8_t)uri_len;
++	memcpy(&buf[2], uri, uri_len);
++
++	*buflen -= uri_len + 2;
++
++	return buf + uri_len + 2;
++}
++
+ static uint8_t *dhcpv4_encode_end_option(uint8_t *buf, size_t *buflen)
+ {
+ 	if (buf == NULL || *buflen < 1) {
+@@ -556,6 +590,16 @@ static uint8_t *dhcpv4_encode_requested_params(
+ 				goto out;
+ 			}
+ 			break;
++		case DHCPV4_OPTIONS_CAPTIVE_PORTAL:
++			if (!IS_ENABLED(CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL)) {
++				break;
++			}
++
++			buf = dhcpv4_encode_captive_portal_option(buf, buflen, ctx);
++			if (buf == NULL) {
++				goto out;
++			}
++			break;
+ 		/* Others - just ignore. */
+ 		default:
+ 			break;
+@@ -1918,3 +1962,4 @@ void net_dhcpv4_server_init(void)
+ 		fds[i].fd = -1;
+ 	}
+ }
++

@@ -1,0 +1,93 @@
+diff --git a/include/zephyr/net/socket_service.h b/include/zephyr/net/socket_service.h
+index 85a9dc884..24d93cd38 100644
+--- a/include/zephyr/net/socket_service.h
++++ b/include/zephyr/net/socket_service.h
+@@ -173,6 +173,17 @@ __syscall int net_socket_service_register(const struct net_socket_service_desc *
+  * @retval -ENOENT Service is not found.
+  * @retval -ENINVAL Invalid parameter.
+  */
++/**
++ * @brief Unregister pollable sockets and close them.
++ *
++ * @param service Pointer to a service description.
++ *
++ * @retval 0 No error
++ * @retval -ENOENT Service is not found.
++ * @retval -ENINVAL Invalid parameter.
++ */
++__syscall int net_socket_service_close(const struct net_socket_service_desc *service);
++
+ static inline int net_socket_service_unregister(const struct net_socket_service_desc *service)
+ {
+ 	return net_socket_service_register(service, NULL, 0, NULL);
+diff --git a/subsys/net/lib/sntp/sntp.c b/subsys/net/lib/sntp/sntp.c
+index af8cc0362..b08a6a541 100644
+--- a/subsys/net/lib/sntp/sntp.c
++++ b/subsys/net/lib/sntp/sntp.c
+@@ -343,12 +343,9 @@ int sntp_read_async(struct net_socket_service_event *event, struct sntp_time *ts
+ 
+ void sntp_close_async(const struct net_socket_service_desc *service)
+ {
+-	struct sntp_ctx *ctx = service->pev->user_data;
+-	/* Detach socket from socket service */
+-	net_socket_service_unregister(service);
+-	/* CLose the socket */
+-	if (ctx) {
+-		(void)zsock_close(ctx->sock.fd);
++	/* Close sockets through the socket service */
++	if (!net_socket_service_close(service)) {
++		return; /* Socket already closed by service */
+ 	}
+ }
+ 
+diff --git a/subsys/net/lib/sockets/sockets_service.c b/subsys/net/lib/sockets/sockets_service.c
+index e60f919ac..aa1dc7c21 100644
+--- a/subsys/net/lib/sockets/sockets_service.c
++++ b/subsys/net/lib/sockets/sockets_service.c
+@@ -305,3 +305,46 @@ void socket_service_init(void)
+ {
+ 	(void)init_socket_service();
+ }
++
++
++int z_impl_net_socket_service_close(const struct net_socket_service_desc *svc)
++{
++	int ret = -ENOENT;
++	int fd;
++
++	k_mutex_lock(&lock, K_FOREVER);
++
++	if (thread_status == SOCKET_SERVICE_THREAD_UNINITIALIZED) {
++		(void)k_condvar_wait(&wait_start, &lock, K_FOREVER);
++	} else if (thread_status != SOCKET_SERVICE_THREAD_RUNNING) {
++		NET_ERR("Socket service thread not running, service %p close fails.", svc);
++		ret = -EIO;
++		goto out;
++	}
++
++	if (STRUCT_SECTION_START(net_socket_service_desc) > svc ||
++	    STRUCT_SECTION_END(net_socket_service_desc) <= svc) {
++		goto out;
++	}
++
++	/* Close all registered sockets */
++	for (int i = 0; i < svc->pev_len; i++) {
++		fd = svc->pev[i].event.fd;
++		if (fd >= 0) {
++			(void)zsock_close(fd);
++			svc->pev[i].event.fd = -1;
++		}
++	}
++
++	/* Clean up the service */
++	cleanup_svc_events(svc);
++
++	/* Tell the thread to re-read the variables */
++	zvfs_eventfd_write(ctx.events[0].fd, 1);
++	ret = 0;
++
++out:
++	k_mutex_unlock(&lock);
++
++	return ret;
++}

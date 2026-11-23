@@ -1,0 +1,145 @@
+diff --git a/include/zephyr/tracing/tracing.h b/include/zephyr/tracing/tracing.h
+index 7608e64e..119dcaaf 100644
+--- a/include/zephyr/tracing/tracing.h
++++ b/include/zephyr/tracing/tracing.h
+@@ -873,15 +873,17 @@
+ /**
+  * @brief Trace Conditional Variable wait enter
+  * @param condvar Conditional Variable object
++ * @param timeout Timeout period
+  */
+-#define sys_port_trace_k_condvar_wait_enter(condvar)
++#define sys_port_trace_k_condvar_wait_enter(condvar, timeout)
+ 
+ /**
+  * @brief Trace Conditional Variable wait exit
+  * @param condvar Conditional Variable object
++ * @param timeout Timeout period
+  * @param ret Return value
+  */
+-#define sys_port_trace_k_condvar_wait_exit(condvar, ret)
++#define sys_port_trace_k_condvar_wait_exit(condvar, timeout, ret)
+ 
+ /** @} */ /* end of subsys_tracing_apis_condvar */
+ 
+diff --git a/kernel/condvar.c b/kernel/condvar.c
+index d00eb552..42590839 100644
+--- a/kernel/condvar.c
++++ b/kernel/condvar.c
+@@ -117,7 +117,7 @@ int z_impl_k_condvar_wait(struct k_condvar *condvar, struct k_mutex *mutex,
+ 	k_spinlock_key_t key;
+ 	int ret;
+ 
+-	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_condvar, wait, condvar);
++	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_condvar, wait, condvar, timeout);
+ 
+ 	key = k_spin_lock(&lock);
+ 	k_mutex_unlock(mutex);
+@@ -125,7 +125,7 @@ int z_impl_k_condvar_wait(struct k_condvar *condvar, struct k_mutex *mutex,
+ 	ret = z_pend_curr(&lock, key, &condvar->wait_q, timeout);
+ 	k_mutex_lock(mutex, K_FOREVER);
+ 
+-	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_condvar, wait, condvar, ret);
++	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_condvar, wait, condvar, timeout, ret);
+ 
+ 	return ret;
+ }
+diff --git a/subsys/tracing/ctf/tracing_ctf.h b/subsys/tracing/ctf/tracing_ctf.h
+index efb9a92f..240d7eaf 100644
+--- a/subsys/tracing/ctf/tracing_ctf.h
++++ b/subsys/tracing/ctf/tracing_ctf.h
+@@ -187,8 +187,8 @@ extern "C" {
+ #define sys_port_trace_k_condvar_signal_exit(condvar, ret)
+ #define sys_port_trace_k_condvar_broadcast_enter(condvar)
+ #define sys_port_trace_k_condvar_broadcast_exit(condvar, ret)
+-#define sys_port_trace_k_condvar_wait_enter(condvar)
+-#define sys_port_trace_k_condvar_wait_exit(condvar, ret)
++#define sys_port_trace_k_condvar_wait_enter(condvar, timeout)
++#define sys_port_trace_k_condvar_wait_exit(condvar, timeout, ret)
+ 
+ #define sys_port_trace_k_queue_init(queue)
+ #define sys_port_trace_k_queue_cancel_wait(queue)
+diff --git a/subsys/tracing/sysview/tracing_sysview.h b/subsys/tracing/sysview/tracing_sysview.h
+index 6867a147..01255dbf 100644
+--- a/subsys/tracing/sysview/tracing_sysview.h
++++ b/subsys/tracing/sysview/tracing_sysview.h
+@@ -343,10 +343,10 @@ void sys_trace_thread_info(struct k_thread *thread);
+ #define sys_port_trace_k_condvar_broadcast_exit(condvar, ret)                                      \
+ 	SEGGER_SYSVIEW_RecordEndCallU32(TID_CONDVAR_BROADCAST, (uint32_t)ret)
+ 
+-#define sys_port_trace_k_condvar_wait_enter(condvar)                                               \
++#define sys_port_trace_k_condvar_wait_enter(condvar, timeout)                                               \
+ 	SEGGER_SYSVIEW_RecordU32(TID_CONDVAR_WAIT, (uint32_t)(uintptr_t)condvar)
+ 
+-#define sys_port_trace_k_condvar_wait_exit(condvar, ret)                                           \
++#define sys_port_trace_k_condvar_wait_exit(condvar, timeout, ret)                                           \
+ 	SEGGER_SYSVIEW_RecordEndCallU32(TID_CONDVAR_WAIT, (uint32_t)ret)
+ 
+ #define sys_port_trace_k_queue_init(queue)                                                         \
+diff --git a/subsys/tracing/test/tracing_string_format_test.c b/subsys/tracing/test/tracing_string_format_test.c
+index 0dda01f5..ea07d0b9 100644
+--- a/subsys/tracing/test/tracing_string_format_test.c
++++ b/subsys/tracing/test/tracing_string_format_test.c
+@@ -243,13 +243,13 @@ void sys_trace_k_condvar_signal_exit(struct k_condvar *condvar, int ret)
+ 	TRACING_STRING("%s: %p\n", __func__, condvar);
+ }
+ 
+-void sys_trace_k_condvar_wait_enter(struct k_condvar *condvar, struct k_mutex *mutex,
++void sys_trace_k_condvar_wait_enter(struct k_condvar *condvar, 
+ 				    k_timeout_t timeout)
+ {
+ 	TRACING_STRING("%s: %p\n", __func__, condvar);
+ }
+ 
+-void sys_trace_k_condvar_wait_exit(struct k_condvar *condvar, struct k_mutex *mutex,
++void sys_trace_k_condvar_wait_exit(struct k_condvar *condvar, 
+ 				   k_timeout_t timeout, int ret)
+ {
+ 	TRACING_STRING("%s: %p\n", __func__, condvar);
+diff --git a/subsys/tracing/test/tracing_test.h b/subsys/tracing/test/tracing_test.h
+index 22c243cb..35705236 100644
+--- a/subsys/tracing/test/tracing_test.h
++++ b/subsys/tracing/test/tracing_test.h
+@@ -152,10 +152,10 @@
+ 	sys_trace_k_condvar_broadcast_enter(condvar)
+ #define sys_port_trace_k_condvar_broadcast_exit(condvar, ret)                                      \
+ 	sys_trace_k_condvar_broadcast_exit(condvar, ret)
+-#define sys_port_trace_k_condvar_wait_enter(condvar)                                               \
+-	sys_trace_k_condvar_wait_enter(condvar, mutex, timeout)
+-#define sys_port_trace_k_condvar_wait_exit(condvar, ret)                                           \
+-	sys_trace_k_condvar_wait_exit(condvar, mutex, timeout, ret)
++#define sys_port_trace_k_condvar_wait_enter(condvar, timeout)                                               \
++	sys_trace_k_condvar_wait_enter(condvar, timeout)
++#define sys_port_trace_k_condvar_wait_exit(condvar, timeout, ret)                                           \
++	sys_trace_k_condvar_wait_exit(condvar, timeout, ret)
+ 
+ #define sys_port_trace_k_queue_init(queue) sys_trace_k_queue_init(queue)
+ #define sys_port_trace_k_queue_cancel_wait(queue) sys_trace_k_queue_cancel_wait(queue)
+@@ -530,10 +530,8 @@ void sys_trace_k_condvar_signal_blocking(struct k_condvar *condvar);
+ void sys_trace_k_condvar_signal_exit(struct k_condvar *condvar, int ret);
+ void sys_trace_k_condvar_broadcast_enter(struct k_condvar *condvar);
+ void sys_trace_k_condvar_broadcast_exit(struct k_condvar *condvar, int ret);
+-void sys_trace_k_condvar_wait_enter(struct k_condvar *condvar, struct k_mutex *mutex,
+-				    k_timeout_t timeout);
+-void sys_trace_k_condvar_wait_exit(struct k_condvar *condvar, struct k_mutex *mutex,
+-				   k_timeout_t timeout, int ret);
++void sys_trace_k_condvar_wait_enter(struct k_condvar *condvar, k_timeout_t timeout);
++void sys_trace_k_condvar_wait_exit(struct k_condvar *condvar, k_timeout_t timeout, int ret);
+ 
+ void sys_trace_k_queue_init(struct k_queue *queue);
+ void sys_trace_k_queue_cancel_wait(struct k_queue *queue);
+diff --git a/subsys/tracing/user/tracing_user.h b/subsys/tracing/user/tracing_user.h
+index 70cf02ea..346f6fab 100644
+--- a/subsys/tracing/user/tracing_user.h
++++ b/subsys/tracing/user/tracing_user.h
+@@ -224,8 +224,8 @@ void sys_trace_gpio_fire_callback_user(const struct device *port, struct gpio_ca
+ #define sys_port_trace_k_condvar_signal_exit(condvar, ret)
+ #define sys_port_trace_k_condvar_broadcast_enter(condvar)
+ #define sys_port_trace_k_condvar_broadcast_exit(condvar, ret)
+-#define sys_port_trace_k_condvar_wait_enter(condvar)
+-#define sys_port_trace_k_condvar_wait_exit(condvar, ret)
++#define sys_port_trace_k_condvar_wait_enter(condvar, timeout)
++#define sys_port_trace_k_condvar_wait_exit(condvar, timeout, ret)
+ 
+ #define sys_port_trace_k_queue_init(queue)
+ #define sys_port_trace_k_queue_cancel_wait(queue)

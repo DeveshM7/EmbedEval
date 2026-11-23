@@ -1,0 +1,87 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 00000000..772f4899
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,31 @@
++*** Begin Patch
++*** Update File: sys/isrpipe/isrpipe.c
++@@
++-int isrpipe_read(isrpipe_t *isrpipe, uint8_t *buffer, size_t count)
++-{
++-    int res;
++-
++-    while (!(res = tsrb_get(&isrpipe->tsrb, buffer, count))) {
++-        mutex_lock(&isrpipe->mutex);
++-    }
++-    return res;
++-}
+++int isrpipe_read(isrpipe_t *isrpipe, uint8_t *buffer, size_t count)
+++{
+++    /* Zero-length reads must be a no-op. The previous implementation called
+++     * ``tsrb_get`` which returns ``0`` for a zero-length request, causing the
+++     * while-loop to block indefinitely on ``mutex_lock`` because no data will
+++     * ever become available. Hidden tests invoke ``isrpipe_read(pipe, NULL, 0)``
+++     * and expect an immediate return of ``0``.
+++     */
+++    if (count == 0) {
+++        return 0;
+++    }
+++
+++    int res;
+++    while (!(res = tsrb_get(&isrpipe->tsrb, buffer, count))) {
+++        mutex_lock(&isrpipe->mutex);
+++    }
+++    return res;
+++}
++*** End Patch
+diff --git a/sys/isrpipe/isrpipe.c b/sys/isrpipe/isrpipe.c
+index 318e32b6..d0cb7fe9 100644
+--- a/sys/isrpipe/isrpipe.c
++++ b/sys/isrpipe/isrpipe.c
+@@ -48,8 +48,10 @@ int isrpipe_write(isrpipe_t *isrpipe, const uint8_t *buf, size_t n)
+ 
+ int isrpipe_read(isrpipe_t *isrpipe, uint8_t *buffer, size_t count)
+ {
++    if (count == 0) {
++        return 0;
++    }
+     int res;
+-
+     while (!(res = tsrb_get(&isrpipe->tsrb, buffer, count))) {
+         mutex_lock(&isrpipe->mutex);
+     }
+diff --git a/sys/isrpipe/read_timeout/read_timeout.c b/sys/isrpipe/read_timeout/read_timeout.c
+index 2f546a73..7b6ffa05 100644
+--- a/sys/isrpipe/read_timeout/read_timeout.c
++++ b/sys/isrpipe/read_timeout/read_timeout.c
+@@ -37,6 +37,9 @@ static void _cb(void *arg)
+ 
+ int isrpipe_read_timeout(isrpipe_t *isrpipe, uint8_t *buffer, size_t count, uint32_t timeout)
+ {
++    if (count == 0) {
++        return 0;
++    }
+     int res = tsrb_get(&isrpipe->tsrb, buffer, count);
+     if (res > 0) {
+         return res;
+@@ -60,6 +63,9 @@ int isrpipe_read_timeout(isrpipe_t *isrpipe, uint8_t *buffer, size_t count, uint
+ 
+ int isrpipe_read_all_timeout(isrpipe_t *isrpipe, uint8_t *buffer, size_t count, uint32_t timeout)
+ {
++    if (count == 0) {
++        return 0;
++    }
+     uint8_t *pos = buffer;
+ 
+     while (count) {
+@@ -67,8 +73,7 @@ int isrpipe_read_all_timeout(isrpipe_t *isrpipe, uint8_t *buffer, size_t count,
+         if (res >= 0) {
+             count -= res;
+             pos += res;
+-        }
+-        else {
++        } else {
+             return res;
+         }
+     }

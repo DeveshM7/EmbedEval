@@ -1,0 +1,98 @@
+diff --git a/sys/include/isrpipe.h b/sys/include/isrpipe.h
+index 6b43f562..70ab63ee 100644
+--- a/sys/include/isrpipe.h
++++ b/sys/include/isrpipe.h
+@@ -93,6 +93,40 @@ int isrpipe_write(isrpipe_t *isrpipe, const uint8_t *buf, size_t n);
+  */
+ int isrpipe_read(isrpipe_t *isrpipe, uint8_t *buf, size_t count);
+ 
++/**
++ * @brief   Read a single byte from an isrpipe (blocking).
++ *
++ * Returns the next byte in FIFO order. The function blocks until a byte is
++ * available. The return type is @c uint8_t so that any byte value, including
++ * those with the high bit set, is returned as data and not confused with an
++ * error code.
++ *
++ * @param[in] isrpipe   isrpipe object to operate on
++ * @return  The next byte from the pipe.
++ */
++uint8_t isrpipe_read_one(isrpipe_t *isrpipe);
++
++/**
++ * @brief   Return the number of bytes currently buffered in the pipe.
++ *
++ * This function is thread‑safe and may be called from either ISR or thread
++ * context. It returns the number of bytes that can be read without blocking.
++ *
++ * @param[in] isrpipe   isrpipe object to operate on
++ * @return  Number of bytes available for reading.
++ */
++unsigned int isrpipe_available(isrpipe_t *isrpipe);
++
++/**
++ * @brief   Discard all data currently buffered in the pipe.
++ *
++ * After the call the pipe is empty but remains usable for subsequent writes
++ * and reads.
++ *
++ * @param[in] isrpipe   isrpipe object to operate on
++ */
++void isrpipe_clear(isrpipe_t *isrpipe);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/sys/isrpipe/isrpipe.c b/sys/isrpipe/isrpipe.c
+index c9dff751..6c841b71 100644
+--- a/sys/isrpipe/isrpipe.c
++++ b/sys/isrpipe/isrpipe.c
+@@ -19,6 +19,7 @@
+ 
+ #include "isrpipe.h"
+ 
++#include "turb.h"
+ void isrpipe_init(isrpipe_t *isrpipe, uint8_t *buf, size_t bufsize)
+ {
+     isrpipe->mutex = (mutex_t)MUTEX_INIT_LOCKED;
+@@ -60,3 +61,40 @@ int isrpipe_read(isrpipe_t *isrpipe, uint8_t *buffer, size_t count)
+ 
+     return res;
+ }
++/**
++ * @brief Read a single byte from the isrpipe (blocking).
++ *
++ * The function waits until a byte is available, then returns it. The return
++ * type is @c uint8_t, ensuring that any possible byte value (including those
++ * with the most significant bit set) is returned as data.
++ */
++uint8_t isrpipe_read_one(isrpipe_t *isrpipe)
++{
++    int res;
++    while ((res = tsrb_get_one(&isrpipe->tsrb)) == -1) {
++        mutex_lock(&isrpipe->mutex);
++    }
++    return (uint8_t)res;
++}
++
++/**
++ * @brief Return the number of bytes currently buffered in the pipe.
++ */
++unsigned int isrpipe_available(isrpipe_t *isrpipe)
++{
++    unsigned int avail;
++    mutex_lock(&isrpipe->mutex);
++    avail = turb_avail(&isrpipe->tsrb);
++    mutex_unlock(&isrpipe->mutex);
++    return avail;
++}
++
++/**
++ * @brief Clear all data currently buffered in the pipe.
++ */
++void isrpipe_clear(isrpipe_t *isrpipe)
++{
++    mutex_lock(&isrpipe->mutex);
++    turb_clear(&isrpipe->tsrb);
++    mutex_unlock(&isrpipe->mutex);
++}

@@ -1,0 +1,59 @@
+diff --git a/sys/include/vfs.h b/sys/include/vfs.h
+index a7df6110..8ea8503c 100644
+--- a/sys/include/vfs.h
++++ b/sys/include/vfs.h
+@@ -1000,7 +1000,16 @@ int vfs_rename(const char *from_path, const char *to_path);
+  * @return 0 on success
+  * @return <0 on error
+  */
+-int vfs_umount(vfs_mount_t *mountp);
++/**
++ * @brief Unmount a mounted file system.
++ *
++ * When @p force is @c false the function behaves like the original implementation and fails with @c -EBUSY if there are open files on the mount point. When @p force is @c true the mount point is removed even if open files are present.
++ *
++ * @param[in]  mountp    pointer to the mount structure of the file system to unmount
++ * @param[in]  force     whether to force unmount regardless of open files
++ * @return 0 on success, negative error code otherwise.
++ */
++int vfs_umount(vfs_mount_t *mountp, bool force);
+ 
+ /**
+  * @brief Unlink (delete) a file from a mounted file system
+diff --git a/sys/vfs/vfs.c b/sys/vfs/vfs.c
+index 3c4f65b9..6a926be0 100644
+--- a/sys/vfs/vfs.c
++++ b/sys/vfs/vfs.c
+@@ -547,7 +547,7 @@ int vfs_mount(vfs_mount_t *mountp)
+     return 0;
+ }
+ 
+-int vfs_umount(vfs_mount_t *mountp)
++int vfs_umount(vfs_mount_t *mountp, bool force)
+ {
+     DEBUG("vfs_umount: %p\n", (void *)mountp);
+     int ret = check_mount(mountp);
+@@ -564,7 +564,7 @@ int vfs_umount(vfs_mount_t *mountp)
+         return -EINVAL;
+     }
+     DEBUG("vfs_umount: -> \"%s\" open=%d\n", mountp->mount_point, atomic_load(&mountp->open_files));
+-    if (atomic_load(&mountp->open_files) > 0) {
++    if (atomic_load(&mountp->open_files) > 0 && !force) {
+         mutex_unlock(&_mount_mutex);
+         return -EBUSY;
+     }
+@@ -1208,13 +1208,11 @@ int vfs_unmount_by_path(const char *path)
+ {
+     for (unsigned i = 0; i < MOUNTPOINTS_NUMOF; ++i) {
+         if (strcmp(path, vfs_mountpoints_xfa[i].mount_point) == 0) {
+-            return vfs_umount(&vfs_mountpoints_xfa[i]);
++            return vfs_umount(&vfs_mountpoints_xfa[i], false);
+         }
+     }
+-
+     return -ENOENT;
+ }
+-
+ int vfs_format_by_path(const char *path)
+ {
+     for (unsigned i = 0; i < MOUNTPOINTS_NUMOF; ++i) {

@@ -1,0 +1,157 @@
+diff --git a/dts/bindings/test/vnd,device-with-props.yaml b/dts/bindings/test/vnd,device-with-props.yaml
+index 22a09c98..8dcbe955 100644
+--- a/dts/bindings/test/vnd,device-with-props.yaml
++++ b/dts/bindings/test/vnd,device-with-props.yaml
+@@ -6,6 +6,14 @@ description: Test device with random properties
+ compatible: "vnd,device-with-props"
+ 
+ properties:
++  reg:
++    type: array
++    required: false
++
++  reg-names:
++    type: string-array
++    required: false
++
+   foo:
+     type: int
+ 
+diff --git a/include/zephyr/devicetree.h b/include/zephyr/devicetree.h
+index 2dca9984..f8a8e5ac 100644
+--- a/include/zephyr/devicetree.h
++++ b/include/zephyr/devicetree.h
+@@ -5216,6 +5216,98 @@
+ #define DT_ALL_INST_HAS_BOOL_STATUS_OKAY(prop) \
+ 	IS_EMPTY(DT_INST_FOREACH_STATUS_OKAY_VARGS(DT_ALL_INST_HAS_BOOL_STATUS_OKAY_, prop))
+ 
++/**
++ * @brief Check if any `DT_DRV_COMPAT` node with status `okay` has a register
++ *        with a given name.
++ *
++ * @param name lowercase-and-underscores register name
++ *
++ * Example devicetree overlay:
++ *
++ * @code{.dts}
++ *     &i2c0 {
++ *         sensor0: sensor@0 {
++ *             compatible = "vnd,some-sensor";
++ *             status = "okay";
++ *             reg = <0>, <1>;
++ *             reg-names = "foo", "bar";
++ *         };
++ *
++ *         sensor1: sensor@1 {
++ *             compatible = "vnd,some-sensor";
++ *             status = "okay";
++ *             reg = <2>;
++ *         };
++ *
++ *         sensor2: sensor@2 {
++ *             compatible = "vnd,some-sensor";
++ *             status = "disabled";
++ *             reg = <3>;
++ *             reg-names = "baz";
++ *         };
++ *     };
++ * @endcode
++ *
++ * Example usage:
++ *
++ * @code{.c}
++ *     #define DT_DRV_COMPAT vnd_some_sensor
++ *
++ *     DT_ANY_INST_REG_HAS_NAME_STATUS_OKAY(foo) // 1
++ *     DT_ANY_INST_REG_HAS_NAME_STATUS_OKAY(bar) // 1
++ *     DT_ANY_INST_REG_HAS_NAME_STATUS_OKAY(baz) // 0
++ * @endcode
++ */
++#define DT_ANY_INST_REG_HAS_NAME_STATUS_OKAY(name)						\
++	UTIL_NOT(IS_EMPTY(									\
++		DT_INST_FOREACH_STATUS_OKAY_VARGS(DT_ANY_INST_REG_HAS_NAME_STATUS_OKAY_, name)))
++
++/**
++ * @brief Check if all `DT_DRV_COMPAT` node with status `okay` has a given
++ *        register name. If all nodes are disabled, this will return 1.
++ *
++ * @param name lowercase-and-underscores register name
++ *
++ * Example devicetree overlay:
++ *
++ * @code{.dts}
++ *     &i2c0 {
++ *         sensor0: sensor@0 {
++ *             compatible = "vnd,some-sensor";
++ *             status = "okay";
++ *             reg = <0>, <1>;
++ *             reg-names = "foo", "bar";
++ *         };
++ *
++ *         sensor1: sensor@1 {
++ *             compatible = "vnd,some-sensor";
++ *             status = "okay";
++ *             reg = <2>, <3>;
++ *             reg-names = "foo";
++ *         };
++ *
++ *         sensor2: sensor@2 {
++ *             compatible = "vnd,some-sensor";
++ *             status = "disabled";
++ *             reg = <4>;
++ *             reg-names = "baz";
++ *         };
++ *     };
++ * @endcode
++ *
++ * Example usage:
++ *
++ * @code{.c}
++ *     #define DT_DRV_COMPAT vnd_some_sensor
++ *
++ *     DT_ALL_INST_REG_HAS_NAME_STATUS_OKAY(foo) // 1
++ *     DT_ALL_INST_REG_HAS_NAME_STATUS_OKAY(bar) // 0
++ *     DT_ALL_INST_REG_HAS_NAME_STATUS_OKAY(baz) // 0
++ * @endcode
++ */
++#define DT_ALL_INST_REG_HAS_NAME_STATUS_OKAY(name) \
++	IS_EMPTY(DT_INST_FOREACH_STATUS_OKAY_VARGS(DT_ALL_INST_REG_HAS_NAME_STATUS_OKAY_, name))
++
+ /**
+  * @brief Call @p fn on all nodes with compatible `DT_DRV_COMPAT`
+  *        and status `okay`
+@@ -5543,6 +5635,34 @@
+ #define DT_ALL_INST_HAS_BOOL_STATUS_OKAY_(idx, prop)	\
+ 	IF_DISABLED(DT_INST_PROP(idx, prop), (1,))
+ 
++/** @brief Helper for DT_ANY_INST_REG_HAS_NAME_STATUS_OKAY
++ *
++ * This macro generates token "1," for instance of a device,
++ * identified by index @p idx, if instance has register with name @p name.
++ *
++ * @param idx instance number
++ * @param name register name to check for
++ *
++ * @return Macro evaluates to `1,` if instance has the register name,
++ * otherwise it evaluates to literal nothing.
++ */
++#define DT_ANY_INST_REG_HAS_NAME_STATUS_OKAY_(idx, name)	\
++	IF_ENABLED(DT_INST_REG_HAS_NAME(idx, name), (1,))
++
++/** @brief Helper for DT_ALL_INST_REG_HAS_NAME_STATUS_OKAY
++ *
++ * This macro generates token "1," for instance of a device,
++ * identified by index @p idx, if instance has no register with name @p name.
++ *
++ * @param idx instance number
++ * @param name register name to check for
++ *
++ * @return Macro evaluates to `1,` if instance does not have the register name,
++ * otherwise it evaluates to literal nothing.
++ */
++#define DT_ALL_INST_REG_HAS_NAME_STATUS_OKAY_(idx, name)	\
++	IF_DISABLED(DT_INST_REG_HAS_NAME(idx, name), (1,))
++
+ #define DT_PATH_INTERNAL(...) \
+ 	UTIL_CAT(DT_ROOT, MACRO_MAP_CAT(DT_S_PREFIX, __VA_ARGS__))
+ /** @brief DT_PATH_INTERNAL() helper: prepends _S_ to a node name

@@ -1,0 +1,113 @@
+diff --git a/subsys/net/lib/dhcpv4/Kconfig b/subsys/net/lib/dhcpv4/Kconfig
+index e78dca260..ad0107ac1 100644
+--- a/subsys/net/lib/dhcpv4/Kconfig
++++ b/subsys/net/lib/dhcpv4/Kconfig
+@@ -228,4 +228,21 @@ config NET_DHCPV4_SERVER_OPTION_ROUTER
+ 	  disabled so that the client does not try to forward traffic to our
+ 	  device.
+ 
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL
++	bool "Set the Captive-Portal URI option in the DHCP server response"
++	depends on NET_DHCPV4_SERVER
++	help
++	  If enabled, set the DHCP Captive-Portal URI option (option 114) in
++	  Offer and Acknowledge messages when the client requests it via the
++	  Parameter Request List (option 55). The URI is either taken from
++	  CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI if non-empty,
++	  or auto-built as http://<server-IPv4>/generate_204.
++
++config NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI
++	string "Captive-Portal URI"
++	default ""
++	help
++	  This configuration option specifies the URI that the DHCPv4 server
++	  should provide to clients in the Captive-Portal URI option (option 114).
++	  If empty, the URI will be auto-built as http://<server-IPv4>/generate_204.
+ endif # NET_DHCPV4_SERVER
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_internal.h b/subsys/net/lib/dhcpv4/dhcpv4_internal.h
+index e6aa02d98..aaabb46de 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_internal.h
++++ b/subsys/net/lib/dhcpv4/dhcpv4_internal.h
+@@ -71,6 +71,7 @@ struct dhcp_msg {
+ #define DHCPV4_OPTIONS_VENDOR_CLASS_ID	60
+ #define DHCPV4_OPTIONS_CLIENT_ID	61
+ #define DHCPV4_OPTIONS_END		255
++#define DHCPV4_OPTIONS_CAPTIVE_PORTAL	114
+ 
+ /* Useful size macros */
+ #define DHCPV4_OLV_MSG_HOST_NAME	2
+diff --git a/subsys/net/lib/dhcpv4/dhcpv4_server.c b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+index d4be6a5f5..2e768a9e9 100644
+--- a/subsys/net/lib/dhcpv4/dhcpv4_server.c
++++ b/subsys/net/lib/dhcpv4/dhcpv4_server.c
+@@ -33,6 +33,8 @@ LOG_MODULE_REGISTER(net_dhcpv4_server, CONFIG_NET_DHCPV4_SERVER_LOG_LEVEL);
+ #define DHCPV4_OPTIONS_SUBNET_MASK_SIZE 6
+ #define DHCPV4_OPTIONS_ROUTER_SIZE 6
+ #define DHCPV4_OPTIONS_DNS_SERVER_SIZE 6
++#define DHCPV4_OPTIONS_CAPTIVE_PORTAL_SIZE 3
++#define DHCPV4_OPTIONS_CAPTIVE_PORTAL_URI_MAX_LEN 252
+ #define DHCPV4_OPTIONS_CLIENT_ID_MIN_SIZE 2
+ 
+ #define ADDRESS_RESERVED_TIMEOUT K_SECONDS(30)
+@@ -441,6 +443,43 @@ static uint8_t *dhcpv4_encode_dns_server_option(uint8_t *buf, size_t *buflen)
+ 	return buf + DHCPV4_OPTIONS_DNS_SERVER_SIZE;
+ }
+ 
++static uint8_t *dhcpv4_encode_captive_portal_option(uint8_t *buf, size_t *buflen,
++						    struct net_in_addr *server_addr)
++{
++	char uri[DHCPV4_OPTIONS_CAPTIVE_PORTAL_URI_MAX_LEN + 1];
++	size_t uri_len;
++
++	if (buf == NULL || buflen == NULL) {
++		return NULL;
++	}
++
++	if (strlen(CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI) > 0) {
++		/* Use configured URI */
++		strncpy(uri, CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL_URI,
++			DHCPV4_OPTIONS_CAPTIVE_PORTAL_URI_MAX_LEN);
++		uri[DHCPV4_OPTIONS_CAPTIVE_PORTAL_URI_MAX_LEN] = '\0';
++	} else {
++		/* Auto-build URI as http://<server-IPv4>/generate_204 */
++		snprintf(uri, sizeof(uri), "http://%s/generate_204",
++			 net_sprint_ipv4_addr(server_addr));
++	}
++
++	uri_len = strlen(uri);
++
++	/* Need 2 bytes for option code and length + uri_len bytes for URI */
++	if (*buflen < DHCPV4_OPTIONS_CAPTIVE_PORTAL_SIZE + uri_len) {
++		return NULL;
++	}
++
++	buf[0] = DHCPV4_OPTIONS_CAPTIVE_PORTAL;
++	buf[1] = uri_len;
++	memcpy(&buf[2], uri, uri_len);
++
++	*buflen -= DHCPV4_OPTIONS_CAPTIVE_PORTAL_SIZE + uri_len;
++
++	return buf + DHCPV4_OPTIONS_CAPTIVE_PORTAL_SIZE + uri_len;
++}
++
+ static uint8_t *dhcpv4_encode_end_option(uint8_t *buf, size_t *buflen)
+ {
+ 	if (buf == NULL || *buflen < 1) {
+@@ -556,6 +595,17 @@ static uint8_t *dhcpv4_encode_requested_params(
+ 				goto out;
+ 			}
+ 			break;
++
++		case DHCPV4_OPTIONS_CAPTIVE_PORTAL:
++			if (!IS_ENABLED(CONFIG_NET_DHCPV4_SERVER_OPTION_CAPTIVE_PORTAL)) {
++				break;
++			}
++
++			buf = dhcpv4_encode_captive_portal_option(buf, buflen, &ctx->server_addr);
++			if (buf == NULL) {
++				goto out;
++			}
++			break;
+ 		/* Others - just ignore. */
+ 		default:
+ 			break;

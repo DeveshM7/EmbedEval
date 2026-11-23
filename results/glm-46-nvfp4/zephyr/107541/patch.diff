@@ -1,0 +1,2833 @@
+diff --git a/include/zephyr/arch/arc/v2/irq.h b/include/zephyr/arch/arc/v2/irq.h
+index 45b9d1388..6387ea468 100644
+--- a/include/zephyr/arch/arc/v2/irq.h
++++ b/include/zephyr/arch/arc/v2/irq.h
+@@ -194,3 +194,14 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ #endif
+ 
+ #endif /* ZEPHYR_INCLUDE_ARCH_ARC_V2_IRQ_H_ */
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int status32;
++
++	/* Read the STATUS32 register without modifying it */
++	__asm__ volatile("lr %0, [0x40]" : "=r"(status32));
++
++	/* Check the IE bit (bit 4) - return true if interrupts are enabled */
++	return (status32 & 0x10) != 0;
++}
+diff --git a/include/zephyr/arch/arc/v2/irq.h.bak b/include/zephyr/arch/arc/v2/irq.h.bak
+new file mode 100644
+index 000000000..45b9d1388
+--- /dev/null
++++ b/include/zephyr/arch/arc/v2/irq.h.bak
+@@ -0,0 +1,196 @@
++/*
++ * Copyright (c) 2014 Wind River Systems, Inc.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief ARCv2 public interrupt handling
++ *
++ * ARCv2 kernel interrupt handling interface. Included by arc/arch.h.
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_ARC_V2_IRQ_H_
++#define ZEPHYR_INCLUDE_ARCH_ARC_V2_IRQ_H_
++
++#include <zephyr/arch/arc/v2/aux_regs.h>
++#include <zephyr/toolchain/common.h>
++#include <zephyr/irq.h>
++#include <zephyr/sys/util.h>
++#include <zephyr/sw_isr_table.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define ARC_MP_PRIMARY_CPU_ID 0
++
++#ifndef _ASMLANGUAGE
++
++extern void z_arc_firq_stack_set(void);
++extern void arch_irq_enable(unsigned int irq);
++extern void arch_irq_disable(unsigned int irq);
++extern int arch_irq_is_enabled(unsigned int irq);
++#ifdef CONFIG_TRACING_ISR
++extern void sys_trace_isr_enter(void);
++extern void sys_trace_isr_exit(void);
++#endif
++
++extern void z_irq_priority_set(unsigned int irq, unsigned int prio,
++			      uint32_t flags);
++
++/* Z_ISR_DECLARE will populate the .intList section with the interrupt's
++ * parameters, which will then be used by gen_irq_tables.py to create
++ * the vector table and the software ISR table. This is all done at
++ * build-time.
++ *
++ * We additionally set the priority in the interrupt controller at
++ * runtime.
++ */
++#define ARCH_IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p) \
++{ \
++	Z_ISR_DECLARE(irq_p, 0, isr_p, isr_param_p); \
++	z_irq_priority_set(irq_p, priority_p, flags_p); \
++}
++
++/**
++ * Configure a 'direct' static interrupt.
++ *
++ * When firq has no separate stack(CONFIG_ARC_FIRQ_STACK=N), it's not safe
++ * to call C ISR handlers because sp will be switched to bank1's sp which
++ * is undefined value.
++ * So for this case, the priority cannot be set to 0 but next level 1
++ *
++ * When firq has separate stack (CONFIG_ARC_FIRQ_STACK=y) but at the same
++ * time stack checking is enabled (CONFIG_ARC_STACK_CHECKING=y)
++ * the stack checking can raise stack check exception as sp is switched to
++ * firq's stack (bank1's sp). So for this case, the priority cannot be set
++ * to 0 but next level 1.
++ *
++ * Note that for the above cases, if application still wants to use firq by
++ * setting priority to 0. Application can call z_irq_priority_set again.
++ * Then it's left to application to handle the details of firq
++ *
++ * See include/irq.h for details.
++ * All arguments must be computable at build time.
++ */
++#define ARCH_IRQ_DIRECT_CONNECT(irq_p, priority_p, isr_p, flags_p) \
++{ \
++	Z_ISR_DECLARE_DIRECT(irq_p, ISR_FLAG_DIRECT, isr_p); \
++	BUILD_ASSERT(priority_p || !IS_ENABLED(CONFIG_ARC_FIRQ) || \
++	(IS_ENABLED(CONFIG_ARC_FIRQ_STACK) && \
++	!IS_ENABLED(CONFIG_ARC_STACK_CHECKING)), \
++	"irq priority cannot be set to 0 when CONFIG_ARC_FIRQ_STACK" \
++	"is not configured or CONFIG_ARC_FIRQ_STACK " \
++	"and CONFIG_ARC_STACK_CHECKING are configured together"); \
++	z_irq_priority_set(irq_p, priority_p, flags_p); \
++}
++
++
++static inline void arch_isr_direct_header(void)
++{
++#ifdef CONFIG_TRACING_ISR
++	sys_trace_isr_enter();
++#endif
++}
++
++static inline void arch_isr_direct_footer(int maybe_swap)
++{
++	/* clear SW generated interrupt */
++	if (z_arc_v2_aux_reg_read(_ARC_V2_ICAUSE) ==
++	    z_arc_v2_aux_reg_read(_ARC_V2_AUX_IRQ_HINT)) {
++		z_arc_v2_aux_reg_write(_ARC_V2_AUX_IRQ_HINT, 0);
++	}
++#ifdef CONFIG_TRACING_ISR
++	sys_trace_isr_exit();
++#endif
++}
++
++#define ARCH_ISR_DIRECT_HEADER() arch_isr_direct_header()
++extern void arch_isr_direct_header(void);
++
++#define ARCH_ISR_DIRECT_FOOTER(swap) arch_isr_direct_footer(swap)
++
++#if defined(__CCAC__)
++#define _ARC_DIRECT_ISR_FUNC_ATTRIBUTE		__interrupt__
++#else
++#define _ARC_DIRECT_ISR_FUNC_ATTRIBUTE		interrupt("ilink")
++#endif
++
++/*
++ * Scheduling can not be done in direct isr. If required, please use kernel
++ * aware interrupt handling
++ */
++#define ARCH_ISR_DIRECT_DECLARE(name) \
++	static inline int name##_body(void); \
++	__attribute__ ((_ARC_DIRECT_ISR_FUNC_ATTRIBUTE))void name(void) \
++	{ \
++		ISR_DIRECT_HEADER(); \
++		name##_body(); \
++		ISR_DIRECT_FOOTER(0); \
++	} \
++	static inline int name##_body(void)
++
++
++/**
++ *
++ * @brief Disable all interrupts on the local CPU
++ *
++ * This routine disables interrupts.  It can be called from either interrupt or
++ * thread level.  This routine returns an architecture-dependent
++ * lock-out key representing the "interrupt disable state" prior to the call;
++ * this key can be passed to irq_unlock() to re-enable interrupts.
++ *
++ * The lock-out key should only be used as the argument to the
++ * irq_unlock() API.  It should never be used to manually re-enable
++ * interrupts or to inspect or manipulate the contents of the source register.
++ *
++ * This function can be called recursively: it will return a key to return the
++ * state of interrupt locking to the previous level.
++ *
++ * WARNINGS
++ * Invoking a kernel routine with interrupts locked may result in
++ * interrupts being re-enabled for an unspecified period of time.  If the
++ * called routine blocks, interrupts will be re-enabled while another
++ * thread executes, or while the system is idle.
++ *
++ * The "interrupt disable state" is an attribute of a thread.  Thus, if a
++ * thread disables interrupts and subsequently invokes a kernel
++ * routine that causes the calling thread to block, the interrupt
++ * disable state will be restored when the thread is later rescheduled
++ * for execution.
++ *
++ * @return An architecture-dependent lock-out key representing the
++ * "interrupt disable state" prior to the call.
++ */
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	unsigned int key;
++
++	__asm__ volatile("clri %0" : "=r"(key):: "memory");
++	return key;
++}
++
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++	__asm__ volatile("seti %0" : : "ir"(key) : "memory");
++}
++
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++	/* ARC irq lock uses instruction "clri r0",
++	 * r0 ==  {26’d0, 1’b1, STATUS32.IE, STATUS32.E[3:0] }
++	 * bit4 is used to record IE (Interrupt Enable) bit
++	 */
++	return (key & 0x10)  ==  0x10;
++}
++
++#endif /* _ASMLANGUAGE */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_INCLUDE_ARCH_ARC_V2_IRQ_H_ */
+diff --git a/include/zephyr/arch/arm/asm_inline_gcc.h b/include/zephyr/arch/arm/asm_inline_gcc.h
+index 1aedaf9c6..395362f4d 100644
+--- a/include/zephyr/arch/arm/asm_inline_gcc.h
++++ b/include/zephyr/arch/arm/asm_inline_gcc.h
+@@ -137,3 +137,24 @@ static ALWAYS_INLINE void arch_zli_unlock(unsigned int key)
+ #endif /* _ASMLANGUAGE */
+ 
+ #endif /* ZEPHYR_INCLUDE_ARCH_ARM_ASM_INLINE_GCC_H_ */
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++#if defined(CONFIG_ARMV6_M_ARMV8_M_BASELINE)
++	/* On Cortex-M0/M0+, check PRIMASK directly */
++	unsigned int primask = __get_PRIMASK();
++	return (primask & 1U) == 0U;
++#elif defined(CONFIG_ARMV7_M_ARMV8_M_MAINLINE)
++	/* On Cortex-M3/M4/M7, check PRIMASK directly */
++	unsigned int primask = __get_PRIMASK();
++	return (primask & 1U) == 0U;
++#elif defined(CONFIG_ARMV7_R) || defined(CONFIG_AARCH32_ARMV8_R) \
++	|| defined(CONFIG_ARMV7_A)
++	/* On Cortex-R/A, check CPSR I-bit directly */
++	unsigned int cpsr;
++	__asm__ volatile ("mrs %0, cpsr" : "=r" (cpsr));
++	return (cpsr & 0x80U) == 0U;
++#else
++#error Unknown ARM architecture
++#endif
++}
+diff --git a/include/zephyr/arch/arm/asm_inline_gcc.h.bak b/include/zephyr/arch/arm/asm_inline_gcc.h.bak
+new file mode 100644
+index 000000000..1aedaf9c6
+--- /dev/null
++++ b/include/zephyr/arch/arm/asm_inline_gcc.h.bak
+@@ -0,0 +1,139 @@
++/* ARM AArch32 GCC specific public inline assembler functions and macros */
++
++/*
++ * Copyright (c) 2015, Wind River Systems, Inc.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/* Either public functions or macros or invoked by public functions */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_ARM_ASM_INLINE_GCC_H_
++#define ZEPHYR_INCLUDE_ARCH_ARM_ASM_INLINE_GCC_H_
++
++/*
++ * The file must not be included directly
++ * Include arch/cpu.h instead
++ */
++
++#ifndef _ASMLANGUAGE
++
++#include <zephyr/toolchain.h>
++#include <zephyr/types.h>
++#include <zephyr/arch/exception.h>
++#include <cmsis_core.h>
++
++#if defined(CONFIG_CPU_AARCH32_CORTEX_R) || defined(CONFIG_CPU_AARCH32_CORTEX_A)
++#include <zephyr/arch/arm/cortex_a_r/cpu.h>
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* On ARMv7-M and ARMv8-M Mainline CPUs, this function prevents regular
++ * exceptions (i.e. with interrupt priority lower than or equal to
++ * _EXC_IRQ_DEFAULT_PRIO) from interrupting the CPU. NMI, Faults, SVC,
++ * and Zero Latency IRQs (if supported) may still interrupt the CPU.
++ *
++ * On ARMv6-M and ARMv8-M Baseline CPUs, this function reads the value of
++ * PRIMASK which shows if interrupts are enabled, then disables all interrupts
++ * except NMI.
++ */
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	unsigned int key;
++
++#if defined(CONFIG_ARMV6_M_ARMV8_M_BASELINE)
++#if CONFIG_MP_MAX_NUM_CPUS == 1 || defined(CONFIG_ARMV8_M_BASELINE)
++	key = __get_PRIMASK();
++	__disable_irq();
++#else
++#error "Cortex-M0 and Cortex-M0+ require SoC specific support for cross core synchronisation."
++#endif
++#elif defined(CONFIG_ARMV7_M_ARMV8_M_MAINLINE)
++	key = __get_BASEPRI();
++	__set_BASEPRI_MAX(_EXC_IRQ_DEFAULT_PRIO);
++	__ISB();
++#elif defined(CONFIG_ARMV7_R) || defined(CONFIG_AARCH32_ARMV8_R) \
++	|| defined(CONFIG_ARMV7_A)
++	__asm__ volatile(
++		"mrs %0, cpsr;"
++		"and %0, #" STRINGIFY(I_BIT) ";"
++		"cpsid i;"
++		: "=r" (key)
++		:
++		: "memory", "cc");
++#else
++#error Unknown ARM architecture
++#endif /* CONFIG_ARMV6_M_ARMV8_M_BASELINE */
++
++	return key;
++}
++
++
++/* On Cortex-M0/M0+, this enables all interrupts if they were not
++ * previously disabled.
++ */
++
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++#if defined(CONFIG_ARMV6_M_ARMV8_M_BASELINE)
++	if (key != 0U) {
++		return;
++	}
++	__enable_irq();
++	__ISB();
++#elif defined(CONFIG_ARMV7_M_ARMV8_M_MAINLINE)
++	__set_BASEPRI(key);
++	__ISB();
++#elif defined(CONFIG_ARMV7_R) || defined(CONFIG_AARCH32_ARMV8_R) \
++	|| defined(CONFIG_ARMV7_A)
++	if (key != 0U) {
++		return;
++	}
++	__enable_irq();
++#else
++#error Unknown ARM architecture
++#endif /* CONFIG_ARMV6_M_ARMV8_M_BASELINE */
++}
++
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++	/* This convention works for both PRIMASK and BASEPRI */
++	return key == 0U;
++}
++
++#ifdef CONFIG_ZERO_LATENCY_IRQS
++
++static ALWAYS_INLINE unsigned int arch_zli_lock(void)
++{
++	unsigned int key;
++
++	key = __get_PRIMASK();
++
++	/*
++	 * The cpsid instruction is self synchronizing within the instruction stream, no need for
++	 * an explicit __ISB().
++	 */
++	__disable_irq();
++
++	return key;
++}
++
++static ALWAYS_INLINE void arch_zli_unlock(unsigned int key)
++{
++	__set_PRIMASK(key);
++	__ISB();
++}
++
++#endif /* CONFIG_ZERO_LATENCY_IRQS */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _ASMLANGUAGE */
++
++#endif /* ZEPHYR_INCLUDE_ARCH_ARM_ASM_INLINE_GCC_H_ */
+diff --git a/include/zephyr/arch/arm64/asm_inline_gcc.h b/include/zephyr/arch/arm64/asm_inline_gcc.h
+index a1fde4fe9..61c732ef6 100644
+--- a/include/zephyr/arch/arm64/asm_inline_gcc.h
++++ b/include/zephyr/arch/arm64/asm_inline_gcc.h
+@@ -48,6 +48,18 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return (key & DAIF_IRQ_BIT) == 0;
+ }
+ 
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	/*
++	 * Read the current DAIF register state to probe live CPU
++	 * interrupt enable status without modifying it
++	 */
++	unsigned int daif = read_daif();
++
++	/* Return true if IRQ bit is clear (enabled), false if set (disabled) */
++	return (daif & DAIF_IRQ_BIT) == 0;
++}
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/include/zephyr/arch/arm64/asm_inline_gcc.h.bak b/include/zephyr/arch/arm64/asm_inline_gcc.h.bak
+new file mode 100644
+index 000000000..a1fde4fe9
+--- /dev/null
++++ b/include/zephyr/arch/arm64/asm_inline_gcc.h.bak
+@@ -0,0 +1,57 @@
++/*
++ * Copyright (c) 2019 Carlo Caione <ccaione@baylibre.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/* Either public functions or macros or invoked by public functions */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_ARM64_ASM_INLINE_GCC_H_
++#define ZEPHYR_INCLUDE_ARCH_ARM64_ASM_INLINE_GCC_H_
++
++/*
++ * The file must not be included directly
++ * Include arch/cpu.h instead
++ */
++
++#ifndef _ASMLANGUAGE
++
++#include <zephyr/arch/arm64/lib_helpers.h>
++#include <zephyr/types.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	unsigned int key;
++
++	/*
++	 * Return the whole DAIF register as key but use DAIFSET to disable
++	 * IRQs.
++	 */
++	key = read_daif();
++	disable_irq();
++
++	return key;
++}
++
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++	write_daif(key);
++}
++
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++	/* We only check the (I)RQ bit on the DAIF register */
++	return (key & DAIF_IRQ_BIT) == 0;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _ASMLANGUAGE */
++
++#endif /* ZEPHYR_INCLUDE_ARCH_ARM64_ASM_INLINE_GCC_H_ */
+diff --git a/include/zephyr/arch/mips/arch.h b/include/zephyr/arch/mips/arch.h
+index 8ae196353..b9936b967 100644
+--- a/include/zephyr/arch/mips/arch.h
++++ b/include/zephyr/arch/mips/arch.h
+@@ -98,6 +98,14 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return key != 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	/* Read current status register to check IE bit without modifying it */
++	uint32_t status = read_c0_status();
++	/* Return true if IE bit is set (interrupts enabled), false if cleared */
++	return (status & ST0_IE) != 0;
++}
+ static ALWAYS_INLINE void arch_nop(void)
+ {
+ 	__asm__ volatile ("nop");
+diff --git a/include/zephyr/arch/mips/arch.h.bak b/include/zephyr/arch/mips/arch.h.bak
+new file mode 100644
+index 000000000..8ae196353
+--- /dev/null
++++ b/include/zephyr/arch/mips/arch.h.bak
+@@ -0,0 +1,126 @@
++/*
++ * Copyright (c) 2020 Antony Pavlov <antonynpavlov@gmail.com>
++ *
++ * based on include/arch/sparc/arch.h
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief MIPS specific kernel interface header
++ *
++ * This header contains the MIPS specific kernel interface.  It is
++ * included by the kernel interface architecture-abstraction header
++ * (include/zephyr/arch/cpu.h).
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_MIPS_ARCH_H_
++#define ZEPHYR_INCLUDE_ARCH_MIPS_ARCH_H_
++
++#include <zephyr/arch/mips/thread.h>
++#include <zephyr/arch/exception.h>
++#include <zephyr/arch/common/sys_bitops.h>
++#include <zephyr/arch/common/sys_io.h>
++#include <zephyr/arch/common/ffs.h>
++
++#include <zephyr/irq.h>
++#include <zephyr/sw_isr_table.h>
++#include <zephyr/devicetree.h>
++#include <mips/mipsregs.h>
++
++#define ARCH_STACK_PTR_ALIGN 16
++
++#define OP_LOADREG lw
++#define OP_STOREREG sw
++
++#define CP0_STATUS_DEF_RESTORE (ST0_EXL | ST0_IE)
++
++#ifndef _ASMLANGUAGE
++#include <zephyr/sys/util.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define STACK_ROUND_UP(x) ROUND_UP(x, ARCH_STACK_PTR_ALIGN)
++
++void arch_irq_enable(unsigned int irq);
++void arch_irq_disable(unsigned int irq);
++int arch_irq_is_enabled(unsigned int irq);
++void z_irq_spurious(const void *unused);
++
++/**
++ * Configure a static interrupt.
++ *
++ * All arguments must be computable by the compiler at build time.
++ *
++ * @param irq_p IRQ line number
++ * @param priority_p Interrupt priority
++ * @param isr_p Interrupt service routine
++ * @param isr_param_p ISR parameter
++ * @param flags_p IRQ options
++ *
++ * @return The vector assigned to this interrupt
++ */
++
++#define ARCH_IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p) \
++	{								 \
++		Z_ISR_DECLARE(irq_p, 0, isr_p, isr_param_p);		 \
++	}
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	uint32_t status = read_c0_status();
++
++	if (status & ST0_IE) {
++		write_c0_status(status & ~ST0_IE);
++		return 1;
++	}
++	return 0;
++}
++
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++	uint32_t status = read_c0_status();
++
++	if (key) {
++		status |= ST0_IE;
++	} else {
++		status &= ~ST0_IE;
++	}
++
++	write_c0_status(status);
++}
++
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++	return key != 0;
++}
++
++static ALWAYS_INLINE void arch_nop(void)
++{
++	__asm__ volatile ("nop");
++}
++
++extern uint32_t sys_clock_cycle_get_32(void);
++
++static inline uint32_t arch_k_cycle_get_32(void)
++{
++	return sys_clock_cycle_get_32();
++}
++
++extern uint64_t sys_clock_cycle_get_64(void);
++
++static inline uint64_t arch_k_cycle_get_64(void)
++{
++	return sys_clock_cycle_get_64();
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _ASMLANGUAGE */
++
++#endif /* ZEPHYR_INCLUDE_ARCH_MIPS_ARCH_H_ */
+diff --git a/include/zephyr/arch/openrisc/irq.h b/include/zephyr/arch/openrisc/irq.h
+index 7841a18d3..5d057603e 100644
+--- a/include/zephyr/arch/openrisc/irq.h
++++ b/include/zephyr/arch/openrisc/irq.h
+@@ -116,4 +116,12 @@ static ALWAYS_INLINE int arch_irq_is_enabled(unsigned int irq)
+ 	return (openrisc_read_spr(SPR_PICMR) & BIT(irq)) != 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	/* Read current SR register to check IRQ mask without modifying it */
++	const uint32_t sr = openrisc_read_spr(SPR_SR);
++	/* Return true if IRQ bit is set (interrupts enabled), false if cleared */
++	return (sr & SPR_SR_IRQ_MASK) != 0;
++}
+ #endif /* ZEPHYR_INCLUDE_ARCH_OR1K_IRQ_H_ */
+diff --git a/include/zephyr/arch/openrisc/irq.h.bak b/include/zephyr/arch/openrisc/irq.h.bak
+new file mode 100644
+index 000000000..7841a18d3
+--- /dev/null
++++ b/include/zephyr/arch/openrisc/irq.h.bak
+@@ -0,0 +1,119 @@
++/*
++ * Copyright (c) 2025 NVIDIA Corporation <jholdsworth@nvidia.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief OpenRISC public interrupt handling
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_OR1K_IRQ_H_
++#define ZEPHYR_INCLUDE_ARCH_OR1K_IRQ_H_
++
++#include <openrisc/openriscregs.h>
++
++#define SPR_SR_IRQ_MASK		(SPR_SR_IEE | SPR_SR_TEE)
++
++#define OR1K_PIC_NUM_INTERRUPTS	32
++
++#ifdef CONFIG_MULTI_LEVEL_INTERRUPTS
++
++/* for _soc_irq_*() */
++#include <soc.h>
++
++#ifdef CONFIG_2ND_LEVEL_INTERRUPTS
++#ifdef CONFIG_3RD_LEVEL_INTERRUPTS
++#define CONFIG_NUM_IRQS (OR1K_PIC_NUM_INTERRUPTS +\
++			(CONFIG_NUM_2ND_LEVEL_AGGREGATORS +\
++			CONFIG_NUM_3RD_LEVEL_AGGREGATORS) *\
++			CONFIG_MAX_IRQ_PER_AGGREGATOR)
++#else
++#define CONFIG_NUM_IRQS (OR1K_PIC_NUM_INTERRUPTS +\
++			CONFIG_NUM_2ND_LEVEL_AGGREGATORS *\
++			CONFIG_MAX_IRQ_PER_AGGREGATOR)
++#endif /* CONFIG_3RD_LEVEL_INTERRUPTS */
++#else
++#define CONFIG_NUM_IRQS OR1K_PIC_NUM_INTERRUPTS
++#endif /* CONFIG_2ND_LEVEL_INTERRUPTS */
++
++void z_soc_irq_init(void);
++void z_soc_irq_enable(unsigned int irq);
++void z_soc_irq_disable(unsigned int irq);
++int z_soc_irq_is_enabled(unsigned int irq);
++
++#define arch_irq_enable(irq)	z_soc_irq_enable(irq)
++#define arch_irq_disable(irq)	z_soc_irq_disable(irq)
++
++#define arch_irq_is_enabled(irq)	z_soc_irq_is_enabled(irq)
++
++#ifdef CONFIG_DYNAMIC_INTERRUPTS
++extern int z_soc_irq_connect_dynamic(unsigned int irq, unsigned int priority,
++				     void (*routine)(const void *parameter),
++				     const void *parameter, uint32_t flags);
++#endif
++
++#else
++
++#define CONFIG_NUM_IRQS OR1K_PIC_NUM_INTERRUPTS
++
++#define arch_irq_enable(irq)	openrisc_irq_enable(irq)
++#define arch_irq_disable(irq)	openrisc_irq_disable(irq)
++
++#define arch_irq_is_enabled(irq)	openrisc_irq_is_enabled(irq)
++
++#endif
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	const uint32_t sr = openrisc_read_spr(SPR_SR);
++
++	openrisc_write_spr(SPR_SR, sr & ~SPR_SR_IRQ_MASK);
++	return (sr & SPR_SR_IRQ_MASK) ? 1 : 0;
++}
++
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++	const uint32_t sr = openrisc_read_spr(SPR_SR);
++
++	openrisc_write_spr(SPR_SR, key ? (sr | SPR_SR_IRQ_MASK) : (sr & ~SPR_SR_IRQ_MASK));
++}
++
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++	return key != 0;
++}
++
++/**
++ * @brief Enable interrupt on OpenRISC core.
++ *
++ * @param irq Interrupt to be enabled.
++ */
++static ALWAYS_INLINE void arch_irq_enable(unsigned int irq)
++{
++	const unsigned int key = arch_irq_lock();
++
++	openrisc_write_spr(SPR_PICMR, openrisc_read_spr(SPR_PICMR) | BIT(irq));
++	arch_irq_unlock(key);
++}
++
++/**
++ * @brief Disable interrupt on OpenRISC core.
++ *
++ * @param irq Interrupt to be disabled.
++ */
++static ALWAYS_INLINE void arch_irq_disable(unsigned int irq)
++{
++	const unsigned int key = arch_irq_lock();
++
++	openrisc_write_spr(SPR_PICMR, openrisc_read_spr(SPR_PICMR) & ~BIT(irq));
++	arch_irq_unlock(key);
++};
++
++static ALWAYS_INLINE int arch_irq_is_enabled(unsigned int irq)
++{
++	return (openrisc_read_spr(SPR_PICMR) & BIT(irq)) != 0;
++}
++
++#endif /* ZEPHYR_INCLUDE_ARCH_OR1K_IRQ_H_ */
+diff --git a/include/zephyr/arch/posix/arch.h b/include/zephyr/arch/posix/arch.h
+index 7e9e01929..33e36cab6 100644
+--- a/include/zephyr/arch/posix/arch.h
++++ b/include/zephyr/arch/posix/arch.h
+@@ -78,4 +78,10 @@ static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
+ }
+ #endif
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	/* For POSIX, interrupts are always enabled conceptually */
++	return true;
++}
+ #endif /* ZEPHYR_INCLUDE_ARCH_POSIX_ARCH_H_ */
+diff --git a/include/zephyr/arch/posix/arch.h.bak b/include/zephyr/arch/posix/arch.h.bak
+new file mode 100644
+index 000000000..7e9e01929
+--- /dev/null
++++ b/include/zephyr/arch/posix/arch.h.bak
+@@ -0,0 +1,81 @@
++/*
++ * Copyright (c) 2010-2014 Wind River Systems, Inc.
++ * Copyright (c) 2017 Oticon A/S
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief POSIX arch specific kernel interface header
++ *
++ * This header contains the POSIX arch specific kernel interface. It is
++ * included by the kernel interface architecture-abstraction header
++ * (include/zephyr/arch/cpu.h).
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_POSIX_ARCH_H_
++#define ZEPHYR_INCLUDE_ARCH_POSIX_ARCH_H_
++
++/* Add include for DTS generated information */
++#include <zephyr/devicetree.h>
++
++#include <zephyr/toolchain.h>
++#include <zephyr/irq.h>
++#include <zephyr/arch/exception.h>
++#include <zephyr/arch/posix/asm_inline.h>
++#include <zephyr/arch/posix/thread.h>
++#include <board_irq.h> /* Each board must define this */
++#include <zephyr/sw_isr_table.h>
++#include <zephyr/arch/posix/posix_soc_if.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifdef CONFIG_64BIT
++#define ARCH_STACK_PTR_ALIGN 8
++#else
++#define ARCH_STACK_PTR_ALIGN 4
++#endif
++
++extern uint32_t sys_clock_cycle_get_32(void);
++
++static inline uint32_t arch_k_cycle_get_32(void)
++{
++	return sys_clock_cycle_get_32();
++}
++
++extern uint64_t sys_clock_cycle_get_64(void);
++
++static inline uint64_t arch_k_cycle_get_64(void)
++{
++	return sys_clock_cycle_get_64();
++}
++
++static ALWAYS_INLINE void arch_nop(void)
++{
++	__asm__ volatile("nop");
++}
++
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++	return key == false;
++}
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	return posix_irq_lock();
++}
++
++
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++	posix_irq_unlock(key);
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_INCLUDE_ARCH_POSIX_ARCH_H_ */
+diff --git a/include/zephyr/arch/riscv/arch.h b/include/zephyr/arch/riscv/arch.h
+index 5ce05114d..971c03464 100644
+--- a/include/zephyr/arch/riscv/arch.h
++++ b/include/zephyr/arch/riscv/arch.h
+@@ -322,3 +322,19 @@ static inline uint64_t arch_k_cycle_get_64(void)
+ 
+ 
+ #endif
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++#ifndef CONFIG_RISCV_SOC_HAS_CUSTOM_IRQ_LOCK_OPS
++	unsigned int mstatus;
++
++	/* Read current mstatus register state without modifying it */
++	__asm__ volatile ("csrr %0, mstatus" : "=r" (mstatus));
++
++	/* Return true if IE bit is set (interrupts enabled), false if cleared */
++	return (mstatus & MSTATUS_IEN) != 0;
++#else
++	/* If custom ops are enabled, we need to handle this at the SoC level */
++	return true; /* Fallback - would ideally call SoC implementation */
++#endif
++}
+diff --git a/include/zephyr/arch/riscv/arch.h.bak b/include/zephyr/arch/riscv/arch.h.bak
+new file mode 100644
+index 000000000..5ce05114d
+--- /dev/null
++++ b/include/zephyr/arch/riscv/arch.h.bak
+@@ -0,0 +1,324 @@
++/*
++ * Copyright (c) 2016 Jean-Paul Etienne <fractalclone@gmail.com>
++ * Contributors: 2018 Antmicro <www.antmicro.com>
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief RISCV specific kernel interface header
++ *
++ * This header contains the RISCV specific kernel interface.  It is
++ * included by the kernel interface architecture-abstraction header
++ * (include/zephyr/arch/cpu.h).
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_RISCV_ARCH_H_
++#define ZEPHYR_INCLUDE_ARCH_RISCV_ARCH_H_
++
++#include <zephyr/arch/riscv/thread.h>
++#include <zephyr/arch/exception.h>
++#include <zephyr/arch/riscv/irq.h>
++#include <zephyr/arch/riscv/sys_io.h>
++#include <zephyr/arch/common/sys_bitops.h>
++#include <zephyr/arch/common/ffs.h>
++#if defined(CONFIG_USERSPACE)
++#include <zephyr/arch/riscv/syscall.h>
++#endif /* CONFIG_USERSPACE */
++#include <zephyr/irq.h>
++#include <zephyr/sw_isr_table.h>
++#include <zephyr/devicetree.h>
++#include <zephyr/arch/riscv/csr.h>
++
++/* stacks, for RISCV architecture stack should be 16byte-aligned */
++#define ARCH_STACK_PTR_ALIGN  16
++
++#define Z_RISCV_STACK_PMP_ALIGN \
++	MAX(CONFIG_PMP_GRANULARITY, ARCH_STACK_PTR_ALIGN)
++
++#ifdef CONFIG_PMP_STACK_GUARD
++/*
++ * The StackGuard is an area at the bottom of the kernel-mode stack made to
++ * fault when accessed. It is _not_ faulting when in exception mode as we rely
++ * on that area to save the exception stack frame and to process said fault.
++ * Therefore the guard area must be large enough to hold the esf, plus some
++ * configurable stack wiggle room to execute the fault handling code off of,
++ * as well as some guard size to cover possible sudden stack pointer
++ * displacement before the fault.
++ */
++#ifdef CONFIG_PMP_POWER_OF_TWO_ALIGNMENT
++#define Z_RISCV_STACK_GUARD_SIZE \
++	Z_POW2_CEIL(MAX(sizeof(struct arch_esf) + CONFIG_PMP_STACK_GUARD_MIN_SIZE, \
++			Z_RISCV_STACK_PMP_ALIGN))
++#define ARCH_KERNEL_STACK_OBJ_ALIGN	Z_RISCV_STACK_GUARD_SIZE
++#else
++#define Z_RISCV_STACK_GUARD_SIZE \
++	ROUND_UP(sizeof(struct arch_esf) + CONFIG_PMP_STACK_GUARD_MIN_SIZE, \
++		 Z_RISCV_STACK_PMP_ALIGN)
++#define ARCH_KERNEL_STACK_OBJ_ALIGN	Z_RISCV_STACK_PMP_ALIGN
++#endif
++#elif defined(CONFIG_CUSTOM_STACK_GUARD)
++/*
++ * The custom stack guard reserved area is located at the bottom of the
++ * kernel-mode stack. When a stack overflow occurs, this area is used to
++ * save the exception stack frame and to handle the resulting fault.
++ * Therefore, the reserved area must be large enough to hold the esf, plus
++ * some configurable stack wiggle room to execute fault-handling code safely.
++ */
++#define Z_RISCV_STACK_GUARD_SIZE \
++	ROUND_UP(sizeof(struct arch_esf) + CONFIG_CUSTOM_STACK_GUARD_RESERVED_SIZE, \
++		 ARCH_STACK_PTR_ALIGN)
++#else /* !CONFIG_PMP_STACK_GUARD && !CONFIG_CUSTOM_STACK_GUARD */
++#define Z_RISCV_STACK_GUARD_SIZE 0
++#endif
++
++#if defined(CONFIG_PMP_STACK_GUARD) || defined(CONFIG_CUSTOM_STACK_GUARD)
++/* Kernel-only stacks have the following layout if a stack guard is enabled:
++ *
++ * +------------+ <- thread.stack_obj
++ * | Guard /    | } Z_RISCV_STACK_GUARD_SIZE
++ * | Reserved   |
++ * +------------+ <- thread.stack_info.start
++ * | Kernel     |
++ * | stack      |
++ * |            |
++ * +............|
++ * | TLS        | } thread.stack_info.delta
++ * +------------+ <- thread.stack_info.start + thread.stack_info.size
++ */
++#define ARCH_KERNEL_STACK_RESERVED	Z_RISCV_STACK_GUARD_SIZE
++#endif
++
++#ifdef CONFIG_PMP_POWER_OF_TWO_ALIGNMENT
++/* The privilege elevation stack is located in another area of memory
++ * generated at build time by gen_kobject_list.py
++ *
++ * +------------+ <- thread.arch.priv_stack_start
++ * | Guard /    | } Z_RISCV_STACK_GUARD_SIZE
++ * | Reserved   |
++ * +------------+
++ * | Priv Stack | } CONFIG_PRIVILEGED_STACK_SIZE
++ * +------------+ <- thread.arch.priv_stack_start +
++ *                   CONFIG_PRIVILEGED_STACK_SIZE +
++ *                   Z_RISCV_STACK_GUARD_SIZE
++ *
++ * The main stack will be initially (or potentially only) used by kernel
++ * mode so we need to make room for a possible stack guard area when enabled:
++ *
++ * +------------+ <- thread.stack_obj
++ * | Guard /    | } Z_RISCV_STACK_GUARD_SIZE
++ * | Reserved   |
++ * +............| <- thread.stack_info.start
++ * | Thread     |
++ * | stack      |
++ * |            |
++ * +............|
++ * | TLS        | } thread.stack_info.delta
++ * +------------+ <- thread.stack_info.start + thread.stack_info.size
++ *
++ * When transitioning to user space, the guard area will be removed from
++ * the main stack. Any thread running in user mode will have full access
++ * to the region denoted by thread.stack_info. Make it PMP-NAPOT compatible.
++ *
++ * +------------+ <- thread.stack_obj = thread.stack_info.start
++ * | Thread     |
++ * | stack      |
++ * |            |
++ * +............|
++ * | TLS        | } thread.stack_info.delta
++ * +------------+ <- thread.stack_info.start + thread.stack_info.size
++ */
++#define ARCH_THREAD_STACK_RESERVED Z_RISCV_STACK_GUARD_SIZE
++#define ARCH_THREAD_STACK_SIZE_ADJUST(size) \
++	Z_POW2_CEIL(MAX(MAX(size, CONFIG_PRIVILEGED_STACK_SIZE), \
++			Z_RISCV_STACK_PMP_ALIGN))
++#define ARCH_THREAD_STACK_OBJ_ALIGN(size) \
++		ARCH_THREAD_STACK_SIZE_ADJUST(size)
++
++#else /* !CONFIG_PMP_POWER_OF_TWO_ALIGNMENT */
++
++/* The stack object will contain the PMP guard (or custom stack guard reserved area),
++ * the privilege stack, and then the usermode stack buffer in that order:
++ *
++ * +------------+ <- thread.stack_obj
++ * | Guard /    | } Z_RISCV_STACK_GUARD_SIZE
++ * | Reserved   |
++ * +------------+
++ * | Priv Stack | } CONFIG_PRIVILEGED_STACK_SIZE
++ * +------------+ <- thread.stack_info.start
++ * | Thread     |
++ * | stack      |
++ * |            |
++ * +............|
++ * | TLS        | } thread.stack_info.delta
++ * +------------+ <- thread.stack_info.start + thread.stack_info.size
++ */
++#define ARCH_THREAD_STACK_RESERVED \
++	ROUND_UP(Z_RISCV_STACK_GUARD_SIZE + CONFIG_PRIVILEGED_STACK_SIZE, \
++		 Z_RISCV_STACK_PMP_ALIGN)
++#define ARCH_THREAD_STACK_SIZE_ADJUST(size) \
++	ROUND_UP(size, Z_RISCV_STACK_PMP_ALIGN)
++#define ARCH_THREAD_STACK_OBJ_ALIGN(size)	Z_RISCV_STACK_PMP_ALIGN
++#endif /* CONFIG_PMP_POWER_OF_TWO_ALIGNMENT */
++
++#ifdef CONFIG_64BIT
++#define RV_REGSIZE 8
++#define RV_REGSHIFT 3
++#else
++#define RV_REGSIZE 4
++#define RV_REGSHIFT 2
++#endif
++
++/* Common mstatus bits. All supported cores today have the same
++ * layouts.
++ */
++
++#define MSTATUS_IEN     (1UL << 3)
++#define MSTATUS_MPP_M   (3UL << 11)
++#define MSTATUS_MPIE_EN (1UL << 7)
++
++#define MSTATUS_FS_OFF   (0UL << 13)
++#define MSTATUS_FS_INIT  (1UL << 13)
++#define MSTATUS_FS_CLEAN (2UL << 13)
++#define MSTATUS_FS_DIRTY (3UL << 13)
++
++/* This comes from openisa_rv32m1, but doesn't seem to hurt on other
++ * platforms:
++ * - Preserve machine privileges in MPP. If you see any documentation
++ *   telling you that MPP is read-only on this SoC, don't believe its
++ *   lies.
++ * - Enable interrupts when exiting from exception into a new thread
++ *   by setting MPIE now, so it will be copied into IE on mret.
++ */
++#define MSTATUS_DEF_RESTORE (MSTATUS_MPP_M | MSTATUS_MPIE_EN)
++
++#ifndef _ASMLANGUAGE
++#include <zephyr/sys/util.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifdef CONFIG_IRQ_VECTOR_TABLE_JUMP_BY_CODE
++#define ARCH_IRQ_VECTOR_JUMP_CODE(v) "j " STRINGIFY(v)
++#endif
++
++/* Kernel macros for memory attribution
++ * (access permissions and cache-ability).
++ *
++ * The macros are to be stored in k_mem_partition_attr_t
++ * objects. The format of a k_mem_partition_attr_t object
++ * is an uint8_t composed by configuration register flags
++ * located in arch/riscv/include/core_pmp.h
++ */
++
++/* Read-Write access permission attributes */
++#define K_MEM_PARTITION_P_RW_U_RW ((k_mem_partition_attr_t) \
++	{PMP_R | PMP_W})
++#define K_MEM_PARTITION_P_RW_U_RO ((k_mem_partition_attr_t) \
++	{PMP_R})
++#define K_MEM_PARTITION_P_RW_U_NA ((k_mem_partition_attr_t) \
++	{0})
++#define K_MEM_PARTITION_P_RO_U_RO ((k_mem_partition_attr_t) \
++	{PMP_R})
++#define K_MEM_PARTITION_P_RO_U_NA ((k_mem_partition_attr_t) \
++	{0})
++#define K_MEM_PARTITION_P_NA_U_NA ((k_mem_partition_attr_t) \
++	{0})
++
++/* Execution-allowed attributes */
++#define K_MEM_PARTITION_P_RWX_U_RWX ((k_mem_partition_attr_t) \
++	{PMP_R | PMP_W | PMP_X})
++#define K_MEM_PARTITION_P_RX_U_RX ((k_mem_partition_attr_t) \
++	{PMP_R | PMP_X})
++
++/* Typedef for the k_mem_partition attribute */
++typedef struct {
++	uint8_t pmp_attr;
++} k_mem_partition_attr_t;
++
++struct arch_mem_domain {
++	unsigned int pmp_update_nr;
++};
++
++extern void z_irq_spurious(const void *unused);
++
++/*
++ * use atomic instruction csrrc to lock global irq
++ * csrrc: atomic read and clear bits in CSR register
++ */
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++#ifdef CONFIG_RISCV_SOC_HAS_CUSTOM_IRQ_LOCK_OPS
++	return z_soc_irq_lock();
++#else
++	unsigned int key;
++
++	__asm__ volatile ("csrrc %0, mstatus, %1"
++			  : "=r" (key)
++			  : "rK" (MSTATUS_IEN)
++			  : "memory");
++
++	return key;
++#endif
++}
++
++/*
++ * use atomic instruction csrs to unlock global irq
++ * csrs: atomic set bits in CSR register
++ */
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++#ifdef CONFIG_RISCV_SOC_HAS_CUSTOM_IRQ_LOCK_OPS
++	z_soc_irq_unlock(key);
++#else
++	__asm__ volatile ("csrs mstatus, %0"
++			  :
++			  : "r" (key & MSTATUS_IEN)
++			  : "memory");
++#endif
++}
++
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++#ifdef CONFIG_RISCV_SOC_HAS_CUSTOM_IRQ_LOCK_OPS
++	return z_soc_irq_unlocked(key);
++#else
++	return (key & MSTATUS_IEN) != 0;
++#endif
++}
++
++static ALWAYS_INLINE void arch_nop(void)
++{
++	__asm__ volatile("nop");
++}
++
++extern uint32_t sys_clock_cycle_get_32(void);
++
++static inline uint32_t arch_k_cycle_get_32(void)
++{
++	return sys_clock_cycle_get_32();
++}
++
++extern uint64_t sys_clock_cycle_get_64(void);
++
++static inline uint64_t arch_k_cycle_get_64(void)
++{
++	return sys_clock_cycle_get_64();
++}
++
++#include <zephyr/arch/riscv/error.h>
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /*_ASMLANGUAGE */
++
++#if defined(CONFIG_RISCV_PRIVILEGED)
++#include <zephyr/arch/riscv/riscv-privileged/asm_inline.h>
++#endif
++
++
++#endif
+diff --git a/include/zephyr/arch/rx/arch.h b/include/zephyr/arch/rx/arch.h
+index 95f82a787..97fb03d90 100644
+--- a/include/zephyr/arch/rx/arch.h
++++ b/include/zephyr/arch/rx/arch.h
+@@ -142,6 +142,15 @@ static inline bool arch_irq_unlocked(unsigned int key)
+ 	return key != 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	/* Read current PSW register to check I-flag without modifying it */
++	uint32_t psw;
++	__asm__ volatile("MVFC psw, %0" : "=r"(psw) : : "cc");
++	/* Return true if I-flag is set (bit 16), false if cleared */
++	return (psw & BIT(16)) != 0;
++}
+ static ALWAYS_INLINE _cpu_t *arch_curr_cpu(void)
+ {
+ 	return &_kernel.cpus[0];
+diff --git a/include/zephyr/arch/rx/arch.h.bak b/include/zephyr/arch/rx/arch.h.bak
+new file mode 100644
+index 000000000..95f82a787
+--- /dev/null
++++ b/include/zephyr/arch/rx/arch.h.bak
+@@ -0,0 +1,156 @@
++/*
++ * Copyright (c) 2021 KT-Elektronik, Klaucke und Partner GmbH
++ * Copyright (c) 2024 Renesas Electronics Corporation
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief Renesas RX specific kernel interface header
++ *
++ * This header contains the Renesas RX specific kernel interface.  It is
++ * included by the kernel interface architecture-abstraction header
++ * (include/zephyr/arch/cpu.h).
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_RX_ARCH_H_
++#define ZEPHYR_INCLUDE_ARCH_RX_ARCH_H_
++
++/* Add include for DTS generated information */
++#include <zephyr/arch/exception.h>
++#include <zephyr/devicetree.h>
++
++#include <zephyr/arch/rx/thread.h>
++#include <zephyr/arch/rx/misc.h>
++#include <zephyr/arch/rx/arch_inlines.h>
++#include <zephyr/arch/rx/error.h>
++#include <zephyr/arch/common/sys_bitops.h>
++#include <zephyr/arch/common/sys_io.h>
++#include <zephyr/arch/common/ffs.h>
++#include <zephyr/sw_isr_table.h>
++#include <zephyr/kernel_structs.h>
++#include <zephyr/sys/__assert.h>
++#include <zephyr/sys/util.h>
++#include <zephyr/irq.h>
++
++#define ARCH_STACK_PTR_ALIGN 4
++
++#ifndef _ASMLANGUAGE
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define REG(addr) *((uint8_t *)(addr))
++
++/* isr for undefined interrupts (results in a fatal error) */
++void z_irq_spurious(const void *unused);
++/* internal routine documented in C file, needed by IRQ_CONNECT() macro */
++extern void z_irq_priority_set(uint32_t irq, uint32_t prio, uint32_t flags);
++
++/* Z_ISR_DECLARE will populate the .intList section with the interrupt's
++ * parameters, which will then be used by gen_irq_tables.py to create
++ * the vector table and the software ISR table. This is all done at
++ * build-time.
++ *
++ * We additionally set the priority in the interrupt controller at
++ * runtime.
++ */
++#define ARCH_IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p)                           \
++	{                                                                                          \
++		Z_ISR_DECLARE(irq_p, 0, isr_p, isr_param_p);                                       \
++		z_irq_priority_set(irq_p, priority_p, flags_p);                                    \
++	}
++
++#if CONFIG_TRACING_ISR
++#define ARCH_ISR_DIRECT_HEADER()                                                                   \
++	{                                                                                          \
++		_kernel.cpus[0].nested++;                                                          \
++		sys_trace_isr_enter();                                                             \
++	}
++#else
++#define ARCH_ISR_DIRECT_HEADER()                                                                   \
++	{                                                                                          \
++		_kernel.cpus[0].nested++;                                                          \
++	}
++#endif
++
++#if CONFIG_TRACING_ISR
++#define ARCH_ISR_DIRECT_FOOTER(check_reschedule)                                                   \
++	{                                                                                          \
++		if (IS_ENABLED(CONFIG_STACK_SENTINEL)) {                                           \
++			z_check_stack_sentinel();                                                  \
++		}                                                                                  \
++		sys_trace_isr_exit();                                                              \
++		irq_lock();                                                                        \
++		if (check_reschedule && _kernel.cpus[0].nested == 1) {                             \
++			if (_kernel.cpus->current->base.prio >= 0 ||                               \
++			    CONFIG_NUM_METAIRQ_PRIORITIES > 0) {                                   \
++				if (_kernel.ready_q.cache != _kernel.cpus->current) {              \
++					z_rx_irq_exit();                                           \
++				}                                                                  \
++			}                                                                          \
++		}                                                                                  \
++		_kernel.cpus[0].nested--;                                                          \
++	}
++#else
++#define ARCH_ISR_DIRECT_FOOTER(check_reschedule)                                                   \
++	{                                                                                          \
++		if (IS_ENABLED(CONFIG_STACK_SENTINEL)) {                                           \
++			z_check_stack_sentinel();                                                  \
++		}                                                                                  \
++		irq_lock();                                                                        \
++		if (check_reschedule && _kernel.cpus[0].nested == 1) {                             \
++			if (_kernel.cpus->current->base.prio >= 0 ||                               \
++			    CONFIG_NUM_METAIRQ_PRIORITIES > 0) {                                   \
++				if (_kernel.ready_q.cache != _kernel.cpus->current) {              \
++					z_rx_irq_exit();                                           \
++				}                                                                  \
++			}                                                                          \
++		}                                                                                  \
++		_kernel.cpus[0].nested--;                                                          \
++	}
++#endif
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	uint32_t key;
++	/* deactivate interrupts by clearing the PSW-i flag */
++	__asm__ volatile("MVFC psw, %0\n"
++			 "CLRPSW i"
++			 : "=r"(key)
++			 :
++			 : "cc");
++	/* return the value of the i-flag before clearing
++	 * if irqs were locked already, it was 0 and calling
++	 * arch_irq_unlock(key) will not actually unlock irqs, as this was a
++	 * nested irq lock
++	 */
++	return key & BIT(16);
++}
++
++static inline void arch_irq_unlock(unsigned int key)
++{
++	if (key != 0) {
++		/* re-activate interrupts by setting the PSW i-flag*/
++		__asm__ volatile("SETPSW i" ::: "cc");
++	}
++}
++
++static inline bool arch_irq_unlocked(unsigned int key)
++{
++	return key != 0;
++}
++
++static ALWAYS_INLINE _cpu_t *arch_curr_cpu(void)
++{
++	return &_kernel.cpus[0];
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* !_ASMLANGUAGE */
++
++#endif /* ZEPHYR_INCLUDE_ARCH_RX_ARCH_H_ */
+diff --git a/include/zephyr/arch/sparc/arch.h b/include/zephyr/arch/sparc/arch.h
+index 34929a171..fbbabaa04 100644
+--- a/include/zephyr/arch/sparc/arch.h
++++ b/include/zephyr/arch/sparc/arch.h
+@@ -91,6 +91,14 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
+ 	return key == 0;
+ }
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	/* Read current PIL level without modifying it */
++	unsigned int current_pil = z_sparc_get_pil_inline();
++	/* Return true if PIL < 15 (interrupts enabled), false if PIL == 15 (disabled) */
++	return current_pil < 15;
++}
+ static ALWAYS_INLINE void arch_nop(void)
+ {
+ 	__asm__ volatile ("nop");
+diff --git a/include/zephyr/arch/sparc/arch.h.bak b/include/zephyr/arch/sparc/arch.h.bak
+new file mode 100644
+index 000000000..34929a171
+--- /dev/null
++++ b/include/zephyr/arch/sparc/arch.h.bak
+@@ -0,0 +1,132 @@
++/*
++ * Copyright (c) 2019-2020 Cobham Gaisler AB
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief SPARC specific kernel interface header
++ *
++ * This header contains the SPARC specific kernel interface.  It is
++ * included by the kernel interface architecture-abstraction header
++ * (include/zephyr/arch/cpu.h).
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_SPARC_ARCH_H_
++#define ZEPHYR_INCLUDE_ARCH_SPARC_ARCH_H_
++
++#include <zephyr/arch/exception.h>
++#include <zephyr/arch/sparc/thread.h>
++#include <zephyr/arch/sparc/sparc.h>
++#include <zephyr/arch/common/sys_bitops.h>
++#include <zephyr/arch/common/sys_io.h>
++#include <zephyr/arch/common/ffs.h>
++
++#include <zephyr/irq.h>
++#include <zephyr/sw_isr_table.h>
++#include <soc.h>
++#include <zephyr/devicetree.h>
++
++/* stacks, for SPARC architecture stack shall be 8byte-aligned */
++#define ARCH_STACK_PTR_ALIGN 8
++
++/*
++ * Software trap numbers.
++ * Assembly usage: "ta SPARC_SW_TRAP_<TYPE>"
++ */
++#define SPARC_SW_TRAP_FLUSH_WINDOWS     0x03
++#define SPARC_SW_TRAP_SET_PIL           0x09
++#define SPARC_SW_TRAP_EXCEPT            0x0F
++
++#ifndef _ASMLANGUAGE
++#include <zephyr/sys/util.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define STACK_ROUND_UP(x) ROUND_UP(x, ARCH_STACK_PTR_ALIGN)
++
++/*
++ * SOC specific function to translate from processor interrupt request level
++ * (1..15) to logical interrupt source number. For example by probing the
++ * interrupt controller.
++ */
++int z_sparc_int_get_source(int irl);
++void z_irq_spurious(const void *unused);
++
++
++#define ARCH_IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p) \
++	{								 \
++		Z_ISR_DECLARE(irq_p, 0, isr_p, isr_param_p);		 \
++	}
++
++
++static ALWAYS_INLINE unsigned int z_sparc_set_pil_inline(unsigned int newpil)
++{
++	register uint32_t oldpil __asm__ ("o0") = newpil;
++
++	__asm__ volatile (
++		"ta %1\nnop\n" :
++		"=r" (oldpil) :
++		"i" (SPARC_SW_TRAP_SET_PIL), "r" (oldpil) :
++		"memory"
++		);
++	return oldpil;
++}
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	return z_sparc_set_pil_inline(15);
++}
++
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++	z_sparc_set_pil_inline(key);
++}
++
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++	return key == 0;
++}
++
++static ALWAYS_INLINE void arch_nop(void)
++{
++	__asm__ volatile ("nop");
++}
++
++extern uint32_t sys_clock_cycle_get_32(void);
++
++static inline uint32_t arch_k_cycle_get_32(void)
++{
++	return sys_clock_cycle_get_32();
++}
++
++extern uint64_t sys_clock_cycle_get_64(void);
++
++static inline uint64_t arch_k_cycle_get_64(void)
++{
++	return sys_clock_cycle_get_64();
++}
++
++#define ARCH_EXCEPT(reason_p)						\
++do {									\
++	register uint32_t _g1 __asm__("g1") = reason_p;			\
++									\
++	__asm__ volatile (						\
++		"ta %[vector]\n\t"					\
++		:							\
++		: [vector] "i" (SPARC_SW_TRAP_EXCEPT), "r" (_g1)	\
++		: "memory"						\
++	);								\
++	CODE_UNREACHABLE;						\
++} while (false)
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  /*_ASMLANGUAGE */
++
++#endif  /* ZEPHYR_INCLUDE_ARCH_SPARC_ARCH_H_ */
+diff --git a/include/zephyr/arch/x86/ia32/arch.h b/include/zephyr/arch/x86/ia32/arch.h
+index ad3c5ac66..01158ec10 100644
+--- a/include/zephyr/arch/x86/ia32/arch.h
++++ b/include/zephyr/arch/x86/ia32/arch.h
+@@ -391,6 +391,17 @@ extern struct task_state_segment _main_tss;
+ }
+ #endif
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned int flags;
++
++	/* Read EFLAGS register to check current interrupt state without modifying it */
++	__asm__ volatile ("pushfl; popl %0" : "=g" (flags) :: "memory");
++
++	/* Check IF bit (bit 9) - if set, interrupts are enabled */
++	return (flags & 0x200U) != 0U;
++}
+ #endif /* !_ASMLANGUAGE */
+ 
+ #endif /* ZEPHYR_INCLUDE_ARCH_X86_IA32_ARCH_H_ */
+diff --git a/include/zephyr/arch/x86/ia32/arch.h.bak b/include/zephyr/arch/x86/ia32/arch.h.bak
+new file mode 100644
+index 000000000..ad3c5ac66
+--- /dev/null
++++ b/include/zephyr/arch/x86/ia32/arch.h.bak
+@@ -0,0 +1,396 @@
++/*
++ * Copyright (c) 2010-2014 Wind River Systems, Inc.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief IA-32 specific kernel interface header
++ *
++ * This header contains the IA-32 portion of the X86 specific kernel
++ * interface (see include/zephyr/arch/x86/cpu.h).
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_X86_IA32_ARCH_H_
++#define ZEPHYR_INCLUDE_ARCH_X86_IA32_ARCH_H_
++
++#include "sys_io.h"
++#include <stdbool.h>
++#include <zephyr/kernel_structs.h>
++#include <zephyr/arch/common/ffs.h>
++#include <zephyr/sys/util.h>
++#include <zephyr/arch/exception.h>
++#include <zephyr/arch/x86/ia32/gdbstub.h>
++#include <zephyr/arch/x86/ia32/thread.h>
++#include <zephyr/arch/x86/ia32/syscall.h>
++
++#ifndef _ASMLANGUAGE
++#include <stddef.h>	/* for size_t */
++
++#include <zephyr/arch/common/addr_types.h>
++#include <zephyr/arch/x86/ia32/segmentation.h>
++#include <zephyr/pm/pm.h>
++
++#endif /* _ASMLANGUAGE */
++
++/* GDT layout */
++#define CODE_SEG	0x08
++#define DATA_SEG	0x10
++#define MAIN_TSS	0x18
++#define DF_TSS		0x20
++
++/*
++ * Use for thread local storage.
++ * Match these to gen_gdt.py.
++ * The 0x03 is added to limit privilege.
++ */
++#if defined(CONFIG_USERSPACE)
++#define GS_TLS_SEG	(0x38 | 0x03)
++#elif defined(CONFIG_X86_STACK_PROTECTION)
++#define GS_TLS_SEG	(0x28 | 0x03)
++#else
++#define GS_TLS_SEG	(0x18 | 0x03)
++#endif
++
++/**
++ * Macro used internally by NANO_CPU_INT_REGISTER and NANO_CPU_INT_REGISTER_ASM.
++ * Not meant to be used explicitly by platform, driver or application code.
++ */
++#define MK_ISR_NAME(x) __isr__##x
++
++#define Z_DYN_STUB_SIZE			8
++#define Z_DYN_STUB_OFFSET		0
++#define Z_DYN_STUB_LONG_JMP_EXTRA_SIZE	3
++#define Z_DYN_STUB_PER_BLOCK		32
++
++
++#ifndef _ASMLANGUAGE
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* interrupt/exception/error related definitions */
++
++typedef struct s_isrList {
++	/** Address of ISR/stub */
++	void		*fnc;
++	/** IRQ associated with the ISR/stub, or -1 if this is not
++	 * associated with a real interrupt; in this case vec must
++	 * not be -1
++	 */
++	unsigned int    irq;
++	/** Priority associated with the IRQ. Ignored if vec is not -1 */
++	unsigned int    priority;
++	/** Vector number associated with ISR/stub, or -1 to assign based
++	 * on priority
++	 */
++	unsigned int    vec;
++	/** Privilege level associated with ISR/stub */
++	unsigned int    dpl;
++
++	/** If nonzero, specifies a TSS segment selector. Will configure
++	 * a task gate instead of an interrupt gate. fnc parameter will be
++	 * ignored
++	 */
++	unsigned int	tss;
++} ISR_LIST;
++
++
++/**
++ * @brief Connect a routine to an interrupt vector
++ *
++ * This macro "connects" the specified routine, @a r, to the specified interrupt
++ * vector, @a v using the descriptor privilege level @a d. On the IA-32
++ * architecture, an interrupt vector is a value from 0 to 255. This macro
++ * populates the special intList section with the address of the routine, the
++ * vector number and the descriptor privilege level. The genIdt tool then picks
++ * up this information and generates an actual IDT entry with this information
++ * properly encoded.
++ *
++ * The @a d argument specifies the privilege level for the interrupt-gate
++ * descriptor; (hardware) interrupts and exceptions should specify a level of 0,
++ * whereas handlers for user-mode software generated interrupts should specify 3.
++ * @param r Routine to be connected
++ * @param n IRQ number
++ * @param p IRQ priority
++ * @param v Interrupt Vector
++ * @param d Descriptor Privilege Level
++ */
++
++#define NANO_CPU_INT_REGISTER(r, n, p, v, d) \
++	 static ISR_LIST __attribute__((section(".intList"))) \
++			 __attribute__((used)) MK_ISR_NAME(r) = \
++			{ \
++				.fnc = &(r), \
++				.irq = (n), \
++				.priority = (p), \
++				.vec = (v), \
++				.dpl = (d), \
++				.tss = 0 \
++			}
++
++/**
++ * @brief Connect an IA hardware task to an interrupt vector
++ *
++ * This is very similar to NANO_CPU_INT_REGISTER but instead of connecting
++ * a handler function, the interrupt will induce an IA hardware task
++ * switch to another hardware task instead.
++ *
++ * @param tss_p GDT/LDT segment selector for the TSS representing the task
++ * @param irq_p IRQ number
++ * @param priority_p IRQ priority
++ * @param vec_p Interrupt vector
++ * @param dpl_p Descriptor privilege level
++ */
++#define _X86_IDT_TSS_REGISTER(tss_p, irq_p, priority_p, vec_p, dpl_p) \
++	static ISR_LIST __attribute__((section(".intList"))) \
++			__attribute__((used)) MK_ISR_NAME(vec_p) = \
++			{ \
++				.fnc = NULL, \
++				.irq = (irq_p), \
++				.priority = (priority_p), \
++				.vec = (vec_p), \
++				.dpl = (dpl_p), \
++				.tss = (tss_p) \
++			}
++
++/**
++ * Code snippets for populating the vector ID and priority into the intList
++ *
++ * The 'magic' of static interrupts is accomplished by building up an array
++ * 'intList' at compile time, and the gen_idt tool uses this to create the
++ * actual IDT data structure.
++ *
++ * For controllers like APIC, the vectors in the IDT are not normally assigned
++ * at build time; instead the sentinel value -1 is saved, and gen_idt figures
++ * out the right vector to use based on our priority scheme. Groups of 16
++ * vectors starting at 32 correspond to each priority level.
++ *
++ * These macros are only intended to be used by IRQ_CONNECT() macro.
++ */
++#define _VECTOR_ARG(irq_p)	(-1)
++
++#ifdef CONFIG_LINKER_USE_PINNED_SECTION
++#define IRQSTUBS_TEXT_SECTION	".pinned_text.irqstubs"
++#else
++#define IRQSTUBS_TEXT_SECTION	".text.irqstubs"
++#endif
++
++/* Internally this function does a few things:
++ *
++ * 1. There is a declaration of the interrupt parameters in the .intList
++ * section, used by gen_idt to create the IDT. This does the same thing
++ * as the NANO_CPU_INT_REGISTER() macro, but is done in assembly as we
++ * need to populate the .fnc member with the address of the assembly
++ * IRQ stub that we generate immediately afterwards.
++ *
++ * 2. The IRQ stub itself is declared. The code will go in its own named
++ * section .text.irqstubs section (which eventually gets linked into 'text')
++ * and the stub shall be named (isr_name)_irq(irq_line)_stub
++ *
++ * 3. The IRQ stub pushes the ISR routine and its argument onto the stack
++ * and then jumps to the common interrupt handling code in _interrupt_enter().
++ *
++ * 4. z_irq_controller_irq_config() is called at runtime to set the mapping
++ * between the vector and the IRQ line as well as triggering flags
++ */
++#define ARCH_IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p) \
++{ \
++	__asm__ __volatile__(							\
++		".pushsection .intList\n\t" \
++		".long %c[isr]_irq%c[irq]_stub\n\t"	/* ISR_LIST.fnc */ \
++		".long %c[irq]\n\t"		/* ISR_LIST.irq */ \
++		".long %c[priority]\n\t"	/* ISR_LIST.priority */ \
++		".long %c[vector]\n\t"		/* ISR_LIST.vec */ \
++		".long 0\n\t"			/* ISR_LIST.dpl */ \
++		".long 0\n\t"			/* ISR_LIST.tss */ \
++		".popsection\n\t" \
++		".pushsection " IRQSTUBS_TEXT_SECTION "\n\t" \
++		".global %c[isr]_irq%c[irq]_stub\n\t" \
++		"%c[isr]_irq%c[irq]_stub:\n\t" \
++		"endbr32\n\t" \
++		"pushl %[isr_param]\n\t" \
++		"pushl %[isr]\n\t" \
++		"jmp _interrupt_enter\n\t" \
++		".popsection\n\t" \
++		: \
++		: [isr] "i" (isr_p), \
++		  [isr_param] "i" (isr_param_p), \
++		  [priority] "i" (priority_p), \
++		  [vector] "i" _VECTOR_ARG(irq_p), \
++		  [irq] "i" (irq_p)); \
++	z_irq_controller_irq_config(Z_IRQ_TO_INTERRUPT_VECTOR(irq_p), (irq_p), \
++				   (flags_p)); \
++}
++
++#ifdef CONFIG_PCIE
++
++#define ARCH_PCIE_IRQ_CONNECT(bdf_p, irq_p, priority_p,			\
++			      isr_p, isr_param_p, flags_p)		\
++	ARCH_IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p)
++
++#endif /* CONFIG_PCIE */
++
++/* Direct interrupts won't work as expected with KPTI turned on, because
++ * all non-user accessible pages in the page table are marked non-present.
++ * It's likely possible to add logic to ARCH_ISR_DIRECT_HEADER/FOOTER to do
++ * the necessary trampolining to switch page tables / stacks, but this
++ * probably loses all the latency benefits that direct interrupts provide
++ * and one might as well use a regular interrupt anyway.
++ */
++#ifndef CONFIG_X86_KPTI
++#define ARCH_IRQ_DIRECT_CONNECT(irq_p, priority_p, isr_p, flags_p) \
++{ \
++	NANO_CPU_INT_REGISTER(isr_p, irq_p, priority_p, -1, 0); \
++	z_irq_controller_irq_config(Z_IRQ_TO_INTERRUPT_VECTOR(irq_p), (irq_p), \
++				   (flags_p)); \
++}
++
++#ifdef CONFIG_PM
++static inline void arch_irq_direct_pm(void)
++{
++	if (_kernel.idle) {
++		_kernel.idle = 0;
++		pm_system_resume();
++	}
++}
++
++#define ARCH_ISR_DIRECT_PM() arch_irq_direct_pm()
++#else
++#define ARCH_ISR_DIRECT_PM() do { } while (false)
++#endif
++
++#define ARCH_ISR_DIRECT_HEADER() arch_isr_direct_header()
++#define ARCH_ISR_DIRECT_FOOTER(swap) arch_isr_direct_footer(swap)
++
++/* FIXME:
++ * tracing/tracing.h cannot be included here due to circular dependency
++ */
++#if defined(CONFIG_TRACING)
++void sys_trace_isr_enter(void);
++void sys_trace_isr_exit(void);
++#endif
++
++static inline void arch_isr_direct_header(void)
++{
++#if defined(CONFIG_TRACING)
++	sys_trace_isr_enter();
++#endif
++
++	/* We're not going to unlock IRQs, but we still need to increment this
++	 * so that arch_is_in_isr() works
++	 */
++	++_kernel.cpus[0].nested;
++}
++
++/*
++ * FIXME: z_swap_irqlock is an inline function declared in a private header and
++ *	  cannot be referenced from a public header, so we move it to an
++ *	  external function.
++ */
++void arch_isr_direct_footer_swap(unsigned int key);
++
++static inline void arch_isr_direct_footer(int swap)
++{
++	z_irq_controller_eoi();
++#if defined(CONFIG_TRACING)
++	sys_trace_isr_exit();
++#endif
++	--_kernel.cpus[0].nested;
++
++	/* Call swap if all the following is true:
++	 *
++	 * 1) swap argument was enabled to this function
++	 * 2) We are not in a nested interrupt
++	 * 3) Next thread to run in the ready queue is not this thread
++	 */
++	if (swap != 0 && _kernel.cpus[0].nested == 0 &&
++	    _kernel.ready_q.cache != _current) {
++		unsigned int flags;
++
++		/* Fetch EFLAGS argument to z_swap() */
++		__asm__ volatile (
++			"pushfl\n\t"
++			"popl %0\n\t"
++			: "=g" (flags)
++			:
++			: "memory"
++			);
++
++		arch_isr_direct_footer_swap(flags);
++	}
++}
++
++#define ARCH_ISR_DIRECT_DECLARE(name) \
++	static inline int name##_body(void); \
++	__attribute__ ((interrupt)) void name(void *stack_frame) \
++	{ \
++		ARG_UNUSED(stack_frame); \
++		int check_reschedule; \
++		ISR_DIRECT_HEADER(); \
++		check_reschedule = name##_body(); \
++		ISR_DIRECT_FOOTER(check_reschedule); \
++	} \
++	static inline int name##_body(void)
++#endif /* !CONFIG_X86_KPTI */
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	unsigned int key;
++
++	__asm__ volatile ("pushfl; cli; popl %0" : "=g" (key) :: "memory");
++
++	return key;
++}
++
++
++/**
++ * The NANO_SOFT_IRQ macro must be used as the value for the @a irq parameter
++ * to NANO_CPU_INT_REGISTER when connecting to an interrupt that does not
++ * correspond to any IRQ line (such as spurious vector or SW IRQ)
++ */
++#define NANO_SOFT_IRQ	((unsigned int) (-1))
++
++#ifdef CONFIG_X86_ENABLE_TSS
++extern struct task_state_segment _main_tss;
++#endif
++
++#define ARCH_EXCEPT(reason_p) do { \
++	__asm__ volatile( \
++		"push %[reason]\n\t" \
++		"int %[vector]\n\t" \
++		: \
++		: [vector] "i" (Z_X86_OOPS_VECTOR), \
++		  [reason] "i" (reason_p) \
++		: "memory"); \
++	CODE_UNREACHABLE; /* LCOV_EXCL_LINE */ \
++} while (false)
++
++/*
++ * Dynamic thread object memory alignment.
++ *
++ * If support for SSEx extensions is enabled a 16 byte boundary is required,
++ * since the 'fxsave' and 'fxrstor' instructions require this. In all other
++ * cases a 4 byte boundary is sufficient.
++ */
++#if defined(CONFIG_EAGER_FPU_SHARING) || defined(CONFIG_LAZY_FPU_SHARING)
++#ifdef CONFIG_SSE
++#define ARCH_DYNAMIC_OBJ_K_THREAD_ALIGNMENT	16
++#else
++#define ARCH_DYNAMIC_OBJ_K_THREAD_ALIGNMENT	(sizeof(void *))
++#endif
++#else
++/* No special alignment requirements, simply align on pointer size. */
++#define ARCH_DYNAMIC_OBJ_K_THREAD_ALIGNMENT	(sizeof(void *))
++#endif /* CONFIG_*_FP_SHARING */
++
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* !_ASMLANGUAGE */
++
++#endif /* ZEPHYR_INCLUDE_ARCH_X86_IA32_ARCH_H_ */
+diff --git a/include/zephyr/arch/x86/intel64/arch.h b/include/zephyr/arch/x86/intel64/arch.h
+index 8bf6f95ff..8e82b5643 100644
+--- a/include/zephyr/arch/x86/intel64/arch.h
++++ b/include/zephyr/arch/x86/intel64/arch.h
+@@ -80,6 +80,17 @@ static ALWAYS_INLINE unsigned int arch_irq_lock(void)
+ #define X86_RESERVE_IRQ(irq_p, name)
+ #endif
+ 
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	unsigned long flags;
++
++	/* Read RFLAGS register to check current interrupt state without modifying it */
++	__asm__ volatile ("pushfq; popq %0" : "=g" (flags) : : "memory");
++
++	/* Check IF bit (bit 9) - if set, interrupts are enabled */
++	return (flags & 0x200UL) != 0UL;
++}
+ #endif /* _ASMLANGUAGE */
+ 
+ /*
+diff --git a/include/zephyr/arch/x86/intel64/arch.h.bak b/include/zephyr/arch/x86/intel64/arch.h.bak
+new file mode 100644
+index 000000000..8bf6f95ff
+--- /dev/null
++++ b/include/zephyr/arch/x86/intel64/arch.h.bak
+@@ -0,0 +1,111 @@
++/*
++ * Copyright (c) 2019 Intel Corp.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief Intel-64 specific kernel interface header
++ *
++ * This header contains the Intel-64 portion of the X86 specific kernel
++ * interface (see include/zephyr/arch/x86/cpu.h).
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_X86_INTEL64_ARCH_H_
++#define ZEPHYR_INCLUDE_ARCH_X86_INTEL64_ARCH_H_
++
++#include <zephyr/arch/exception.h>
++#include <zephyr/kernel_structs.h>
++#include <zephyr/arch/x86/intel64/exception.h>
++#include <zephyr/arch/x86/intel64/thread.h>
++#include <zephyr/arch/x86/thread_stack.h>
++#if defined(CONFIG_PCIE) && !defined(_ASMLANGUAGE)
++#include <zephyr/sys/iterable_sections.h>
++#endif
++
++#if CONFIG_ISR_STACK_SIZE != (CONFIG_ISR_SUBSTACK_SIZE * CONFIG_ISR_DEPTH)
++#error "Check ISR stack configuration (CONFIG_ISR_*)"
++#endif
++
++#if CONFIG_ISR_SUBSTACK_SIZE % ARCH_STACK_PTR_ALIGN
++#error "CONFIG_ISR_SUBSTACK_SIZE must be a multiple of 16"
++#endif
++
++#ifndef _ASMLANGUAGE
++
++static ALWAYS_INLINE void sys_write64(uint64_t data, mm_reg_t addr)
++{
++	__asm__ volatile("movq %0, %1"
++			 :
++			 : "r"(data), "m" (*(volatile uint64_t *)
++					   (uintptr_t) addr)
++			 : "memory");
++}
++
++static ALWAYS_INLINE uint64_t sys_read64(mm_reg_t addr)
++{
++	uint64_t ret;
++
++	__asm__ volatile("movq %1, %0"
++			 : "=r"(ret)
++			 : "m" (*(volatile uint64_t *)(uintptr_t) addr)
++			 : "memory");
++
++	return ret;
++}
++
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	unsigned long key;
++
++	__asm__ volatile ("pushfq; cli; popq %0" : "=g" (key) : : "memory");
++
++	return (unsigned int) key;
++}
++
++#define ARCH_EXCEPT(reason_p) do { \
++	__asm__ volatile( \
++		"movq %[reason], %%rax\n\t" \
++		"int $32\n\t" \
++		: \
++		: [reason] "i" (reason_p) \
++		: "memory"); \
++	CODE_UNREACHABLE; /* LCOV_EXCL_LINE */ \
++} while (false)
++
++#ifdef CONFIG_PCIE
++#define X86_RESERVE_IRQ(irq_p, name) \
++	static TYPE_SECTION_ITERABLE(uint8_t, name, irq_alloc, name) = irq_p
++#else
++#define X86_RESERVE_IRQ(irq_p, name)
++#endif
++
++#endif /* _ASMLANGUAGE */
++
++/*
++ * All Intel64 interrupts are dynamically connected.
++ */
++
++#define ARCH_IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p) \
++	X86_RESERVE_IRQ(irq_p, _CONCAT(_irq_alloc_fixed, __COUNTER__)); \
++	arch_irq_connect_dynamic(irq_p, priority_p,			\
++				 (void (*)(const void *))isr_p,		\
++				 isr_param_p, flags_p)
++
++#ifdef CONFIG_PCIE
++
++#define ARCH_PCIE_IRQ_CONNECT(bdf_p, irq_p, priority_p,			\
++			      isr_p, isr_param_p, flags_p)		\
++	X86_RESERVE_IRQ(irq_p, _CONCAT(_irq_alloc_fixed, __COUNTER__)); \
++	pcie_connect_dynamic_irq(bdf_p, irq_p, priority_p,		\
++				 (void (*)(const void *))isr_p,		\
++				 isr_param_p, flags_p)
++
++#endif /* CONFIG_PCIE */
++
++/*
++ * Thread object needs to be 16-byte aligned.
++ */
++#define ARCH_DYNAMIC_OBJ_K_THREAD_ALIGNMENT	16
++
++#endif /* ZEPHYR_INCLUDE_ARCH_X86_INTEL64_ARCH_H_ */
+diff --git a/include/zephyr/arch/xtensa/irq.h b/include/zephyr/arch/xtensa/irq.h
+index 9516f86c0..fc90cb38f 100644
+--- a/include/zephyr/arch/xtensa/irq.h
++++ b/include/zephyr/arch/xtensa/irq.h
+@@ -274,6 +274,15 @@ static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
+ 
+ /** Implementation of @ref arch_irq_unlocked. */
+ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++
++static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
++{
++	/* Read current PS register to check interrupt level without modifying it */
++	unsigned int ps;
++	__asm__ volatile("rsr %0, ps" : "=r"(ps) : : "memory");
++	/* Return true if INTLEVEL field is 0 (interrupts enabled), false otherwise */
++	return (ps & 0xf) == 0;
++}
+ {
+ 	return (key & 0xf) == 0; /* INTLEVEL field */
+ }
+diff --git a/include/zephyr/arch/xtensa/irq.h.bak b/include/zephyr/arch/xtensa/irq.h.bak
+new file mode 100644
+index 000000000..9516f86c0
+--- /dev/null
++++ b/include/zephyr/arch/xtensa/irq.h.bak
+@@ -0,0 +1,292 @@
++/*
++ * Copyright (c) 2016 Cadence Design Systems, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_XTENSA_XTENSA_IRQ_H_
++#define ZEPHYR_INCLUDE_ARCH_XTENSA_XTENSA_IRQ_H_
++
++#include <stdint.h>
++
++#include <zephyr/toolchain.h>
++#include <xtensa/config/core-isa.h>
++
++#define CONFIG_GEN_IRQ_START_VECTOR 0
++
++/**
++ * @cond INTERNAL_HIDDEN
++ */
++
++/*
++ * Call these functions to enable the specified interrupts.
++ *
++ * mask     - Bit mask of interrupts to be enabled.
++ */
++static inline void z_xt_ints_on(unsigned int mask)
++{
++	int val;
++
++	__asm__ volatile("rsr.intenable %0" : "=r"(val));
++	val |= mask;
++	__asm__ volatile("wsr.intenable %0; rsync" : : "r"(val));
++}
++#if XCHAL_NUM_INTERRUPTS > 32
++static inline void z_xt_ints1_on(unsigned int mask)
++{
++	int val;
++
++	__asm__ volatile("rsr.intenable1 %0" : "=r"(val));
++	val |= mask;
++	__asm__ volatile("wsr.intenable1 %0; rsync" : : "r"(val));
++}
++#endif
++#if XCHAL_NUM_INTERRUPTS > 64
++static inline void z_xt_ints2_on(unsigned int mask)
++{
++	int val;
++
++	__asm__ volatile("rsr.intenable2 %0" : "=r"(val));
++	val |= mask;
++	__asm__ volatile("wsr.intenable2 %0; rsync" : : "r"(val));
++}
++#endif
++#if XCHAL_NUM_INTERRUPTS > 96
++static inline void z_xt_ints3_on(unsigned int mask)
++{
++	int val;
++
++	__asm__ volatile("rsr.intenable3 %0" : "=r"(val));
++	val |= mask;
++	__asm__ volatile("wsr.intenable3 %0; rsync" : : "r"(val));
++}
++#endif
++
++
++/*
++ * Call these functions to disable the specified interrupts.
++ *
++ * mask     - Bit mask of interrupts to be disabled.
++ */
++static inline void z_xt_ints_off(unsigned int mask)
++{
++	int val;
++
++	__asm__ volatile("rsr.intenable %0" : "=r"(val));
++	val &= ~mask;
++	__asm__ volatile("wsr.intenable %0; rsync" : : "r"(val));
++}
++#if XCHAL_NUM_INTERRUPTS > 32
++static inline void z_xt_ints1_off(unsigned int mask)
++{
++	int val;
++
++	__asm__ volatile("rsr.intenable1 %0" : "=r"(val));
++	val &= ~mask;
++	__asm__ volatile("wsr.intenable1 %0; rsync" : : "r"(val));
++}
++#endif
++#if XCHAL_NUM_INTERRUPTS > 64
++static inline void z_xt_ints2_off(unsigned int mask)
++{
++	int val;
++
++	__asm__ volatile("rsr.intenable2 %0" : "=r"(val));
++	val &= ~mask;
++	__asm__ volatile("wsr.intenable2 %0; rsync" : : "r"(val));
++}
++#endif
++#if XCHAL_NUM_INTERRUPTS > 96
++static inline void z_xt_ints3_off(unsigned int mask)
++{
++	int val;
++
++	__asm__ volatile("rsr.intenable3 %0" : "=r"(val));
++	val &= ~mask;
++	__asm__ volatile("wsr.intenable3 %0; rsync" : : "r"(val));
++}
++#endif
++
++
++/*
++ * Call these functions to set the specified (s/w) interrupt.
++ */
++static inline void z_xt_set_intset(unsigned int arg)
++{
++#if XCHAL_HAVE_INTERRUPTS
++	__asm__ volatile("wsr.intset %0; rsync" : : "r"(arg));
++#else
++	ARG_UNUSED(arg);
++#endif
++}
++#if XCHAL_NUM_INTERRUPTS > 32
++static inline void z_xt_set_intset1(unsigned int arg)
++{
++	__asm__ volatile("wsr.intset1 %0; rsync" : : "r"(arg));
++}
++#endif
++#if XCHAL_NUM_INTERRUPTS > 64
++static inline void z_xt_set_intset2(unsigned int arg)
++{
++	__asm__ volatile("wsr.intset2 %0; rsync" : : "r"(arg));
++}
++#endif
++#if XCHAL_NUM_INTERRUPTS > 96
++static inline void z_xt_set_intset3(unsigned int arg)
++{
++	__asm__ volatile("wsr.intset3 %0; rsync" : : "r"(arg));
++}
++#endif
++
++
++/**
++ * INTERNAL_HIDDEN @endcond
++ */
++
++#ifdef CONFIG_MULTI_LEVEL_INTERRUPTS
++
++/* for _soc_irq_*() */
++#include <soc.h>
++
++#ifdef CONFIG_2ND_LEVEL_INTERRUPTS
++#ifdef CONFIG_3RD_LEVEL_INTERRUPTS
++#define CONFIG_NUM_IRQS (XCHAL_NUM_INTERRUPTS +\
++			(CONFIG_NUM_2ND_LEVEL_AGGREGATORS +\
++			CONFIG_NUM_3RD_LEVEL_AGGREGATORS) *\
++			CONFIG_MAX_IRQ_PER_AGGREGATOR)
++#else
++#define CONFIG_NUM_IRQS (XCHAL_NUM_INTERRUPTS +\
++			CONFIG_NUM_2ND_LEVEL_AGGREGATORS *\
++			CONFIG_MAX_IRQ_PER_AGGREGATOR)
++#endif /* CONFIG_3RD_LEVEL_INTERRUPTS */
++#else
++#define CONFIG_NUM_IRQS XCHAL_NUM_INTERRUPTS
++#endif /* CONFIG_2ND_LEVEL_INTERRUPTS */
++
++void z_soc_irq_init(void);
++void z_soc_irq_enable(unsigned int irq);
++void z_soc_irq_disable(unsigned int irq);
++int z_soc_irq_is_enabled(unsigned int irq);
++
++#define arch_irq_enable(irq)	z_soc_irq_enable(irq)
++#define arch_irq_disable(irq)	z_soc_irq_disable(irq)
++
++#define arch_irq_is_enabled(irq)	z_soc_irq_is_enabled(irq)
++
++#ifdef CONFIG_DYNAMIC_INTERRUPTS
++extern int z_soc_irq_connect_dynamic(unsigned int irq, unsigned int priority,
++				     void (*routine)(const void *parameter),
++				     const void *parameter, uint32_t flags);
++#endif
++
++#else
++
++#define CONFIG_NUM_IRQS XCHAL_NUM_INTERRUPTS
++
++#define arch_irq_enable(irq)	xtensa_irq_enable(irq)
++#define arch_irq_disable(irq)	xtensa_irq_disable(irq)
++
++#define arch_irq_is_enabled(irq)	xtensa_irq_is_enabled(irq)
++
++#endif
++
++/**
++ * @brief Enable interrupt on Xtensa core.
++ *
++ * @param irq Interrupt to be enabled.
++ */
++static ALWAYS_INLINE void xtensa_irq_enable(uint32_t irq)
++{
++#if XCHAL_NUM_INTERRUPTS > 32
++	switch (irq >> 5) {
++	case 0:
++		z_xt_ints_on(1 << (irq & 0x1f));
++		break;
++	case 1:
++		z_xt_ints1_on(1 << (irq & 0x1f));
++		break;
++#if XCHAL_NUM_INTERRUPTS > 64
++	case 2:
++		z_xt_ints2_on(1 << (irq & 0x1f));
++		break;
++#endif
++#if XCHAL_NUM_INTERRUPTS > 96
++	case 3:
++		z_xt_ints3_on(1 << (irq & 0x1f));
++		break;
++#endif
++	default:
++		break;
++	}
++#else
++	z_xt_ints_on(1 << irq);
++#endif
++}
++
++/**
++ * @brief Disable interrupt on Xtensa core.
++ *
++ * @param irq Interrupt to be disabled.
++ */
++static ALWAYS_INLINE void xtensa_irq_disable(uint32_t irq)
++{
++#if XCHAL_NUM_INTERRUPTS > 32
++	switch (irq >> 5) {
++	case 0:
++		z_xt_ints_off(1 << (irq & 0x1f));
++		break;
++	case 1:
++		z_xt_ints1_off(1 << (irq & 0x1f));
++		break;
++#if XCHAL_NUM_INTERRUPTS > 64
++	case 2:
++		z_xt_ints2_off(1 << (irq & 0x1f));
++		break;
++#endif
++#if XCHAL_NUM_INTERRUPTS > 96
++	case 3:
++		z_xt_ints3_off(1 << (irq & 0x1f));
++		break;
++#endif
++	default:
++		break;
++	}
++#else
++	z_xt_ints_off(1 << irq);
++#endif
++}
++
++/** Implementation of @ref arch_irq_lock. */
++static ALWAYS_INLINE unsigned int arch_irq_lock(void)
++{
++	unsigned int key;
++
++	__asm__ volatile("rsil %0, %1"
++			 : "=r"(key) : "i"(XCHAL_EXCM_LEVEL) : "memory");
++	return key;
++}
++
++/** Implementation of @ref arch_irq_unlock. */
++static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
++{
++	__asm__ volatile("wsr.ps %0; rsync"
++			 :: "r"(key) : "memory");
++}
++
++/** Implementation of @ref arch_irq_unlocked. */
++static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
++{
++	return (key & 0xf) == 0; /* INTLEVEL field */
++}
++
++/**
++ * @brief Query if an interrupt is enabled on Xtensa core.
++ *
++ * @param irq Interrupt to be queried.
++ *
++ * @return True if interrupt is enabled, false otherwise.
++ */
++int xtensa_irq_is_enabled(unsigned int irq);
++
++#include <zephyr/irq.h>
++
++#endif /* ZEPHYR_INCLUDE_ARCH_XTENSA_XTENSA_IRQ_H_ */
+diff --git a/include/zephyr/irq.h b/include/zephyr/irq.h
+index c8a2ed528..07aaf16a3 100644
+--- a/include/zephyr/irq.h
++++ b/include/zephyr/irq.h
+@@ -286,6 +286,18 @@ void z_smp_global_unlock(unsigned int key);
+ #define irq_unlock(key) z_smp_global_unlock(key)
+ #else
+ #define irq_unlock(key) arch_irq_unlock(key)
++
++static inline bool arch_cpu_irqs_are_enabled(void);
++/**
++ * @brief Check if interrupts are currently enabled.
++ * 
++ * This routine checks the live CPU interrupt enable state without
++ * modifying it. Unlike arch_irq_unlocked() which inspects a saved lock
++ * key, this primitive probes the live CPU register directly.
++ * 
++ * @return true if interrupts are enabled, false if disabled.
++ */
++#define arch_cpu_irqs_are_enabled arch_cpu_irqs_are_enabled
+ #endif
+ 
+ /**
+diff --git a/include/zephyr/irq.h.bak b/include/zephyr/irq.h.bak
+new file mode 100644
+index 000000000..c8a2ed528
+--- /dev/null
++++ b/include/zephyr/irq.h.bak
+@@ -0,0 +1,329 @@
++/*
++ * Copyright (c) 2015 Intel corporation
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief Public interface for configuring interrupts
++ */
++#ifndef ZEPHYR_INCLUDE_IRQ_H_
++#define ZEPHYR_INCLUDE_IRQ_H_
++
++/* Pull in the arch-specific implementations */
++#include <zephyr/arch/cpu.h>
++
++#ifndef _ASMLANGUAGE
++#include <zephyr/toolchain.h>
++#include <zephyr/types.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @defgroup isr_apis Interrupt Service Routine APIs
++ * @ingroup kernel_apis
++ * @{
++ */
++
++/**
++ * @brief Initialize an interrupt handler.
++ *
++ * This routine initializes an interrupt handler for an IRQ. The IRQ must be
++ * subsequently enabled before the interrupt handler begins servicing
++ * interrupts.
++ *
++ * @warning
++ * Although this routine is invoked at run-time, all of its arguments must be
++ * computable by the compiler at build time.
++ *
++ * @param irq_p IRQ line number.
++ * @param priority_p Interrupt priority.
++ * @param isr_p Address of interrupt service routine.
++ * @param isr_param_p Parameter passed to interrupt service routine.
++ * @param flags_p Architecture-specific IRQ configuration flags..
++ */
++#define IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p) \
++	ARCH_IRQ_CONNECT(irq_p, priority_p, isr_p, isr_param_p, flags_p)
++
++/**
++ * Configure a dynamic interrupt.
++ *
++ * Use this instead of IRQ_CONNECT() if arguments cannot be known at build time.
++ *
++ * @param irq IRQ line number
++ * @param priority Interrupt priority
++ * @param routine Interrupt service routine
++ * @param parameter ISR parameter
++ * @param flags Arch-specific IRQ configuration flags
++ *
++ * @return The vector assigned to this interrupt
++ */
++static inline int
++irq_connect_dynamic(unsigned int irq, unsigned int priority,
++		    void (*routine)(const void *parameter),
++		    const void *parameter, uint32_t flags)
++{
++	return arch_irq_connect_dynamic(irq, priority, routine, parameter,
++					flags);
++}
++
++/**
++ * Disconnect a dynamic interrupt.
++ *
++ * Use this in conjunction with shared interrupts to remove a routine/parameter
++ * pair from the list of clients using the same interrupt line. If the interrupt
++ * is not being shared then the associated _sw_isr_table entry will be replaced
++ * by (NULL, z_irq_spurious) (default entry).
++ *
++ * @param irq IRQ line number
++ * @param priority Interrupt priority
++ * @param routine Interrupt service routine
++ * @param parameter ISR parameter
++ * @param flags Arch-specific IRQ configuration flags
++ *
++ * @return 0 in case of success, negative value otherwise
++ */
++static inline int
++irq_disconnect_dynamic(unsigned int irq, unsigned int priority,
++		       void (*routine)(const void *parameter),
++		       const void *parameter, uint32_t flags)
++{
++	return arch_irq_disconnect_dynamic(irq, priority, routine,
++					   parameter, flags);
++}
++
++/**
++ * @brief Initialize a 'direct' interrupt handler.
++ *
++ * This routine initializes an interrupt handler for an IRQ. The IRQ must be
++ * subsequently enabled via irq_enable() before the interrupt handler begins
++ * servicing interrupts.
++ *
++ * These ISRs are designed for performance-critical interrupt handling and do
++ * not go through common interrupt handling code. They must be implemented in
++ * such a way that it is safe to put them directly in the vector table.  For
++ * ISRs written in C, The ISR_DIRECT_DECLARE() macro will do this
++ * automatically. For ISRs written in assembly it is entirely up to the
++ * developer to ensure that the right steps are taken.
++ *
++ * This type of interrupt currently has a few limitations compared to normal
++ * Zephyr interrupts:
++ * - No parameters are passed to the ISR.
++ * - No stack switch is done, the ISR will run on the interrupted context's
++ *   stack, unless the architecture automatically does the stack switch in HW.
++ * - Interrupt locking state is unchanged from how the HW sets it when the ISR
++ *   runs. On arches that enter ISRs with interrupts locked, they will remain
++ *   locked.
++ * - Scheduling decisions are now optional, controlled by the return value of
++ *   ISRs implemented with the ISR_DIRECT_DECLARE() macro
++ * - The call into the OS to exit power management idle state is now optional.
++ *   Normal interrupts always do this before the ISR is run, but when it runs
++ *   is now controlled by the placement of a ISR_DIRECT_PM() macro, or omitted
++ *   entirely.
++ *
++ * @warning
++ * Although this routine is invoked at run-time, all of its arguments must be
++ * computable by the compiler at build time.
++ *
++ * @note
++ * All IRQs configured with the IRQ_ZERO_LATENCY flag must be declared as
++ * direct.
++ *
++ * @param irq_p IRQ line number.
++ * @param priority_p Interrupt priority.
++ * @param isr_p Address of interrupt service routine.
++ * @param flags_p Architecture-specific IRQ configuration flags.
++ */
++#define IRQ_DIRECT_CONNECT(irq_p, priority_p, isr_p, flags_p) \
++	ARCH_IRQ_DIRECT_CONNECT(irq_p, priority_p, isr_p, flags_p)
++
++/**
++ * @brief Common tasks before executing the body of an ISR
++ *
++ * This macro must be at the beginning of all direct interrupts and performs
++ * minimal architecture-specific tasks before the ISR itself can run. It takes
++ * no arguments and has no return value.
++ */
++#define ISR_DIRECT_HEADER() ARCH_ISR_DIRECT_HEADER()
++
++/**
++ * @brief Common tasks before exiting the body of an ISR
++ *
++ * This macro must be at the end of all direct interrupts and performs
++ * minimal architecture-specific tasks like EOI. It has no return value.
++ *
++ * In a normal interrupt, a check is done at end of interrupt to invoke
++ * z_swap() logic if the current thread is preemptible and there is another
++ * thread ready to run in the kernel's ready queue cache. This is now optional
++ * and controlled by the check_reschedule argument. If unsure, set to nonzero.
++ * On systems that do stack switching and nested interrupt tracking in software,
++ * z_swap() should only be called if this was a non-nested interrupt.
++ *
++ * @param check_reschedule If nonzero, additionally invoke scheduling logic
++ */
++#define ISR_DIRECT_FOOTER(check_reschedule) \
++	ARCH_ISR_DIRECT_FOOTER(check_reschedule)
++
++/**
++ * @brief Perform power management idle exit logic
++ *
++ * This macro may optionally be invoked somewhere in between IRQ_DIRECT_HEADER()
++ * and IRQ_DIRECT_FOOTER() invocations. It performs tasks necessary to
++ * exit power management idle state. It takes no parameters and returns no
++ * arguments. It may be omitted, but be careful!
++ *
++ * @warning
++ * This macro must not be used at all with IRQs configured with the
++ * IRQ_ZERO_LATENCY flag.
++ */
++#define ISR_DIRECT_PM() ARCH_ISR_DIRECT_PM()
++
++/**
++ * @brief Helper macro to declare a direct interrupt service routine.
++ *
++ * This will declare the function in a proper way and automatically include
++ * the ISR_DIRECT_FOOTER() and ISR_DIRECT_HEADER() macros. The function should
++ * return nonzero status if a scheduling decision should potentially be made.
++ * See ISR_DIRECT_FOOTER() for more details on the scheduling decision.
++ *
++ * For architectures that support 'regular' and 'fast' interrupt types, where
++ * these interrupt types require different assembly language handling of
++ * registers by the ISR, this will always generate code for the 'fast'
++ * interrupt type.
++ *
++ * @warning
++ * Any ISRs that serve IRQs configured with the IRQ_ZERO_LATENCY flag must
++ * always return 0 in this macro.
++ *
++ * Example usage:
++ *
++ *     ISR_DIRECT_DECLARE(my_isr)
++ *     {
++ *             bool done = do_stuff();
++ *             ISR_DIRECT_PM(); // done after do_stuff() due to latency concerns
++ *             if (!done) {
++ *                 return 0; // don't bother checking if we have to z_swap()
++ *             }
++ *
++ *             k_sem_give(some_sem);
++ *             return 1;
++ *      }
++ *
++ * @param name symbol name of the ISR
++ */
++#define ISR_DIRECT_DECLARE(name) ARCH_ISR_DIRECT_DECLARE(name)
++
++/**
++ * @brief Lock interrupts.
++ * @def irq_lock()
++ *
++ * This routine disables all interrupts on the CPU. It returns an unsigned
++ * integer "lock-out key", which is an architecture-dependent indicator of
++ * whether interrupts were locked prior to the call. The lock-out key must be
++ * passed to irq_unlock() to re-enable interrupts.
++ *
++ * @note
++ * This routine must also serve as a memory barrier to ensure the uniprocessor
++ * implementation of spinlocks is correct.
++ *
++ * This routine can be called recursively, as long as the caller keeps track
++ * of each lock-out key that is generated. Interrupts are re-enabled by
++ * passing each of the keys to irq_unlock() in the reverse order they were
++ * acquired. (That is, each call to irq_lock() must be balanced by
++ * a corresponding call to irq_unlock().)
++ *
++ * This routine can only be invoked from supervisor mode. Some architectures
++ * (for example, ARM) will fail silently if invoked from user mode instead
++ * of generating an exception.
++ *
++ * This routine can be called by ISRs and threads.
++ *
++ * @warning
++ * As long as all recursive calls to irq_lock() have not been balanced with
++ * corresponding irq_unlock() calls, the caller "holds the interrupt lock".
++ * "Holding the interrupt lock" when a context switch occurs is illegal.
++ *
++ * @warning
++ * The lock-out key should never be used to manually re-enable interrupts
++ * or to inspect or manipulate the contents of the CPU's interrupt bits.
++ *
++ * @return An architecture-dependent lock-out key representing the
++ *         "interrupt disable state" prior to the call.
++ */
++#ifdef CONFIG_SMP
++unsigned int z_smp_global_lock(void);
++#define irq_lock() z_smp_global_lock()
++#else
++#define irq_lock() arch_irq_lock()
++#endif
++
++/**
++ * @brief Unlock interrupts.
++ * @def irq_unlock()
++ *
++ * This routine reverses the effect of a previous call to irq_lock() using
++ * the associated lock-out key. The caller must call the routine once for
++ * each time it called irq_lock(), supplying the keys in the reverse order
++ * they were acquired, before interrupts are enabled.
++ *
++ * @note
++ * This routine must also serve as a memory barrier to ensure the uniprocessor
++ * implementation of spinlocks is correct.
++ *
++ * This routine can only be invoked from supervisor mode. Some architectures
++ * (for example, ARM) will fail silently if invoked from user mode instead
++ * of generating an exception.
++ *
++ * @note Can be called by ISRs.
++ *
++ * @param key Lock-out key generated by irq_lock().
++ */
++#ifdef CONFIG_SMP
++void z_smp_global_unlock(unsigned int key);
++#define irq_unlock(key) z_smp_global_unlock(key)
++#else
++#define irq_unlock(key) arch_irq_unlock(key)
++#endif
++
++/**
++ * @brief Enable an IRQ.
++ *
++ * This routine enables interrupts from source @a irq.
++ *
++ * @param irq IRQ line.
++ */
++#define irq_enable(irq) arch_irq_enable(irq)
++
++/**
++ * @brief Disable an IRQ.
++ *
++ * This routine disables interrupts from source @a irq.
++ *
++ * @param irq IRQ line.
++ */
++#define irq_disable(irq) arch_irq_disable(irq)
++
++/**
++ * @brief Get IRQ enable state.
++ *
++ * This routine indicates if interrupts from source @a irq are enabled.
++ *
++ * @param irq IRQ line.
++ *
++ * @return interrupt enable state, true or false
++ */
++#define irq_is_enabled(irq) arch_irq_is_enabled(irq)
++
++/**
++ * @}
++ */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ASMLANGUAGE */
++#endif /* ZEPHYR_INCLUDE_IRQ_H_ */
+diff --git a/test_arch.c b/test_arch.c
+new file mode 100644
+index 000000000..82a7254af
+--- /dev/null
++++ b/test_arch.c
+@@ -0,0 +1,19 @@
++#include <zephyr/kernel.h>
++#include <zephyr/arch/cpu.h>
++#include <zephyr/irq.h>
++
++void main(void) {
++    printk("Testing architecture IRQ functions\n");
++    
++    unsigned int key = arch_irq_lock();
++    printk("arch_irq_lock() returned key: 0x%x\n", key);
++    
++    bool unlocked = arch_irq_unlocked(key);
++    printk("arch_irq_unlocked(key): %s\n", unlocked ? "true" : "false");
++    
++    arch_irq_unlock(key);
++    
++    // Test current interrupt state after unlock
++    unlocked = arch_irq_unlocked(arch_irq_lock());
++    printk("Current interrupt state: %s\n", unlocked ? "enabled" : "disabled");
++}

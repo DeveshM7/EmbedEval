@@ -1,0 +1,144 @@
+diff --git a/libs/libc/wqueue/work_cancel.c b/libs/libc/wqueue/work_cancel.c
+index 65893daa..078e0a36 100644
+--- a/libs/libc/wqueue/work_cancel.c
++++ b/libs/libc/wqueue/work_cancel.c
+@@ -59,6 +59,7 @@
+  *   reported:
+  *
+  *   -EINVAL - An invalid work queue was specified
++ *   -ENOENT - The work structure was not queued
+  *
+  ****************************************************************************/
+ 
+@@ -84,6 +85,7 @@ static int work_qcancel(FAR struct usr_wqueue_s *wqueue, bool sync,
+     {
+       FAR sem_t *sync_wait = NULL;
+       int wndx;
++      bool found = false;
+ 
+       /* Get exclusive access to the work queue */
+ 
+@@ -93,7 +95,7 @@ static int work_qcancel(FAR struct usr_wqueue_s *wqueue, bool sync,
+         }
+       while (ret < 0);
+ 
+-      /* Remove a pending instance from the queue. */
++      /* Check if the work is currently queued. */
+ 
+       if (work->worker != NULL)
+         {
+@@ -101,8 +103,12 @@ static int work_qcancel(FAR struct usr_wqueue_s *wqueue, bool sync,
+             {
+               work_wake(wqueue);
+             }
++
++          found = true;
+         }
+ 
++      /* Check if the work is currently being executed by a worker thread. */
++
+       if (sync)
+         {
+           for (wndx = 0; wndx < wqueue->nthreads; wndx++)
+@@ -113,6 +119,7 @@ static int work_qcancel(FAR struct usr_wqueue_s *wqueue, bool sync,
+                 {
+                   worker->wait_count++;
+                   sync_wait = &worker->wait;
++                  found = true;
+                   break;
+                 }
+             }
+@@ -122,6 +129,13 @@ static int work_qcancel(FAR struct usr_wqueue_s *wqueue, bool sync,
+ 
+       if (sync_wait == NULL)
+         {
++          /* Work was not found either queued or running. */
++
++          if (!found)
++            {
++              return -ENOENT;
++            }
++
+           return OK;
+         }
+ 
+@@ -150,6 +164,7 @@ static int work_qcancel(FAR struct usr_wqueue_s *wqueue, bool sync,
+  *   reported:
+  *
+  *   -EINVAL - An invalid work queue was specified
++ *   -ENOENT - The work structure was not queued
+  *
+  ****************************************************************************/
+ 
+diff --git a/sched/wqueue/kwork_cancel.c b/sched/wqueue/kwork_cancel.c
+index 2329abaf..2ce91307 100644
+--- a/sched/wqueue/kwork_cancel.c
++++ b/sched/wqueue/kwork_cancel.c
+@@ -66,6 +66,7 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue, bool sync,
+       FAR struct kworker_s *worker = wq_get_worker(wqueue);
+       FAR sem_t *sync_wait = NULL;
+       int wndx;
++      bool found = false;
+ 
+       /* Cancelling the work is simply a matter of removing the work
+        * structure from the work queue.  This must be done with interrupts
+@@ -75,6 +76,8 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue, bool sync,
+ 
+       flags = spin_lock_irqsave(&wqueue->lock);
+ 
++      /* Check if the work is currently queued. */
++
+       if (!work_available(work))
+         {
+           /* If the head of the pending queue has changed, reset the timer. */
+@@ -83,8 +86,12 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue, bool sync,
+             {
+               work_timer_reset(wqueue);
+             }
++
++          found = true;
+         }
+ 
++      /* Check if the work is currently being executed by a worker thread. */
++
+       if (sync)
+         {
+           for (wndx = 0; wndx < wqueue->nthreads; wndx++)
+@@ -93,6 +100,7 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue, bool sync,
+                 {
+                   worker[wndx].wait_count++;
+                   sync_wait = &worker[wndx].wait;
++                  found = true;
+                   break;
+                 }
+             }
+@@ -102,6 +110,13 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue, bool sync,
+ 
+       if (sync_wait == NULL)
+         {
++          /* Work was not found either queued or running. */
++
++          if (!found)
++            {
++              return -ENOENT;
++            }
++
+           return OK;
+         }
+ 
+@@ -130,6 +145,7 @@ static int work_qcancel(FAR struct kwork_wqueue_s *wqueue, bool sync,
+  *   Zero on success, a negated errno on failure
+  *
+  *   -EINVAL - An invalid work queue was specified
++ *   -ENOENT - The work structure was not queued
+  *
+  ****************************************************************************/
+ 
+@@ -163,6 +179,7 @@ int work_cancel_wq(FAR struct kwork_wqueue_s *wqueue,
+  *   A negated errno value is returned on any failure:
+  *
+  *   -EINVAL - An invalid work queue was specified
++ *   -ENOENT - The work structure was not queued and not running
+  *
+  ****************************************************************************/
+ 

@@ -1,0 +1,207 @@
+diff --git a/sys/congure/Makefile b/sys/congure/Makefile
+index 67edc5e..2b656ed 100644
+--- a/sys/congure/Makefile
++++ b/sys/congure/Makefile
+@@ -10,6 +10,9 @@ endif
+ ifneq (,$(filter congure_reno_methods,$(USEMODULE)))
+   DIRS += reno/methods
+ endif
++ifneq (,$(filter congure_abe,$(USEMODULE)))
++  DIRS += abe
++endif
+ ifneq (,$(filter congure_test,$(USEMODULE)))
+   DIRS += test
+ endif
+diff --git a/sys/congure/abe/Kconfig b/sys/congure/abe/Kconfig
+new file mode 100644
+index 0000000..4a7b2a4
+--- /dev/null
++++ b/sys/congure/abe/Kconfig
+@@ -0,0 +1,21 @@
++config MODULE_CONGURE_ABE
++    bool "CongURE implementation of TCP ABE (Alternative Backoff with ECN)"
++    depends on MODULE_CONGURE
++    select MODULE_CONGURE_RENO_METHODS
++    help
++        This module provides a TCP congestion control algorithm based on Reno
++        with an ECN handling that uses an alternative backoff multiplier.
++
++config CONGURE_ABE_MULTIPLIER_NUMERATOR_DEFAULT
++    int "Default ABE multiplier numerator"
++    default 4
++    help
++        Numerator of the default ABE multiplier (default 4 gives 0.8 when used
++        with the denominator below).
++
++config CONGURE_ABE_MULTIPLIER_DENOMINATOR_DEFAULT
++    int "Default ABE multiplier denominator"
++    default 5
++    help
++        Denominator of the default ABE multiplier (default 5 gives 0.8 when
++        used with the numerator above).
+diff --git a/sys/congure/abe/Makefile b/sys/congure/abe/Makefile
+new file mode 100644
+index 0000000..3192fae
+--- /dev/null
++++ b/sys/congure/abe/Makefile
+@@ -0,0 +1,3 @@
++MODULE := congure_abe
++
++include $(RIOTBASE)/Makefile.base
+diff --git a/sys/congure/abe/congure_abe.c b/sys/congure/abe/congure_abe.c
+new file mode 100644
+index 0000000..e08a908
+--- /dev/null
++++ b/sys/congure/abe/congure_abe.c
+@@ -0,0 +1,52 @@
++/*
++ * Copyright (C) 2024 Freie Universität Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @file
++ * @brief   CongURE ABE implementation – driver setup and ECN handling.
++ */
++
++#include "congure/abe.h"
++
++/* use all Reno driver methods, only ECN handling differs */
++static const congure_snd_driver_t _driver = {
++    .init = congure_reno_snd_init,
++    .inter_msg_interval = congure_reno_snd_inter_msg_interval,
++    .report_msg_sent = congure_reno_snd_report_msg_sent,
++    .report_msg_discarded = congure_reno_snd_report_msg_discarded,
++    .report_msgs_timeout = congure_reno_snd_report_msgs_timeout,
++    .report_msgs_lost = congure_reno_snd_report_msgs_lost,
++    .report_msg_acked = congure_reno_snd_report_msg_acked,
++    .report_ecn_ce = congure_abe_snd_report_ecn_ce,
++};
++
++void congure_abe_snd_setup(congure_abe_snd_t *c,
++                           const congure_abe_snd_consts_t *consts)
++{
++    c->super.driver = &_driver;
++    c->consts = consts;
++}
++
++void congure_abe_snd_report_ecn_ce(congure_snd_t *cong, ztimer_now_t time)
++{
++    (void)time; /* currently unused */
++    congure_abe_snd_t *c = (congure_abe_snd_t *)cong;
++    /* calculate new ssthresh = max(abe_multiplier * in_flight / denominator,
++     *                           2 * mss) */
++    uint32_t mult_num = c->consts->abe_multiplier_numerator;
++    uint32_t mult_den = c->consts->abe_multiplier_denominator;
++    if (mult_den == 0) {
++        mult_den = 1; /* avoid div by zero */
++    }
++    uint32_t scaled = (c->in_flight_size * mult_num) / mult_den;
++    uint32_t min_ssthresh = 2 * c->mss;
++    c->ssthresh = (scaled > min_ssthresh) ? scaled : min_ssthresh;
++    if (c->super.cwnd > c->ssthresh) {
++        c->super.cwnd = c->ssthresh;
++    }
++}
+diff --git a/sys/include/congure/abe.h b/sys/include/congure/abe.h
+new file mode 100644
+index 0000000..8910ae1
+--- /dev/null
++++ b/sys/include/congure/abe.h
+@@ -0,0 +1,93 @@
++/*
++ * Copyright (C) 2024 Freie Universität Berlin
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    sys_congure_abe CongURE implementation of TCP ABE
++ * @ingroup     sys_congure
++ * @brief       TCP Alternative Backoff with ECN (ABE) implementation.
++ *
++ * This module builds on the Reno implementation and overrides the ECN
++ * handling according to RFC 8311 with an alternative backoff multiplier.
++ *
++ * @author  Martine Lenders <m.lenders@fu-berlin.de>
++ * @author  Your Name <you@example.com>
++ */
++#ifndef CONGURE_ABE_H
++#define CONGURE_ABE_H
++
++#include <stdint.h>
++
++#include "congure.h"
++#include "congure/reno.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief   Forward declaration of state object for CongURE ABE.
++ */
++typedef struct congure_abe_snd congure_abe_snd_t;
++
++/**
++ * @brief   Constants for the ABE congestion control.
++ *
++ * The constant set contains all fields of @ref congure_reno_snd_consts_t
++ * plus an additional multiplier for ECN backoff.
++ */
++typedef struct {
++    /* base Reno constants – must be the first member for binary compatibility */
++    congure_reno_snd_consts_t reno;
++    /**
++     * @brief   Numerator of the ECN backoff multiplier.
++     */
++    uint16_t abe_multiplier_numerator;
++    /**
++     * @brief   Denominator of the ECN backoff multiplier.
++     */
++    uint16_t abe_multiplier_denominator;
++} congure_abe_snd_consts_t;
++
++/**
++ * @brief   State object for CongURE ABE.
++ *
++ * The layout mirrors @ref congure_reno_snd_t and therefore reuses the same
++ * implementation of the driver methods.
++ */
++struct congure_abe_snd {
++    congure_snd_t super;            /**< base CongURE driver */
++    const congure_abe_snd_consts_t *consts; /**< constants */
++    uint32_t last_ack;              /**< ID of last ACK */
++    congure_wnd_size_t mss;         /**< maximum segment size */
++    congure_wnd_size_t ssthresh;    /**< slow‑start threshold */
++    uint16_t in_flight_size;        /**< bytes in flight */
++    uint8_t dup_acks;               /**< duplicate ACK counter */
++};
++
++/**
++ * @brief   Set up the ABE sender driver.
++ *
++ * @pre   Module `congure_abe` must be compiled in.
++ * @param[in] c       ABE sender state object.
++ * @param[in] consts  Constant set to use.
++ */
++void congure_abe_snd_setup(congure_abe_snd_t *c,
++                           const congure_abe_snd_consts_t *consts);
++
++/**
++ * @brief   ECN CE handling for ABE.
++ * @internal
++ */
++void congure_abe_snd_report_ecn_ce(congure_snd_t *c, ztimer_now_t time);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* CONGURE_ABE_H */
++/** @} */

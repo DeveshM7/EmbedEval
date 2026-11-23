@@ -1,0 +1,62 @@
+diff --git a/include/zephyr/net/lwm2m.h b/include/zephyr/net/lwm2m.h
+index adbf990a..ded0fbef 100644
+--- a/include/zephyr/net/lwm2m.h
++++ b/include/zephyr/net/lwm2m.h
+@@ -1619,6 +1619,23 @@ int lwm2m_enable_cache(const struct lwm2m_obj_path *path, struct lwm2m_time_seri
+ int lwm2m_set_cache_filter(const struct lwm2m_obj_path *path,
+ 			   lwm2m_cache_filter_cb_t filter_cb);
+ 
++
++/**
++ * @brief Query the number of free slots in a cached resource.
++ *
++ * This function returns the number of free slots available in the cache
++ * for a given LwM2M object path. The caller can use this to determine when
++ * to flush buffered samples via lwm2m_send.
++ *
++ * @param path LwM2M path to the cached resource.
++ *
++ * @return Number of free slots on success, or negative errno code on failure.
++ * @retval -EINVAL if path is NULL.
++ * @retval -ENOTSUP if resource data cache support is not configured.
++ * @retval -ENOENT if cache entry is not found for the given path.
++ */
++int lwm2m_cache_free_slots_get(const struct lwm2m_obj_path *path);
++
+ /**
+  * @brief Security modes as defined in LwM2M Security object.
+  */
+diff --git a/subsys/net/lib/lwm2m/lwm2m_registry.c b/subsys/net/lib/lwm2m/lwm2m_registry.c
+index db1afb94..a8526e5f 100644
+--- a/subsys/net/lib/lwm2m/lwm2m_registry.c
++++ b/subsys/net/lib/lwm2m/lwm2m_registry.c
+@@ -1660,6 +1660,29 @@ int lwm2m_set_cache_filter(const struct lwm2m_obj_path *path,
+ #endif /* CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT */
+ }
+ 
++int lwm2m_cache_free_slots_get(const struct lwm2m_obj_path *path)
++{
++#if defined(CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT)
++	struct lwm2m_time_series_resource *cache_entry;
++	uint32_t bytes_available;
++
++	if (path == NULL) {
++		return -EINVAL;
++	}
++
++	cache_entry = lwm2m_cache_entry_get_by_object(path);
++	if (cache_entry == NULL) {
++		return -ENOENT;
++	}
++
++	bytes_available = ring_buf_space_get(&cache_entry->rb);
++
++	return (bytes_available / sizeof(struct lwm2m_time_series_elem));
++#else
++	return -ENOTSUP;
++#endif /* CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT */
++}
++
+ #if defined(CONFIG_LWM2M_RESOURCE_DATA_CACHE_SUPPORT)
+ static int lwm2m_engine_data_cache_init(void)
+ {

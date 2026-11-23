@@ -1,0 +1,258 @@
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index 13ffedf1..f801706e 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -156,6 +156,7 @@ menu "Storage Device Drivers"
+ rsource "at24cxxx/Kconfig"
+ rsource "at25xxx/Kconfig"
+ rsource "mtd/Kconfig"
++rsource "mtd_emulated/Kconfig"
+ rsource "mtd_mapper/Kconfig"
+ rsource "mtd_sdcard/Kconfig"
+ rsource "nvram/Kconfig"
+diff --git a/drivers/include/mtd_emulated.h b/drivers/include/mtd_emulated.h
+new file mode 100644
+index 00000000..23749e20
+--- /dev/null
++++ b/drivers/include/mtd_emulated.h
+@@ -0,0 +1,74 @@
++/*
++ * Copyright (C) 2024
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    drivers_mtd_emulated   Emulated MTD
++ * @ingroup     drivers_storage
++ * @brief       Driver for emulated MTD devices using RAM
++ *
++ * @{
++ *
++ * @file
++ * @brief       Interface definition for the emulated memory driver
++ *
++ * @author
++ */
++
++#ifndef MTD_EMULATED_H
++#define MTD_EMULATED_H
++
++#include "mtd.h"
++
++#ifdef __cplusplus
++extern "C"
++{
++#endif
++
++/**
++ * @brief   Macro helper to initialize a mtd_emulated device
++ *
++ * @param _dev   Device index (0 for first device)
++ * @param _sc   Sector count
++ * @param _pps  Pages per sector
++ * @param _ps   Page size in bytes
++ */
++#define MTD_EMULATED_DEV(_dev, _sc, _pps, _ps) \
++    static uint8_t mtd_emulated_memory_ ## _dev[(_sc) * (_pps) * (_ps)]; \
++    static mtd_emulated_dev_t mtd_emulated_dev_ ## _dev = { \
++        .base = { \
++            .driver = &mtd_emulated_driver, \
++            .sector_count = (_sc), \
++            .pages_per_sector = (_pps), \
++            .page_size = (_ps), \
++            .write_size = 1 \
++        }, \
++        .memory = mtd_emulated_memory_ ## _dev, \
++        .memory_size = sizeof(mtd_emulated_memory_ ## _dev) \
++    }; \
++    static mtd_dev_t *mtd_emulated_dev ## _dev = (mtd_dev_t *)&mtd_emulated_dev_ ## _dev.base;
++
++/**
++ * @brief   Emulated MTD device descriptor
++ */
++typedef struct {
++    mtd_dev_t base;     /**< MTD generic device */
++    uint8_t *memory;    /**< Pointer to the RAM buffer */
++    uint32_t memory_size; /**< Size of the RAM buffer */
++} mtd_emulated_dev_t;
++
++/**
++ * @brief   Emulated MTD device operations table
++ */
++extern const mtd_desc_t mtd_emulated_driver;
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* MTD_EMULATED_H */
++/** @} */
+diff --git a/drivers/mtd/Kconfig b/drivers/mtd/Kconfig
+index fc18a5c5..a5f55dd9 100644
+--- a/drivers/mtd/Kconfig
++++ b/drivers/mtd/Kconfig
+@@ -95,6 +95,11 @@ config MODULE_MTD_MCI
+     depends on CPU_FAM_LPC23XX
+     select MODULE_MCI
+ 
++config MODULE_MTD_EMULATED
++    bool "MTD emulation driver"
++    help
++        Driver for emulated MTD devices using RAM
++
+ config MODULE_MTD_SDCARD_DEFAULT
+     bool "Use Generic SD card configuration"
+     depends on MODULE_MTD_SDCARD
+diff --git a/drivers/mtd_emulated/Kconfig b/drivers/mtd_emulated/Kconfig
+new file mode 100644
+index 00000000..7fdf730f
+--- /dev/null
++++ b/drivers/mtd_emulated/Kconfig
+@@ -0,0 +1,12 @@
++# Copyright (c) 2024
++#
++# This file is subject to the terms and conditions of the GNU Lesser
++# General Public License v2.1. See the file LICENSE in the top level
++# directory for more details.
++#
++
++config MODULE_MTD_EMULATED
++    bool "MTD emulation driver"
++    depends on MODULE_MTD
++    help
++        Driver for emulated MTD devices using RAM
+diff --git a/drivers/mtd_emulated/Makefile b/drivers/mtd_emulated/Makefile
+new file mode 100644
+index 00000000..48422e90
+--- /dev/null
++++ b/drivers/mtd_emulated/Makefile
+@@ -0,0 +1 @@
++include $(RIOTBASE)/Makefile.base
+diff --git a/drivers/mtd_emulated/mtd_emulated.c b/drivers/mtd_emulated/mtd_emulated.c
+new file mode 100644
+index 00000000..085b8eb2
+--- /dev/null
++++ b/drivers/mtd_emulated/mtd_emulated.c
+@@ -0,0 +1,119 @@
++/*
++ * Copyright (C) 2024
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @ingroup     drivers_mtd_emulated
++ * @brief       Driver for emulated MTD devices using RAM
++ *
++ * @{
++ *
++ * @file
++ * @brief       Implementation for the emulated memory driver
++ *
++ * @author
++ */
++
++#include <string.h>
++#include <errno.h>
++#include <assert.h>
++
++#include "mtd_emulated.h"
++#include "container.h"
++
++#define ENABLE_DEBUG 0
++#include "debug.h"
++
++static int _init(mtd_dev_t *dev)
++{
++    mtd_emulated_dev_t *super = container_of(dev, mtd_emulated_dev_t, base);
++    (void)super;
++    
++    assert(dev->pages_per_sector * dev->page_size * dev->sector_count == super->memory_size);
++    
++    /* Initialize memory to 0xff (erased state) */
++    memset(super->memory, 0xff, super->memory_size);
++    
++    return 0;
++}
++
++static int _read(mtd_dev_t *dev, void *buf, uint32_t addr, uint32_t size)
++{
++    mtd_emulated_dev_t *super = container_of(dev, mtd_emulated_dev_t, base);
++    
++    /* Check if the read is within bounds */
++    if (addr + size > super->memory_size) {
++        return -EOVERFLOW;
++    }
++    
++    /* Copy data from RAM buffer */
++    memcpy(buf, super->memory + addr, size);
++    
++    return 0;
++}
++
++static int _write(mtd_dev_t *dev, const void *buf, uint32_t addr, uint32_t size)
++{
++    mtd_emulated_dev_t *super = container_of(dev, mtd_emulated_dev_t, base);
++    
++    /* Check if the write is within bounds */
++    if (addr + size > super->memory_size) {
++        return -EOVERFLOW;
++    }
++    
++    /* Check if write crosses page boundary */
++    if (((addr % dev->page_size) + size) > dev->page_size) {
++        return -EOVERFLOW;
++    }
++    
++    /* Copy data to RAM buffer */
++    memcpy(super->memory + addr, buf, size);
++    
++    return 0;
++}
++
++static int _erase(mtd_dev_t *dev, uint32_t addr, uint32_t size)
++{
++    mtd_emulated_dev_t *super = container_of(dev, mtd_emulated_dev_t, base);
++    uint32_t sector_size = dev->pages_per_sector * dev->page_size;
++    
++    /* Check if address and size are aligned to sector boundaries */
++    if (addr % sector_size != 0) {
++        return -EOVERFLOW;
++    }
++    
++    if (size % sector_size != 0) {
++        return -EOVERFLOW;
++    }
++    
++    /* Check if the erase is within bounds */
++    if (addr + size > super->memory_size) {
++        return -EOVERFLOW;
++    }
++    
++    /* Set memory to 0xff (erased state) */
++    memset(super->memory + addr, 0xff, size);
++    
++    return 0;
++}
++
++static int _power(mtd_dev_t *dev, enum mtd_power_state power)
++{
++    (void)dev;
++    (void)power;
++    
++    /* Power management not supported */
++    return -ENOTSUP;
++}
++
++const mtd_desc_t mtd_emulated_driver = {
++    .init = _init,
++    .read = _read,
++    .write = _write,
++    .erase = _erase,
++    .power = _power,
++};

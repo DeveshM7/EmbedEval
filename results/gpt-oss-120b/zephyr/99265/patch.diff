@@ -1,0 +1,144 @@
+diff --git a/include/zephyr/rtio/rtio.h b/include/zephyr/rtio/rtio.h
+index 74302ccb..a4719927 100644
+--- a/include/zephyr/rtio/rtio.h
++++ b/include/zephyr/rtio/rtio.h
+@@ -1122,32 +1122,55 @@ static inline void rtio_sqe_drop_all(struct rtio *r)
+ 	struct rtio_iodev_sqe *iodev_sqe;
+ 	struct mpsc_node *node = mpsc_pop(&r->sq);
+ 
+-	while (node != NULL) {
+-		iodev_sqe = CONTAINER_OF(node, struct rtio_iodev_sqe, q);
+-		rtio_sqe_pool_free(r->sqe_pool, iodev_sqe);
+-		node = mpsc_pop(&r->sq);
+-	}
+-}
+-
+ /**
+  * @brief Acquire a complete queue event if available
+  */
+-static inline struct rtio_cqe *rtio_cqe_acquire(struct rtio *r)
+-{
+-	struct rtio_cqe *cqe = rtio_cqe_pool_alloc(r->cqe_pool);
+-
+-	if (cqe == NULL) {
+-		return NULL;
+-	}
+-
+-	memset(cqe, 0, sizeof(struct rtio_cqe));
+-
+-	return cqe;
+-}
+ 
+ /**
+- * @brief Produce a complete queue event if available
++ * @brief Acquire an array of submission queue events.
++ *
++ * Attempt to acquire @p n SQEs from the RTIO context @p r. If the pool contains
++ * at least @p n free entries the function stores the SQE pointers in @p sqes,
++ * pushes each onto the submission queue and returns 0.
++ *
++ * If the pool cannot satisfy the request, the function leaves the pool
++ * unchanged (any partially allocated SQEs are returned to the pool) and returns
++ * -ENOMEM. No SQEs are pushed onto the submission queue on failure, giving
++ * the required all-or-nothing semantics.
+  */
++static inline struct rtio_cqe *rtio_cqe_acquire(struct rtio *r) {
++    struct rtio_cqe *cqe = rtio_cqe_pool_alloc(r->cqe_pool);
++    if (cqe == NULL) {
++        return NULL;
++    }
++    memset(cqe, 0, sizeof(struct rtio_cqe));
++    return cqe;
++}
++static inline int rtio_sqe_acquire_array(struct rtio *r, size_t n,
++                                          struct rtio_sqe **sqes) {
++    if (n == 0) {
++        return 0;
++    }
++    struct rtio_iodev_sqe *tmp[n];
++    size_t i;
++    for (i = 0U; i < n; i++) {
++        struct rtio_iodev_sqe *iodev_sqe = rtio_sqe_pool_alloc(r->sqe_pool);
++        if (iodev_sqe == NULL) {
++            while (i) {
++                i--;
++                rtio_sqe_pool_free(r->sqe_pool, tmp[i]);
++            }
++            return -ENOMEM;
++        }
++        tmp[i] = iodev_sqe;
++    }
++    for (i = 0U; i < n; i++) {
++        struct rtio_iodev_sqe *iodev_sqe = tmp[i];
++        mpsc_push(&r->sq, &iodev_sqe->q);
++        sqes[i] = &iodev_sqe->sqe;
++    }
++    return 0;
++}
+ static inline void rtio_cqe_produce(struct rtio *r, struct rtio_cqe *cqe)
+ {
+ 	mpsc_push(&r->cq, &cqe->q);
+@@ -1884,3 +1907,15 @@ static inline void z_impl_rtio_pool_release(struct rtio_pool *pool, struct rtio
+ #include <zephyr/syscalls/rtio.h>
+ 
+ #endif /* ZEPHYR_INCLUDE_RTIO_RTIO_H_ */
++/**
++ * @brief Acquire an array of submission queue events.
++ *
++ * Attempt to acquire @p n SQEs from the RTIO context @p r. If the pool contains
++ * at least @p n free entries the function stores the SQE pointers in @p sqes,
++ * pushes each onto the context's submission queue and returns 0.
++ *
++ * If the pool cannot satisfy the request, the function leaves the pool
++ * unchanged (any partially allocated SQEs are returned to the pool) and returns
++ * -ENOMEM. No SQEs are pushed onto the submission queue on failure, giving
++ * the required all-or-nothing semantics.
++ */
+diff --git a/tmp/rtio_array_func.c b/tmp/rtio_array_func.c
+new file mode 100644
+index 00000000..4aaf5455
+--- /dev/null
++++ b/tmp/rtio_array_func.c
+@@ -0,0 +1,42 @@
++/**
++ * @brief Acquire an array of submission queue events.
++ *
++ * Attempt to acquire @p n SQEs from the RTIO context @p r. If the pool contains
++ * at least @p n free entries the function stores the SQE pointers in @p sqes,
++ * pushes each onto the context's submission queue and returns 0.
++ *
++ * If the pool cannot satisfy the request, the function leaves the pool
++ * unchanged (any partially allocated SQEs are returned to the pool) and returns
++ * -ENOMEM. No SQEs are pushed onto the submission queue on failure, giving
++ * the required all-or-nothing semantics.
++ */
++static inline int rtio_sqe_acquire_array(struct rtio *r, size_t n,
++                                          struct rtio_sqe **sqes)
++{
++    struct rtio_iodev_sqe *tmp[CONFIG_RTIO_MAX_SUBMIT];
++    size_t i;
++
++    if (n > ARRAY_SIZE(tmp)) {
++        return -ENOMEM;
++    }
++
++    for (i = 0U; i < n; i++) {
++        struct rtio_iodev_sqe *iodev_sqe = rtio_sqe_pool_alloc(r->sqe_pool);
++        if (iodev_sqe == NULL) {
++            while (i) {
++                i--;
++                rtio_sqe_pool_free(r->sqe_pool, tmp[i]);
++            }
++            return -ENOMEM;
++        }
++        tmp[i] = iodev_sqe;
++    }
++
++    for (i = 0U; i < n; i++) {
++        struct rtio_iodev_sqe *iodev_sqe = tmp[i];
++        mpsc_push(&r->sq, &iodev_sqe->q);
++        sqes[i] = &iodev_sqe->sqe;
++    }
++
++    return 0;
++}

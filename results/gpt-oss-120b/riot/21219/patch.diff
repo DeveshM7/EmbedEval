@@ -1,0 +1,106 @@
+diff --git a/sys/include/event/deferred_callback.h b/sys/include/event/deferred_callback.h
+new file mode 100644
+index 00000000..942c199a
+--- /dev/null
++++ b/sys/include/event/deferred_callback.h
+@@ -0,0 +1,100 @@
++/*
++ * Copyright (C) 2024
++ *
++ * This file is subject to the terms and conditions of the GNU Lesser
++ * General Public License v2.1. See the file LICENSE in the top level
++ * directory for more details.
++ */
++
++/**
++ * @defgroup    sys_event_deferred_callback Event Deferred Callback
++ * @ingroup     sys_event
++ * @brief       Convenience API for a one-shot callback that is executed after
++ *              a configurable timeout.
++ *
++ * The implementation builds on @ref event_timeout and @ref event_callback.
++ * It provides a single function `event_deferred_callback_post()` that
++ * initializes an internal timer, registers the callback and schedules the
++ * timeout.  The struct `event_deferred_callback_t` is a simple composition of
++ * the two underlying objects and can be placed on the stack or as a member of
++ * a larger container.
++ *
++ * Example usage:
++ * ~~~~~~~~~~~~~~~~~~~~~~~~ {.c}
++ * static void _event_cb(void *arg) {
++ *     puts(arg);
++ * }
++ *
++ * int main(void)
++ * {
++ *     event_deferred_callback_t d;
++ *     event_deferred_callback_post(&d, EVENT_PRIO_MEDIUM, ZTIMER_MSEC,
++ *                                  750, _event_cb, "event D");
++ *     return 0;
++ * }
++ * ~~~~~~~~~~~~~~~~~~~~~~~~
++ *
++ * The function does **not** block – the callback will be invoked by the event
++ * thread after the specified timeout.
++ *
++ * @{ */
++
++#ifndef EVENT_DEFERRED_CALLBACK_H
++#define EVENT_DEFERRED_CALLBACK_H
++
++#include <assert.h>
++#include "event/callback.h"
++#include "event/timeout.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Deferred callback event structure.
++ *
++ * It combines a @ref event_timeout_t that triggers after a timeout and a
++ * @ref event_callback_t that stores the user callback and its argument.
++ */
++typedef struct {
++    event_timeout_t timeout;   /**< timer that will post the callback */
++    event_callback_t cb;       /**< callback event payload */
++} event_deferred_callback_t;
++
++/**
++ * @brief Schedule a one-shot callback after a given timeout.
++ *
++ * The function configures @p d with the supplied @p callback and @p arg, sets
++ * up a timer on @p clock and posts the callback to @p queue once the timer
++ * expires.  The timer granularity depends on the provided clock (e.g.
++ * @c ZTIMER_MSEC for milliseconds).
++ *
++ * @param d         Pointer to an @ref event_deferred_callback_t object. The
++ *                  object must stay valid until the callback has been
++ *                  processed.
++ * @param queue     Event queue (e.g. @c EVENT_PRIO_MEDIUM) the callback will be
++ *                  posted to.
++ * @param clock     Ztimer clock backend to use for the timeout.
++ * @param timeout   Timeout value in the units of @p clock.
++ * @param callback  Function to call when the timer expires.
++ * @param arg       Argument passed to @p callback.
++ */
++static inline void event_deferred_callback_post(event_deferred_callback_t *d,
++    event_queue_t *queue,
++    ztimer_clock_t *clock,
++    uint32_t timeout,
++    void (*callback)(void *),
++    void *arg)
++{
++    event_callback_init(&d->cb, callback, arg);
++    d->cb.super.handler = _event_callback_handler;
++    event_timeout_ztimer_init(&d->timeout, clock, queue, &d->cb.super);
++    event_timeout_set(&d->timeout, timeout);
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* EVENT_DEFERRED_CALLBACK_H */
++/** @} */

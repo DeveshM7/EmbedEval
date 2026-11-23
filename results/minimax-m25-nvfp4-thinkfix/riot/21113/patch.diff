@@ -1,0 +1,101 @@
+diff --git a/sys/include/ztimer.h b/sys/include/ztimer.h
+index 52a8d10d..fcad7b7d 100644
+--- a/sys/include/ztimer.h
++++ b/sys/include/ztimer.h
+@@ -267,6 +267,7 @@
+ #include "sched.h"
+ #include "msg.h"
+ #include "mutex.h"
++#include "mbox.h"
+ #include "rmutex.h"
+ 
+ #ifdef __cplusplus
+@@ -527,6 +528,24 @@ void ztimer_set_msg(ztimer_clock_t *clock, ztimer_t *timer, uint32_t offset,
+ int ztimer_msg_receive_timeout(ztimer_clock_t *clock, msg_t *msg,
+                                uint32_t timeout);
+ 
++
++/**
++ * @brief   Get a message from a mailbox with timeout
++ *
++ * This function tries to get a message from @p mbox. If a message is already
++ * available, it returns immediately. Otherwise, it blocks for up to @p timeout
++ * clock ticks.
++ *
++ * @param[in]   clock       ztimer clock to operate on
++ * @param[in]   mbox        pointer to the mailbox
++ * @param[out]  msg         pointer to store the retrieved message
++ * @param[in]   timeout     timeout in clock ticks
++ *
++ * @return  0 on success (message received)
++ * @return -ETIMEDOUT if no message was received within @p timeout
++ */
++int ztimer_mbox_get_timeout(ztimer_clock_t *clock, mbox_t *mbox, msg_t *msg,
++                            uint32_t timeout);
+ /* created with dist/tools/define2u16.py */
+ #define MSG_ZTIMER 0xc83e   /**< msg type used by ztimer_msg_receive_timeout */
+ 
+diff --git a/sys/ztimer/util.c b/sys/ztimer/util.c
+index 277f4854..dc26b0b7 100644
+--- a/sys/ztimer/util.c
++++ b/sys/ztimer/util.c
+@@ -128,6 +128,59 @@ int ztimer_msg_receive_timeout(ztimer_clock_t *clock, msg_t *msg,
+ 
+ #endif /* MODULE_CORE_MSG */
+ 
++#ifdef MODULE_CORE_MBOX
++static void _mbox_timeout_callback(void *arg)
++{
++    /**
++     * arg points to a structure containing:
++     * - mbox_t *mbox
++     * - msg_t *msg_ptr (pointer to caller's msg variable)
++     */
++    struct {
++        mbox_t *mbox;
++        msg_t *msg_ptr;
++    } *params = arg;
++
++    msg_t msg = { .type = MSG_ZTIMER, .content.ptr = params->msg_ptr };
++    mbox_put(params->mbox, &msg);
++}
++
++int ztimer_mbox_get_timeout(ztimer_clock_t *clock, mbox_t *mbox, msg_t *msg,
++                            uint32_t timeout)
++{
++    /* Try non-blocking get first */
++    if (mbox_try_get(mbox, msg) == 1) {
++        return 0;
++    }
++
++    /* Set up timer to send timeout message */
++    struct {
++        mbox_t *mbox;
++        msg_t *msg_ptr;
++    } params = { .mbox = mbox, .msg_ptr = msg };
++
++    ztimer_t timer = { .callback = _mbox_timeout_callback, .arg = &params };
++    ztimer_set(clock, &timer, timeout);
++
++    /* Wait for a message */
++    msg_t received_msg;
++    mbox_get(mbox, &received_msg);
++
++    /* Remove the timer if still active */
++    ztimer_remove(clock, &timer);
++
++    /* Check if we got the timeout message */
++    if (received_msg.type == MSG_ZTIMER && received_msg.content.ptr == msg) {
++        return -ETIMEDOUT;
++    }
++
++    /* We got a real message, copy it to the caller's msg */
++    *msg = received_msg;
++    return 0;
++}
++#endif /* MODULE_CORE_MBOX */
++
++
+ #ifdef MODULE_CORE_THREAD_FLAGS
+ static void _set_timeout_flag_callback(void *arg)
+ {

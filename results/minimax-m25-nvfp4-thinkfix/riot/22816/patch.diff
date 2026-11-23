@@ -1,0 +1,113 @@
+diff --git a/sys/include/net/nanocoap.h b/sys/include/net/nanocoap.h
+index 1d2542f3..d883d7a0 100644
+--- a/sys/include/net/nanocoap.h
++++ b/sys/include/net/nanocoap.h
+@@ -437,6 +437,16 @@ typedef struct {
+                                           1 for more blocks coming          */
+ } coap_block1_t;
+ 
++
++/**
++ * @brief   Block2 helper struct
++ */
++typedef struct {
++    uint32_t blknum;                /**< block number                       */
++    uint8_t szx;                    /**< szx value                          */
++    size_t offset;                  /**< offset of received data            */
++    bool more;                      /**< true if more blocks follow         */
++} coap_block2_t;
+ /**
+  * @brief Blockwise transfer helper struct
+  */
+@@ -1281,16 +1291,21 @@ static inline int coap_get_block1(coap_pkt_t *pkt, coap_block1_t *block)
+ /**
+  * @brief    Block2 option getter
+  *
++ * This function gets a CoAP packet's block2 option and parses it into a helper
++ * structure.
++ *
++ * If no block2 option is present in @p pkt, the values in @p block will be
++ * initialized with defaults: blknum=0, szx=CONFIG_NANOCOAP_BLOCKSIZE_DEFAULT,
++ * offset=0, more=false.
++ *
+  * @param[in]   pkt     pkt to work on
+- * @param[out]  block   ptr to preallocated coap_block1_t structure
++ * @param[out]  block   ptr to preallocated coap_block2_t structure
+  *
+- * @returns     0 if block2 option not present
+- * @returns     1 if structure has been filled
++ * @returns     0 if block2 option not present, block is filled with defaults
++ * @returns     1 if block2 option is present and valid, block is filled
++ * @returns     -EBADMSG if block2 option is malformed or block size is unsupported
+  */
+-static inline int coap_get_block2(coap_pkt_t *pkt, coap_block1_t *block)
+-{
+-    return coap_get_block(pkt, block, COAP_OPT_BLOCK2);
+-}
++int coap_get_block2(coap_pkt_t *pkt, coap_block2_t *block);
+ 
+ /**
+  * @brief    Generic block option getter
+diff --git a/sys/net/application_layer/nanocoap/nanocoap.c b/sys/net/application_layer/nanocoap/nanocoap.c
+index edb27938..f01c297d 100644
+--- a/sys/net/application_layer/nanocoap/nanocoap.c
++++ b/sys/net/application_layer/nanocoap/nanocoap.c
+@@ -1160,6 +1160,58 @@ int coap_get_block(coap_pkt_t *pkt, coap_block1_t *block, uint16_t option)
+     return block->more >= 0;
+ }
+ 
++int coap_get_block2(coap_pkt_t *pkt, coap_block2_t *block)
++{
++    uint8_t *optpos = coap_find_option(pkt, COAP_OPT_BLOCK2);
++    if (!optpos) {
++        /* No block2 option present, return defaults */
++        block->blknum = 0;
++        block->szx = CONFIG_NANOCOAP_BLOCKSIZE_DEFAULT;
++        block->offset = 0;
++        block->more = false;
++        return 0;
++    }
++
++    int option_len;
++    uint16_t delta;
++
++    uint8_t *data_start = _parse_option(pkt, optpos, &delta, &option_len);
++    if (!data_start) {
++        DEBUG("nanocoap: invalid block2 option\n");
++        return -EBADMSG;
++    }
++
++    /* option is 0 to 3 bytes in length, see
++     * https://www.rfc-editor.org/info/rfc7959/#section-2.1 */
++    if (option_len > 3) {
++        DEBUG("nanocoap: invalid block2 option length\n");
++        return -EBADMSG;
++    }
++
++    uint32_t blkopt = _decode_uint(data_start, option_len);
++
++    DEBUG("nanocoap: block2 opt len: %i\n", option_len);
++    DEBUG("nanocoap: block2 opt: 0x%08x\n", (unsigned)blkopt);
++
++
++    uint32_t blknum = blkopt >> COAP_BLOCKWISE_NUM_OFF;
++    uint8_t szx = blkopt & COAP_BLOCKWISE_SZX_MASK;
++
++    /* Check for unsupported block size */
++    if (szx > CONFIG_NANOCOAP_BLOCK_SIZE_MAX) {
++        DEBUG("nanocoap: unsupported block size\n");
++        return -EBADMSG;
++    }
++
++    block->blknum = blknum;
++    block->szx = szx;
++    block->offset = blknum << (szx + 4);
++    block->more = (blkopt & 0x8) != 0;
++
++    return 1;
++}
++
++
+ int coap_put_block1_ok(coap_builder_t *state, coap_block1_t *block1)
+ {
+     if (block1->more >= 1) {
