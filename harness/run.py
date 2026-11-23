@@ -417,8 +417,9 @@ def build_task(meta: dict) -> str:
 
 def make_environment(meta: dict):
     cfg = projects.config_for(meta)
-    if cfg.get("runtime") == "apptainer":
-        # Zephyr: an Apptainer image built by scripts/build_instances.py.
+    # Zephyr and RIOT (the project's setting) and NuttX (its instances' metadata):
+    # an Apptainer image built by scripts/build_instances.py.
+    if cfg.get("runtime") == "apptainer" or meta.get("runtime") == "apptainer":
         sys.path.insert(0, str(paths.REPO_ROOT / "scripts"))
         import apptainer_util
         from apptainer_env import ApptainerEnvironment

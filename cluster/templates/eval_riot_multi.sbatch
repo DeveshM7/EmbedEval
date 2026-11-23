@@ -73,9 +73,16 @@ print(json.load(open('triage/models.json'))[run.LOCAL_MODELS[paths.resolve_model
 mapfile -t HOSTS < <(scontrol show hostnames "$LS")
 NG=$(( ${#HOSTS[@]} / NN ))
 [ "$NG" -gt 0 ] || { echo "[$(date +%T)] ${#HOSTS[@]} GB10 nodes, $NN per server: no server"; exit 1; }
-GROUPS_LIST=(); for (( g = 0; g < NG; g++ )); do GROUPS_LIST+=(sg$g); done   # the group script names them <prefix>g<G>
+# EVAL_LOCAL_GROUPS (0): the first that many groups run agents on their own GB10 nodes, on
+# EVAL_LOCAL_INSTANCES (NuttX's ARM64 instances, as Zephyr's are run), instead of serving
+# the cpu nodes' agents; the others serve the cpu nodes' agents, on EVAL_INSTANCES.
+NL=${EVAL_LOCAL_GROUPS:-0}
+[ "$NL" -lt "$NG" ] || { echo "[$(date +%T)] EVAL_LOCAL_GROUPS=$NL leaves no server for the cpu nodes"; exit 1; }
+[ "$NL" = 0 ] || [ -f "${EVAL_LOCAL_INSTANCES:-}" ] || { echo "[$(date +%T)] EVAL_LOCAL_GROUPS needs EVAL_LOCAL_INSTANCES"; exit 1; }
+GROUPS_LIST=(); for (( g = NL; g < NG; g++ )); do GROUPS_LIST+=(sg$g); done   # the group script names them <prefix>g<G>
 echo "[$(date +%T)] job for $MODEL: $NG servers of $NN node(s) on ${SLURM_JOB_PARTITION_HET_GROUP_0:-?} ($LS),"\
      "agents on $NC cpu nodes (${SLURM_JOB_NODELIST_HET_GROUP_1:-?})"
+[ "$NL" = 0 ] || echo "[$(date +%T)] groups 0-$(( NL - 1 )) run agents on their own nodes ($EVAL_LOCAL_INSTANCES)"
 echo "[$(date +%T)] results in $EVAL/$PROJECT, logs in $EVAL_LOGS"
 
 # The servers: one srun step per group, so a failed node aborts its own group only.
@@ -83,7 +90,8 @@ T=$(( END + 120 - $(date +%s) ))
 STEPS=()
 for (( g = 0; g < NG; g++ )); do
     W=$(IFS=,; echo "${HOSTS[*]:$(( g * NN )):$NN}")
-    EVAL_NODELIST="$LS" EVAL_GROUP_PREFIX=s EVAL_NODES_PER_SERVER=$NN EVAL_SERVE_ONLY=1 \
+    if [ "$g" -lt "$NL" ]; then local_=(EVAL_SERVE_ONLY=0 "EVAL_INSTANCES=$EVAL_LOCAL_INSTANCES"); else local_=(EVAL_SERVE_ONLY=1); fi
+    env "${local_[@]}" EVAL_NODELIST="$LS" EVAL_GROUP_PREFIX=s EVAL_NODES_PER_SERVER=$NN \
     EVAL_GPU_MEMORY=${EVAL_GPU_MEMORY:-0.80} EVAL_AGENTS=${EVAL_AGENTS:-3} \
     timeout -s TERM -k 1m $T srun --het-group=0 -N "$NN" -n "$NN" -w "$W" --ntasks-per-node=1 \
         --export=ALL --kill-on-bad-exit=0 --cpu-bind=none --gres=gpu:1 \
@@ -103,7 +111,9 @@ echo "[$(date +%T)] job ended"
 LEFT=$(.venv/bin/python -c "
 import sys; sys.path.insert(0, 'harness'); import paths
 from pathlib import Path
-f = sys.argv[2]
+f, local = sys.argv[2], sys.argv[4]
 ids = Path(f).read_text().split() if f else paths.discover_instances(sys.argv[3])
-print(sum(not paths.grade_path(i, sys.argv[1]).exists() for i in ids))" "$MODEL" "${EVAL_INSTANCES:-}" "$PROJECT")
+ids += Path(local).read_text().split() if local else []
+print(sum(not paths.grade_path(i, sys.argv[1]).exists() for i in ids))" "$MODEL" "${EVAL_INSTANCES:-}" "$PROJECT" \
+    "$([ "$NL" = 0 ] || echo "${EVAL_LOCAL_INSTANCES:-}")")
 echo "[$(date +%T)] $LEFT PRs not graded yet (no resubmission: start a follow-up job if needed)"
