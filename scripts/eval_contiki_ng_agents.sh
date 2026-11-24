@@ -16,6 +16,8 @@
 # before the run if it is not there (harness/eval_images.py), from the CI image (pulled once into <shared>/images; older eras too).
 # Settings, from the environment: EVAL_AGENTS (4), EVAL_MARGIN (60), EVAL_TIME_LIMIT (120), EVAL_INSTANCES,
 # EVAL_KEEP_IMAGES, EVAL_SERVER_WAIT_MIN (40: this side waits 10 minutes longer), EVAL_LOGS, EVAL_SERVERS.
+# A watchdog per server stops that server's workers (they are saved as cut off, for a later job) when it
+# has not answered for 3 minutes, or generated nothing for EVAL_HANG_MIN (10) minutes with requests running.
 set -u
 MODEL=${1:?usage: eval_contiki_ng_agents.sh <model> <stop-at> <servers>}
 STOP_AT=${2:?usage: eval_contiki_ng_agents.sh <model> <stop-at> <servers>}
@@ -83,9 +85,10 @@ log "checks passed"
 EXTRA=()
 [ -n "${EVAL_INSTANCES:-}" ] && EXTRA+=(--instances "$EVAL_INSTANCES")
 [ "${EVAL_KEEP_IMAGES:-0}" = 1 ] || EXTRA+=(--delete-images)
-PIDS=()
+PIDS=() WATCH=()
 SBX=${TMPDIR:-/tmp}/embedeval-sandboxes-$USER/$ME     # the unpacked sandboxes of this node's workers (32-bit instances only)
 for k in $MINE; do
+    SPIDS=()
     for a in $(seq 1 "$AGENTS"); do
         mkdir -p "$SBX/s$k-w$a"
         EMBEDEVAL_LOCAL_API_BASE=$(cat "$S/node$k.url") EMBEDEVAL_LOCAL_API_KEY=$KEY \
@@ -93,13 +96,31 @@ for k in $MINE; do
             "$PY" harness/eval_worker.py --project contiki-ng --arch x86_64 --model "$MODEL" \
             --name "$ME-s$k-w$a" --stop-at "$STOP_AT" --margin "${EVAL_MARGIN:-60}" --time-limit "${EVAL_TIME_LIMIT:-120}" "${EXTRA[@]}" \
             > "$LOGS/cpu$I-s$k-w$a.log" 2>&1 &
-        PIDS+=($!)
+        PIDS+=($!) SPIDS+=($!)
         sleep 10        # stagger the first pulls and container starts
     done
+    # the watchdog (as in eval_riot_remote.sh): dead for 3 min, or hung for EVAL_HANG_MIN
+    url=$(cat "$S/node$k.url")
+    (   miss=0; still=0; prev=""
+        while sleep 60; do
+            if curl -sf -m 30 -H "Authorization: Bearer $KEY" "$url/models" >/dev/null; then miss=0; else miss=$(( miss + 1 )); fi
+            if [ $miss -ge 3 ]; then log "server $k: server not answering for 3 min: stopping its agents"
+                kill -TERM "${SPIDS[@]}" 2>/dev/null; exit 0; fi
+            m=$(curl -sf -m 30 -H "Authorization: Bearer $KEY" "${url%/v1}/metrics" 2>/dev/null)
+            tok=$(awk '/^vllm:generation_tokens_total/ {s+=$NF} END {printf "%.0f", s}' <<<"$m")
+            run=$(awk '/^vllm:num_requests_running/ {s+=$NF} END {printf "%.0f", s}' <<<"$m")
+            if [ -n "$m" ] && [ "${run:-0}" -gt 0 ] && [ "$tok" = "$prev" ]; then still=$(( still + 1 )); else still=0; fi
+            prev=$tok
+            if [ $still -ge "${EVAL_HANG_MIN:-10}" ]; then
+                log "server $k: server generated nothing for ${EVAL_HANG_MIN:-10} min with requests running: stopping its agents"
+                kill -TERM "${SPIDS[@]}" 2>/dev/null; exit 0; fi
+        done ) &
+    WATCH+=($!)
 done
 # On the job's end, pass SIGTERM on: each worker saves its run and records it
 # as cut off, for the next job to retry.
-trap 'kill -TERM "${PIDS[@]}" 2>/dev/null; wait' TERM
+trap 'kill "${WATCH[@]}" 2>/dev/null; kill -TERM "${PIDS[@]}" 2>/dev/null; wait' TERM
 wait "${PIDS[@]}"
+kill "${WATCH[@]}" 2>/dev/null
 chmod -R u+rwX "$SBX" 2>/dev/null; rm -rf "$SBX"     # none is left behind, even by a killed run
 log "workers done: $(cat "$LOGS"/cpu$I-s*-w*.log | grep -c ": pass\|: fail\|: not_run") PRs finished on this node"
