@@ -955,7 +955,7 @@ RIOT images are pulled from the registry instead.
 Each of these instances is built for one architecture and is taken only by a
 job of that architecture; the others stay "to do" in the table until a job of
 theirs has run (`python harness/eval_set.py summary --project nuttx --model
-qwen38-nvfp4` lists the counts). Mynewt (61) and Contiki-NG (38) are
+qwen38-nvfp4` lists the counts). Mynewt (61) and Contiki-NG (37) are
 all x86_64. NuttX has 18 aarch64 and 11 x86_64 instances, so **a NuttX
 evaluation is two submissions**, `eval_nuttx.sbatch` for the aarch64 ones and
 `eval_nuttx_x86.sbatch` for the x86_64 ones, with the same `EVAL_MODEL`. They

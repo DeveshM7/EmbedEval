@@ -32,7 +32,7 @@ and the tests actually run.
 
 **Instances:** 203 Zephyr and 190 RIOT (`apptainer/instances/`), 29 NuttX (in
 `apptainer/instances/nuttx/`: 18 ARM64, 11 x86_64 hosts; and 6 Docker ones in
-`docker/instances/`), 61 Apache Mynewt (`apptainer/instances/mynewt/`), and 38
+`docker/instances/`), 61 Apache Mynewt (`apptainer/instances/mynewt/`), and 37
 Contiki-NG (`apptainer/instances/contiki-ng/`).
 
 ---
@@ -390,7 +390,7 @@ python harness/evaluate_patches.py --instance contiki-ng__contiki-ng-3246 --mode
 `EMBEDEVAL_LOCAL_API_BASE`. On Scholar, triage and validation go through
 `cluster/`
 ([docs/running_on_scholar.md, section 12](docs/running_on_scholar.md#12-contiki-ng-runs)),
-and evaluating a model on the 38 instances is one `sbatch` of
+and evaluating a model on the 37 instances is one `sbatch` of
 `cluster/templates/eval_contiki_ng.sbatch`
 ([section 13](docs/running_on_scholar.md#13-evaluating-on-the-cluster)).
 The [Contiki-NG triage document](docs/contiki_ng_triage.md) is the triage
