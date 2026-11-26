@@ -864,12 +864,39 @@ for the two MiniMax models, 3 for GLM 4.6 and gpt-oss-120b, with 4 `cpu` cores
 per agent (one GLM server: `-N 3 : -N 1 -c 12`). A 3-node server takes 25 to 40 minutes
 to load; the agents wait 10 minutes longer than `EVAL_SERVER_WAIT_MIN`.
 
+The Contiki-NG runner can also serve on `spark-interactive` (76 nodes, but a
+job gets at most 60 GB and 20 cores of each), where a model needs about twice
+the nodes at a lower GPU memory share. `EVAL_NODES_PER_SERVER` sets the nodes
+per server (default: the profile's `nodes`; the Spark `-N` must be a multiple
+of it, as above) and `EVAL_GPU_MEMORY` the share, from main's layouts
+([model_wiring_branch_owners.md](model_wiring_branch_owners.md), section 4):
+MiniMax M2.5 6 nodes at 0.42, MiniMax M2 8 at 0.38, GLM 4.6 10 at 0.38;
+gpt-oss-120b stays on `spark-batch`. Give the Spark part `-p spark-interactive
+--mem-per-cpu=6000M --cpus-per-task=10`, not `--mem`: next to the template's
+own `--mem-per-cpu`, sbatch refuses it ("--mem, --mem-per-cpu, and
+--mem-per-gpu are mutually exclusive"). A resubmission keeps the Spark part's
+`-p`, `-x`, `-t`, cores and memory per core, and `EVAL_NODES_PER_SERVER`.
+Nodes scholar-k054 and scholar-k055 froze in main's runs: exclude them with
+`-x`. Two servers of each model, with the agents per server above:
+
+```bash
+L=$SCRATCH/embedeval/eval/logs/%x-%j.out
+I=(-p spark-interactive --mem-per-cpu=6000M --cpus-per-task=10 -x "scholar-k[054,055]")
+E=NONE,EVAL_MODEL=minimax-m25-nvfp4-thinkfix,EVAL_AGENTS=2,EVAL_NODES_PER_SERVER=6,EVAL_GPU_MEMORY=0.42
+sbatch "${I[@]}" -N 12 --export=$E : -N 1 -c 16 --export=$E -o $L cluster/templates/eval_contiki_ng.sbatch
+E=NONE,EVAL_MODEL=minimax-m2,EVAL_AGENTS=2,EVAL_NODES_PER_SERVER=8,EVAL_GPU_MEMORY=0.38
+sbatch "${I[@]}" -N 16 --export=$E : -N 1 -c 16 --export=$E -o $L cluster/templates/eval_contiki_ng.sbatch
+E=NONE,EVAL_MODEL=glm-46-nvfp4,EVAL_AGENTS=3,EVAL_NODES_PER_SERVER=10,EVAL_GPU_MEMORY=0.38
+sbatch "${I[@]}" -N 20 --export=$E : -N 1 -c 24 --export=$E -o $L cluster/templates/eval_contiki_ng.sbatch
+```
+
 Settings go in `--export` (repeat them after `:` for a heterogeneous job):
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `EVAL_MODEL` | required | a model `harness/paths.py` knows, served from its profile in `triage/models.json` |
 | `EVAL_AGENTS` | 4 | agents per server |
+| `EVAL_NODES_PER_SERVER` | the profile's `nodes` | Spark nodes per server (Contiki-NG) |
 | `EVAL_GPU_MEMORY` | 0.80 (heterogeneous runners), 0.70 (`eval_zephyr.sbatch`, `eval_nuttx.sbatch`: the node also builds) | share of GPU memory for the server |
 | `EVAL_MAX_MODEL_LEN` | the profile's `max_model_len`, else 262144 (NuttX: 262144) | the server's context |
 | `EVAL_SERVER_WAIT_MIN` | 40 | minutes a model server may take to start (Mynewt, Contiki-NG) |

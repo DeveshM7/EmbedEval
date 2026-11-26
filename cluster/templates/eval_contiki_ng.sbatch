@@ -23,9 +23,10 @@
 # this is one heterogeneous job, which counts as one job against the account's
 # limit:
 #
-#   component 0, spark-batch: the model servers, each on the profile's `nodes`
-#                Spark nodes (triage/models.json; 1 if absent), on the cluster
-#                network behind an API key made for this job (scripts/eval_contiki_ng_server.sh)
+#   component 0, spark-batch (or spark-interactive, below): the model servers, each on
+#                EVAL_NODES_PER_SERVER Spark nodes (default: the profile's `nodes`,
+#                triage/models.json; 1 if absent), on the cluster network behind an API
+#                key made for this job (scripts/eval_contiki_ng_server.sh)
 #   component 1, cpu:         the agents and their containers, EVAL_AGENTS per
 #                server, 4 cores each (scripts/eval_contiki_ng_agents.sh)
 #
@@ -38,7 +39,7 @@
 #     sbatch --export=NONE,EVAL_MODEL=... -N 3 : -N 1 -c 48 --export=NONE,EVAL_MODEL=... \
 #         -o ... cluster/templates/eval_contiki_ng.sbatch
 #
-# -N of the Spark part is the profile's nodes x servers (else the job stops at
+# -N of the Spark part is servers x EVAL_NODES_PER_SERVER (else the job stops at
 # once and is not resubmitted). The four evaluation models, with the agents per
 # server (EVAL_AGENTS, also the server's sequences) that suit them: MiniMax M2.5
 # (minimax-m25-nvfp4, 2 nodes) 2, MiniMax M2 (minimax-m2, 3 nodes) 2, GLM 4.6
@@ -50,16 +51,31 @@
 #     sbatch --export=NONE,EVAL_MODEL=glm-46-nvfp4,EVAL_AGENTS=3 -N 3 : -N 1 -c 12 \
 #         --export=NONE,EVAL_MODEL=glm-46-nvfp4,EVAL_AGENTS=3 -o ... cluster/templates/eval_contiki_ng.sbatch
 #
+# On spark-interactive (76 nodes, but a job gets at most 60 GB and 20 cores of each) a model
+# needs about twice the nodes, at a lower GPU memory share. Give the Spark part
+# -p spark-interactive --mem-per-cpu=6000M --cpus-per-task=10 (as main's eval_riot_multi.sbatch;
+# not --mem, which sbatch refuses next to this file's --mem-per-cpu), and EVAL_NODES_PER_SERVER
+# and EVAL_GPU_MEMORY from main's layouts: MiniMax M2.5 6 nodes at 0.42, MiniMax M2 8 at 0.38,
+# GLM 4.6 10 at 0.38 (gpt-oss-120b: spark-batch only). scholar-k054 and scholar-k055 froze in
+# main's runs: exclude them with -x. Two M2.5 servers:
+#
+#     sbatch -p spark-interactive --mem-per-cpu=6000M --cpus-per-task=10 -N 12 -x "scholar-k[054,055]" \
+#         --export=NONE,EVAL_MODEL=minimax-m25-nvfp4-thinkfix,EVAL_AGENTS=2,EVAL_NODES_PER_SERVER=6,EVAL_GPU_MEMORY=0.42 \
+#         : -N 1 -c 16 --export=NONE,EVAL_MODEL=minimax-m25-nvfp4-thinkfix,EVAL_AGENTS=2,EVAL_NODES_PER_SERVER=6,EVAL_GPU_MEMORY=0.42 \
+#         -o ... cluster/templates/eval_contiki_ng.sbatch
+#
 # Give each cpu node 4 x EVAL_AGENTS x (servers it takes) cores; server k goes
 # to cpu node k mod (cpu nodes). Settings, in --export (repeat them after ":"):
-# EVAL_MODEL, EVAL_AGENTS (4), EVAL_GPU_MEMORY (0.80: the Spark node runs only
-# the model), EVAL_MAX_MODEL_LEN (the profile's), EVAL_SERVER_WAIT_MIN (minutes
+# EVAL_MODEL, EVAL_AGENTS (4), EVAL_NODES_PER_SERVER (the profile's nodes),
+# EVAL_GPU_MEMORY (0.80: the Spark node runs only the model; ~0.38-0.42 on
+# spark-interactive), EVAL_MAX_MODEL_LEN (the profile's), EVAL_SERVER_WAIT_MIN (minutes
 # a server may take to start, 40), EVAL_INSTANCES (a file of ids, for a trial),
 # EVAL_KEEP_IMAGES, EVAL_MAX_JOBS (6), EVAL_MARGIN (minutes before the end after
 # which no new PR is taken, 60), EVAL_TIME_LIMIT (minutes per run, 120),
 # EMBEDEVAL_EVAL_DIR (results elsewhere, for a test), EMBEDEVAL_CONTIKI_NG_IMAGE
 # (the current CI image, if not under <shared>/images).
-# A shorter job: -t on both components, also kept on resubmission; a -p or -x for the Spark nodes too.
+# A shorter job: -t on both components, also kept on resubmission; a -p or -x for the Spark nodes too,
+# and their cores and memory per core.
 #
 # Before any agent starts, the cpu side sends each server one request, checks
 # that a request without the key is refused and that an agent container cannot
@@ -93,10 +109,10 @@ END=$(( $(date -d "$(squeue -h -j "$SLURM_JOB_ID" -o %e | head -1)" +%s) - 300 )
 [ "$END" -gt "$(date +%s)" ] || END=$(( $(date +%s) + 4 * 3600 - 300 ))
 N0=${SLURM_JOB_NUM_NODES_HET_GROUP_0:-1} N1=${SLURM_JOB_NUM_NODES_HET_GROUP_1:-1}
 C1=${SLURM_CPUS_PER_TASK_HET_GROUP_1:-16}
-# Spark nodes per server: the profile's nodes (triage/models.json; 1 if absent).
-K=$(.venv/bin/python -c "
+# Spark nodes per server: EVAL_NODES_PER_SERVER, else the profile's nodes (triage/models.json; 1 if absent).
+K=${EVAL_NODES_PER_SERVER:-$(.venv/bin/python -c "
 import json, sys; sys.path.insert(0, 'harness'); import paths, run
-print(json.load(open('triage/models.json'))[run.LOCAL_MODELS[paths.resolve_model(sys.argv[1])]].get('nodes', 1))" "$MODEL")
+print(json.load(open('triage/models.json'))[run.LOCAL_MODELS[paths.resolve_model(sys.argv[1])]].get('nodes', 1))" "$MODEL")}
 if ! [[ "$K" =~ ^[1-9][0-9]*$ ]] || [ $((N0 % K)) != 0 ]; then
     echo "$N0 Spark nodes do not make whole servers of $MODEL (${K:-no profile} nodes each)" > "$EVAL_LOGS/checks-failed"
     echo "[$(date +%T)] not started, not resubmitted: $(cat "$EVAL_LOGS/checks-failed")"
@@ -133,10 +149,14 @@ echo "[$(date +%T)] $LEFT PRs not graded yet ($(.venv/bin/python harness/eval_se
 if [ -f "$EVAL_LOGS/checks-failed" ]; then
     echo "[$(date +%T)] not resubmitted: $(cat "$EVAL_LOGS/checks-failed")"
 elif [ "$LEFT" -gt 0 ] && [ "$ATTEMPT" -lt "${EVAL_MAX_JOBS:-6}" ]; then
-    keep=$(env | grep -E "^(EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|SERVER_WAIT_MIN|INSTANCES|KEEP_IMAGES|MAX_JOBS|MARGIN|TIME_LIMIT)|EMBEDEVAL_EVAL_DIR|EMBEDEVAL_CONTIKI_NG_IMAGE)=" | paste -sd, -)
+    keep=$(env | grep -E "^(EVAL_(AGENTS|GPU_MEMORY|MAX_MODEL_LEN|SERVER_WAIT_MIN|INSTANCES|KEEP_IMAGES|MAX_JOBS|MARGIN|TIME_LIMIT|NODES_PER_SERVER)|EMBEDEVAL_EVAL_DIR|EMBEDEVAL_CONTIKI_NG_IMAGE)=" | paste -sd, -)
     exp=NONE,EVAL_MODEL="$MODEL",EVAL_ATTEMPT=$((ATTEMPT + 1))${keep:+,$keep}
     XN=$(squeue -h -j "$SLURM_JOB_ID" -o "%i %x" | awk '$1 ~ /\+0$/ {print $2}')
+    # The Spark part's cores and memory per core as this job had them (on spark-interactive 10 x 6000M),
+    # not this file's 20 x 6025M, which spark-interactive refuses. Slurm sets both per component (its
+    # memory is per core: sbatch refuses a --mem next to this file's --mem-per-cpu).
+    C0=${SLURM_CPUS_PER_TASK_HET_GROUP_0:-} M0=${SLURM_MEM_PER_CPU_HET_GROUP_0:-}
     env $(env | grep -E "^(SLURM|SBATCH)_" | cut -d= -f1 | sed "s/^/-u /") sbatch \
-        -N "$N0" -p "${SLURM_JOB_PARTITION_HET_GROUP_0:-$SLURM_JOB_PARTITION}" ${XN:+-x "$XN"} -t "$LIMIT" --export="$exp" -o "$EVAL/logs/contiki-ng/%x-%j.out" \
+        -N "$N0" -p "${SLURM_JOB_PARTITION_HET_GROUP_0:-$SLURM_JOB_PARTITION}" ${XN:+-x "$XN"} ${C0:+-c "$C0"} ${M0:+--mem-per-cpu="${M0}M"} -t "$LIMIT" --export="$exp" -o "$EVAL/logs/contiki-ng/%x-%j.out" \
         : -N "$N1" -c "$C1" -t "$LIMIT" --export="$exp" "$EVAL/logs/contiki-ng/eval_contiki_ng.sbatch"
 fi

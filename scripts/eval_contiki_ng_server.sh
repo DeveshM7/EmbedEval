@@ -5,15 +5,15 @@
 #
 #     bash scripts/eval_contiki_ng_server.sh <model>
 #
-# A server takes the profile's `nodes` (K, 1 if absent) Spark nodes: node I is
-# rank I mod K of server I / K. Rank 0 serves the API; the other ranks run
+# A server takes K Spark nodes, EVAL_NODES_PER_SERVER or else the profile's `nodes`
+# (1 if absent): node I is rank I mod K of server I / K. Rank 0 serves the API; the other ranks run
 # headless, one pipeline stage each (scripts/serve_triage_model.sh).
 # The server takes requests only with this job's key ($EVAL_SERVERS/key).
 # When it answers, rank 0 writes its address to $EVAL_SERVERS/node<server>.url;
 # if it does not start (on any rank), node<server>.failed, with the reason.
 # Logs and compile caches are per node: server<server>-r<rank>. Settings, from the
-# environment: EVAL_AGENTS (4, = sequences the server takes), EVAL_GPU_MEMORY
-# (0.80), EVAL_MAX_MODEL_LEN (the profile's max_model_len, else 262144),
+# environment: EVAL_AGENTS (4, = sequences the server takes), EVAL_NODES_PER_SERVER
+# (the profile's nodes), EVAL_GPU_MEMORY (0.80), EVAL_MAX_MODEL_LEN (the profile's max_model_len, else 262144),
 # EVAL_SERVER_WAIT_MIN (40, minutes for the server to start), EVAL_LOGS, EVAL_SERVERS.
 set -u
 MODEL=${1:?usage: eval_contiki_ng_server.sh <model>}
@@ -31,6 +31,9 @@ p = run.LOCAL_MODELS[paths.resolve_model(sys.argv[1])]
 print(p, json.load(open('triage/models.json'))[p].get('nodes', 1))" "$MODEL") \
     || fail "no server profile for model $MODEL (harness/run.py LOCAL_MODELS)"
 read -r PROFILE K <<<"$OUT"
+# EVAL_NODES_PER_SERVER: more nodes than the profile's, e.g. on spark-interactive, where a job
+# may use only half a node's memory (60 GB), so the model needs about twice the nodes.
+K=${EVAL_NODES_PER_SERVER:-$K}
 SRV=$((I / K)) R=$((I % K))
 ME=${SLURM_JOB_ID:-local}-server$SRV-r$R
 

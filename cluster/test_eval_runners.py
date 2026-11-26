@@ -1,7 +1,8 @@
 """Local checks of the evaluation runners of Mynewt, NuttX and Contiki-NG: the
 worker's queue and results table for every kind of instance id, the image
-build before a run (mocked), the choice of instances by architecture, and
-that each runner keeps main's Zephyr and RIOT settings.
+build before a run (mocked), the choice of instances by architecture, that
+each runner keeps main's Zephyr and RIOT settings, and Contiki-NG's nodes per
+server and resubmission against a fake Slurm.
 
     python3 -m unittest cluster/test_eval_runners.py
 """
@@ -389,6 +390,8 @@ PAIRS = [
 # settings a project's runner adds to main's
 EXTRA = {"EMBEDEVAL_NUTTX_CLONE", "EMBEDEVAL_NUTTX_APPS_CLONE", "EMBEDEVAL_MYNEWT_CLONE",
          "EMBEDEVAL_CONTIKI_NG_IMAGE", "EMBEDEVAL_WORK", "EMBEDEVAL_SANDBOX_DIR", "TMPDIR"}
+# main's settings that its multi-node runner has and its single-node RIOT runner lacks
+MULTI, MULTI_MAIN = {"EVAL_NODES_PER_SERVER"}, "cluster/templates/eval_riot_multi.sbatch"
 DEFAULT = re.compile(r"\$\{(\w+):-([^}]*)\}")
 PROJECT_NAMES = re.compile(r"zephyr|riot|nuttx_x86|nuttx|mynewt|contiki_ng|contiki-ng")
 
@@ -423,7 +426,10 @@ class RunnersFollowMain(unittest.TestCase):
                 elif name in mine:
                     self.assertEqual(mine[name], value, f"{new}: {name}")
             for name in set(mine) - set(theirs):
-                self.assertIn(name, EXTRA, f"{new} has a setting main's {main} lacks: {name}")
+                if name in MULTI:
+                    self.assertIn(name, defaults(self.read(MULTI_MAIN)), f"{new}: {name} is not main's")
+                else:
+                    self.assertIn(name, EXTRA, f"{new} has a setting main's {main} lacks: {name}")
 
     def test_margin_time_limit_and_step_limit_are_main_s_everywhere(self):
         w = worker_defaults()
@@ -447,6 +453,7 @@ class RunnersFollowMain(unittest.TestCase):
             text = norm(self.read(new))
             text = text.replace(' -p "${SLURM_JOB_PARTITION_HET_GROUP_0:-$SLURM_JOB_PARTITION}"', "")   # kept Spark partition (main's Zephyr has a -p too)
             text = text.replace(' ${XN:+-x "$XN"}', "")   # kept Spark exclusions
+            text = text.replace(' ${C0:+-c "$C0"} ${M0:+--mem-per-cpu="${M0}M"}', "")   # kept Spark cores and memory
             text = "\n".join(l for l in text.splitlines() if not l.strip().startswith("XN=$(squeue"))
             for line in norm(self.read(main)).splitlines():
                 if line.strip().startswith('echo "[$(date +%T)] job $ATTEMPT for $MODEL:'):
@@ -489,6 +496,137 @@ class RunnersFollowMain(unittest.TestCase):
             self.assertIn(m[1], paths.PROJECTS)
             if m[1] in eval_set.BUILT_HERE:
                 self.assertIn(m[2], eval_set.ARCHS, rel)
+
+
+# --------------------------------------------------------------------------
+# Contiki-NG's runner against a fake Slurm: nodes per server, and what a resubmission keeps.
+
+CONTIKI_FAKES = {
+    # the python calls: the eval folder, the server's profile and nodes, the template's nodes, PRs left, a summary
+    ".venv/bin/python": """#!/bin/bash
+case "$*" in
+    *OUTPUTS_DIR*) echo "$FAKE_EVAL" ;;
+    *"p = run"*) echo "$FAKE_PROFILE ${FAKE_NODES:-2}" ;;
+    *"'nodes'"*) echo "${FAKE_NODES:-2}" ;;
+    *"eval_set.py left"*) echo "${FAKE_LEFT:-0}" ;;
+    *) echo summary ;;
+esac
+""",
+    "scripts/serve_triage_model.sh": 'echo "$1 $VLLM_NNODES $VLLM_NODE_RANK $VLLM_MASTER_ADDR $GPU_MEMORY" > "$FAKE_LOG/serve"\n',
+    "bin/squeue": """#!/bin/bash
+case "$*" in
+    *%l*) echo 4:00:00 ;;
+    *%e*) echo 2030-01-01T00:00:00 ;;
+    *"%i %x"*) echo "$SLURM_JOB_ID+0 ${FAKE_EXCLUDED:-}"; echo "$SLURM_JOB_ID+1" ;;
+esac
+""",
+    "bin/srun": '#!/bin/bash\necho "$*" >> "$FAKE_LOG/srun"\n',
+    "bin/sbatch": '#!/bin/bash\nprintf "%s\\n" "$@" > "$FAKE_LOG/sbatch"\n',
+    "bin/timeout": '#!/bin/bash\nshift 5; exec "$@"\n',            # timeout -s TERM -k 1m <seconds> <command>
+    "bin/scontrol": "#!/bin/bash\nprintf 'h%02d\\n' $(seq 0 19)\n",  # show hostnames: h00 to h19
+    "bin/getent": '#!/bin/bash\necho "10.0.0.${2#h} $2"\n',
+    "bin/pkill": "#!/bin/bash\nexit 0\n",
+}
+
+
+class ContikiNgLayout(unittest.TestCase):
+    """cluster/templates/eval_contiki_ng.sbatch and its server script, run with fake Slurm commands."""
+
+    MODEL = "minimax-m25-nvfp4-thinkfix"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.repo, self.fake, self.eval = self.root / "repo", self.root / "fake", self.root / "eval" / "m"
+        for rel, body in CONTIKI_FAKES.items():
+            f = (self.root if rel.startswith("bin/") else self.repo) / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(body)
+            f.chmod(0o755)
+        for name in ("eval_contiki_ng_server.sh", "eval_contiki_ng_agents.sh"):
+            shutil.copy(REPO / "scripts" / name, self.repo / "scripts" / name)
+        self.env = {"PATH": f"{self.root / 'bin'}:/usr/bin:/bin", "HOME": str(self.root), "USER": "me",
+                    "FAKE_LOG": str(self.fake), "FAKE_EVAL": str(self.eval), "FAKE_PROFILE": self.MODEL,
+                    "EMBEDEVAL_EVAL_DIR": str(self.root / "eval"), "EMBEDEVAL_SHARED": str(self.root / "shared"),
+                    "SLURM_SUBMIT_DIR": str(self.repo), "SLURM_JOB_ID": "77", "EVAL_MODEL": self.MODEL}
+
+    def run_job(self, spark_nodes: int, **env) -> subprocess.CompletedProcess:
+        """The template as Slurm starts it: `spark_nodes` Spark nodes, one cpu node of 16 cores."""
+        shutil.rmtree(self.fake, ignore_errors=True)
+        self.fake.mkdir()
+        slurm = {"SLURM_JOB_NUM_NODES_HET_GROUP_0": str(spark_nodes), "SLURM_JOB_NUM_NODES_HET_GROUP_1": "1",
+                 "SLURM_CPUS_PER_TASK_HET_GROUP_1": "16", "SLURM_JOB_PARTITION": "spark-batch", "FAKE_LEFT": "3"}
+        return subprocess.run(["bash", str(REPO / "cluster/templates/eval_contiki_ng.sbatch")],
+                              env={**self.env, **slurm, **env}, capture_output=True, text=True)
+
+    def servers_given_to_agents(self) -> int:
+        line = next(l for l in (self.fake / "srun").read_text().splitlines() if "eval_contiki_ng_agents.sh" in l)
+        return int(line.split()[-1])
+
+    def resubmission(self) -> list:
+        """The follow-up job's sbatch arguments, each --export as the set of its settings."""
+        return [set(a.split(",")) if a.startswith("--export=") else a
+                for a in (self.fake / "sbatch").read_text().splitlines()]
+
+    def follow_up(self, spark: list, spark_nodes: str, *settings: str) -> list:
+        exp = {"--export=NONE", f"EVAL_MODEL={self.MODEL}", "EVAL_ATTEMPT=2",
+               f"EMBEDEVAL_EVAL_DIR={self.root / 'eval'}", *settings}
+        logs = f"{self.eval}/logs/contiki-ng"
+        return ["-N", spark_nodes, *spark, "-t", "4:00:00", exp, "-o", f"{logs}/%x-%j.out",
+                ":", "-N", "1", "-c", "16", "-t", "4:00:00", exp, f"{logs}/eval_contiki_ng.sbatch"]
+
+    def test_eval_nodes_per_server_sets_the_servers_of_a_job(self):
+        r = self.run_job(12, EVAL_NODES_PER_SERVER="6", FAKE_NODES="2")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("2 servers of 6 nodes", r.stdout)
+        self.assertEqual(self.servers_given_to_agents(), 2)
+        self.run_job(12, FAKE_NODES="2")          # without it: the profile's nodes
+        self.assertEqual(self.servers_given_to_agents(), 6)
+
+    def test_nodes_that_make_no_whole_servers_stop_the_job_unresubmitted(self):
+        for per_server in ("5", "six"):
+            r = self.run_job(12, EVAL_NODES_PER_SERVER=per_server)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertEqual((self.eval / "logs/contiki-ng/job-77/checks-failed").read_text().strip(),
+                             f"12 Spark nodes do not make whole servers of {self.MODEL} ({per_server} nodes each)")
+            self.assertFalse((self.fake / "srun").exists())
+            self.assertFalse((self.fake / "sbatch").exists())
+
+    def test_an_interactive_job_resubmits_as_one_that_fits(self):
+        self.run_job(12, EVAL_NODES_PER_SERVER="6", EVAL_GPU_MEMORY="0.42", EVAL_AGENTS="2",
+                     FAKE_EXCLUDED="scholar-k[054,055]", SLURM_JOB_PARTITION_HET_GROUP_0="spark-interactive",
+                     SLURM_CPUS_PER_TASK_HET_GROUP_0="10", SLURM_MEM_PER_CPU_HET_GROUP_0="6000")
+        self.assertEqual(self.resubmission(), self.follow_up(
+            ["-p", "spark-interactive", "-x", "scholar-k[054,055]", "-c", "10", "--mem-per-cpu=6000M"], "12",
+            "EVAL_NODES_PER_SERVER=6", "EVAL_GPU_MEMORY=0.42", "EVAL_AGENTS=2"))
+
+    def test_a_batch_job_resubmits_with_the_template_s_own_request(self):
+        # as Slurm starts a spark-batch job: the template's 20 cores x 6025M, the profile's nodes
+        self.run_job(4, FAKE_NODES="2", SLURM_JOB_PARTITION_HET_GROUP_0="spark-batch",
+                     SLURM_CPUS_PER_TASK_HET_GROUP_0="20", SLURM_MEM_PER_CPU_HET_GROUP_0="6025")
+        self.assertEqual(self.servers_given_to_agents(), 2)
+        self.assertEqual(self.resubmission(),
+                         self.follow_up(["-p", "spark-batch", "-c", "20", "--mem-per-cpu=6025M"], "4"))
+        # neither variable: the line of before, argument for argument
+        self.run_job(4, FAKE_NODES="2", SLURM_JOB_PARTITION_HET_GROUP_0="spark-batch")
+        self.assertEqual(self.resubmission(), self.follow_up(["-p", "spark-batch"], "4"))
+
+    def test_a_server_node_takes_its_rank_from_eval_nodes_per_server(self):
+        servers = self.root / "logs" / "servers"
+        servers.mkdir(parents=True)
+        (servers / "key").write_text("k\n")
+        self.fake.mkdir()
+        env = {**self.env, "SLURM_NODEID": "9", "SLURM_JOB_NODELIST_HET_GROUP_0": "h[00-19]",
+               "EVAL_LOGS": str(self.root / "logs"), "EVAL_SERVERS": str(servers), "FAKE_NODES": "2"}
+        script = [str(self.repo / "scripts/eval_contiki_ng_server.sh"), self.MODEL]
+        # node 9, 6 nodes per server: rank 3 of server 1, whose rank 0 is h06
+        subprocess.run(["bash", *script], env={**env, "EVAL_NODES_PER_SERVER": "6"}, capture_output=True)
+        self.assertEqual((self.fake / "serve").read_text().split(), [self.MODEL, "6", "3", "10.0.0.06", "0.80"])
+        self.assertTrue((servers / "node1.failed").exists())     # the fake server stopped at once
+        # the profile's 2: rank 1 of server 4, whose rank 0 is h08
+        subprocess.run(["bash", *script], env=env, capture_output=True)
+        self.assertEqual((self.fake / "serve").read_text().split(), [self.MODEL, "2", "1", "10.0.0.08", "0.80"])
 
 
 if __name__ == "__main__":
