@@ -10,6 +10,7 @@ import sys
 import tempfile
 import tokenize
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -158,6 +159,127 @@ class ContikiRunnerTest(unittest.TestCase):
     def test_no_test_is_a_usage_error(self):
         with patch.object(sys, "argv", ["run_tests"]):
             self.assertEqual(self.m.usage("x"), 4)
+
+
+def report(description, result="success", line=10):
+    """One case as the unit-test framework's unit_test_print_report prints it."""
+    return ("\nUnit test: {}\nResult: {}\nExit point: test-only.c:{}\nAssertions executed: 1\n"
+            "Start: 0\nEnd: 0\nDuration: 0 ticks\nTicks per second: 1000\n").format(description, result, line)
+
+
+class ContikiRunnerOutputTest(unittest.TestCase):
+    """A test that does not pass shows the last 40 lines of its output (as main's
+    RIOT runner) under the file that holds it; one that passes shows nothing more.
+    The base is the image's own runner with its builds and runs faked."""
+
+    UNIT = "tests/08-native-runs/14-one/only"
+
+    def setUp(self):
+        self.m = load("contiki_ng")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tb = Path(self.tmp.name)
+        (self.tb / "tests/08-native-runs/14-one").mkdir(parents=True)
+        (self.tb / "tests/08-native-runs/14-one/Makefile").write_text("CONTIKI_PROJECT = only\n")
+        self.suite = self.tb / "tests/07-sim"
+        self.suite.mkdir(parents=True)
+        (self.suite / "Makefile").write_text("all:\n")
+        (self.suite / "22-x.csc").write_text("<simconf/>")
+        (self.tb / "tools/cooja").mkdir(parents=True)
+        (self.tb / "tools/cooja/build.xml").write_text("")
+        with patch.object(self.m, "BASE", str(REPO / "templates/contiki-ng/apptainer/run_tests.py")):
+            self.b = self.m.load_base()
+        self.b.TESTBED, self.b.LOGS = self.tb, self.tb / ".embedeval/logs"
+        self.b.build_native = lambda unit: True
+        self.b.native_binary = lambda unit: self.tb / "only.native"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_tests(self, *args):
+        out = io.StringIO()
+        with patch.object(self.m, "load_base", return_value=self.b), \
+                patch.object(sys, "argv", ["run_tests"] + list(args)), redirect_stdout(out):
+            code = self.m.main()
+        return code, out.getvalue()
+
+    def native(self, output, done=True, timed_out=False, rc=0):
+        def run(binary, path, cwd=None):
+            path.write_text(output)
+            return output, done, timed_out, rc
+        self.b.run_native_binary = run
+        return self.run_tests("tests/08-native-runs/14-one")
+
+    def shown(self, out, path, text):
+        """Assert `out` shows the last 40 lines of `text` under `path`'s header."""
+        head = "\n--- {} (last 40 lines) ---\n".format(path)
+        self.assertIn(head, out)
+        want = "".join("    | " + l + "\n" for l in text.splitlines()[-40:])
+        self.assertTrue(out.split(head, 1)[1].startswith(want), out)
+
+    def test_failed_case_shows_its_exit_point_and_the_output_tail(self):
+        output = ("Running unit tests\n" + report("first", "failure", 42)
+                  + "".join(report("later {}".format(i)) for i in range(5)) + "=check-me= DONE\n")
+        code, out = self.native(output)
+        self.assertEqual(code, 1)
+        self.assertIn("  failed {}: first\n    | Exit point: test-only.c:42\n  passed {}: later 0\n"
+                      .format(self.UNIT, self.UNIT), out)
+        log = self.b.log_path({"id": self.UNIT}, "run")
+        self.shown(out, log, output)
+        # The failed case's report is beyond the last 40 lines: only its own line shows it.
+        self.assertEqual(out.count("Exit point: test-only.c:42"), 1)
+        self.assertTrue(out.rstrip().endswith("==> run_tests: FAILED"))
+
+    def test_timeout_shows_the_output_tail(self):
+        output = "Running unit tests\n" + report("first") + "waiting for the timer\n"
+        code, out = self.native(output, done=False, timed_out=True, rc=-15)
+        self.assertEqual(code, 1)
+        self.assertIn("  timeout {}\n".format(self.UNIT), out)
+        self.shown(out, self.b.log_path({"id": self.UNIT}, "run"), output)
+
+    def test_incomplete_run_shows_the_output_tail(self):
+        output = report("first") + "TEST FAILED\n"       # exit(1) before the DONE marker
+        code, out = self.native(output, done=False, rc=1)
+        self.assertEqual(code, 3)
+        self.shown(out, self.b.log_path({"id": self.UNIT}, "run"), output)
+
+    def test_passing_unit_shows_no_output(self):
+        code, out = self.native(report("first") + report("second") + "=check-me= DONE\n")
+        self.assertEqual(code, 0)
+        self.assertNotIn("last 40 lines", out)
+        self.assertNotIn("    | ", out)
+
+    def test_failed_cooja_scenario_shows_its_logs(self):
+        # Ant-era simexec exits 0 and dumps the Cooja and script logs; its verdict
+        # goes to <scenario>.testlog, which the base runner reads.
+        run_log = "\n".join(["Running test 22-x with random Seed 1: FAIL", "==== 22-x.1.coojalog ===="]
+                            + ["INFO [sim] mote {} booted".format(i) for i in range(45)]
+                            + ["==== 22-x.1.scriptlog ====", "TEST FAILED: no reply from node 2",
+                               "========== Summary ==========",
+                               "22-x  TEST FAIL      0/1 -- failed seeds: 1"]) + "\n"
+        testlog = "22-x  TEST FAIL      0/1 -- failed seeds: 1\n"
+
+        def make(cmd, path, **kw):
+            path.write_text(run_log)
+            (self.suite / "22-x.testlog").write_text(testlog)
+            return 0, run_log
+        self.b.run_logged = make
+        code, out = self.run_tests("tests/07-sim/22-x.csc")
+        self.assertEqual(code, 1)
+        self.assertIn("  failed tests/07-sim/22-x.csc\n", out)
+        log = self.b.log_path({"id": "tests/07-sim/22-x.csc"}, "run")
+        self.shown(out, log, run_log)
+        self.shown(out, self.suite / "22-x.testlog", testlog)
+        self.assertLess(out.index(str(log)), out.index(str(self.suite / "22-x.testlog")))
+
+    def test_passing_cooja_scenario_shows_no_logs(self):
+        def make(cmd, path, **kw):
+            path.write_text("done\n")
+            (self.suite / "COOJA.testlog").write_text("TEST OK\n")
+            return 0, "done\n"
+        self.b.run_logged = make
+        code, out = self.run_tests("tests/07-sim/22-x.csc")
+        self.assertEqual(code, 0)
+        self.assertNotIn("last 40 lines", out)
 
 
 class PythonCompatibilityTest(unittest.TestCase):

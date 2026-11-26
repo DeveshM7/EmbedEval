@@ -31,6 +31,7 @@ import types
 from pathlib import Path
 
 BASE = "/opt/embedeval/run_tests_base.py"     # the image's own runner
+TAIL = 40      # lines of output shown for a test that did not pass, as main's RIOT runner
 
 PROJECT_LINE = re.compile(r'^\s*CONTIKI_PROJECT\s*[:+]?=\s*(.+)$', re.M)
 
@@ -112,15 +113,51 @@ def resolve(arg, testbed):
     return units, None
 
 
+def tail(path, text):
+    """The end of a test's output, under the file that holds all of it."""
+    print("\n--- {} (last {} lines) ---".format(path, TAIL))
+    for line in text.splitlines()[-TAIL:]:
+        print("    | " + line)
+
+
+def exit_points(output):
+    """{case: its `Exit point: <file>:<line>` line} for each case the unit-test
+    framework reported as failed (the base runner's parser keeps only verdicts)."""
+    points, case, failing = {}, None, False
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("Unit test: "):
+            case, failing = line[len("Unit test: "):], False
+        elif line == "Result: failure":
+            failing = case is not None
+        elif failing and line.startswith("Exit point: "):
+            points[case], failing = line, False
+    return points
+
+
+def cooja_logs(b, unit):
+    """The files the base runner leaves of a Cooja run: its make output, and the
+    simulator's verdict log it reads (COOJA.testlog, or <scenario>.testlog in the
+    Ant era)."""
+    suite = b.TESTBED / unit["suite_directory"]
+    stem = unit["scenario"][:-len(".csc")]
+    found = ([b.log_path(unit, "run")] + sorted(suite.rglob("COOJA.testlog"))
+             + sorted(suite.glob(stem + ".testlog")))
+    return [p for p in found if p.is_file()]
+
+
 def run_native(b, unit, lines):
     """(failed, incomplete) after building and running one native unit."""
     binary = b.native_binary(unit)
-    output, done, timed_out, rc = b.run_native_binary(
-        binary, b.log_path(unit, "run"), b.TESTBED / unit["directory"])
+    log = b.log_path(unit, "run")
+    output, done, timed_out, rc = b.run_native_binary(binary, log, b.TESTBED / unit["directory"])
     observed, parsed_done = b.parse_native(output)
+    points = exit_points(output)
     failed = incomplete = False
     for description, status in observed.items():
         lines.append("  {} {}: {}".format(status, unit["id"], description))
+        if status == "failed" and description in points:
+            lines.append("    | " + points[description])
         failed |= status == "failed"
     if not (done and parsed_done):
         if timed_out:
@@ -137,6 +174,8 @@ def run_native(b, unit, lines):
     elif not observed:
         lines.append("  incomplete {}: no test case reported".format(unit["id"]))
         incomplete = True
+    if failed or incomplete:
+        tail(log, output)
     return failed, incomplete
 
 
@@ -171,6 +210,9 @@ def main():
             statuses, complete, compile_failed = b.run_cooja(unit)
             verdict = statuses[unit["id"]]
             lines.append("  {} {}".format(verdict, unit["id"]))
+            if verdict != "passed":
+                for path in cooja_logs(b, unit):
+                    tail(path, path.read_text(errors="replace"))
             if compile_failed:
                 print("{}: Cooja build failed; see {}".format(unit["id"], b.log_path(unit, "run")))
                 build_failed = True
