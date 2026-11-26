@@ -149,5 +149,20 @@ class PromptsTest(unittest.TestCase):
                                     "no test file under the protected paths")
 
 
+class CommandTimeoutTest(unittest.TestCase):
+    """Main's per-command limit is 900 s for every project; Contiki-NG had
+    drifted to 1800 (copied from OpenThread). The ports evaluated against
+    main's rules must apply 900 s, via the lookups harness/run.py uses."""
+
+    def test_contiki_and_mynewt_use_mains_900s(self):
+        for project in ("contiki-ng", "mynewt"):
+            iids = list(paths.discover_instances(project))
+            self.assertTrue(iids, project)
+            meta = paths.load_metadata(iids[0])
+            with self.subTest(project):
+                self.assertEqual(projects.config_for(meta).get("command_timeout", 900), 900)
+                self.assertEqual(projects.setting(meta, "command_timeout", 900), 900)
+
+
 if __name__ == "__main__":
     unittest.main()

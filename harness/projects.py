@@ -127,7 +127,10 @@ PROJECTS: dict[str, dict] = {
         "orientation": "Run `run_tests` to rebuild and execute the fixed upstream native units or Cooja scenarios. The selected target and configuration are fixed by this instance.",
         "extra_warnings": "Exit 2 means a build failed; exit 3 means required named tests did not execute.",
         "protected_paths": ["tests/", "regression-tests/", "tools/cooja/"],
-        "runtime": "apptainer", "rebuild_command": "", "command_timeout": 1800,
+        "runtime": "apptainer", "rebuild_command": "",
+        # Main's per-command limit (Zephyr's too). run_tests' own build (900 s)
+        # and run (300 s) caps fit inside it.
+        "command_timeout": 900,
     },
     "zephyr": {
         "label": "Zephyr RTOS",
