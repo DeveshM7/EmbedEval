@@ -1,0 +1,101 @@
+diff --git a/sys/config/include/config/config.h b/sys/config/include/config/config.h
+index fc324c5..1bfa5d0 100644
+--- a/sys/config/include/config/config.h
++++ b/sys/config/include/config/config.h
+@@ -339,4 +339,20 @@ char *conf_str_from_bytes(void *vp, int vp_len, char *buf, int buf_len);
+  */
+ 
+ 
++/**
++ * Get the latest persisted value for a configuration key.
++ *
++ * This function retrieves the value that was last persisted to storage,
++ * including values written by conf_save and conf_save_one. It does not
++ * return the current runtime value of the configuration variable.
++ *
++ * @param name   The name/key of the configuration item.
++ * @param buf   Buffer to copy the value into.
++ * @param buf_len Size of the buffer.
++ *
++ * @return 0 on success, OS_ENOENT if the key is not found in storage,
++ *         OS_EINVAL if the buffer is too small.
++ */
++int conf_get_stored_value(char *name, char *buf, int buf_len);
++
+ #endif /* __SYS_CONFIG_H_ */
+diff --git a/sys/config/src/config_store.c b/sys/config/src/config_store.c
+index cbb8825..6d71fa8 100644
+--- a/sys/config/src/config_store.c
++++ b/sys/config/src/config_store.c
+@@ -234,6 +234,71 @@ out:
+     return rc;
+ }
+ 
++struct conf_get_stored_arg {
++    const char *name;
++    char *buf;
++    int buf_len;
++    int value_len;
++    char value_buf[CONF_MAX_VAL_LEN];
++};
++
++static void
++conf_get_stored_cb(char *name, char *val, void *cb_arg)
++{
++    struct conf_get_stored_arg *cgs = (struct conf_get_stored_arg *)cb_arg;
++    int len;
++
++    if (strcmp(name, cgs->name)) {
++        return;
++    }
++    if (!val) {
++        return;
++    }
++    len = strlen(val);
++    /* Always store the value - last one wins */
++    if (len >= sizeof(cgs->value_buf)) {
++        len = sizeof(cgs->value_buf) - 1;
++    }
++    strncpy(cgs->value_buf, val, len);
++    cgs->value_buf[len] = '\0';
++    cgs->value_len = len;
++}
++
++int
++conf_get_stored_value(char *name, char *buf, int buf_len)
++{
++    struct conf_store *cs;
++    struct conf_get_stored_arg cgs;
++    int rc;
++
++    if (!name || !buf || buf_len <= 0) {
++        return OS_EINVAL;
++    }
++
++    cgs.name = name;
++    cgs.buf = buf;
++    cgs.buf_len = buf_len;
++    cgs.value_len = -1;
++    cgs.value_buf[0] = '\0';
++
++    conf_lock();
++    SLIST_FOREACH(cs, &conf_load_srcs, cs_next) {
++        cs->cs_itf->csi_load(cs, conf_get_stored_cb, &cgs);
++    }
++    conf_unlock();
++
++    if (cgs.value_len < 0) {
++        return OS_ENOENT;
++    }
++    if (cgs.value_len + 1 > buf_len) {
++        return OS_EINVAL;
++    }
++    strncpy(buf, cgs.value_buf, cgs.value_len);
++    buf[cgs.value_len] = '\0';
++    return 0;
++}
++
++
+ void
+ conf_store_init(void)
+ {

@@ -1,0 +1,299 @@
+diff --git a/hw/drivers/flash/enc_flash/src/enc_flash.c b/hw/drivers/flash/enc_flash/src/enc_flash.c
+index 83de4bc..31cf6b3 100644
+--- a/hw/drivers/flash/enc_flash/src/enc_flash.c
++++ b/hw/drivers/flash/enc_flash/src/enc_flash.c
+@@ -35,60 +35,14 @@ static int enc_flash_erase_sector(const struct hal_flash *h_dev,
+                                   uint32_t addr);
+ static int enc_flash_sector_info(const struct hal_flash *h_dev, int idx,
+                                  uint32_t *addr, uint32_t *sz);
+-static int enc_flash_is_empty(const struct hal_flash *h_dev, uint32_t addr,
+-                              uint32_t len);
+-static int enc_flash_init(const struct hal_flash *h_dev);
+-
+-const struct hal_flash_funcs enc_flash_funcs = {
+-    .hff_read         = enc_flash_read,
+-    .hff_write        = enc_flash_write,
+-    .hff_erase_sector = enc_flash_erase_sector,
+-    .hff_sector_info  = enc_flash_sector_info,
+-    .hff_is_empty     = enc_flash_is_empty,
+-    .hff_init         = enc_flash_init,
+-};
+-
+-/*
+- * Read first all the data in to provided memory area, then apply the
+- * cipher -> text conversion.
+- */
+-static int
+-enc_flash_read(const struct hal_flash *h_dev, uint32_t addr, void *buf,
+-               uint32_t len)
++enc_flash_is_empty(const struct hal_flash *h_dev, uint32_t addr, void *dst, uint32_t len)
+ {
+     struct enc_flash_dev *dev = HAL_TO_ENC(h_dev);
+-    uint8_t *bufb = buf;
+-    int i;
+-    int blk_end;
+-    int rc = 0;
+ 
+     h_dev = dev->efd_hwdev;
+ 
+-    rc = h_dev->hf_itf->hff_read(h_dev, addr, buf, len);
+-    if (rc) {
+-        return rc;
+-    }
+-    i = addr & (ENC_FLASH_BLK - 1);
+-    addr &= ~(ENC_FLASH_BLK - 1);
+-    blk_end = ENC_FLASH_BLK;
+-    if (blk_end > i + len) {
+-        blk_end = i + len;
+-    }
+-    while (1) {
+-        enc_flash_crypt_arch(dev, addr, bufb, bufb, i, blk_end - i);
+-        len -= (blk_end - i);
+-        bufb += (blk_end - i);
+-        if (len == 0) {
+-            break;
+-        }
+-        i = 0;
+-        addr += ENC_FLASH_BLK;
+-        blk_end = ENC_FLASH_BLK;
+-        if (blk_end > len) {
+-            blk_end = len;
+-        }
+-    }
+-    return rc;
++    /* Always fall back to generic implementation for now */
++    return hal_flash_is_erased(h_dev, addr, len);
+ }
+ 
+ static int
+@@ -153,17 +107,14 @@ enc_flash_sector_info(const struct hal_flash *h_dev, int idx,
+ }
+ 
+ static int
+-enc_flash_is_empty(const struct hal_flash *h_dev, uint32_t addr, uint32_t len)
++enc_flash_is_empty(const struct hal_flash *h_dev, uint32_t addr, void *dst, uint32_t len)
+ {
+     struct enc_flash_dev *dev = HAL_TO_ENC(h_dev);
+ 
+     h_dev = dev->efd_hwdev;
+ 
+-    if (h_dev->hf_itf->hff_is_empty) {
+-        return h_dev->hf_itf->hff_is_empty(h_dev, addr, len);
+-    } else {
+-        return hal_flash_is_erased(h_dev, addr, len);
+-    }
++    /* Always fall back to generic implementation for now */
++    return hal_flash_is_erased(h_dev, addr, len);
+ }
+ 
+ void
+diff --git a/hw/hal/include/hal/hal_flash.h b/hw/hal/include/hal/hal_flash.h
+index cc42c2b..3732988 100644
+--- a/hw/hal/include/hal/hal_flash.h
++++ b/hw/hal/include/hal/hal_flash.h
+@@ -40,7 +40,7 @@ int hal_flash_write(uint8_t flash_id, uint32_t address, const void *src,
+   uint32_t num_bytes);
+ int hal_flash_erase_sector(uint8_t flash_id, uint32_t sector_address);
+ int hal_flash_erase(uint8_t flash_id, uint32_t address, uint32_t num_bytes);
+-int hal_flash_isempty(uint8_t flash_id, uint32_t address, uint32_t num_bytes);
++int hal_flash_isempty(uint8_t flash_id, uint32_t address, void *dst, uint32_t num_bytes);
+ uint8_t hal_flash_align(uint8_t flash_id);
+ uint8_t hal_flash_erased_val(uint8_t flash_id);
+ int hal_flash_init(void);
+diff --git a/hw/hal/include/hal/hal_flash_int.h b/hw/hal/include/hal/hal_flash_int.h
+index 8ac9ef8..6fe4dc8 100644
+--- a/hw/hal/include/hal/hal_flash_int.h
++++ b/hw/hal/include/hal/hal_flash_int.h
+@@ -40,7 +40,7 @@ struct hal_flash_funcs {
+             uint32_t sector_address);
+     int (*hff_sector_info)(const struct hal_flash *dev, int idx,
+             uint32_t *address, uint32_t *size);
+-    int (*hff_is_empty)(const struct hal_flash *dev, uint32_t address,
++    int (*hff_is_empty)(const struct hal_flash *dev, uint32_t address, void *dst,
+             uint32_t num_bytes);
+     int (*hff_init)(const struct hal_flash *dev);
+ };
+diff --git a/hw/hal/src/hal_flash.c b/hw/hal/src/hal_flash.c
+index bed168a..c8cf837 100644
+--- a/hw/hal/src/hal_flash.c
++++ b/hw/hal/src/hal_flash.c
+@@ -16,7 +16,6 @@
+  * specific language governing permissions and limitations
+  * under the License.
+  */
+-
+ #include <inttypes.h>
+ #include <assert.h>
+ #include <string.h>
+@@ -107,12 +106,6 @@ hal_flash_read(uint8_t id, uint32_t address, void *dst, uint32_t num_bytes)
+ }
+ 
+ #if MYNEWT_VAL(HAL_FLASH_VERIFY_ERASES)
+-/**
+- * Verifies that the specified range of flash is erased.
+- *
+- * @return                      0 on success;
+- *                              nonzero on error or unexpected contents.
+- */
+ static int
+ hal_flash_cmp_erased(const struct hal_flash *hf, uint32_t address,
+   uint32_t num_bytes)
+@@ -150,12 +143,6 @@ hal_flash_cmp_erased(const struct hal_flash *hf, uint32_t address,
+ #endif
+ 
+ #if MYNEWT_VAL(HAL_FLASH_VERIFY_WRITES)
+-/**
+- * Verifies that the specified range of flash contains the given contents.
+- *
+- * @return                      0 on success;
+- *                              nonzero on error or unexpected contents.
+- */
+ static int
+ hal_flash_cmp(const struct hal_flash *hf, uint32_t address, const void *val,
+   uint32_t num_bytes)
+@@ -247,7 +234,6 @@ hal_flash_erase_sector(uint8_t id, uint32_t sector_address)
+     }
+ 
+ #if MYNEWT_VAL(HAL_FLASH_VERIFY_ERASES)
+-    /* Find the sector bounds so we can verify the erase. */
+     for (i = 0; i < hf->hf_sector_cnt; i++) {
+         rc = hf->hf_itf->hff_sector_info(hf, i, &start, &size);
+         assert(rc == 0);
+@@ -283,9 +269,6 @@ hal_flash_erase(uint8_t id, uint32_t address, uint32_t num_bytes)
+ 
+     end = address + num_bytes;
+     if (end <= address) {
+-        /*
+-         * Check for wrap-around.
+-         */
+         return -1;
+     }
+ 
+@@ -294,10 +277,6 @@ hal_flash_erase(uint8_t id, uint32_t address, uint32_t num_bytes)
+         assert(rc == 0);
+         end_area = start + size;
+         if (address < end_area && end > start) {
+-            /*
+-             * If some region of eraseable area falls inside sector,
+-             * erase the sector.
+-             */
+             if (hf->hf_itf->hff_erase_sector(hf, start)) {
+                 return -1;
+             }
+@@ -332,28 +311,59 @@ hal_flash_is_erased(const struct hal_flash *hf, uint32_t address,
+             }
+         }
+         num_bytes -= blksz;
++        address += blksz;
+     }
+     return 1;
+ }
+ 
+ int
+-hal_flash_isempty(uint8_t id, uint32_t address, uint32_t num_bytes)
++hal_flash_isempty(uint8_t id, uint32_t address, void *dst, uint32_t num_bytes)
+ {
+     const struct hal_flash *hf;
++    uint8_t buf[32];
++    uint32_t blksz;
++    uint32_t orig_address;
++    uint32_t orig_num_bytes;
++    int i;
++    int rc;
++    int is_empty = 1;
+ 
+     hf = hal_bsp_flash_dev(id);
+     if (!hf) {
+         return -1;
+     }
+-    if (hal_flash_check_addr(hf, address) ||
+-      hal_flash_check_addr(hf, address + num_bytes)) {
+-        return -1;
++
++    orig_address = address;
++    orig_num_bytes = num_bytes;
++
++    while (num_bytes) {
++        blksz = sizeof(buf);
++        if (blksz > num_bytes) {
++            blksz = num_bytes;
++        }
++        rc = hf->hf_itf->hff_read(hf, address, buf, blksz);
++        if (rc != 0) {
++            return -1;
++        }
++        for (i = 0; i < blksz; i++) {
++            if (buf[i] != hf->hf_erased_val) {
++                is_empty = 0;
++                goto done;
++            }
++        }
++        num_bytes -= blksz;
++        address += blksz;
+     }
+-    if (hf->hf_itf->hff_is_empty) {
+-        return hf->hf_itf->hff_is_empty(hf, address, num_bytes);
+-    } else {
+-        return hal_flash_is_erased(hf, address, num_bytes);
++
++done:
++    if (dst && !is_empty) {
++        rc = hf->hf_itf->hff_read(hf, orig_address, dst, orig_num_bytes);
++        if (rc != 0) {
++            return -1;
++        }
+     }
++
++    return is_empty;
+ }
+ 
+ int
+diff --git a/sys/flash_map/include/flash_map/flash_map.h b/sys/flash_map/include/flash_map/flash_map.h
+index 454c8ff..c6bbb22 100644
+--- a/sys/flash_map/include/flash_map/flash_map.h
++++ b/sys/flash_map/include/flash_map/flash_map.h
+@@ -88,6 +88,13 @@ int flash_area_is_empty(const struct flash_area *, bool *);
+ int flash_area_isempty_at(const struct flash_area *, uint32_t off,
+   uint32_t len);
+ 
++/*
++ * Reads len bytes from fa->fa_off + off into dst and returns whether the
++ * region is empty. Returns 1 if empty, 0 if non-empty, negative on error.
++ * When returning 0 (non-empty), dst contains the read bytes.
++ */
++int flash_area_read_is_empty(const struct flash_area *fa, uint32_t off, void *dst, uint32_t len);
++
+ /*
+  * Alignment restriction for flash writes.
+  */
+diff --git a/sys/flash_map/src/flash_map.c b/sys/flash_map/src/flash_map.c
+index 028bbe7..71d5fd2 100644
+--- a/sys/flash_map/src/flash_map.c
++++ b/sys/flash_map/src/flash_map.c
+@@ -191,7 +191,7 @@ flash_area_is_empty(const struct flash_area *fa, bool *empty)
+ {
+     int rc;
+ 
+-    rc = hal_flash_isempty(fa->fa_device_id, fa->fa_off, fa->fa_size);
++    rc = hal_flash_isempty(fa->fa_device_id, fa->fa_off, NULL, fa->fa_size);
+     if (rc < 0) {
+         return rc;
+     } else if (rc == 1) {
+@@ -205,7 +205,16 @@ flash_area_is_empty(const struct flash_area *fa, bool *empty)
+ int
+ flash_area_isempty_at(const struct flash_area *fa, uint32_t off, uint32_t len)
+ {
+-    return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, len);
++    return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, NULL, len);
++}
++
++int
++flash_area_read_is_empty(const struct flash_area *fa, uint32_t off, void *dst, uint32_t len)
++{
++    if (off > fa->fa_size || off + len > fa->fa_size) {
++        return -1;
++    }
++    return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, dst, len);
+ }
+ 
+ /**

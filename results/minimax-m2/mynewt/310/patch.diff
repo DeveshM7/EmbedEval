@@ -1,0 +1,144 @@
+diff --git a/net/nimble/host/include/host/ble_gatt.h b/net/nimble/host/include/host/ble_gatt.h
+index d3c1d2b..b069c6a 100644
+--- a/net/nimble/host/include/host/ble_gatt.h
++++ b/net/nimble/host/include/host/ble_gatt.h
+@@ -188,6 +188,8 @@ int ble_gattc_write_reliable(uint16_t conn_handle,
+ int ble_gattc_notify_custom(uint16_t conn_handle, uint16_t att_handle,
+                             struct os_mbuf *om);
+ int ble_gattc_notify(uint16_t conn_handle, uint16_t chr_val_handle);
++int ble_gattc_indicate_custom(uint16_t conn_handle, uint16_t chr_val_handle,
++                              struct os_mbuf *txom);
+ int ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle);
+ 
+ int ble_gattc_init(void);
+diff --git a/net/nimble/host/src/ble_gattc.c b/net/nimble/host/src/ble_gattc.c
+index 66344d8..074b32a 100644
+--- a/net/nimble/host/src/ble_gattc.c
++++ b/net/nimble/host/src/ble_gattc.c
+@@ -4436,6 +4436,9 @@ ble_gattc_notify_custom(uint16_t conn_handle, uint16_t chr_val_handle,
+         goto err;
+     }
+ 
++    /* Tell the application that a notification transmission was attempted. */
++    ble_gap_notify_tx_event(0, conn_handle, chr_val_handle, 0);
++
+     return 0;
+ 
+ err:
+@@ -4556,20 +4559,25 @@ ble_gatts_indicate_fail_notconn(uint16_t conn_handle)
+     ble_gattc_fail_procs(conn_handle, BLE_GATT_OP_INDICATE, BLE_HS_ENOTCONN);
+ }
+ 
++
+ /**
+- * Sends a characteristic indication.  The content of the message is read from
+- * the specified characteristic.
++ * Sends a characteristic indication with custom payload.  The content of the
++ * message is either the provided txom payload or read from the specified
++ * characteristic if txom is NULL.
+  *
+  * @param conn_handle           The connection over which to execute the
+  *                                  procedure.
+  * @param chr_val_handle        The value attribute handle of the
+  *                                  characteristic to include in the outgoing
+  *                                  indication.
++ * @param txom                  The payload to send, or NULL to read the
++ *                                  characteristic value.
+  *
+  * @return                      0 on success; nonzero on failure.
+  */
+ int
+-ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
++ble_gattc_indicate_custom(uint16_t conn_handle, uint16_t chr_val_handle,
++                          struct os_mbuf *txom)
+ {
+ #if !MYNEWT_VAL(BLE_GATT_INDICATE)
+     return BLE_HS_ENOTSUP;
+@@ -4596,19 +4604,26 @@ ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
+ 
+     ble_gattc_log_indicate(chr_val_handle);
+ 
+-    om = ble_hs_mbuf_att_pkt();
+-    if (om == NULL) {
+-        rc = BLE_HS_ENOMEM;
+-        goto done;
+-    }
++    if (txom == NULL) {
++        /* No custom attribute data; read the value from the specified
++         * characteristic.
++         */
++        om = ble_hs_mbuf_att_pkt();
++        if (om == NULL) {
++            rc = BLE_HS_ENOMEM;
++            goto done;
++        }
+ 
+-    rc = ble_att_svr_read_handle(BLE_HS_CONN_HANDLE_NONE, chr_val_handle, 0,
+-                                 om, NULL);
+-    if (rc != 0) {
+-        /* Fatal error; application disallowed attribute read. */
+-        BLE_HS_DBG_ASSERT(0);
+-        rc = BLE_HS_EAPP;
+-        goto done;
++        rc = ble_att_svr_read_handle(BLE_HS_CONN_HANDLE_NONE, chr_val_handle, 0,
++                                     om, NULL);
++        if (rc != 0) {
++            /* Fatal error; application disallowed attribute read. */
++            BLE_HS_DBG_ASSERT(0);
++            rc = BLE_HS_EAPP;
++            goto done;
++        }
++    } else {
++        om = txom;
+     }
+ 
+     rc = ble_att_clt_tx_indicate(conn_handle, chr_val_handle, om);
+@@ -4639,6 +4654,26 @@ done:
+     return rc;
+ }
+ 
++/**
++ * Sends a characteristic indication.  The content of the message is read from
++ * the specified characteristic.
++ *
++ * @param conn_handle           The connection over which to execute the
++ *                                  procedure.
++ * @param chr_val_handle        The value attribute handle of the
++ *                                  characteristic to include in the outgoing
++ *                                  indication.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++int
++ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
++{
++    return ble_gattc_indicate_custom(conn_handle, chr_val_handle, NULL);
++}
++
++
++
+ /*****************************************************************************
+  * $rx                                                                       *
+  *****************************************************************************/
+diff --git a/net/nimble/host/src/ble_sm.c b/net/nimble/host/src/ble_sm.c
+index b59d94d..7d746a1 100644
+--- a/net/nimble/host/src/ble_sm.c
++++ b/net/nimble/host/src/ble_sm.c
+@@ -1829,11 +1829,15 @@ ble_sm_key_exch_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
+             goto err;
+         }
+ 
+-        rc = ble_sm_gen_ediv(&master_id->ediv);
++        uint16_t ediv_val;
++        rc = ble_sm_gen_ediv(&ediv_val);
++        master_id->ediv = ediv_val;
+         if (rc != 0) {
+             goto err;
+         }
+-        rc = ble_sm_gen_master_id_rand(&master_id->rand_val);
++        uint64_t rand_val;
++        rc = ble_sm_gen_master_id_rand(&rand_val);
++        master_id->rand_val = rand_val;
+         if (rc != 0) {
+             goto err;
+         }

@@ -1,0 +1,88 @@
+diff --git a/hw/sensor/include/sensor/sensor.h b/hw/sensor/include/sensor/sensor.h
+index 215946a..a816eaf 100644
+--- a/hw/sensor/include/sensor/sensor.h
++++ b/hw/sensor/include/sensor/sensor.h
+@@ -1135,4 +1135,5 @@ void sensor_oic_init(void);
+ }
+ #endif
+ 
++int sensor_register_err_func(struct sensor *sensor, void (*err_fn)(struct sensor *, void *, int), void *arg);
+ #endif /* __SENSOR_H__ */
+diff --git a/hw/sensor/src/sensor.c b/hw/sensor/src/sensor.c
+index 310acae..4e49a18 100644
+--- a/hw/sensor/src/sensor.c
++++ b/hw/sensor/src/sensor.c
+@@ -22,6 +22,7 @@
+ #include <assert.h>
+ #include "os/mynewt.h"
+ #include "sensor/sensor.h"
++#include <stdlib.h>
+ #include "sensor_priv.h"
+ #include "sensor/accel.h"
+ #include "sensor/mag.h"
+@@ -2241,3 +2242,65 @@ err:
+     return (rc);
+ }
+ 
++/*
++ * Simple error callback wrapper.  The user supplied callback has the signature
++ * `void (*)(struct sensor *, void *, int)`.  The generic error listener expects
++ * an additional sensor_type_t argument, which we simply ignore.
++ */
++struct sensor_err_wrapper_arg {
++    void (*user_fn)(struct sensor *, void *, int);
++    void *user_arg;
++};
++
++static void
++sensor_err_wrapper(struct sensor *sensor, void *arg, int status,
++        sensor_type_t type)
++{
++    struct sensor_err_wrapper_arg *warg = (struct sensor_err_wrapper_arg *)arg;
++    if (warg && warg->user_fn) {
++        warg->user_fn(sensor, warg->user_arg, status);
++    }
++}
++
++/**
++ * Register a simple error callback for a sensor.  This convenience API registers
++ * a single listener that is invoked for any read error regardless of the sensor
++ * type.  The supplied argument is passed to the callback when it is invoked.
++ */
++int
++sensor_register_err_func(struct sensor *sensor,
++        void (*err_fn)(struct sensor *, void *, int), void *arg)
++{
++    struct sensor_err_listener *listener;
++    struct sensor_err_wrapper_arg *warg;
++    int rc;
++
++    if (!sensor || !err_fn) {
++        return SYS_EINVAL;
++    }
++
++    listener = (struct sensor_err_listener *)malloc(sizeof(*listener));
++    if (!listener) {
++        return OS_ENOMEM;
++    }
++
++    warg = (struct sensor_err_wrapper_arg *)malloc(sizeof(*warg));
++    if (!warg) {
++        free(listener);
++        return OS_ENOMEM;
++    }
++
++    warg->user_fn = err_fn;
++    warg->user_arg = arg;
++
++    listener->sel_sensor_type = SENSOR_TYPE_ALL;
++    listener->sel_func = sensor_err_wrapper;
++    listener->sel_arg = warg;
++
++    rc = sensor_register_err_listener(sensor, listener);
++    if (rc != 0) {
++        free(warg);
++        free(listener);
++    }
++    return rc;
++}

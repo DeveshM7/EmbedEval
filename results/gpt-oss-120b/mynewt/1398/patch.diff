@@ -1,0 +1,102 @@
+diff --git a/sys/config/include/config/config.h b/sys/config/include/config/config.h
+index fc324c5..4313131 100644
+--- a/sys/config/include/config/config.h
++++ b/sys/config/include/config/config.h
+@@ -258,6 +258,22 @@ int conf_set_value(char *name, char *val_str);
+  * @return pointer to value on success, NULL on failure.
+  */
+ char *conf_get_value(char *name, char *buf, int buf_len);
++/**
++ * Retrieve the most recently persisted value for a configuration key.
++ *
++ * The value is read directly from the persistence destination (the store
++ * registered as the save destination).  It reflects the latest value written
++ * by conf_save or conf_save_one, regardless of whether the value has been
++ * loaded into the in‑memory shadow configuration.
++ *
++ * @param name     Name/key of the configuration item.
++ * @param buf      Buffer to receive the NUL‑terminated string value.
++ * @param buf_len  Length of the buffer.
++ *
++ * @return 0 on success, OS_ENOENT if the key does not exist in storage, or
++ *         OS_EINVAL if the provided buffer is too small to hold the value.
++ */
++int conf_get_stored_value(char *name, char *buf, int buf_len);
+ 
+ /**
+  * Call commit for all configuration handler. This should apply all
+diff --git a/sys/config/src/conf_get_stored.c b/sys/config/src/conf_get_stored.c
+new file mode 100644
+index 0000000..05775c3
+--- /dev/null
++++ b/sys/config/src/conf_get_stored.c
+@@ -0,0 +1,69 @@
++#include "os/mynewt.h"
++#include <string.h>
++#include "config/config.h"
++#include "config/config_store.h"
++#include "config_priv.h"
++
++struct conf_get_stored_arg {
++    const char *search_name;
++    char *out_buf;
++    int out_len;
++    int found;
++    int too_small;
++};
++
++static void
++conf_get_stored_cb(char *name, char *val, void *arg)
++{
++    struct conf_get_stored_arg *cga = (struct conf_get_stored_arg *)arg;
++    if (strcmp(name, cga->search_name) == 0) {
++        size_t vlen = strlen(val);
++        if ((int)(vlen + 1) > cga->out_len) {
++            cga->too_small = 1;
++        } else {
++            memcpy(cga->out_buf, val, vlen + 1);
++            cga->found = 1;
++        }
++    }
++}
++
++int
++conf_get_stored_value(char *name, char *buf, int buf_len)
++{
++    struct conf_store *cs;
++    struct conf_get_stored_arg arg;
++    int rc = OS_ENOENT;
++
++    if (!name || !buf || buf_len <= 0) {
++        return OS_EINVAL;
++    }
++
++    conf_lock();
++    cs = conf_save_dst;
++    if (!cs) {
++        rc = OS_ENOENT;
++        goto out;
++    }
++
++    arg.search_name = name;
++    arg.out_buf = buf;
++    arg.out_len = buf_len;
++    arg.found = 0;
++    arg.too_small = 0;
++
++    if (cs->cs_itf->csi_load) {
++        cs->cs_itf->csi_load(cs, conf_get_stored_cb, &arg);
++    }
++
++    if (arg.too_small) {
++        rc = OS_EINVAL;
++    } else if (arg.found) {
++        rc = 0;
++    } else {
++        rc = OS_ENOENT;
++    }
++out:
++    conf_unlock();
++    return rc;
++}
++

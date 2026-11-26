@@ -1,0 +1,231 @@
+diff --git a/kernel/os/src/os_mbuf.c b/kernel/os/src/os_mbuf.c
+index accbba0..9b2d6b9 100644
+--- a/kernel/os/src/os_mbuf.c
++++ b/kernel/os/src/os_mbuf.c
+@@ -416,6 +416,7 @@ os_mbuf_off(const struct os_mbuf *om, int off, uint16_t *out_off)
+     struct os_mbuf *cur;
+ 
+     /* Cast away const. */
++    if (off < 0) {        return NULL;    }
+     cur = (struct os_mbuf *)om;
+ 
+     while (1) {
+@@ -442,6 +443,7 @@ os_mbuf_copydata(const struct os_mbuf *om, int off, int len, void *dst)
+ {
+     unsigned int count;
+     uint8_t *udst;
++    if (off < 0 || len < 0) {        return -1;    }
+ 
+     if (!len) {
+         return 0;
+diff --git a/mbuf.patch b/mbuf.patch
+new file mode 100644
+index 0000000..ebd55bf
+--- /dev/null
++++ b/mbuf.patch
+@@ -0,0 +1,153 @@
++--- a/kernel/os/src/os_mbuf.c
+++++ b/kernel/os/src/os_mbuf.c
++@@
++-struct os_mbuf *
++-os_mbuf_off(const struct os_mbuf *om, int off, uint16_t *out_off)
++-{
++-    struct os_mbuf *next;
++-    struct os_mbuf *cur;
++-
++-    /* Cast away const. */
++-    cur = (struct os_mbuf *)om;
++-
++-    while (1) {
++-        if (cur == NULL) {
++-            return NULL;
++-        }
++-
++-        next = SLIST_NEXT(cur, om_next);
++-
++-        if (cur->om_len > off ||
++-            (cur->om_len == off && next == NULL)) {
++-
++-            *out_off = off;
++-            return cur;
++-        }
++-
++-        off -= cur->om_len;
++-        cur = next;
++-    }
++-}
+++/**
+++ * Return the mbuf in the chain that contains the byte at the given offset.
+++ *
+++ * The original implementation assumed the caller would never pass a negative
+++ * offset.  Several callers (including newly added tests) rely on the function
+++ * to gracefully reject such inputs.  For consistency with other mbuf helper
+++ * functions (e.g. os_mbuf_copydata) we now treat a negative offset as an error
+++ * and return NULL.
+++ */
+++struct os_mbuf *
+++os_mbuf_off(const struct os_mbuf *om, int off, uint16_t *out_off)
+++{
+++    struct os_mbuf *next;
+++    struct os_mbuf *cur;
+++
+++    /* Negative offsets are invalid – reject them early. */
+++    if (off < 0) {
+++        return NULL;
+++    }
+++
+++    /* Cast away const. */
+++    cur = (struct os_mbuf *)om;
+++
+++    while (1) {
+++        if (cur == NULL) {
+++            return NULL;
+++        }
+++
+++        next = SLIST_NEXT(cur, om_next);
+++
+++        if (cur->om_len > off ||
+++            (cur->om_len == off && next == NULL)) {
+++
+++            *out_off = (uint16_t)off;
+++            return cur;
+++        }
+++
+++        off -= cur->om_len;
+++        cur = next;
+++    }
+++}
++@@
++-int
++-os_mbuf_copydata(const struct os_mbuf *om, int off, int len, void *dst)
++-{
++-    unsigned int count;
++-    uint8_t *udst;
++-
++-    if (!len) {
++-        return 0;
++-    }
++-
++-    udst = dst;
++-
++-    while (off > 0) {
++-        if (!om) {
++-            return (-1);
++-        }
++-
++-        if (off < om->om_len) {
++-            break;
++-        }
++-        off -= om->om_len;
++-        om = SLIST_NEXT(om, om_next);
++-    }
++-    while (len > 0 && om != NULL) {
++-        count = min(om->om_len - off, len);
++-        memcpy(udst, om->om_data + off, count);
++-        len -= count;
++-        udst += count;
++-        off = 0;
++-        om = SLIST_NEXT(om, om_next);
++-    }
++-
++-    return (len > 0 ? -1 : 0);
++-}
+++/**
+++ * Copy data from a mbuf chain to a destination buffer.
+++ *
+++ * The function now validates its parameters more strictly.  A negative
+++ * offset or a negative length is considered an error and the function returns
+++ * -1 without touching the destination buffer.  This mirrors the behaviour of
+++ * other mbuf APIs that reject invalid arguments.
+++ */
+++int
+++os_mbuf_copydata(const struct os_mbuf *om, int off, int len, void *dst)
+++{
+++    unsigned int count;
+++    uint8_t *udst;
+++
+++    /* Reject negative offsets and lengths. */
+++    if (off < 0 || len < 0) {
+++        return -1;
+++    }
+++
+++    if (!len) {
+++        return 0;
+++    }
+++
+++    udst = dst;
+++
+++    while (off > 0) {
+++        if (!om) {
+++            return (-1);
+++        }
+++
+++        if (off < om->om_len) {
+++            break;
+++        }
+++        off -= om->om_len;
+++        om = SLIST_NEXT(om, om_next);
+++    }
+++    while (len > 0 && om != NULL) {
+++        count = min(om->om_len - off, (unsigned int)len);
+++        memcpy(udst, om->om_data + off, count);
+++        len -= count;
+++        udst += count;
+++        off = 0;
+++        om = SLIST_NEXT(om, om_next);
+++    }
+++
+++    return (len > 0 ? -1 : 0);
+++}
+diff --git a/mbuf_test_add.patch b/mbuf_test_add.patch
+new file mode 100644
+index 0000000..9b53090
+--- /dev/null
++++ b/mbuf_test_add.patch
+@@ -0,0 +1,46 @@
++diff --git a/kernel/os/selftest/src/mbuf_test.c b/kernel/os/selftest/src/mbuf_test.c
++index 0000000..1111111 100644
++--- a/kernel/os/selftest/src/mbuf_test.c
+++++ b/kernel/os/selftest/src/mbuf_test.c
++@@
++-TEST_CASE_DECL(os_mbuf_test_pack_chains)
++-TEST_CASE_DECL(os_mbuf_test_copydata_negative)
+++TEST_CASE_DECL(os_mbuf_test_pack_chains)
+++TEST_CASE_DECL(os_mbuf_test_copydata_negative)
++@@
++-    os_mbuf_test_pack_chains();
++-    os_mbuf_test_copydata_negative();
+++    os_mbuf_test_pack_chains();
+++    os_mbuf_test_copydata_negative();
++ }
+++
+++/* Test that os_mbuf_copydata rejects negative offsets and lengths and does not modify the destination buffer. Also test that os_mbuf_off returns NULL for negative offsets. */
+++static void
+++os_mbuf_test_copydata_negative(void)
+++{
+++    struct os_mbuf *om;
+++    uint8_t dst[4];
+++    int rc;
+++    uint16_t out_off;
+++
+++    om = os_mbuf_get(&os_mbuf_pool, 0);
+++    TEST_ASSERT_FATAL(om != NULL, "Failed to allocate mbuf");
+++    om->om_len = 2;
+++    om->om_data = om->om_databuf;
+++    om->om_data[0] = 0x11;
+++    om->om_data[1] = 0x22;
+++
+++    memset(dst, 0xAA, sizeof dst);
+++
+++    rc = os_mbuf_copydata(om, -1, 1, dst);
+++    TEST_ASSERT(rc == -1);
+++    TEST_ASSERT(memcmp(dst, (uint8_t[4]){0xAA,0xAA,0xAA,0xAA}, sizeof dst) == 0);
+++
+++    rc = os_mbuf_copydata(om, 0, -1, dst);
+++    TEST_ASSERT(rc == -1);
+++    TEST_ASSERT(memcmp(dst, (uint8_t[4]){0xAA,0xAA,0xAA,0xAA}, sizeof dst) == 0);
+++
+++    TEST_ASSERT(os_mbuf_off(om, -5, &out_off) == NULL);
+++
+++    os_mbuf_free_chain(om);
+++}

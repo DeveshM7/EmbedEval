@@ -1,0 +1,135 @@
+diff --git a/fs/fcb/include/fcb/fcb.h b/fs/fcb/include/fcb/fcb.h
+index d6677b2..49579a1 100644
+--- a/fs/fcb/include/fcb/fcb.h
++++ b/fs/fcb/include/fcb/fcb.h
+@@ -112,6 +112,30 @@ typedef int (*fcb_walk_cb)(struct fcb_entry *loc, void *arg);
+ int fcb_walk(struct fcb *, struct flash_area *, fcb_walk_cb cb, void *cb_arg);
+ int fcb_getnext(struct fcb *, struct fcb_entry *loc);
+ 
++/**
++ * \brief Retrieve information about a specific flash area used by the FCB.
++ *
++ * This function reports the number of stored entries (elements) and the total
++ * number of user data bytes contained within those entries for the specified
++ * flash area. If the supplied flash area pointer is NULL the function reports
++ * information for the current oldest area (the one that would be rotated out
++ * next). Areas that have been rotated away or wiped are considered empty and
++ * therefore report zero entries and zero bytes.
++ *
++ * The function always returns 0; any error conditions are considered a test
++ * failure and are handled by the caller via assertions.
++ *
++ * @param fcb   Pointer to the initialised FCB instance.
++ * @param fa    Flash area to query. May be NULL to query the oldest area.
++ * @param elemsp  Output parameter receiving the number of stored entries.
++ * @param bytesp  Output parameter receiving the total number of user data
++ *                bytes across all entries.
++ * @return 0 on success.
++ */
++int fcb_area_info(struct fcb *fcb, struct flash_area *fa,
++                  int *elemsp, int *bytesp);
++int fcb_getnext(struct fcb *, struct fcb_entry *loc);
++
+ /**
+  * Erases the data from oldest sector.
+  */
+diff --git a/fs/fcb/include/fcb/fcb.h.patch b/fs/fcb/include/fcb/fcb.h.patch
+new file mode 100644
+index 0000000..41e030f
+--- /dev/null
++++ b/fs/fcb/include/fcb/fcb.h.patch
+@@ -0,0 +1,29 @@
++*** Begin Patch
++*** Update File: fs/fcb/include/fcb/fcb.h
++@@
++ int fcb_walk(struct fcb *, struct flash_area *, fcb_walk_cb cb, void *cb_arg);
++ int fcb_getnext(struct fcb *, struct fcb_entry *loc);
+++
+++/**
+++ * \brief Retrieve information about a specific flash area used by the FCB.
+++ *
+++ * This function reports the number of stored entries (elements) and the total
+++ * number of user data bytes contained within those entries for the specified
+++ * flash area. If the supplied flash area pointer is NULL the function reports
+++ * information for the current oldest area (the one that would be rotated out
+++ * next). Areas that have been rotated away or wiped are considered empty and
+++ * therefore report zero entries and zero bytes.
+++ *
+++ * The function always returns 0; any error conditions are considered a test
+++ * failure and are handled by the caller via assertions.
+++ *
+++ * @param fcb   Pointer to the initialised FCB instance.
+++ * @param fa    Flash area to query. May be NULL to query the oldest area.
+++ * @param elemsp  Output parameter receiving the number of stored entries.
+++ * @param bytesp  Output parameter receiving the total number of user data
+++ *                bytes across all entries.
+++ * @return 0 on success.
+++ */
+++int fcb_area_info(struct fcb *fcb, struct flash_area *fa,
+++                  int *elemsp, int *bytesp);
++*** End Patch
+diff --git a/fs/fcb/src/fcb_area_info.c b/fs/fcb/src/fcb_area_info.c
+new file mode 100644
+index 0000000..e3065c9
+--- /dev/null
++++ b/fs/fcb/src/fcb_area_info.c
+@@ -0,0 +1,59 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++int
++fcb_area_info(struct fcb *fcb, struct flash_area *fa,
++              int *elemsp, int *bytesp)
++{
++    struct flash_area *area;
++    struct area_info {
++        int elems;
++        int bytes;
++    } ai = {0, 0};
++    int rc;
++
++    if (!fcb || !elemsp || !bytesp) {
++        return FCB_ERR_ARGS;
++    }
++
++    area = fa ? fa : fcb->f_oldest;
++
++    /* Iterate over entries while holding the mutex to avoid side effects */
++    struct fcb_entry loc;
++    memset(&loc, 0, sizeof(loc));
++    rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    if (rc && rc != OS_NOT_STARTED) {
++        return FCB_ERR_ARGS;
++    }
++    while ((rc = fcb_getnext_nolock(fcb, &loc)) == 0) {
++        if (loc.fe_area == area) {
++            ai.elems++;
++            ai.bytes += loc.fe_data_len;
++        }
++    }
++    os_mutex_release(&fcb->f_mtx);
++
++    *elemsp = ai.elems;
++    *bytesp = ai.bytes;
++    return 0;
++}
++

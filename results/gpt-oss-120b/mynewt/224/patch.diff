@@ -1,0 +1,106 @@
+diff --git a/net/nimble/controller/include/controller/ble_ll_conn.h b/net/nimble/controller/include/controller/ble_ll_conn.h
+index 041504d..428511a 100644
+--- a/net/nimble/controller/include/controller/ble_ll_conn.h
++++ b/net/nimble/controller/include/controller/ble_ll_conn.h
+@@ -115,6 +115,7 @@ union ble_ll_conn_sm_flags {
+         uint32_t encrypted:1;
+         uint32_t encrypt_chg_sent:1;
+         uint32_t le_ping_supp:1;
++        uint32_t csa2_supp:1;
+     } cfbit;
+     uint32_t conn_flags;
+ } __attribute__((packed));
+@@ -149,6 +150,7 @@ struct ble_ll_conn_sm
+     uint8_t req_chanmap[BLE_LL_CONN_CHMAP_LEN];
+     uint16_t chanmap_instant;
+     uint8_t hop_inc;
++    uint16_t channel_id;
+     uint8_t data_chan_index;
+     uint8_t unmapped_chan;
+     uint8_t last_unmapped_chan;
+@@ -271,6 +273,7 @@ struct ble_ll_conn_sm
+ #define CONN_F_CONN_REQ_TXD(csm)    ((csm)->csmflags.cfbit.conn_req_txd)
+ #define CONN_F_ENCRYPTED(csm)       ((csm)->csmflags.cfbit.encrypted)
+ #define CONN_F_ENC_CHANGE_SENT(csm) ((csm)->csmflags.cfbit.encrypt_chg_sent)
++#define CONN_F_CSA2_SUPP(csm)    ((csm)->csmflags.cfbit.csa2_supp)
+ #define CONN_F_LE_PING_SUPP(csm)    ((csm)->csmflags.cfbit.le_ping_supp)
+ 
+ /* Role */
+diff --git a/net/nimble/controller/include/controller/ble_ll_test.h b/net/nimble/controller/include/controller/ble_ll_test.h
+new file mode 100644
+index 0000000..e4e5941
+--- /dev/null
++++ b/net/nimble/controller/include/controller/ble_ll_test.h
+@@ -0,0 +1,25 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef H_BLE_LL_TEST_
++#define H_BLE_LL_TEST_
++
++int ble_ll_csa2_test_all(void);
++
++#endif /* H_BLE_LL_TEST_ */
+diff --git a/net/nimble/controller/src/ble_ll_conn.c b/net/nimble/controller/src/ble_ll_conn.c
+index 2d4c099..42cb717 100644
+--- a/net/nimble/controller/src/ble_ll_conn.c
++++ b/net/nimble/controller/src/ble_ll_conn.c
+@@ -572,7 +572,7 @@ ble_ll_conn_calc_access_addr(void)
+  * @return uint8_t
+  */
+ uint8_t
+-ble_ll_conn_calc_dci(struct ble_ll_conn_sm *conn)
++ble_ll_conn_calc_dci(struct ble_ll_conn_sm *conn, uint16_t latency)
+ {
+     int     i;
+     int     j;
+@@ -584,6 +584,7 @@ ble_ll_conn_calc_dci(struct ble_ll_conn_sm *conn)
+     uint8_t mask;
+     uint8_t usable_chans;
+ 
++    /* CSA2 channel selection */    if (CONN_F_CSA2_SUPP(conn)) {        uint16_t prn = (uint16_t)((conn->channel_id + conn->hop_inc * conn->event_cntr) & 0xFFFF);        curchan = prn % BLE_PHY_NUM_DATA_CHANS;        conn->unmapped_chan = curchan;        /* Check if channel is usable; if not, remap similar to CSA1 */        uint8_t bitpos = 1 << (curchan & 0x07);        if ((conn->chanmap[curchan >> 3] & bitpos) == 0) {            uint8_t remap_index = curchan % conn->num_used_chans;            uint8_t chan = 0;            uint8_t cntr = 0;            for (int i = 0; i < BLE_LL_CONN_CHMAP_LEN; i++) {                uint8_t usable = conn->chanmap[i];                if (usable) {                    uint8_t mask = 0x01;                    for (int j = 0; j < 8; j++) {                        if (usable & mask) {                            if (cntr == remap_index) {                                return (chan + j);                            }                            ++cntr;                        }                        mask <<= 1;                    }                }                chan += 8;            }        }        return curchan;    }
+     /* Get next unmapped channel */
+     curchan = conn->last_unmapped_chan + conn->hop_inc;
+     if (curchan > BLE_PHY_NUM_DATA_CHANS) {
+@@ -1490,6 +1491,7 @@ ble_ll_conn_master_init(struct ble_ll_conn_sm *connsm,
+ 
+     /*  Calculate random access address and crc initialization value */
+     connsm->access_addr = ble_ll_conn_calc_access_addr();
++    connsm->channel_id = (uint16_t)((connsm->access_addr & 0xFFFF) ^ (connsm->access_addr >> 16));
+     connsm->crcinit = rand() & 0xffffff;
+ 
+     /* Set initial schedule callback */
+@@ -1536,7 +1538,7 @@ ble_ll_conn_sm_new(struct ble_ll_conn_sm *connsm)
+ 
+     /* Calculate the next data channel */
+     connsm->last_unmapped_chan = 0;
+-    connsm->data_chan_index = ble_ll_conn_calc_dci(connsm);
++    connsm->data_chan_index = ble_ll_conn_calc_dci(connsm, 0);
+ 
+     /* Connection end event */
+     connsm->conn_ev_end.ev_arg = connsm;
+@@ -1860,7 +1862,7 @@ ble_ll_conn_next_event(struct ble_ll_conn_sm *connsm)
+     /* Calculate data channel index of next connection event */
+     while (latency > 0) {
+         connsm->last_unmapped_chan = connsm->unmapped_chan;
+-        connsm->data_chan_index = ble_ll_conn_calc_dci(connsm);
++        connsm->data_chan_index = ble_ll_conn_calc_dci(connsm, 0);
+         --latency;
+     }
+ 

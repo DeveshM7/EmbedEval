@@ -1,0 +1,320 @@
+diff --git a/net/nimble/host/include/host/ble_gap.h b/net/nimble/host/include/host/ble_gap.h
+index 111c207..583b748 100644
+--- a/net/nimble/host/include/host/ble_gap.h
++++ b/net/nimble/host/include/host/ble_gap.h
+@@ -614,6 +614,26 @@ struct ble_gap_event {
+             uint8_t tx_phy;
+             uint8_t rx_phy;
+         } phy_updated;
++
++        /**
++         * Represents the completion of an advertising procedure. Valid for
++         * the following event types:
++         *     o BLE_GAP_EVENT_ADV_COMPLETE
++         */
++        struct {
++            /** The reason for the advertising procedure completion. */
++            int reason;
++        } adv_complete;
++
++        /**
++         * Represents the completion of a discovery procedure. Valid for
++         * the following event types:
++         *     o BLE_GAP_EVENT_DISC_COMPLETE
++         */
++        struct {
++            /** The reason for the discovery procedure completion. */
++            int reason;
++        } disc_complete;
+     };
+ };
+ 
+diff --git a/net/nimble/host/include/host/ble_hs.h b/net/nimble/host/include/host/ble_hs.h
+index 85885bd..da0468b 100644
+--- a/net/nimble/host/include/host/ble_hs.h
++++ b/net/nimble/host/include/host/ble_hs.h
+@@ -76,6 +76,7 @@ struct os_event;
+ #define BLE_HS_EENCRYPT_KEY_SZ      26
+ #define BLE_HS_ESTORE_CAP           27
+ #define BLE_HS_ESTORE_FAIL          28
++#define BLE_HS_EPREEMPTED           29
+ 
+ #define BLE_HS_ERR_ATT_BASE         0x100   /* 256 */
+ #define BLE_HS_ATT_ERR(x)           ((x) ? BLE_HS_ERR_ATT_BASE + (x) : 0)
+diff --git a/net/nimble/host/src/ble_gap.c b/net/nimble/host/src/ble_gap.c
+index 01a2ab2..c25c6b6 100644
+--- a/net/nimble/host/src/ble_gap.c
++++ b/net/nimble/host/src/ble_gap.c
+@@ -106,6 +106,7 @@ struct ble_gap_master_state {
+             uint8_t using_wl:1;
+             uint8_t our_addr_type:2;
+             uint8_t cancel:1;
++            uint8_t preempted:1;
+         } conn;
+ 
+         struct {
+@@ -143,6 +144,13 @@ static bssnz_t struct {
+     void *cb_arg;
+ } ble_gap_slave;
+ 
++/**
++ * Indicates whether GAP procedures are preempted due to an IRK addition
++ * to the resolving list.  When nonzero, new GAP procedures should fail
++ * with BLE_HS_EPREEMPTED.
++ */
++static uint8_t ble_gap_preempted;
++
+ struct ble_gap_update_entry {
+     SLIST_ENTRY(ble_gap_update_entry) next;
+     struct ble_gap_upd_params params;
+@@ -175,6 +183,14 @@ static int ble_gap_conn_cancel_tx(void);
+ 
+ #if NIMBLE_BLE_SCAN
+ static int ble_gap_disc_enable_tx(int enable, int filter_duplicates);
++
++/* Forward declarations for preemption functions */
++static void ble_gap_slave_extract_cb(ble_gap_event_fn **out_cb, void **out_cb_arg);
++static void ble_gap_master_extract_state(struct ble_gap_master_state *out_state,
++                             int reset_state);
++static int ble_gap_is_extended_disc(void);
++static int ble_gap_call_event_cb(struct ble_gap_event *event,
++                                ble_gap_event_fn *cb, void *cb_arg);
+ #endif
+ 
+ #if MYNEWT_VAL(BLE_EXT_ADV)
+@@ -615,6 +631,94 @@ ble_gap_slave_reset_state(void)
+     ble_hs_timer_resched();
+ }
+ 
++/**
++ * Returns true if GAP procedures are preempted due to an IRK addition
++ * to the resolving list.
++ */
++int
++ble_gap_get_preempted(void)
++{
++    return ble_gap_preempted != 0;
++}
++
++/**
++ * Preempts all GAP procedures.  This should be called before adding
++ * an IRK to the resolving list.  All active GAP procedures are stopped
++ * and new ones are blocked until ble_gap_preempt_relax() is called.
++ */
++void
++ble_gap_preempt(void)
++{
++    struct ble_gap_event event;
++    ble_gap_event_fn *cb;
++    void *cb_arg;
++
++    ble_hs_lock();
++
++    ble_gap_preempted = 1;
++
++    /* Stop active advertising if any and report completion. */
++    if (ble_gap_slave.op == BLE_GAP_OP_S_ADV) {
++        ble_gap_adv_enable_tx(0, false);
++
++        /* Extract callback before resetting state. */
++        ble_gap_slave_extract_cb(&cb, &cb_arg);
++        ble_gap_slave_reset_state();
++
++        if (cb != NULL) {
++            memset(&event, 0, sizeof event);
++            event.type = BLE_GAP_EVENT_ADV_COMPLETE;
++            event.adv_complete.reason = BLE_HS_EPREEMPTED;
++            cb(&event, cb_arg);
++        }
++    }
++
++    /* Stop active discovery if any and report completion. */
++    if (ble_gap_master.op == BLE_GAP_OP_M_DISC) {
++        struct ble_gap_master_state state;
++#if NIMBLE_BLE_SCAN
++        if (!ble_gap_is_extended_disc()) {
++            ble_gap_disc_enable_tx(0, 0);
++        } else {
++#if MYNEWT_VAL(BLE_EXT_ADV)
++            ble_gap_ext_disc_enable_tx(0, 0, 0, 0);
++#endif
++        }
++#endif
++        /* Extract state before resetting. */
++        ble_gap_master_extract_state(&state, 1);
++
++        /* Report discovery complete with preempted reason. */
++        if (state.cb != NULL) {
++            memset(&event, 0, sizeof event);
++            event.type = BLE_GAP_EVENT_DISC_COMPLETE;
++            event.disc_complete.reason = BLE_HS_EPREEMPTED;
++            ble_gap_call_event_cb(&event, state.cb, state.cb_arg);
++        }
++    }
++
++    /* Stop active connection if any - report after cancel completes. */
++    if (ble_gap_master.op == BLE_GAP_OP_M_CONN) {
++        ble_gap_master.conn.cancel = 1;
++        ble_gap_master.conn.preempted = 1;
++        ble_gap_conn_cancel_tx();
++    }
++
++    ble_hs_unlock();
++}
++
++/**
++ * Relaxes preemption, allowing GAP procedures to resume.  This should be
++ * called after adding an IRK to the resolving list.
++ */
++void
++ble_gap_preempt_relax(void)
++{
++    ble_hs_lock();
++    ble_gap_preempted = 0;
++    ble_hs_unlock();
++}
++
+ static bool
+ ble_gap_has_client(struct ble_gap_master_state *out_state)
+ {
+@@ -697,13 +801,23 @@ ble_gap_master_connect_cancelled(void)
+ 
+     ble_gap_master_extract_state(&state, 1);
+     if (state.cb != NULL) {
+-        /* The GAP event type depends on whether 1) the application manually
+-         * cancelled the connect procedure or 2) the connect procedure timed
+-         * out.
++        /* The GAP event type depends on whether:
++         * 1) The application manually cancelled the connect procedure.
++         * 2) The connect procedure was preempted due to IRK addition.
++         * 3) The connect procedure timed out.
+          */
+         memset(&event, 0, sizeof event);
+         if (state.conn.cancel) {
+-            event.type = BLE_GAP_EVENT_CONN_CANCEL;
++            if (state.conn.preempted) {
++                /* Preempted due to IRK addition - report connect with
++                 * preempted status.
++                 */
++                event.type = BLE_GAP_EVENT_CONNECT;
++                event.connect.status = BLE_HS_EPREEMPTED;
++                event.connect.conn_handle = BLE_HS_CONN_HANDLE_NONE;
++            } else {
++                event.type = BLE_GAP_EVENT_CONN_CANCEL;
++            }
+         } else {
+             event.type = BLE_GAP_EVENT_CONNECT;
+             event.connect.status = BLE_HS_ETIMEOUT;
+@@ -2207,6 +2321,11 @@ ble_gap_adv_start(uint8_t own_addr_type, const ble_addr_t *direct_addr,
+ 
+     ble_hs_lock();
+ 
++    if (ble_gap_get_preempted()) {
++        rc = BLE_HS_EPREEMPTED;
++        goto done;
++    }
++
+     rc = ble_gap_adv_validate(own_addr_type, direct_addr, adv_params);
+     if (rc != 0) {
+         goto done;
+@@ -2898,6 +3017,11 @@ ble_gap_disc(uint8_t own_addr_type, int32_t duration_ms,
+ 
+     ble_hs_lock();
+ 
++    if (ble_gap_get_preempted()) {
++        rc = BLE_HS_EPREEMPTED;
++        goto done;
++    }
++
+     /* Make a copy of the parameter strcuture and fill unspecified values with
+      * defaults.
+      */
+@@ -3176,6 +3300,11 @@ ble_gap_ext_connect(uint8_t own_addr_type, const ble_addr_t *peer_addr,
+ 
+     ble_hs_lock();
+ 
++    if (ble_gap_get_preempted()) {
++        rc = BLE_HS_EPREEMPTED;
++        goto done;
++    }
++
+     if (ble_gap_conn_active()) {
+         rc = BLE_HS_EALREADY;
+         goto done;
+@@ -3324,6 +3453,11 @@ ble_gap_connect(uint8_t own_addr_type, const ble_addr_t *peer_addr,
+ 
+     ble_hs_lock();
+ 
++    if (ble_gap_get_preempted()) {
++        rc = BLE_HS_EPREEMPTED;
++        goto done;
++    }
++
+     if (ble_gap_conn_active()) {
+         rc = BLE_HS_EALREADY;
+         goto done;
+diff --git a/net/nimble/host/src/ble_gap_priv.h b/net/nimble/host/src/ble_gap_priv.h
+index 88e62ca..f412b9e 100644
+--- a/net/nimble/host/src/ble_gap_priv.h
++++ b/net/nimble/host/src/ble_gap_priv.h
+@@ -118,3 +118,22 @@ int ble_gap_dbg_update_active(uint16_t conn_handle);
+ #endif
+ 
+ #endif
++
++/**
++ * Preempts all GAP procedures.  This should be called before adding
++ * an IRK to the resolving list.  All active GAP procedures are stopped
++ * and new ones are blocked until ble_gap_preempt_relax() is called.
++ */
++void ble_gap_preempt(void);
++
++/**
++ * Relaxes preemption, allowing GAP procedures to resume.  This should be
++ * called after adding an IRK to the resolving list.
++ */
++void ble_gap_preempt_relax(void);
++
++/**
++ * Returns true if GAP procedures are preempted due to an IRK addition
++ * to the resolving list.
++ */
++int ble_gap_get_preempted(void);
+diff --git a/net/nimble/host/src/ble_hs_pvcy.c b/net/nimble/host/src/ble_hs_pvcy.c
+index 95b22c2..59c64c5 100644
+--- a/net/nimble/host/src/ble_hs_pvcy.c
++++ b/net/nimble/host/src/ble_hs_pvcy.c
+@@ -21,6 +21,7 @@
+ #include <string.h>
+ #include "stats/stats.h"
+ #include "ble_hs_priv.h"
++#include "ble_gap_priv.h"
+ 
+ static uint8_t ble_hs_pvcy_started;
+ static uint8_t ble_hs_pvcy_irk[16];
+@@ -116,6 +117,9 @@ ble_hs_pvcy_add_entry(const uint8_t *addr, uint8_t addr_type,
+ 
+     STATS_INC(ble_hs_stats, pvcy_add_entry);
+ 
++    /* Preempt GAP procedures before adding the IRK to the resolving list. */
++    ble_gap_preempt();
++
+     add.addr_type = addr_type;
+     memcpy(add.addr, addr, 6);
+     memcpy(add.local_irk, ble_hs_pvcy_irk, 16);
+@@ -133,10 +137,15 @@ ble_hs_pvcy_add_entry(const uint8_t *addr, uint8_t addr_type,
+         goto err;
+     }
+ 
++    /* Allow GAP procedures to resume. */
++    ble_gap_preempt_relax();
++
+     return 0;
+ 
+ err:
+     STATS_INC(ble_hs_stats, pvcy_add_entry_fail);
++    /* Allow GAP procedures to resume even on failure. */
++    ble_gap_preempt_relax();
+     return rc;
+ }
+ 

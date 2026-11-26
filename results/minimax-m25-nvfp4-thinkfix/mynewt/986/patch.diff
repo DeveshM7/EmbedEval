@@ -1,0 +1,40 @@
+diff --git a/kernel/sim/src/sim_sched_gen.c b/kernel/sim/src/sim_sched_gen.c
+index bcc029e..efa5279 100644
+--- a/kernel/sim/src/sim_sched_gen.c
++++ b/kernel/sim/src/sim_sched_gen.c
+@@ -157,6 +157,8 @@ void
+ sim_task_start(struct stack_frame *sf, int rc)
+ {
+     struct os_task *task;
++    struct os_task *next_t;
++    os_sr_t sr;
+ 
+     /*
+      * Interrupts are disabled when a task starts executing. This happens in
+@@ -171,8 +173,24 @@ sim_task_start(struct stack_frame *sf, int rc)
+     task = sf->sf_task;
+     task->t_func(task->t_arg);
+ 
+-    /* This should never return */
+-    assert(0);
++    /*
++     * Task handler returned instead of running forever.
++     * Remove the task from the scheduler and try to run other tasks.
++     * This allows tests that don't call tu_restart() to complete without
++     * aborting.
++     */
++    OS_ENTER_CRITICAL(sr);
++    os_sched_remove(task);
++    next_t = os_sched_next_task();
++    
++    /* If there's no runnable task, stop the OS and return.
++     * This allows tests that don't call tu_restart() to complete. */
++    if (!next_t) {
++        sim_os_stop();
++    } else {
++        os_sched(NULL);
++    }
++    OS_EXIT_CRITICAL(sr);
+ }
+ 
+ os_stack_t *

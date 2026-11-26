@@ -1,0 +1,274 @@
+diff --git a/encoding/base62/include/base62/base62.h b/encoding/base62/include/base62/base62.h
+new file mode 100644
+index 0000000..eba61fb
+--- /dev/null
++++ b/encoding/base62/include/base62/base62.h
+@@ -0,0 +1,51 @@
++#ifndef BASE62_H_
++#define BASE62_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Return codes */
++#define BASE62_DECODE_OK          0
++#define BASE62_DECODE_ERROR       1
++#define BASE62_INVALID_ARG        2
++#define BASE62_INSUFFICIENT_MEM   3
++
++/*
++ * Encode binary data to a base62 string.
++ *
++ * data: pointer to input bytes
++ * input_size: number of bytes to encode
++ * encoded_text: output buffer for encoded characters (not null terminated)
++ * output_size: on entry contains size of output buffer; on exit contains
++ *              number of characters written (or required size on insufficient
++ *              memory).
++ *
++ * Returns BASE62_DECODE_OK on success, BASE62_INVALID_ARG for bad arguments,
++ * or BASE62_INSUFFICIENT_MEM if the supplied buffer is too small.
++ */
++int base62_encode(const void *data, unsigned int input_size,
++                 char *encoded_text, unsigned int *output_size);
++
++/*
++ * Decode a base62 string to binary data.
++ *
++ * encoded_text: pointer to base62 characters
++ * text_length: number of characters to decode
++ * output_data: buffer for binary output
++ * output_size: on entry contains size of output buffer; on exit contains
++ *              number of bytes written (or required size on insufficient
++ *              memory).
++ *
++ * Returns BASE62_DECODE_OK on success, BASE62_DECODE_ERROR if any character
++ * is not a valid base62 digit, BASE62_INVALID_ARG for bad arguments, or
++ * BASE62_INSUFFICIENT_MEM if the supplied output buffer is too small.
++ */
++int base62_decode(const char *encoded_text, unsigned int text_length,
++                 void *output_data, unsigned int *output_size);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* BASE62_H_ */
+diff --git a/encoding/base62/pkg.yml b/encoding/base62/pkg.yml
+new file mode 100644
+index 0000000..10e092d
+--- /dev/null
++++ b/encoding/base62/pkg.yml
+@@ -0,0 +1,25 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++pkg.name: encoding/base62
++pkg.description: Library containing base62 encoding/decoding functions
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++    - base62
+diff --git a/encoding/base62/src/base62.c b/encoding/base62/src/base62.c
+new file mode 100644
+index 0000000..b62993d
+--- /dev/null
++++ b/encoding/base62/src/base62.c
+@@ -0,0 +1,180 @@
++/*
++ * Base62 encoding/decoding implementation.
++ *
++ * The implementation treats the input byte array as a big‑endian integer.
++ * Encoding repeatedly divides this integer by 62, collecting the remainders.
++ * Decoding does the reverse: it multiplies the accumulated integer by 62 and
++ * adds the digit value.
++ */
++
++#include <stddef.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "base62/base62.h"
++
++static const char base62_chars[] =
++    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
++
++static int char_to_val(char c, unsigned int *out)
++{
++    if (c >= '0' && c <= '9') {
++        *out = (unsigned int)(c - '0');
++        return 0;
++    }
++    if (c >= 'A' && c <= 'Z') {
++        *out = 10u + (unsigned int)(c - 'A');
++        return 0;
++    }
++    if (c >= 'a' && c <= 'z') {
++        *out = 36u + (unsigned int)(c - 'a');
++        return 0;
++    }
++    return -1;
++}
++
++static char val_to_char(unsigned int v)
++{
++    return base62_chars[v];
++}
++
++int base62_encode(const void *data, unsigned int input_size,
++                 char *encoded_text, unsigned int *output_size)
++{
++    if (!data || !encoded_text || !output_size) {
++        return BASE62_INVALID_ARG;
++    }
++    if (*output_size < input_size) {
++        return BASE62_INVALID_ARG;
++    }
++
++    const unsigned char *src = (const unsigned char *)data;
++    unsigned char *num = malloc(input_size);
++    if (!num) {
++        return BASE62_INVALID_ARG;
++    }
++    memcpy(num, src, input_size);
++
++    unsigned int start = 0;
++    while (start < input_size && num[start] == 0) {
++        ++start;
++    }
++
++    unsigned int digit_capacity = (input_size * 8 + 5) / 6 + 2;
++    unsigned char *digits = malloc(digit_capacity);
++    if (!digits) {
++        free(num);
++        return BASE62_INVALID_ARG;
++    }
++    unsigned int digit_count = 0;
++
++    if (start == input_size) {
++        digits[digit_count++] = 0;
++    } else {
++        while (start < input_size) {
++            unsigned int remainder = 0;
++            for (unsigned int i = start; i < input_size; ++i) {
++                unsigned int cur = ((unsigned int)remainder << 8) | num[i];
++                num[i] = (unsigned char)(cur / 62u);
++                remainder = cur % 62u;
++            }
++            digits[digit_count++] = (unsigned char)remainder;
++            while (start < input_size && num[start] == 0) {
++                ++start;
++            }
++        }
++    }
++
++    if (*output_size < digit_count) {
++        *output_size = digit_count;
++        free(num);
++        free(digits);
++        return BASE62_INSUFFICIENT_MEM;
++    }
++
++    for (unsigned int i = 0; i < digit_count; ++i) {
++        encoded_text[i] = val_to_char(digits[digit_count - 1 - i]);
++    }
++    *output_size = digit_count;
++
++    free(num);
++    free(digits);
++    return BASE62_DECODE_OK;
++}
++
++int base62_decode(const char *encoded_text, unsigned int text_length,
++                 void *output_data, unsigned int *output_size)
++{
++    if (!encoded_text || !output_data || !output_size) {
++        return BASE62_INVALID_ARG;
++    }
++
++    unsigned int *digit_vals = malloc(text_length * sizeof(unsigned int));
++    if (!digit_vals) {
++        return BASE62_INVALID_ARG;
++    }
++    for (unsigned int i = 0; i < text_length; ++i) {
++        if (char_to_val(encoded_text[i], &digit_vals[i]) != 0) {
++            free(digit_vals);
++            return BASE62_DECODE_ERROR;
++        }
++    }
++
++    unsigned int capacity = (text_length * 6 / 8) + 4;
++    unsigned char *num = malloc(capacity);
++    if (!num) {
++        free(digit_vals);
++        return BASE62_INVALID_ARG;
++    }
++    unsigned int len = 1;
++    num[0] = 0;
++
++    for (unsigned int i = 0; i < text_length; ++i) {
++        unsigned int carry = digit_vals[i];
++        for (unsigned int j = 0; j < len; ++j) {
++            unsigned int prod = (unsigned int)num[j] * 62u + carry;
++            num[j] = (unsigned char)(prod & 0xFFu);
++            carry = prod >> 8;
++        }
++        while (carry) {
++            if (len >= capacity) {
++                capacity *= 2;
++                unsigned char *tmp = realloc(num, capacity);
++                if (!tmp) {
++                    free(digit_vals);
++                    free(num);
++                    return BASE62_INVALID_ARG;
++                }
++                num = tmp;
++            }
++            num[len++] = (unsigned char)(carry & 0xFFu);
++            carry >>= 8;
++        }
++    }
++
++    while (len > 0 && num[len - 1] == 0) {
++        --len;
++    }
++    if (len == 0) {
++        len = 1;
++        num[0] = 0;
++    }
++
++    if (*output_size < len) {
++        *output_size = len;
++        free(digit_vals);
++        free(num);
++        return BASE62_INSUFFICIENT_MEM;
++    }
++
++    unsigned char *out = (unsigned char *)output_data;
++    for (unsigned int i = 0; i < len; ++i) {
++        out[i] = num[len - 1 - i];
++    }
++    *output_size = len;
++
++    free(digit_vals);
++    free(num);
++    return BASE62_DECODE_OK;
++}
++

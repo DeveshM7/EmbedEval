@@ -1,0 +1,163 @@
+diff --git a/kernel/os/include/os/os_mbuf.h b/kernel/os/include/os/os_mbuf.h
+index 40dc16a..25cc854 100644
+--- a/kernel/os/include/os/os_mbuf.h
++++ b/kernel/os/include/os/os_mbuf.h
+@@ -644,6 +644,22 @@ struct os_mbuf *os_mbuf_trim_front(struct os_mbuf *om);
+  */
+ int os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len);
+ 
++/**
++ * Packs two mbuf chains together by copying the data from successive mbufs
++ * into preceding ones, freeing each mbuf that becomes empty. If m2 is NULL,
++ * m1 is compacted. If m2 is non-NULL, its mbufs are appended after m1. If m1
++ * has a packet header, it is retained and its length is updated; any packet
++ * header on m2 is discarded.
++ *
++ * @param m1                    The first mbuf chain (and the base for the
++ *                              result).
++ * @param m2                    The second mbuf chain to append, or NULL.
++ *
++ * @return                      The head of the packed mbuf chain.
++ */
++struct os_mbuf *os_mbuf_pack_chains(struct os_mbuf *m1, struct os_mbuf *m2);
++
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/kernel/os/src/os_mbuf.c b/kernel/os/src/os_mbuf.c
+index 297ccaf..1c49027 100644
+--- a/kernel/os/src/os_mbuf.c
++++ b/kernel/os/src/os_mbuf.c
+@@ -1036,3 +1036,131 @@ os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len)
+ 
+     return 0;
+ }
++
++struct os_mbuf *
++os_mbuf_pack_chains(struct os_mbuf *m1, struct os_mbuf *m2)
++{
++    struct os_mbuf *cur;
++    struct os_mbuf *next;
++    uint16_t pkthdr_len;
++    uint16_t copylen;
++    uint16_t buflen;
++    uint16_t totallen;
++
++    if (m1 == NULL) {
++        return NULL;
++    }
++
++    /* If m2 is provided, append its mbufs to m1. */
++    if (m2 != NULL) {
++        /* Find the last mbuf in m1. */
++        cur = m1;
++        while (SLIST_NEXT(cur, om_next) != NULL) {
++            cur = SLIST_NEXT(cur, om_next);
++        }
++
++        /* Append m2's mbufs to m1. */
++        SLIST_NEXT(cur, om_next) = m2;
++
++        /* If m1 has a packet header, update its length to include m2's data. */
++        if (OS_MBUF_IS_PKTHDR(m1)) {
++            totallen = OS_MBUF_PKTLEN(m1);
++            /* Calculate length of m2 chain. */
++            if (OS_MBUF_IS_PKTHDR(m2)) {
++                totallen += OS_MBUF_PKTLEN(m2);
++            } else {
++                for (next = m2; next != NULL; next = SLIST_NEXT(next, om_next)) {
++                    totallen += next->om_len;
++                }
++            }
++            OS_MBUF_PKTHDR(m1)->omp_len = totallen;
++        }
++
++        /* Discard packet header on m2. */
++        for (next = m2; next != NULL; next = SLIST_NEXT(next, om_next)) {
++            next->om_pkthdr_len = 0;
++        }
++    }
++
++    /*
++     * Now pack the combined chain:
++     * - Remove leading space from each mbuf
++     * - Fill each mbuf except the last to capacity
++     * - Free empty mbufs
++     */
++    cur = m1;
++
++    while (cur != NULL) {
++        next = SLIST_NEXT(cur, om_next);
++
++        /* Get the usable data size for this mbuf (total buffer minus pkthdr). */
++        pkthdr_len = cur->om_pkthdr_len;
++        buflen = cur->om_omp->omp_databuf_len - pkthdr_len;
++
++        /* If there's leading space, shift data to the beginning. */
++        if (OS_MBUF_LEADINGSPACE(cur) > 0) {
++            if (cur->om_len > 0) {
++                memmove(cur->om_databuf + pkthdr_len, cur->om_data, cur->om_len);
++                cur->om_data = cur->om_databuf + pkthdr_len;
++            } else {
++                cur->om_data = cur->om_databuf + pkthdr_len;
++            }
++        }
++
++        /* If there's a next mbuf, try to fill this one completely. */
++        if (next != NULL) {
++            /* Pull data from next mbufs until current is full. */
++            while (next != NULL && cur->om_len < buflen) {
++                /* Calculate how much we can copy. */
++                uint16_t avail = buflen - cur->om_len;
++                if (next->om_len <= avail) {
++                    /* Can copy entire next mbuf. */
++                    copylen = next->om_len;
++                } else {
++                    /* Can only copy part of next mbuf. */
++                    copylen = avail;
++                }
++
++                if (copylen > 0) {
++                    memcpy(cur->om_data + cur->om_len, next->om_data, copylen);
++                    cur->om_len += copylen;
++                    next->om_data += copylen;
++                    next->om_len -= copylen;
++                }
++
++                /* If next is now empty, remove it from chain and free. */
++                if (next->om_len == 0) {
++                    struct os_mbuf *tmp = SLIST_NEXT(next, om_next);
++                    SLIST_NEXT(next, om_next) = NULL;
++                    os_mbuf_free(next);
++                    next = tmp;
++                }
++            }
++
++            /* Update the link from cur to the new next (after any freed mbufs). */
++            SLIST_NEXT(cur, om_next) = next;
++
++            /* If current mbuf is now full, continue to next. */
++            if (cur->om_len == buflen) {
++                cur = next;
++                continue;
++            }
++        }
++
++        /*
++         * If we get here, either:
++         * 1. This is the last mbuf (next == NULL)
++         * 2. Current mbuf couldn't be filled (no more data in chain)
++         *
++         * In either case, we're done with packing this mbuf.
++         */
++        break;
++    }
++
++    /* If first mbuf became empty, need to return next one. */
++    if (m1->om_len == 0) {
++        return SLIST_NEXT(m1, om_next);
++    }
++
++    return m1;
++}

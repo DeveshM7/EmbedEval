@@ -1,0 +1,219 @@
+diff --git a/kernel/os/include/os/os_mbuf.h b/kernel/os/include/os/os_mbuf.h
+index f264d56..5e5112d 100644
+--- a/kernel/os/include/os/os_mbuf.h
++++ b/kernel/os/include/os/os_mbuf.h
+@@ -586,6 +586,20 @@ void os_mbuf_concat(struct os_mbuf *first, struct os_mbuf *second);
+  */
+ void *os_mbuf_extend(struct os_mbuf *om, uint16_t len);
+ 
++/**
++ * Inserts a gap of the specified length at the specified offset.
++ *
++ * @param om                    The mbuf chain to widen.
++ * @param off                   The offset at which to insert the gap.
++ * @param len                   The length of the gap to insert.
++ *
++ * @return                      0 on success; SYS_EINVAL if off is not a valid
++ *                              insertion offset; SYS_ENOMEM if memory
++ *                              allocation fails.
++ */
++int os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len);
++
++
+ /**
+  * Rearrange a mbuf chain so that len bytes are contiguous,
+  * and in the data area of an mbuf (so that OS_MBUF_DATA() will
+diff --git a/kernel/os/src/os_mbuf.c b/kernel/os/src/os_mbuf.c
+index cfb0d8f..46d7845 100644
+--- a/kernel/os/src/os_mbuf.c
++++ b/kernel/os/src/os_mbuf.c
+@@ -1059,3 +1059,189 @@ os_mbuf_trim_front(struct os_mbuf *om)
+     return om;
+ }
+ 
++
++/*
++ * Widen an mbuf chain by inserting a gap of the specified length at the
++ * specified offset.
++ *
++ * @param om                    The mbuf chain to widen.
++ * @param off                   The offset at which to insert the gap.
++ * @param len                   The length of the gap to insert.
++ *
++ * @return                      0 on success; SYS_EINVAL if off is not a valid
++ *                              insertion offset; SYS_ENOMEM if memory
++ *                              allocation fails.
++ */
++int
++os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len)
++{
++    struct os_mbuf *cur;
++    struct os_mbuf *next;
++    struct os_mbuf *newm;
++    struct os_mbuf_pool *omp;
++    uint16_t cur_off;
++    uint16_t total_len;
++    uint16_t shift_len;
++    uint16_t copy_len;
++
++    if (len == 0) {
++        return 0;
++    }
++
++    /* Calculate the total length of the mbuf chain. */
++    total_len = 0;
++    for (cur = om; cur != NULL; cur = SLIST_NEXT(cur, om_next)) {
++        total_len += cur->om_len;
++    }
++
++    /* Validate the offset - must be in range [0, total_len]. */
++    if (off > total_len) {
++        return SYS_EINVAL;
++    }
++
++    /* If the offset is at the very end of the chain, extend it. */
++    if (off == total_len) {
++        /* Find the last mbuf in the chain */
++        cur = om;
++        while (SLIST_NEXT(cur, om_next) != NULL) {
++            cur = SLIST_NEXT(cur, om_next);
++        }
++
++        omp = om->om_omp;
++
++        /* Check if there's trailing space in the last mbuf */
++        if (OS_MBUF_TRAILINGSPACE(cur) >= len) {
++            /* Just extend the last mbuf */
++            cur->om_len += len;
++        } else {
++            /* Need to allocate a new mbuf */
++            newm = os_mbuf_get(omp, 0);
++            if (newm == NULL) {
++                return SYS_ENOMEM;
++            }
++            newm->om_len = len;
++            SLIST_NEXT(cur, om_next) = newm;
++        }
++
++        /* Update packet header length if present */
++        if (OS_MBUF_IS_PKTHDR(om)) {
++            OS_MBUF_PKTHDR(om)->omp_len += len;
++        }
++        return 0;
++    }
++
++    omp = om->om_omp;
++
++    /* Find the mbuf and offset within that mbuf for the insertion point. */
++    cur = os_mbuf_off(om, off, &cur_off);
++    if (cur == NULL) {
++        return SYS_EINVAL;
++    }
++
++    /*
++     * We need to insert a gap in the middle of the chain.
++     * Calculate how much data needs to be shifted after the insertion point.
++     */
++    shift_len = cur->om_len - cur_off;
++
++    /*
++     * First, try to shift data within the current mbuf if there's enough
++     * trailing space.
++     */
++    if (OS_MBUF_TRAILINGSPACE(cur) >= shift_len) {
++        /* Shift data within current mbuf */
++        memmove(cur->om_data + cur_off + len, cur->om_data + cur_off, shift_len);
++        cur->om_len += len;
++    } else {
++        /*
++         * Not enough space in current mbuf. We need to allocate new mbufs
++         * and shift data across them.
++         */
++        uint16_t trailing_space = OS_MBUF_TRAILINGSPACE(cur);
++        uint8_t *shift_ptr;
++        uint16_t shift_remaining;
++
++        /* Truncate current mbuf to the insertion point */
++        cur->om_len = cur_off + len;
++
++        /* If there's any trailing space, use it */
++        if (trailing_space > 0) {
++            uint16_t move_len = min(trailing_space, shift_len);
++            memmove(cur->om_data + cur_off + len, cur->om_data + cur_off,
++                    move_len);
++            shift_len -= move_len;
++            shift_ptr = cur->om_data + cur_off + len + move_len;
++        } else {
++            /* No trailing space, all data needs to move to new mbuf */
++            shift_ptr = cur->om_data + cur_off;
++        }
++
++        shift_remaining = shift_len;
++
++        /* Get a new mbuf to hold the shifted data */
++        newm = os_mbuf_get(omp, 0);
++        if (newm == NULL) {
++            return SYS_ENOMEM;
++        }
++
++        /* Link new mbuf after current */
++        next = SLIST_NEXT(cur, om_next);
++        SLIST_NEXT(newm, om_next) = next;
++        SLIST_NEXT(cur, om_next) = newm;
++
++        /* Copy as much data as we can to the new mbuf */
++        copy_len = min(shift_remaining, omp->omp_databuf_len);
++        memcpy(newm->om_data, shift_ptr, copy_len);
++        newm->om_len = copy_len;
++        shift_remaining -= copy_len;
++        shift_ptr += copy_len;
++
++        /* Now process remaining mbufs in the chain */
++        cur = newm;
++        while (shift_remaining > 0) {
++            next = SLIST_NEXT(cur, om_next);
++            if (next == NULL) {
++                /* Should not happen if chain is consistent */
++                break;
++            }
++
++            trailing_space = OS_MBUF_TRAILINGSPACE(next);
++            if (trailing_space >= shift_remaining) {
++                /* Can fit all remaining data in next mbuf */
++                memmove(next->om_data + len, next->om_data, shift_remaining);
++                next->om_len += shift_remaining;
++                shift_remaining = 0;
++            } else if (trailing_space > 0) {
++                /* Move some data to next mbuf's trailing space */
++                memmove(next->om_data + len, next->om_data, trailing_space);
++                next->om_len += len;
++                shift_remaining -= trailing_space;
++
++                /* Need another mbuf for the rest */
++                newm = os_mbuf_get(omp, 0);
++                if (newm == NULL) {
++                    return SYS_ENOMEM;
++                }
++                SLIST_NEXT(cur, om_next) = newm;
++                SLIST_NEXT(newm, om_next) = next;
++                cur = newm;
++            } else {
++                /* No trailing space, need a new mbuf */
++                newm = os_mbuf_get(omp, 0);
++                if (newm == NULL) {
++                    return SYS_ENOMEM;
++                }
++                SLIST_NEXT(cur, om_next) = newm;
++                SLIST_NEXT(newm, om_next) = next;
++                cur = newm;
++            }
++        }
++    }
++
++    /* Update the packet header length if present. */
++    if (OS_MBUF_IS_PKTHDR(om)) {
++        OS_MBUF_PKTHDR(om)->omp_len += len;
++    }
++
++    return 0;
++}

@@ -1,0 +1,138 @@
+diff --git a/hw/hal/include/hal/hal_flash.h b/hw/hal/include/hal/hal_flash.h
+index 429837e..52b7fab 100644
+--- a/hw/hal/include/hal/hal_flash.h
++++ b/hw/hal/include/hal/hal_flash.h
+@@ -64,6 +64,23 @@ uint8_t hal_flash_align(uint8_t flash_id);
+ uint8_t hal_flash_erased_val(uint8_t flash_id);
+ int hal_flash_init(void);
+ 
++/**
++ * @brief Enables or disables write protection on a flash device.
++ *
++ * This function enables or disables write protection for the specified flash
++ * device. When write protection is enabled, write and erase operations will
++ * return SYS_EACCES and will not modify the flash contents.
++ *
++ * @param id                    The ID of the flash hardware.
++ * @param protect               Nonzero to enable write protection,
++ *                              zero to disable protection.
++ *
++ * @return                      0 on success;
++ *                              SYS_EINVAL if id does not identify a valid
++ *                              flash device.
++ */
++int hal_flash_write_protect(uint8_t id, uint8_t protect);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/hw/hal/src/hal_flash.c b/hw/hal/src/hal_flash.c
+index ac26a05..fe405c3 100644
+--- a/hw/hal/src/hal_flash.c
++++ b/hw/hal/src/hal_flash.c
+@@ -3,9 +3,9 @@
+  * or more contributor license agreements.  See the NOTICE file
+  * distributed with this work for additional information
+  * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
++ * to you under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
+  *
+  *  http://www.apache.org/licenses/LICENSE-2.0
+  *
+@@ -26,6 +26,16 @@
+ #include "hal/hal_flash.h"
+ #include "hal/hal_flash_int.h"
+ 
++/* Maximum number of flash devices we'll track for protection state.
++ * This should be sufficient for typical Mynewt systems.
++ */
++#define MAX_FLASH_DEVICES 32
++
++/* Write protection state for each flash device.
++ * 0 = not protected, 1 = write protected
++ */
++static uint8_t g_hal_flash_write_protected[MAX_FLASH_DEVICES];
++
+ int
+ hal_flash_init(void)
+ {
+@@ -33,6 +43,11 @@ hal_flash_init(void)
+     uint8_t i;
+     int rc = 0;
+ 
++    /* Initialize all protection states to 0 (not protected) */
++    for (i = 0; i < MAX_FLASH_DEVICES; i++) {
++        g_hal_flash_write_protected[i] = 0;
++    }
++
+     for (i = 0; ; i++) {
+         hf = hal_bsp_flash_dev(i);
+         if (!hf) {
+@@ -165,6 +180,11 @@ hal_flash_write(uint8_t id, uint32_t address, const void *src,
+         return -1;
+     }
+ 
++    /* Check if write protection is enabled for this flash device */
++    if (id < MAX_FLASH_DEVICES && g_hal_flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
+     rc = hf->hf_itf->hff_write(hf, address, src, num_bytes);
+     if (rc != 0) {
+         return rc;
+@@ -198,6 +218,11 @@ hal_flash_erase_sector(uint8_t id, uint32_t sector_address)
+         return -1;
+     }
+ 
++    /* Check if write protection is enabled for this flash device */
++    if (id < MAX_FLASH_DEVICES && g_hal_flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
+     rc = hf->hf_itf->hff_erase_sector(hf, sector_address);
+     if (rc != 0) {
+         return rc;
+@@ -246,6 +271,11 @@ hal_flash_erase(uint8_t id, uint32_t address, uint32_t num_bytes)
+         return -1;
+     }
+ 
++    /* Check if write protection is enabled for this flash device */
++    if (id < MAX_FLASH_DEVICES && g_hal_flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
+     for (i = 0; i < hf->hf_sector_cnt; i++) {
+         rc = hf->hf_itf->hff_sector_info(hf, i, &start, &size);
+         assert(rc == 0);
+@@ -338,3 +368,27 @@ hal_flash_ioctl(uint8_t id, uint32_t cmd, void *args)
+ {
+     return 0;
+ }
++
++int
++hal_flash_write_protect(uint8_t id, uint8_t protect)
++{
++    const struct hal_flash *hf;
++
++    /* Check if the flash device ID is valid */
++    hf = hal_bsp_flash_dev(id);
++    if (!hf) {
++        return SYS_EINVAL;
++    }
++
++    /* ID is valid, set or clear protection */
++    if (id < MAX_FLASH_DEVICES) {
++        if (protect) {
++            g_hal_flash_write_protected[id] = 1;
++        } else {
++            g_hal_flash_write_protected[id] = 0;
++        }
++        return 0;
++    }
++
++    return SYS_EINVAL;
++}

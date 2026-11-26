@@ -1,0 +1,228 @@
+diff --git a/hw/sensor/include/sensor/sensor.h b/hw/sensor/include/sensor/sensor.h
+index 57c59b8..55a807c 100644
+--- a/hw/sensor/include/sensor/sensor.h
++++ b/hw/sensor/include/sensor/sensor.h
+@@ -44,6 +44,7 @@ void sensor_pkg_init(void);
+ 
+ /* Forward declare sensor structure defined below. */
+ struct sensor;
++struct sensor_err_listener;
+ 
+ typedef enum {
+  /* No sensor type, used for queries */
+@@ -578,6 +579,7 @@ struct sensor {
+      * sensor
+      */
+     SLIST_HEAD(, sensor_listener) s_listener_list;
++    SLIST_HEAD(, sensor_err_listener) s_err_listener_list; // error listeners
+ 
+     /* A list of notifiers that are registered to receive events from this
+      * sensor
+@@ -660,6 +662,7 @@ void sensor_unlock(struct sensor *sensor);
+  * @return 0 on success, non-zero error code on failure.
+  */
+ int sensor_register_listener(struct sensor *sensor, struct sensor_listener *listener);
++int sensor_register_err_listener(struct sensor *sensor, struct sensor_err_listener *err_listener);
+ 
+ /**
+  * Un-register a sensor listener. This allows a calling application to clear
+@@ -1070,4 +1073,12 @@ void sensor_oic_init(void);
+ }
+ #endif
+ 
++/* Error listener structure */
++struct sensor_err_listener {
++    sensor_type_t sel_sensor_type;
++    void (*sel_func)(struct sensor *sensor, void *arg, int status, sensor_type_t type);
++    void *sel_arg;
++    SLIST_ENTRY(sensor_err_listener) sel_next;
++};
++
+ #endif /* __SENSOR_H__ */
+diff --git a/hw/sensor/src/sensor.c b/hw/sensor/src/sensor.c
+index 36d85ef..fa4aca5 100644
+--- a/hw/sensor/src/sensor.c
++++ b/hw/sensor/src/sensor.c
+@@ -990,6 +990,21 @@ err:
+     return (rc);
+ }
+ 
++/* Register a sensor error listener */
++int
++sensor_register_err_listener(struct sensor *sensor,
++        struct sensor_err_listener *err_listener)
++{
++    int rc;
++    rc = sensor_lock(sensor);
++    if (rc != 0) {
++        return rc;
++    }
++    SLIST_INSERT_HEAD(&sensor->s_err_listener_list, err_listener, sel_next);
++    sensor_unlock(sensor);
++    return 0;
++}
++
+ /**
+  * Un-register a sensor listener. This allows a calling application to unset
+  * callbacks for a given sensor object.
+@@ -2163,6 +2178,13 @@ sensor_read(struct sensor *sensor, sensor_type_t type,
+     rc = sensor->s_funcs->sd_read(sensor, type, sensor_read_data_func, &src,
+                                   timeout);
+     if (rc) {
++        /* Call error listeners matching the type */
++        struct sensor_err_listener *l;
++        SLIST_FOREACH(l, &sensor->s_err_listener_list, sel_next) {
++            if (l->sel_sensor_type & type) {
++                l->sel_func(sensor, l->sel_arg, rc, type);
++            }
++        }
+         goto err;
+     }
+ 
+diff --git a/hw/sensor/test_err_listener/pkg.yml b/hw/sensor/test_err_listener/pkg.yml
+new file mode 100644
+index 0000000..75dc9fe
+--- /dev/null
++++ b/hw/sensor/test_err_listener/pkg.yml
+@@ -0,0 +1,15 @@
++#
++# Sensor error listener unit test
++#
++pkg.name: hw/sensor/test_err_listener
++pkg.type: unittest
++pkg.description: "Test sensor error listener registration and invocation."
++pkg.author: "Apache Mynewt"
++pkg.homepage: "http://mynewt.apache.org/"
++
++pkg.deps:
++    - test/testutil
++    - hw/sensor
++
++pkg.deps.SELFTEST:
++    - sys/console/stub
+diff --git a/hw/sensor/test_err_listener/src/main.c b/hw/sensor/test_err_listener/src/main.c
+new file mode 100644
+index 0000000..cabe96d
+--- /dev/null
++++ b/hw/sensor/test_err_listener/src/main.c
+@@ -0,0 +1,17 @@
++#include "os/mynewt.h"
++#include "sensor_err_listener_test.c"
++
++TEST_SUITE(sensor_err_listener_test_suite)
++{
++    sensor_err_listener_test();
++}
++
++#if MYNEWT_VAL(SELFTEST)
++int
++main(int argc, char **argv)
++{
++    sysinit();
++    sensor_err_listener_test_suite();
++    return tu_any_failed;
++}
++#endif
+diff --git a/hw/sensor/test_err_listener/src/sensor_err_listener_test.c b/hw/sensor/test_err_listener/src/sensor_err_listener_test.c
+new file mode 100644
+index 0000000..6eeb468
+--- /dev/null
++++ b/hw/sensor/test_err_listener/src/sensor_err_listener_test.c
+@@ -0,0 +1,89 @@
++#include "sensor/sensor.h"
++#include "testutil/testutil.h"
++
++/* Global variables to capture callback invocation */
++static int err_call_count;
++static struct sensor *called_sensor;
++static void *called_arg;
++static int called_status;
++static sensor_type_t called_type;
++
++static void err_callback(struct sensor *sensor, void *arg, int status,
++                         sensor_type_t type)
++{
++    err_call_count++;
++    called_sensor = sensor;
++    called_arg = arg;
++    called_status = status;
++    called_type = type;
++}
++
++/* Mock driver read that always fails */
++static int mock_read_fail(struct sensor *sensor, sensor_type_t type,
++                          sensor_data_func_t data_func, void *arg,
++                          uint32_t timeout)
++{
++    (void)sensor; (void)type; (void)data_func; (void)arg; (void)timeout;
++    return -1; /* non‑zero error */
++}
++
++/* Mock driver read that succeeds */
++static int mock_read_success(struct sensor *sensor, sensor_type_t type,
++                             sensor_data_func_t data_func, void *arg,
++                             uint32_t timeout)
++{
++    (void)sensor; (void)type; (void)data_func; (void)arg; (void)timeout;
++    return 0;
++}
++
++static struct sensor_driver driver_fail = { .sd_read = mock_read_fail };
++static struct sensor_driver driver_success = { .sd_read = mock_read_success };
++
++TEST_CASE(sensor_err_listener_test)
++{
++    struct sensor s;
++    struct sensor_err_listener l;
++    int rc;
++
++    /* Initialize sensor */
++    rc = sensor_init(&s, NULL);
++    TEST_ASSERT_FATAL(rc == 0, "sensor_init failed");
++
++    /* Set driver that fails */
++    sensor_set_driver(&s, SENSOR_TYPE_ACCELEROMETER, &driver_fail);
++    s.s_types = SENSOR_TYPE_ACCELEROMETER;
++    s.s_mask = SENSOR_TYPE_ACCELEROMETER;
++
++    /* Register error listener with matching mask */
++    l.sel_sensor_type = SENSOR_TYPE_ACCELEROMETER;
++    l.sel_func = err_callback;
++    l.sel_arg = (void*)0xdeadbeef;
++    rc = sensor_register_err_listener(&s, &l);
++    TEST_ASSERT_FATAL(rc == 0, "register err listener failed");
++
++    err_call_count = 0;
++    rc = sensor_read(&s, SENSOR_TYPE_ACCELEROMETER, NULL, NULL, 0);
++    TEST_ASSERT_FATAL(rc != 0, "read should fail");
++    TEST_ASSERT_FATAL(err_call_count == 1, "error listener not called");
++    TEST_ASSERT_FATAL(called_sensor == &s, "listener got wrong sensor");
++    TEST_ASSERT_FATAL(called_arg == (void*)0xdeadbeef, "listener arg mismatch");
++    TEST_ASSERT_FATAL(called_status == rc, "listener status mismatch");
++    TEST_ASSERT_FATAL(called_type == SENSOR_TYPE_ACCELEROMETER, "listener type mismatch");
++
++    /* Reset count and change driver to success; listener should not be called */
++    sensor_set_driver(&s, SENSOR_TYPE_ACCELEROMETER, &driver_success);
++    err_call_count = 0;
++    s.s_mask = SENSOR_TYPE_ACCELEROMETER;
++    rc = sensor_read(&s, SENSOR_TYPE_ACCELEROMETER, NULL, NULL, 0);
++    TEST_ASSERT_FATAL(rc == 0, "read should succeed");
++    TEST_ASSERT_FATAL(err_call_count == 0, "listener called on success");
++
++    /* Test non‑matching mask */
++    l.sel_sensor_type = 0; /* no bits */
++    sensor_set_driver(&s, SENSOR_TYPE_ACCELEROMETER, &driver_fail);
++    err_call_count = 0;
++    rc = sensor_read(&s, SENSOR_TYPE_ACCELEROMETER, NULL, NULL, 0);
++    TEST_ASSERT_FATAL(rc != 0, "read should fail");
++    TEST_ASSERT_FATAL(err_call_count == 0, "listener called despite non‑matching mask");
++}
++
+diff --git a/hw/sensor/test_err_listener/syscfg.yml b/hw/sensor/test_err_listener/syscfg.yml
+new file mode 100644
+index 0000000..42ab414
+--- /dev/null
++++ b/hw/sensor/test_err_listener/syscfg.yml
+@@ -0,0 +1,2 @@
++syscfg.vals:
++    SENSOR_OIC: 0

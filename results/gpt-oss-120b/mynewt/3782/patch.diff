@@ -1,0 +1,63 @@
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..218cbb4
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,24 @@
++*** Begin Patch
++*** Update File: sys/shell/src/shell_bridge.c
++@@
++-    char line[MYNEWT_VAL(SHELL_BRIDGE_MAX_IN_LEN)];
++-    char *argv[MYNEWT_VAL(SHELL_CMD_ARGC_MAX)];
+++    /* Buffer for the command line received from the management bridge. */
+++    char line[MYNEWT_VAL(SHELL_BRIDGE_MAX_IN_LEN)];
+++    /*
+++     * The bridge parses the incoming CBOR "argv" array into a C string array.
+++     * The command handler expects the argument list to be NULL‑terminated –
+++     * even when the number of arguments equals the configured maximum
+++     * (SHELL_CMD_ARGC_MAX).  The original code allocated an array of exactly
+++     * SHELL_CMD_ARGC_MAX entries, leaving no room for the terminating NULL when
+++     * the limit was reached.  As a result, a bridge request with the maximum
+++     * number of arguments caused the handler to read past the end of the
+++     * array, violating the contract described in the task.
+++     *
+++     * We allocate one extra slot and explicitly store a NULL after the parsed
+++     * arguments.  The CBOR attribute descriptor's `maxlen` field still limits
+++     * the number of arguments that can be supplied to SHELL_CMD_ARGC_MAX, but
+++     * the backing storage now has space for the required terminator.
+++     */
+++    char *argv[MYNEWT_VAL(SHELL_CMD_ARGC_MAX) + 1];
++*** End Patch
+diff --git a/sys/shell/src/shell_bridge.c b/sys/shell/src/shell_bridge.c
+index ff5304c..138d6e6 100644
+--- a/sys/shell/src/shell_bridge.c
++++ b/sys/shell/src/shell_bridge.c
+@@ -48,9 +48,9 @@ static struct mgmt_group shell_bridge_group = {
+ static int
+ shell_bridge_exec(struct mgmt_ctxt *cb)
+ {
+-    char line[MYNEWT_VAL(SHELL_BRIDGE_MAX_IN_LEN)];
+-    char *argv[MYNEWT_VAL(SHELL_CMD_ARGC_MAX)];
+     struct shell_bridge_streamer sbs;
++    char line[MYNEWT_VAL(SHELL_BRIDGE_MAX_IN_LEN)];
++    char *argv[MYNEWT_VAL(SHELL_CMD_ARGC_MAX) + 1];
+     CborEncoder str_encoder;
+     CborError err;
+     int argc;
+@@ -66,7 +66,7 @@ shell_bridge_exec(struct mgmt_ctxt *cb)
+                 .arr.strings.store = line,
+                 .arr.strings.storelen = sizeof line,
+                 .count = &argc,
+-                .maxlen = sizeof argv / sizeof argv[0],
++                .maxlen = MYNEWT_VAL(SHELL_CMD_ARGC_MAX),
+             },
+         },
+         { 0 },
+@@ -75,6 +75,7 @@ shell_bridge_exec(struct mgmt_ctxt *cb)
+     err = cbor_read_object(&cb->it, attrs);
+     if (err != 0) {
+         return MGMT_ERR_EINVAL;
++    argv[argc] = NULL;
+     }
+ 
+     /* Key="o"; value=<command-output> */

@@ -1,0 +1,194 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 651bb67..c68574b 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -63,6 +63,12 @@ struct log_offset {
+ 
+ typedef int (*log_walk_func_t)(struct log *, struct log_offset *log_offset,
+         void *dptr, uint16_t len);
++/* New walk body callback type – invoked for each log entry with the parsed header and the length of the entry body (entry length without the header). The callback may return non-zero to abort the walk. */
++typedef int (*log_walk_body_func_t)(struct log *log,
++        struct log_offset *log_offset,
++        const struct log_entry_hdr *hdr,
++        void *dptr,
++        uint16_t len);
+ 
+ typedef int (*lh_read_func_t)(struct log *, void *dptr, void *buf,
+         uint16_t offset, uint16_t len);
+@@ -297,6 +303,16 @@ int log_append_mbuf_typed_no_free(struct log *log, uint8_t module,
+  */
+ int log_append_mbuf_typed(struct log *log, uint8_t module, uint8_t level,
+                           uint8_t etype, struct os_mbuf *om);
++/* Append body without header */
++int log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype, const void *body, uint16_t body_len);
++/* Append mbuf body, consuming the chain */
++int log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype, struct os_mbuf *om);
++/* Read functions */
++int log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr);
++int log_read_body(struct log *log, void *dptr, void *buf, uint16_t off, uint16_t len);
++int log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om, uint16_t off, uint16_t len);
++/* Walk body */
++int log_walk_body(struct log *log, log_walk_body_func_t walk_body_func, struct log_offset *log_offset);
+ 
+ #if MYNEWT_VAL(LOG_CONSOLE)
+ struct log *log_console_get(void);
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index 4fa8581..873dbf3 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -25,6 +25,8 @@
+ #include "os/mynewt.h"
+ #include "cbmem/cbmem.h"
+ #include "log/log.h"
++#include <stdlib.h>
++#include <string.h>
+ 
+ #if MYNEWT_VAL(LOG_CLI)
+ #include "shell/shell.h"
+@@ -503,3 +505,146 @@ log_flush(struct log *log)
+ err:
+     return (rc);
+ }
++#include <stdlib.h>
++
++/* Forward declaration of the body‑walk wrapper used by log_walk_body. */
++static int log_walk_body_wrapper(struct log *log, struct log_offset *log_offset,
++                                 void *dptr, uint16_t len);
++
++/**
++ * Append a flat buffer body to the log.  The entry header is prepared using
++ * log_append_prepare and then the header followed by the supplied body is
++ * written using the underlying log handler's append function.
++ */
++int
++log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
++                const void *body, uint16_t body_len)
++{
++    struct log_entry_hdr hdr;
++    int rc;
++    uint8_t *buf;
++    size_t total_len;
++
++    rc = log_append_prepare(log, module, level, etype, &hdr);
++    if (rc != 0) {
++        return rc;
++    }
++
++    total_len = LOG_ENTRY_HDR_SIZE + body_len;
++    buf = (uint8_t *)malloc(total_len);
++    if (!buf) {
++        return OS_ENOMEM;
++    }
++
++    memcpy(buf, &hdr, LOG_ENTRY_HDR_SIZE);
++    if (body_len) {
++        memcpy(buf + LOG_ENTRY_HDR_SIZE, body, body_len);
++    }
++
++    rc = log->l_log->log_append(log, buf, total_len);
++    free(buf);
++    return rc;
++}
++
++/**
++ * Append the contents of an mbuf chain as the body of a log entry.  The entry
++ * header is prepared and prepended to the mbuf using the existing helper
++ * log_append_mbuf_typed_no_free, after which the mbuf is consumed (freed).
++ */
++int
++log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level,
++                     uint8_t etype, struct os_mbuf *om)
++{
++    int rc;
++
++    rc = log_append_mbuf_typed_no_free(log, module, level, etype, &om);
++    if (rc == 0 && om) {
++        os_mbuf_free_chain(om);
++    }
++    return rc;
++}
++
++/**
++ * Read the header of a log entry identified by the medium‑specific pointer
++ * *dptr*.
++ */
++int
++log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr)
++{
++    int rc;
++
++    rc = log_read(log, dptr, hdr, 0, sizeof *hdr);
++    return (rc == sizeof *hdr) ? 0 : -1;
++}
++
++/**
++ * Read a portion of the entry body into a flat buffer.  Offset *off* and length
++ * *len* are relative to the start of the body (i.e. after the header).
++ */
++int
++log_read_body(struct log *log, void *dptr, void *buf,
++              uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = log_read(log, dptr, buf,
++                  LOG_ENTRY_HDR_SIZE + off, len);
++    return rc;
++}
++
++/**
++ * Read a portion of the entry body into an mbuf chain.  Offset *off* and
++ * length *len* are relative to the start of the body.
++ */
++int
++log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om,
++                   uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = log_read_mbuf(log, dptr, om,
++                       LOG_ENTRY_HDR_SIZE + off, len);
++    return rc;
++}
++
++/**
++ * Walk the log invoking a body‑oriented callback.  The callback receives the
++ * parsed header and the length of the body (entry length minus the header).
++ */
++int
++log_walk_body(struct log *log, log_walk_body_func_t walk_body_func,
++              struct log_offset *log_offset)
++{
++    void *saved_arg = log_offset->lo_arg;
++    int rc;
++
++    /* Store the user callback in lo_arg for the wrapper to retrieve. */
++    log_offset->lo_arg = (void *)walk_body_func;
++    rc = log_walk(log, log_walk_body_wrapper, log_offset);
++    log_offset->lo_arg = saved_arg;
++    return rc;
++}
++
++static int
++log_walk_body_wrapper(struct log *log, struct log_offset *log_offset,
++                      void *dptr, uint16_t len)
++{
++    struct log_entry_hdr hdr;
++    int rc;
++    uint16_t body_len;
++    log_walk_body_func_t user_cb;
++
++    rc = log_read_hdr(log, dptr, &hdr);
++    if (rc != 0) {
++        return rc;
++    }
++
++    if (len > LOG_ENTRY_HDR_SIZE) {
++        body_len = len - LOG_ENTRY_HDR_SIZE;
++    } else {
++        body_len = 0;
++    }
++
++    user_cb = (log_walk_body_func_t)log_offset->lo_arg;
++    return user_cb(log, log_offset, &hdr, dptr, body_len);
++}

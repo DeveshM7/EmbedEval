@@ -419,6 +419,9 @@ x86_64; NuttX: 18 aarch64 and 11 x86_64). The six NuttX instances in
 evaluation and have no hidden tests. Settings, results and what is hidden:
 [docs/running_on_scholar.md, section 13](docs/running_on_scholar.md#13-evaluating-on-the-cluster).
 
+The [Mynewt evaluation results](results/README.md) cover all 61 tasks for each
+of the four models. The report links to the per-run records and summary CSV.
+
 ---
 
 ## Layout
@@ -449,7 +452,8 @@ apptainer/instances/  validated Zephyr and RIOT instances: the benchmark (recipe
                     images are built from them); nuttx/, mynewt/ and contiki-ng/
                     hold those projects' validated instances
 generated/          Zephyr instances being generated and validated (not in git)
-outputs/            agent runs and grades
+outputs/            local agent runs and grades
+results/            completed Mynewt evaluation records and summary
 archive/            superseded work, kept for provenance
 ```
 

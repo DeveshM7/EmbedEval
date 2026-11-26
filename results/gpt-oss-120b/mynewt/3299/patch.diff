@@ -1,0 +1,77 @@
+diff --git a/kernel/os/src/os_msys.c b/kernel/os/src/os_msys.c
+index 3b287a3..897c4e0 100644
+--- a/kernel/os/src/os_msys.c
++++ b/kernel/os/src/os_msys.c
+@@ -86,30 +86,32 @@ os_msys_reset(void)
+     STAILQ_INIT(&g_msys_pool_list);
+ }
+ 
+-static struct os_mbuf_pool *
+-os_msys_find_biggest_pool(void)
+-{
+-    /* Mempools are sorted by the blocksize, so just return last one */
+-    return STAILQ_LAST(&g_msys_pool_list, os_mbuf_pool, omp_next);
+-}
+-
+ static struct os_mbuf_pool *
+ os_msys_find_pool(uint16_t dsize)
+ {
+     struct os_mbuf_pool *pool;
++    struct os_mbuf_pool *largest_free = NULL;
++    struct os_mbuf_pool *candidate = NULL;
+ 
+-    pool = NULL;
+     STAILQ_FOREACH(pool, &g_msys_pool_list, omp_next) {
+-        if (dsize <= pool->omp_databuf_len) {
++        if (pool->omp_pool->mp_num_free > 0) {
++            largest_free = pool;
++        }
++        if (dsize == 0) {
++            continue;
++        }
++        if (dsize <= pool->omp_databuf_len && pool->omp_pool->mp_num_free > 0) {
++            candidate = pool;
+             break;
+         }
+     }
+-
+-    if (!pool) {
+-        pool = STAILQ_LAST(&g_msys_pool_list, os_mbuf_pool, omp_next);
++    if (dsize == 0) {
++        return largest_free;
+     }
+-
+-    return (pool);
++    if (candidate) {
++        return candidate;
++    }
++    return largest_free;
+ }
+ 
+ 
+@@ -122,11 +124,7 @@ os_msys_get(uint16_t dsize, uint16_t leadingspace)
+     /* If dsize = 0 that means user has no idea how big block size is needed,
+     * therefore lets find for him the biggest one
+     */
+-    if (dsize == 0) {
+-        pool = os_msys_find_biggest_pool();
+-    } else {
+-        pool = os_msys_find_pool(dsize);
+-    }
++    pool = os_msys_find_pool(dsize);
+ 
+     if (!pool) {
+         goto err;
+@@ -150,11 +148,7 @@ os_msys_get_pkthdr(uint16_t dsize, uint16_t user_hdr_len)
+     /* If dsize = 0 that means user has no idea how big block size is needed,
+      * therefore lets find for him the biggest one
+      */
+-    if (dsize == 0) {
+-        pool = os_msys_find_biggest_pool();
+-    } else {
+-        pool = os_msys_find_pool(dsize + total_pkthdr_len);
+-    }
++    pool = os_msys_find_pool(dsize + total_pkthdr_len);
+ 
+     if (!pool) {
+         goto err;

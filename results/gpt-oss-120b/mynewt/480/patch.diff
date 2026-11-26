@@ -1,0 +1,93 @@
+diff --git a/net/nimble/host/include/host/ble_gatt.h b/net/nimble/host/include/host/ble_gatt.h
+index db68b35..39b0b47 100644
+--- a/net/nimble/host/include/host/ble_gatt.h
++++ b/net/nimble/host/include/host/ble_gatt.h
+@@ -426,6 +426,38 @@ int ble_gatts_find_chr(const ble_uuid_t *svc_uuid, const ble_uuid_t *chr_uuid,
+ int ble_gatts_find_dsc(const ble_uuid_t *svc_uuid, const ble_uuid_t *chr_uuid,
+                        const ble_uuid_t *dsc_uuid, uint16_t *out_dsc_handle);
+ 
++/**
++ * @brief Reset the GATT server to its initial state.
++ *
++ * This function clears all registered services, characteristics and
++ * descriptors, and releases any memory allocated for client‑configuration
++ * handling.  After a successful reset the host behaves as if it has never
++ * had any GATT services registered – callers may queue new services with
++ * @ref ble_gatts_add_svcs and then start the server again with
++ * @ref ble_gatts_start.
++ *
++ * The reset may only be performed when the host is idle – i.e. no active
++ * connections exist and no GAP procedures (advertising, scanning or a
++ * connection establishment) are in progress.  If the host is busy the
++ * function returns @ref BLE_HS_EBUSY.
++ *
++ * @return  0 on success; BLE_HS_EBUSY if the host is busy; other error
++ *          codes on failure.
++ */
++int ble_gatts_reset(void);
++
++/**
++ * @brief Start the GATT server.
++ *
++ * This function makes the previously queued services (via @ref
++ * ble_gatts_add_svcs) available to peers.  It must be called after all
++ * services have been added and after a previous reset or at start‑up.  The
++ * function fails with @ref BLE_HS_EBUSY if any connections are present or a
++ * GAP procedure is active.
++ *
++ * @return  0 on success; BLE_HS_EBUSY if the host is busy; other error
++ *          codes on failure.
++ */
+ typedef void (*ble_gatt_svc_foreach_fn)(const struct ble_gatt_svc_def *svc,
+                                         uint16_t handle,
+                                         uint16_t end_group_handle);
+@@ -436,3 +468,4 @@ void ble_gatts_show_local(void);
+ #endif
+ 
+ #endif
++int ble_gatts_start(void);
+diff --git a/net/nimble/host/src/ble_gatts.c b/net/nimble/host/src/ble_gatts.c
+index b8ecbda..29f4b0c 100644
+--- a/net/nimble/host/src/ble_gatts.c
++++ b/net/nimble/host/src/ble_gatts.c
+@@ -1230,6 +1230,40 @@ err:
+     ble_gatts_free_svc_defs();
+     return rc;
+ }
++/**
++ * Reset the GATT server to its pristine state.
++ *
++ * This function removes all registered services, clears allocated memory for
++ * client‑configuration handling and resets internal counters.  It can only be
++ * called when the host is idle – i.e. no connections are present and no GAP
++ * procedures are active.  If the host is busy the function returns
++ * BLE_HS_EBUSY.
++ */
++int
++ble_gatts_reset(void)
++{
++    /* Ensure no active connections or GAP procedures. */
++    if (ble_hs_conn_first() != NULL || ble_gap_adv_active() ||
++        ble_gap_disc_active() || ble_gap_conn_active()) {
++        return BLE_HS_EBUSY;
++    }
++
++    /* Free any allocated client‑configuration memory and service entries. */
++    ble_gatts_free_mem();
++
++    /* Return the cached client‑configuration array to its mempool, if any. */
++    if (ble_gatts_clt_cfgs != NULL) {
++        os_memblock_put(&ble_gatts_clt_cfg_pool, ble_gatts_clt_cfgs);
++        ble_gatts_clt_cfgs = NULL;
++    }
++
++    /* Reset service entry counters and any pending service definitions. */
++    ble_gatts_num_svc_entries = 0;
++    ble_gatts_num_cfgable_chrs = 0;
++    ble_gatts_free_svc_defs();
++
++    return 0;
++}
+ 
+ int
+ ble_gatts_conn_can_alloc(void)

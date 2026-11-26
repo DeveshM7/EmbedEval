@@ -1,0 +1,427 @@
+diff --git a/encoding/cborattr/include/cborattr/cborattr.h b/encoding/cborattr/include/cborattr/cborattr.h
+index 9e69ca9..0125a65 100644
+--- a/encoding/cborattr/include/cborattr/cborattr.h
++++ b/encoding/cborattr/include/cborattr/cborattr.h
+@@ -30,7 +30,42 @@
+ 
+ #ifdef __cplusplus
+ extern "C" {
+-#endif
++
++/* Encoder structures and functions */
++struct cbor_out_arr_val_t {
++    struct cbor_out_val_t *elems;
++    size_t len;
++};
++
++struct cbor_out_val_t {
++    CborAttrType type;
++    union {
++        long long int integer;
++        long long unsigned int uinteger;
++        double real;
++        float fval;
++        const char *string;
++        bool boolean;
++        struct {
++            const uint8_t *data;
++            size_t len;
++        } bytestring;
++        struct cbor_out_arr_val_t array;
++        struct cbor_out_attr_t *obj;
++    };
++};
++
++struct cbor_out_attr_t {
++    const char *attribute;
++    struct cbor_out_val_t val;
++    bool omit;
++};
++
++int cbor_write_object_msys(const struct cbor_out_attr_t *attrs,
++                            struct os_mbuf **out_om);
++
++#ifdef __cplusplus
++}
+ 
+ /* This library wraps the tinycbor decoder with a attribute based decoder
+  * suitable for decoding a binary version of json.  Specifically, the
+@@ -150,7 +185,41 @@ int cbor_read_mbuf_attrs(struct os_mbuf *m, uint16_t off, uint16_t len,
+ 
+ #ifdef __cplusplus
+ }
+-#endif
+ 
+-#endif /* CBORATTR_H */
++/* Encoder structures and functions */
++struct cbor_out_arr_val_t {
++    struct cbor_out_val_t *elems;
++    size_t len;
++};
++
++struct cbor_out_val_t {
++    CborAttrType type;
++    union {
++        long long int integer;
++        long long unsigned int uinteger;
++        double real;
++        float fval;
++        const char *string;
++        bool boolean;
++        struct {
++            const uint8_t *data;
++            size_t len;
++        } bytestring;
++        struct cbor_out_arr_val_t array;
++        struct cbor_out_attr_t *obj;
++    };
++};
++
++struct cbor_out_attr_t {
++    const char *attribute;
++    struct cbor_out_val_t val;
++    bool omit;
++};
++
++int cbor_write_object_msys(const struct cbor_out_attr_t *attrs,
++                            struct os_mbuf **out_om);
+ 
++#ifdef __cplusplus
++}
++
++#endif
+diff --git a/encoding/cborattr/src/cborattr.c b/encoding/cborattr/src/cborattr.c
+index 93a85f1..1d65555 100644
+--- a/encoding/cborattr/src/cborattr.c
++++ b/encoding/cborattr/src/cborattr.c
+@@ -418,3 +418,140 @@ cbor_read_mbuf_attrs(struct os_mbuf *m, uint16_t off, uint16_t len,
+     }
+     return cbor_read_object(&value, attrs);
+ }
++
++#include <tinycbor/cbor_mbuf_writer.h>
++
++static int cbor_write_object_internal(CborEncoder *encoder, const struct cbor_out_attr_t *attrs);
++
++static int
++cbor_write_value(CborEncoder *encoder, const struct cbor_out_val_t *val)
++{
++    CborError err = CborNoError;
++
++    switch (val->type) {
++    case CborAttrNullType:
++        err = cbor_encode_null(encoder);
++        break;
++    case CborAttrBooleanType:
++        err = cbor_encode_boolean(encoder, val->boolean);
++        break;
++    case CborAttrIntegerType:
++        err = cbor_encode_int(encoder, val->integer);
++        break;
++    case CborAttrUnsignedIntegerType:
++        err = cbor_encode_uint(encoder, val->uinteger);
++        break;
++#if FLOAT_SUPPORT
++    case CborAttrFloatType:
++        err = cbor_encode_float(encoder, val->fval);
++        break;
++    case CborAttrDoubleType:
++        err = cbor_encode_double(encoder, val->real);
++        break;
++#endif
++    case CborAttrByteStringType:
++        err = cbor_encode_byte_string(encoder, val->bytestring.data, 
++                                      val->bytestring.len);
++        break;
++    case CborAttrTextStringType:
++        err = cbor_encode_text_string(encoder, val->string, 
++                                      strlen(val->string));
++        break;
++    case CborAttrArrayType: {
++        CborEncoder arrayEncoder;
++        err = cbor_encoder_create_array(encoder, &arrayEncoder, 
++                                        val->array.len);
++        if (err) return err;
++        
++        for (size_t i = 0; i < val->array.len && !err; i++) {
++            err = cbor_write_value(&arrayEncoder, &val->array.elems[i]);
++        }
++        
++        if (!err) {
++            err = cbor_encoder_close_container_checked(encoder, &arrayEncoder);
++        }
++        break;
++    }
++    case CborAttrObjectType: {
++        CborEncoder mapEncoder;
++        err = cbor_encoder_create_map(encoder, &mapEncoder, CborIndefiniteLength);
++        if (err) return err;
++        
++        err = cbor_write_object_internal(&mapEncoder, val->obj);
++        if (!err) {
++            err = cbor_encoder_close_container_checked(encoder, &mapEncoder);
++        }
++        break;
++    }
++    default:
++        err = CborErrorIllegalType;
++        break;
++    }
++
++    return err;
++}
++
++static int
++cbor_write_object_internal(CborEncoder *encoder, const struct cbor_out_attr_t *attrs)
++{
++    CborError err = CborNoError;
++
++    for (const struct cbor_out_attr_t *attr = attrs; 
++         attr->attribute != NULL && !err; attr++) {
++        
++        /* Skip omitted entries */
++        if (attr->omit) {
++            continue;
++        }
++
++        /* Encode the key */
++        err = cbor_encode_text_string(encoder, attr->attribute, 
++                                     strlen(attr->attribute));
++        if (err) break;
++
++        /* Encode the value */
++        err = cbor_write_value(encoder, &attr->val);
++        if (err) break;
++    }
++
++    return err;
++}
++
++int
++cbor_write_object_msys(const struct cbor_out_attr_t *attrs, 
++                        struct os_mbuf **out_om)
++{
++    struct os_mbuf *m;
++    struct cbor_mbuf_writer writer;
++    CborEncoder encoder;
++    CborError err;
++
++    if (!attrs || !out_om) {
++        return -1;
++    }
++
++    m = os_msys_get(256, 0);
++    if (!m) {
++        return -1;
++    }
++
++    cbor_mbuf_writer_init(&writer, m);
++    cbor_encoder_init(&encoder, &writer.enc, 0);
++
++    /* Create indefinite-length map */
++    err = cbor_encoder_create_map(&encoder, &encoder, CborIndefiniteLength);
++    if (!err) {
++        err = cbor_write_object_internal(&encoder, attrs);
++        if (!err) {
++            err = cbor_encoder_close_container_checked(&encoder, &encoder);
++        }
++    }
++
++    if (err) {
++        os_mbuf_free_chain(m);
++        return err;
++    }
++
++    *out_om = m;
++    return 0;
++}
+diff --git a/fix_tests.py b/fix_tests.py
+new file mode 100644
+index 0000000..02a9a7e
+--- /dev/null
++++ b/fix_tests.py
+@@ -0,0 +1,26 @@
++import sys
++
++f = open("encoding/cborattr/selftest/src/testcases/cborattr_encode_test.c", "r")
++lines = f.readlines()
++f.close()
++
++out_lines = []
++for i, line in enumerate(lines):
++    out_lines.append(line)
++    # Look for the function end patterns and add return statements
++    if "os_mbuf_free_chain(m);" in line and i+1 < len(lines) and "}" in lines[i+1]:
++        # Check if we're in a test function (look backwards for TEST_CASE)
++        is_test_func = False
++        for j in range(i-20, max(-1, i-50), -1):
++            if "TEST_CASE " in lines[j]:
++                is_test_func = True
++                break
++        if is_test_func:
++            # Insert return before the closing brace
++            out_lines.append("    return;\n")
++
++f = open("encoding/cborattr/selftest/src/testcases/cborattr_encode_test.c", "w")
++f.writelines(out_lines)
++f.close()
++
++print("Fixed test cases")
+diff --git a/manual_patch b/manual_patch
+new file mode 100755
+index 0000000000000000000000000000000000000000..039c58e82671ab3f0827ccb586b7bff84fb3ad20
+GIT binary patch
+literal 16192
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/manual_patch.c b/manual_patch.c
+new file mode 100644
+index 0000000..0407bba
+--- /dev/null
++++ b/manual_patch.c
+@@ -0,0 +1,22 @@
++#include <stdio.h>
++#include <string.h>
++
++int main() {
++    FILE *f = fopen("encoding/cborattr/selftest/src/test_cborattr.c", "r");
++    if (!f) {
++        printf("Cannot open file\n");
++        return 1;
++    }
++    
++    printf("Contents of test_cborattr.c:\n");
++    printf("==========================\n");
++    
++    char line[1024];
++    int line_num = 1;
++    while (fgets(line, sizeof(line), f)) {
++        printf("%3d: %s", line_num++, line);
++    }
++    
++    fclose(f);
++    return 0;
++}
+diff --git a/patchit.c b/patchit.c
+new file mode 100644
+index 0000000..9364791
+--- /dev/null
++++ b/patchit.c
+@@ -0,0 +1,59 @@
++#include <stdio.h>
++#include <stdlib.h>
++
++int main() {
++    FILE *f = fopen("encoding/cborattr/selftest/src/test_cborattr.c", "r+");
++    if (!f) return 1;
++    
++    // Read the whole file
++    fseek(f, 0, SEEK_END);
++    long size = ftell(f);
++    fseek(f, 0, SEEK_SET);
++    
++    char *buf = malloc(size + 1);
++    fread(buf, 1, size, f);
++    buf[size] = '\0';
++    
++    // Find the TEST_SUITE start
++    char *test_suite_start = strstr(buf, "TEST_SUITE(test_cborattr_suite)");
++    if (!test_suite_start) {
++        free(buf);
++        fclose(f);
++        return 1;
++    }
++    
++    // Find the opening brace
++    char *brace = strchr(test_suite_start, '{');
++    if (!brace) {
++        free(buf);
++        fclose(f);
++        return 1;
++    }
++    
++    // Insert our new test suite call after the brace
++    char *insert_point = brace + 1;
++    
++    // Create new content
++    char *new_content = malloc(size + 1000);
++    long before_size = insert_point - buf;
++    memcpy(new_content, buf, before_size);
++    sprintf(new_content + before_size, 
++            "\n    test_cborattr_encode_suite();");
++    
++    // Copy the rest but skip the original test_cborattr_encode_suite() if it exists
++    char *rest_start = insert_point;
++    while (*rest_start && strncmp(rest_start, "    test_cborattr_decode1();", 26) != 0) {
++        rest_start++;
++    }
++    
++    strcat(new_content, rest_start);
++    
++    // Write back
++    fseek(f, 0, SEEK_SET);
++    fwrite(new_content, 1, strlen(new_content), f);
++    
++    free(buf);
++    free(new_content);
++    fclose(f);
++    return 0;
++}

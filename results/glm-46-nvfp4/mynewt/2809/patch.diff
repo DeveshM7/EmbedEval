@@ -1,0 +1,70 @@
+diff --git a/fs/fcb2/src/fcb_getnext.c b/fs/fcb2/src/fcb_getnext.c
+index 4a61dfb..8d0293f 100644
+--- a/fs/fcb2/src/fcb_getnext.c
++++ b/fs/fcb2/src/fcb_getnext.c
+@@ -21,18 +21,47 @@
+ #include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ 
++/* Forward declaration */
++int fcb2_element_info_at(struct fcb2 *fcb, struct fcb2_entry *loc);
++
+ int
+ fcb2_getnext_in_area(struct fcb2 *fcb, struct fcb2_entry *loc)
+ {
+     int rc = FCB2_ERR_CRC;
+     int off;
+     int len;
++    uint32_t entry_offset;
++    uint32_t sector_end;
++    struct flash_sector_range *range;
+ 
+     while (rc == FCB2_ERR_CRC) {
+         len = loc->fe_data_len;
+         off = loc->fe_data_off;
+         loc->fe_data_len = 0;
+         loc->fe_entry_num++;
++        
++        /* Check if the next entry would be out of bounds */
++        range = loc->fe_range;
++        entry_offset = fcb2_entry_location_in_range(loc);
++        sector_end = range->fsr_sector_size *
++                    (1 + loc->fe_sector - range->fsr_first_sector);
++        
++        if (entry_offset < sizeof(struct fcb2_disk_area) + FCB2_ENTRY_SIZE ||
++            entry_offset > sector_end) {
++            /* Entry would be out of bounds - this is expected when sector is nearly full.
++             * Don't return an error, just indicate we're done.
++             */
++            loc->fe_entry_num--;  /* Revert the increment */
++            return FCB2_ERR_NOVAR;
++        }
++        
++        /* Also check if the entry location intersects with the data area */
++        if (off && entry_offset < off + fcb2_len_in_flash(range, len) + fcb2_len_in_flash(range, 2)) {
++            /* Entry would overlap with data - indicate we're done */
++            loc->fe_entry_num--;  /* Revert the increment */
++            return FCB2_ERR_NOVAR;
++        }
++        
+         rc = fcb2_elem_info(loc);
+         if (len) {
+             loc->fe_data_off = off + fcb2_len_in_flash(loc->fe_range, len) +
+@@ -59,7 +88,7 @@ fcb2_getnext_nolock(struct fcb2 *fcb, struct fcb2_entry *loc)
+          * If offset is zero, we serve the first entry from the area.
+          */
+         loc->fe_entry_num = 1;
+-        rc = fcb2_elem_info(loc);
++        rc = fcb2_element_info_at(fcb, loc);
+     } else {
+         rc = fcb2_getnext_in_area(fcb, loc);
+     }
+@@ -88,7 +117,7 @@ next_sector:
+             loc->fe_sector = fcb2_getnext_sector(fcb, loc->fe_sector);
+             loc->fe_range = fcb2_get_sector_range(fcb, loc->fe_sector);
+             loc->fe_entry_num = 1;
+-            rc = fcb2_elem_info(loc);
++            rc = fcb2_element_info_at(fcb, loc);
+             switch (rc) {
+             case 0:
+                 return 0;

@@ -1,0 +1,165 @@
+diff --git a/net/nimble/host/include/host/ble_gatt.h b/net/nimble/host/include/host/ble_gatt.h
+index db68b35..3579154 100644
+--- a/net/nimble/host/include/host/ble_gatt.h
++++ b/net/nimble/host/include/host/ble_gatt.h
+@@ -430,6 +430,8 @@ typedef void (*ble_gatt_svc_foreach_fn)(const struct ble_gatt_svc_def *svc,
+                                         uint16_t handle,
+                                         uint16_t end_group_handle);
+ void ble_gatts_show_local(void);
++int ble_gatts_reset(void);
++int ble_gatts_start(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/net/nimble/host/src/ble_att_priv.h b/net/nimble/host/src/ble_att_priv.h
+index 8e72fba..92be764 100644
+--- a/net/nimble/host/src/ble_att_priv.h
++++ b/net/nimble/host/src/ble_att_priv.h
+@@ -178,6 +178,7 @@ int ble_att_init(void);
+ /*** @svr */
+ 
+ int ble_att_svr_start(void);
++void ble_att_svr_reset(void);
+ 
+ struct ble_att_svr_entry *
+ ble_att_svr_find_by_uuid(struct ble_att_svr_entry *start_at,
+diff --git a/net/nimble/host/src/ble_att_svr.c b/net/nimble/host/src/ble_att_svr.c
+index 08c8b03..9bbca04 100644
+--- a/net/nimble/host/src/ble_att_svr.c
++++ b/net/nimble/host/src/ble_att_svr.c
+@@ -2687,6 +2687,29 @@ err:
+     return rc;
+ }
+ 
++/**
++ * Clears all ATT server entries. This is used by the GATT server reset
++ * functionality to remove all registered services, characteristics, and
++ * descriptors.
++ */
++void
++ble_att_svr_reset(void)
++{
++    struct ble_att_svr_entry *entry;
++
++    /* Free all entries back to the pool */
++    while ((entry = STAILQ_FIRST(&ble_att_svr_list)) != NULL) {
++        STAILQ_REMOVE_HEAD(&ble_att_svr_list, ha_next);
++        os_memblock_put(&ble_att_svr_entry_pool, entry);
++    }
++
++    /* Reinitialize the list */
++    STAILQ_INIT(&ble_att_svr_list);
++
++    /* Reset the handle counter */
++    ble_att_svr_id = 0;
++}
++
+ int
+ ble_att_svr_init(void)
+ {
+diff --git a/net/nimble/host/src/ble_gatts.c b/net/nimble/host/src/ble_gatts.c
+index b8ecbda..a321d3d 100644
+--- a/net/nimble/host/src/ble_gatts.c
++++ b/net/nimble/host/src/ble_gatts.c
+@@ -24,6 +24,7 @@
+ #include "host/ble_uuid.h"
+ #include "host/ble_store.h"
+ #include "ble_hs_priv.h"
++#include "host/ble_gap.h"
+ 
+ #define BLE_GATTS_INCLUDE_SZ    6
+ #define BLE_GATTS_CHR_MAX_SZ    19
+@@ -42,6 +43,7 @@ static const ble_uuid_t *uuid_ccc =
+ static const struct ble_gatt_svc_def **ble_gatts_svc_defs;
+ static int ble_gatts_num_svc_defs;
+ 
++static int ble_gatts_started;
+ struct ble_gatts_svc_entry {
+     const struct ble_gatt_svc_def *svc;
+     uint16_t handle;            /* 0 means unregistered. */
+@@ -1139,6 +1141,59 @@ ble_gatts_free_mem(void)
+     ble_gatts_svc_entries = NULL;
+ }
+ 
++/**
++ * Checks if the GATT server is busy and cannot be reset or started.
++ * Returns 1 if busy (active connections or GAP procedures), 0 otherwise.
++ * Must be called with the host lock held.
++ */
++static int
++ble_gatts_is_busy(void)
++{
++    /* Check for active connections */
++    if (ble_hs_conn_first() != NULL) {
++        return 1;
++    }
++
++    /* Check for active GAP procedures */
++    if (ble_gap_adv_active() || ble_gap_disc_active() || ble_gap_conn_active()) {
++        return 1;
++    }
++
++    return 0;
++}
++
++int
++ble_gatts_reset(void)
++{
++    int busy;
++
++    /* Lock the host before checking */
++    ble_hs_lock();
++
++    /* Check if busy - cannot reset with active connections or GAP procedures */
++    busy = ble_gatts_is_busy();
++
++    ble_hs_unlock();
++
++    if (busy) {
++        return BLE_HS_EBUSY;
++    }
++
++    /* Reset the ATT server to clear all registered attributes */
++    ble_att_svr_reset();
++
++    /* Free GATT server memory */
++    ble_gatts_free_mem();
++
++    /* Free service definitions */
++    ble_gatts_free_svc_defs();
++
++    /* Reset the started state */
++    ble_gatts_started = 0;
++
++    return 0;
++}
++
+ int
+ ble_gatts_start(void)
+ {
+@@ -1151,6 +1206,17 @@ ble_gatts_start(void)
+     int rc;
+     int i;
+ 
++    /* Lock the host before checking */
++    ble_hs_lock();
++
++    /* Check if busy - cannot start with active connections or GAP procedures */
++    if (ble_gatts_is_busy()) {
++        ble_hs_unlock();
++        return BLE_HS_EBUSY;
++    }
++
++    ble_hs_unlock();
++
+     ble_gatts_free_mem();
+ 
+     if (ble_hs_max_client_configs > 0) {
+@@ -1223,6 +1289,7 @@ ble_gatts_start(void)
+         }
+     }
+ 
++    ble_gatts_started = 1;
+     return 0;
+ 
+ err:

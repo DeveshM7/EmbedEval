@@ -1,0 +1,152 @@
+diff --git a/fs/fcb/include/fcb/fcb.h b/fs/fcb/include/fcb/fcb.h
+index db19a2a..98d9a77 100644
+--- a/fs/fcb/include/fcb/fcb.h
++++ b/fs/fcb/include/fcb/fcb.h
+@@ -126,9 +126,24 @@ int fcb_free_sector_cnt(struct fcb *fcb);
+  * Whether FCB has any data.
+  */
+ int fcb_is_empty(struct fcb *fcb);
+-
++/**
++ * Find the entry that is ``entries`` positions from the end of the FCB.
++ * ``entries`` is 1\u2011based: 1 = most recent entry, 2 = second\u2011most\u2011recent, ...
++ * If ``entries`` exceeds the number of entries stored, the oldest entry is
++ * returned.  The function returns 0 on success and a non\u2011zero error only when
++ * the FCB contains no entries.
++ *
++ * @param fcb       Pointer to the FCB instance.
++ * @param entries   Number of entries to look back from the end (1\u2011based).
++ * @param entry_out Pointer to a ``struct fcb_entry`` that will be filled with
++ *                  the matching entry (its ``fe_elem_off`` field holds the
++ *                  offset).
++ * @return          0 on success; non\u2011zero if the FCB is empty.
++ */
+ int
+-fcb_offset_last_n(struct fcb *fcb, uint8_t entries, uint32_t *last_n_off);
++fcb_offset_last_n(struct fcb *fcb, uint8_t entries,
++    struct fcb_entry *entry_out);
++
+ 
+ /*
+  * Clears FCB passed to it
+diff --git a/fs/fcb/src/fcb.c b/fs/fcb/src/fcb.c
+index 0e210df..889e86f 100644
+--- a/fs/fcb/src/fcb.c
++++ b/fs/fcb/src/fcb.c
+@@ -212,28 +212,27 @@ fcb_sector_hdr_read(struct fcb *fcb, struct flash_area *fap,
+  * @return 0 on success; non-zero on failure
+  */
+ int
+-fcb_offset_last_n(struct fcb *fcb, uint8_t entries, uint32_t *last_n_off)
++fcb_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *entry_out)
+ {
+     struct fcb_entry loc;
+-    struct fcb_entry start;
+-    int i;
+-
+-    i = 0;
++    struct fcb_entry buf[256];
++    uint32_t total = 0;
++    uint8_t idx = 0;
++    if (!entry_out) { return -1; }
++    if (entries == 0) { return -1; }
++    memset(buf, 0, sizeof(buf));
+     memset(&loc, 0, sizeof(loc));
+     while (!fcb_getnext(fcb, &loc)) {
+-        if (i == 0) {
+-            /* Start from the beginning of fcb entries */
+-            *last_n_off = loc.fe_elem_off;
+-            start = loc;
+-        }
+-        /* Update last_n_off after n entries and keep updating */
+-        if (i >= (entries - 1)) {
+-            fcb_getnext(fcb, &start);
+-            *last_n_off = start.fe_elem_off;
+-        }
+-        i++;
++        buf[idx] = loc;
++        idx = (idx + 1) % entries;
++        total++;
++    }
++    if (total == 0) { return -1; }
++    if (total < entries) {
++        *entry_out = buf[0];
++    } else {
++        *entry_out = buf[idx];
+     }
+-
+     return 0;
+ }
+ 
+diff --git a/sys/log/full/src/log_fcb.c b/sys/log/full/src/log_fcb.c
+index ea104d4..5ccafee 100644
+--- a/sys/log/full/src/log_fcb.c
++++ b/sys/log/full/src/log_fcb.c
+@@ -219,6 +219,7 @@ log_fcb_rtr_erase(struct log *log, void *arg)
+     struct fcb *fcb;
+     const struct flash_area *ptr;
+     uint32_t offset;
++    struct fcb_entry entry;
+     int rc;
+ 
+     rc = 0;
+@@ -249,7 +250,8 @@ log_fcb_rtr_erase(struct log *log, void *arg)
+     }
+ 
+     /* Calculate offset of n-th last entry */
+-    rc = fcb_offset_last_n(fcb, fcb_log->fl_entries, &offset);
++    rc = fcb_offset_last_n(fcb, fcb_log->fl_entries, &entry);
++    offset = entry.fe_elem_off;
+     if (rc) {
+         goto err;
+     }
+diff --git a/tmp/fcb_proto.sed b/tmp/fcb_proto.sed
+new file mode 100644
+index 0000000..d1b04b4
+--- /dev/null
++++ b/tmp/fcb_proto.sed
+@@ -0,0 +1,21 @@
++/int$/ {
++    N
++    /int\n\/\* removed \*\//c\int
++/**
++ * Find the entry that is ``entries`` positions from the end of the FCB.
++ * ``entries`` is 1\u2011based: 1 = most recent entry, 2 = second\u2011most\u2011recent, ...
++ * If ``entries`` exceeds the number of entries stored, the oldest entry is
++ * returned.  The function returns 0 on success and a non\u2011zero error only when
++ * the FCB contains no entries.
++ *
++ * @param fcb       Pointer to the FCB instance.
++ * @param entries   Number of entries to look back from the end (1\u2011based).
++ * @param entry_out Pointer to a ``struct fcb_entry`` that will be filled with
++ *                  the matching entry (its ``fe_elem_off`` field holds the
++ *                  offset).
++ * @return          0 on success; non\u2011zero if the FCB is empty.
++ */
++int
++fcb_offset_last_n(struct fcb *fcb, uint8_t entries,
++    struct fcb_entry *entry_out);
++}
+diff --git a/tmp/proto.txt b/tmp/proto.txt
+new file mode 100644
+index 0000000..9c4d267
+--- /dev/null
++++ b/tmp/proto.txt
+@@ -0,0 +1,17 @@
++/**
++ * Find the entry that is ``entries`` positions from the end of the FCB.
++ * ``entries`` is 1\u2011based: 1 = most recent entry, 2 = second\u2011most\u2011recent, ...
++ * If ``entries`` exceeds the number of entries stored, the oldest entry is
++ * returned.  The function returns 0 on success and a non\u2011zero error only when
++ * the FCB contains no entries.
++ *
++ * @param fcb       Pointer to the FCB instance.
++ * @param entries   Number of entries to look back from the end (1\u2011based).
++ * @param entry_out Pointer to a ``struct fcb_entry`` that will be filled with
++ *                  the matching entry (its ``fe_elem_off`` field holds the
++ *                  offset).
++ * @return          0 on success; non\u2011zero if the FCB is empty.
++ */
++int
++fcb_offset_last_n(struct fcb *fcb, uint8_t entries,
++    struct fcb_entry *entry_out);

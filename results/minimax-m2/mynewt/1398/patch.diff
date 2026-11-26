@@ -1,0 +1,141 @@
+diff --git a/sys/config/include/config/config.h b/sys/config/include/config/config.h
+index fc324c5..c34c782 100644
+--- a/sys/config/include/config/config.h
++++ b/sys/config/include/config/config.h
+@@ -258,10 +258,27 @@ int conf_set_value(char *name, char *val_str);
+  * @return pointer to value on success, NULL on failure.
+  */
+ char *conf_get_value(char *name, char *buf, int buf_len);
+-
+ /**
+- * Call commit for all configuration handler. This should apply all
+- * configuration which has been set, but not applied yet.
++ * Get the latest persisted value for a configuration key.
++ *
++ * This function retrieves the value directly from persistent storage,
++ * not from the current in-memory configuration state. This is useful
++ * when you need to know what was actually persisted, regardless of
++ * any uncommitted changes in memory.
++ *
++ * @param name Name/key of the configuration item.
++ * @param buf Buffer to copy the value into.
++ * @param buf_len Size of the buffer.
++ *
++ * @return 0 on success, OS_ENOENT if key doesn't exist in storage,
++ *         OS_EINVAL if buffer is too small or parameters are invalid.
++ */
++int conf_get_stored_value(char *name, char *buf, int buf_len);
++ 
++ 
++ /**
++  * Call commit for all configuration handler. This should apply all
++  * configuration which has been set, but not applied yet.
+  *
+  * @param name Name of the configuration subtree, or NULL to commit everything.
+  *
+diff --git a/sys/config/src/config_store.c b/sys/config/src/config_store.c
+index cbb8825..caf8a92 100644
+--- a/sys/config/src/config_store.c
++++ b/sys/config/src/config_store.c
+@@ -240,3 +240,101 @@ conf_store_init(void)
+     conf_loaded = false;
+     SLIST_INIT(&conf_load_srcs);
+ }
++
++/*
++ * Callback structure for finding a specific key in stored configuration.
++ */
++struct conf_get_stored_arg {
++    const char *name;
++    char *buf;
++    int buf_len;
++    int found;
++};
++
++/*
++ * Callback function to find a specific configuration key while loading.
++ */
++static void
++conf_get_stored_cb(char *name, char *val, void *cb_arg)
++{
++    struct conf_get_stored_arg *arg = (struct conf_get_stored_arg *)cb_arg;
++
++    if (strcmp(name, arg->name) == 0) {
++        /* Found the key */
++        if (val) {
++            /* Check if value fits in buffer (including null terminator) */
++            if (strlen(val) + 1 <= (size_t)arg->buf_len) {
++                strcpy(arg->buf, val);
++                arg->found = 1;
++            } else {
++                /* Value exists but buffer is too small */
++                arg->found = -1;
++            }
++        } else {
++            /* Key exists but has no value */
++            arg->buf[0] = '\0';
++            arg->found = 1;
++        }
++    }
++}
++
++/*
++ * Get the latest persisted value for a configuration key.
++ *
++ * This function retrieves the value directly from persistent storage,
++ * not from the current in-memory configuration state. This is useful
++ * when you need to know what was actually persisted, regardless of
++ * any uncommitted changes in memory.
++ *
++ * @param name The configuration key name (e.g., "myfoo/mybar")
++ * @param buf Buffer to copy the value into
++ * @param buf_len Size of the buffer
++ *
++ * @return 0 on success, OS_ENOENT if key doesn't exist in storage,
++ *         OS_EINVAL if buffer is too small
++ */
++int
++conf_get_stored_value(char *name, char *buf, int buf_len)
++{
++    struct conf_store *cs;
++    struct conf_get_stored_arg arg;
++    int rc;
++
++    if (!name || !buf || buf_len <= 0) {
++        return OS_EINVAL;
++    }
++
++    conf_lock();
++
++    /* Initialize the callback argument */
++    arg.name = name;
++    arg.buf = buf;
++    arg.buf_len = buf_len;
++    arg.found = 0;
++
++    /* Load from all configured storage sources to find the value */
++    SLIST_FOREACH(cs, &conf_load_srcs, cs_next) {
++        rc = cs->cs_itf->csi_load(cs, conf_get_stored_cb, &arg);
++        if (rc != 0) {
++            conf_unlock();
++            return rc;
++        }
++        /* If buffer is too small, return immediately */
++        if (arg.found == -1) {
++            conf_unlock();
++            return OS_EINVAL;
++        }
++        /* Continue checking all sources even if we found a match,
++         * because a later source might have a newer value */
++    }
++
++    conf_unlock();
++
++    /* Check if we found any value */
++    if (arg.found == 1) {
++        return 0;
++    }
++
++    /* Key not found in any storage */
++    return OS_ENOENT;
++}

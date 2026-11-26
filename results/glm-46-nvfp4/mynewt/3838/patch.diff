@@ -1,0 +1,887 @@
+diff --git a/libc/baselibc/src/strstr.c b/libc/baselibc/src/strstr.c
+index 0af23bb..2e3cdcc 100644
+--- a/libc/baselibc/src/strstr.c
++++ b/libc/baselibc/src/strstr.c
+@@ -12,5 +12,6 @@ char *strstr(const char *haystack, const char *needle)
+ 
+ char *strnstr(const char *haystack, const char *needle, size_t len)
+ {
+-	return (char *)memmem(haystack, strlen(haystack), needle, len);
++    // Limit haystack to requested length before searching
++    return (char *)memmem(haystack, len, needle, strlen(needle));
+ }
+diff --git a/libc/baselibc/src/strstr.c.backup b/libc/baselibc/src/strstr.c.backup
+new file mode 100644
+index 0000000..0af23bb
+--- /dev/null
++++ b/libc/baselibc/src/strstr.c.backup
+@@ -0,0 +1,16 @@
++/*
++ * strstr.c
++ */
++
++#include <string.h>
++
++char *strstr(const char *haystack, const char *needle)
++{
++	return (char *)memmem(haystack, strlen(haystack), needle,
++			      strlen(needle));
++}
++
++char *strnstr(const char *haystack, const char *needle, size_t len)
++{
++	return (char *)memmem(haystack, strlen(haystack), needle, len);
++}
+diff --git a/libc/baselibc/src/vsscanf.c b/libc/baselibc/src/vsscanf.c
+index ddd3d7e..d49a6e6 100644
+--- a/libc/baselibc/src/vsscanf.c
++++ b/libc/baselibc/src/vsscanf.c
+@@ -93,6 +93,7 @@ int vsscanf(const char *buffer, const char *format, va_list ap)
+ 	unsigned long matchmap[((1 << CHAR_BIT) + (LONG_BIT - 1)) / LONG_BIT];
+ 	int matchinv = 0;	/* Is match map inverted? */
+ 	unsigned char range_start = 0;
++	unsigned char prev_char = 0;  /* Store previous character for range start */
+ 	(void)sign;
+ 
+ 	while ((ch = *p++) && !bail) {
+@@ -321,6 +322,7 @@ int vsscanf(const char *buffer, const char *format, va_list ap)
+ 					state = st_match_init;
+ 					matchinv = 0;
+ 					memset(matchmap, 0, sizeof matchmap);
++					prev_char = 0;  /* Reset for new scanset */
+ 					break;
+ 
+ 				case '%':	/* %% sequence */
+@@ -343,6 +345,7 @@ int vsscanf(const char *buffer, const char *format, va_list ap)
+ 				matchinv = 1;
+ 			} else {
+ 				set_bit(matchmap, (unsigned char)ch);
++				prev_char = (unsigned char)ch;  /* Store as potential range start */
+ 				state = st_match;
+ 			}
+ 			break;
+@@ -351,23 +354,27 @@ int vsscanf(const char *buffer, const char *format, va_list ap)
+ 			if (ch == ']') {
+ 				goto match_run;
+ 			} else if (ch == '-') {
+-				range_start = (unsigned char)ch;
++				range_start = prev_char;  /* Use previous character as range start */
+ 				state = st_match_range;
+ 			} else {
+ 				set_bit(matchmap, (unsigned char)ch);
++				prev_char = (unsigned char)ch;  /* Update previous character */
+ 			}
+ 			break;
+ 
+ 		case st_match_range:	/* %[ match after - */
+ 			if (ch == ']') {
+-				/* - was last character */
++				/* - was last character, include it literally */
+ 				set_bit(matchmap, (unsigned char)'-');
+-				goto match_run;
++				state = st_match;
++				p--; /* Process ']' in st_match state */
+ 			} else {
++				/* Include both range endpoints */
+ 				int i;
+-				for (i = range_start; i < (unsigned char)ch;
+-				     i++)
++				for (i = range_start; i <= (unsigned char)ch; i++) {
+ 					set_bit(matchmap, i);
++				}
++				prev_char = (unsigned char)ch;  /* Update previous character */
+ 				state = st_match;
+ 			}
+ 			break;
+@@ -384,9 +391,14 @@ int vsscanf(const char *buffer, const char *format, va_list ap)
+ 			if (q != qq && sarg) {
+ 				*sarg = '\0';
+ 				converted++;
+-			} else {
++			} else if (sarg) {
++				/* No characters matched - conversion failure for scanset */
++				bail = bail_err;
++			} else if (q == qq) {
++				/* No characters matched for %*[] - error */
+ 				bail = bail_err;
+ 			}
++			/* If sarg is NULL (suppress assignment), empty match is OK */
+ 			if (!uc)
+ 				bail = bail_eof;
+ 			break;
+diff --git a/libc/baselibc/src/vsscanf.c.backup b/libc/baselibc/src/vsscanf.c.backup
+new file mode 100644
+index 0000000..ddd3d7e
+--- /dev/null
++++ b/libc/baselibc/src/vsscanf.c.backup
+@@ -0,0 +1,400 @@
++/*
++ * vsscanf.c
++ *
++ * vsscanf(), from which the rest of the scanf()
++ * family is built
++ */
++
++#include <ctype.h>
++#include <stdarg.h>
++#include <stddef.h>
++#include <string.h>
++#include <limits.h>
++#include <stdio.h>
++#include <strntoimax.h>
++
++#ifndef LONG_BIT
++#define LONG_BIT (CHAR_BIT*sizeof(long))
++#endif
++
++enum flags {
++	FL_SPLAT = 0x01,	/* Drop the value, do not assign */
++	FL_INV   = 0x02,	/* Character-set with inverse */
++	FL_WIDTH = 0x04,	/* Field width specified */
++	FL_MINUS = 0x08,	/* Negative number */
++};
++
++enum ranks {
++	rank_char     = -2,
++	rank_short    = -1,
++	rank_int      = 0,
++	rank_long     = 1,
++	rank_longlong = 2,
++	rank_ptr      = INT_MAX	/* Special value used for pointers */
++};
++
++#define MIN_RANK	rank_char
++#define MAX_RANK	rank_longlong
++
++#define INTMAX_RANK	rank_longlong
++#define SIZE_T_RANK	rank_long
++#define PTRDIFF_T_RANK	rank_long
++
++enum bail {
++	bail_none = 0,		/* No error condition */
++	bail_eof,		/* Hit EOF */
++	bail_err		/* Conversion mismatch */
++};
++
++static inline const char *skipspace(const char *p)
++{
++	while (isspace((unsigned char)*p))
++		p++;
++	return p;
++}
++
++#undef set_bit
++static inline void set_bit(unsigned long *bitmap, unsigned int bit)
++{
++	bitmap[bit / LONG_BIT] |= 1UL << (bit % LONG_BIT);
++}
++
++#undef test_bit
++static inline int test_bit(unsigned long *bitmap, unsigned int bit)
++{
++	return (int)(bitmap[bit / LONG_BIT] >> (bit % LONG_BIT)) & 1;
++}
++
++int vsscanf(const char *buffer, const char *format, va_list ap)
++{
++	const char *p = format;
++	char ch;
++	unsigned char uc;
++	const char *q = buffer;
++	const char *qq;
++	uintmax_t val = 0;
++	int rank = rank_int;	/* Default rank */
++	unsigned int width = UINT_MAX;
++	int base;
++	enum flags flags = 0;
++	enum {
++		st_normal,	/* Ground state */
++		st_flags,	/* Special flags */
++		st_width,	/* Field width */
++		st_modifiers,	/* Length or conversion modifiers */
++		st_match_init,	/* Initial state of %[ sequence */
++		st_match,	/* Main state of %[ sequence */
++		st_match_range,	/* After - in a %[ sequence */
++	} state = st_normal;
++	char *sarg = NULL;	/* %s %c or %[ string argument */
++	enum bail bail = bail_none;
++	int sign;
++	int converted = 0;	/* Successful conversions */
++	unsigned long matchmap[((1 << CHAR_BIT) + (LONG_BIT - 1)) / LONG_BIT];
++	int matchinv = 0;	/* Is match map inverted? */
++	unsigned char range_start = 0;
++	(void)sign;
++
++	while ((ch = *p++) && !bail) {
++		switch (state) {
++		case st_normal:
++			if (ch == '%') {
++				state = st_flags;
++				flags = 0;
++				rank = rank_int;
++				width = UINT_MAX;
++			} else if (isspace((unsigned char)ch)) {
++				q = skipspace(q);
++			} else {
++				if (*q == ch)
++					q++;
++				else
++					bail = bail_err; /* Match failure */
++			}
++			break;
++
++		case st_flags:
++			switch (ch) {
++			case '*':
++				flags |= FL_SPLAT;
++				break;
++			case '0'...'9':
++				width = (ch - '0');
++				state = st_width;
++				flags |= FL_WIDTH;
++				break;
++			default:
++				state = st_modifiers;
++				p--;	/* Process this character again */
++				break;
++			}
++			break;
++
++		case st_width:
++			if (ch >= '0' && ch <= '9') {
++				width = width * 10 + (ch - '0');
++			} else {
++				state = st_modifiers;
++				p--;	/* Process this character again */
++			}
++			break;
++
++		case st_modifiers:
++			switch (ch) {
++				/* Length modifiers - nonterminal sequences */
++			case 'h':
++				rank--;	/* Shorter rank */
++				break;
++			case 'l':
++				rank++;	/* Longer rank */
++				break;
++			case 'j':
++				rank = INTMAX_RANK;
++				break;
++			case 'z':
++				rank = SIZE_T_RANK;
++				break;
++			case 't':
++				rank = PTRDIFF_T_RANK;
++				break;
++			case 'L':
++			case 'q':
++				rank = rank_longlong;	/* long double/long long */
++				break;
++
++			default:
++				/* Output modifiers - terminal sequences */
++				/* Next state will be normal */
++				state = st_normal;
++
++				/* Canonicalize rank */
++				if (rank < MIN_RANK)
++					rank = MIN_RANK;
++				else if (rank > MAX_RANK)
++					rank = MAX_RANK;
++
++				switch (ch) {
++				case 'P':	/* Upper case pointer */
++				case 'p':	/* Pointer */
++					rank = rank_ptr;
++					base = 0;
++					sign = 0;
++					goto scan_int;
++
++				case 'i':	/* Base-independent integer */
++					base = 0;
++					sign = 1;
++					goto scan_int;
++
++				case 'd':	/* Decimal integer */
++					base = 10;
++					sign = 1;
++					goto scan_int;
++
++				case 'o':	/* Octal integer */
++					base = 8;
++					sign = 0;
++					goto scan_int;
++
++				case 'u':	/* Unsigned decimal integer */
++					base = 10;
++					sign = 0;
++					goto scan_int;
++
++				case 'x':	/* Hexadecimal integer */
++				case 'X':
++					base = 16;
++					sign = 0;
++					goto scan_int;
++
++				case 'n':	/* # of characters consumed */
++					val = (q - buffer);
++					goto set_integer;
++
++				      scan_int:
++					q = skipspace(q);
++					if (!*q) {
++						bail = bail_eof;
++						break;
++					}
++					val =
++					    strntoumax(q, (char **)&qq, base,
++						       width);
++					if (qq == q) {
++						bail = bail_err;
++						break;
++					}
++					q = qq;
++					if (!(flags & FL_SPLAT))
++						converted++;
++					/* fall through */
++
++				      set_integer:
++					if (!(flags & FL_SPLAT)) {
++						switch (rank) {
++						case rank_char:
++							*va_arg(ap,
++								unsigned char *)
++								= val;
++							break;
++						case rank_short:
++							*va_arg(ap,
++								unsigned short
++								*) = val;
++							break;
++						case rank_int:
++							*va_arg(ap,
++								unsigned int *)
++							    = val;
++							break;
++						case rank_long:
++							*va_arg(ap,
++								unsigned long *)
++								= val;
++							break;
++						case rank_longlong:
++							*va_arg(ap,
++								unsigned long
++								long *) = val;
++							break;
++						case rank_ptr:
++							*va_arg(ap, void **) =
++								(void *)
++								(uintptr_t)val;
++							break;
++						}
++					}
++					break;
++
++				case 'c':	/* Character */
++					/* Default width == 1 */
++					width = (flags & FL_WIDTH) ? width : 1;
++					if (flags & FL_SPLAT) {
++						while (width--) {
++							if (!*q) {
++								bail = bail_eof;
++								break;
++							}
++						}
++					} else {
++						sarg = va_arg(ap, char *);
++						while (width--) {
++							if (!*q) {
++								bail = bail_eof;
++								break;
++							}
++							*sarg++ = *q++;
++						}
++						if (!bail)
++							converted++;
++					}
++					break;
++
++				case 's':	/* String */
++					uc = 1;	/* Anything nonzero */
++					if (flags & FL_SPLAT) {
++						while (width-- && (uc = *q) &&
++						       !isspace(uc)) {
++							q++;
++						}
++					} else {
++						char *sp;
++						sp = sarg = va_arg(ap, char *);
++						while (width-- && (uc = *q) &&
++						       !isspace(uc)) {
++							*sp++ = uc;
++							q++;
++						}
++						if (sarg != sp) {
++							/* Terminate output */
++							*sp = '\0';
++							converted++;
++						}
++					}
++					if (!uc)
++						bail = bail_eof;
++					break;
++
++				case '[':	/* Character range */
++					sarg = (flags & FL_SPLAT) ? NULL
++						: va_arg(ap, char *);
++					state = st_match_init;
++					matchinv = 0;
++					memset(matchmap, 0, sizeof matchmap);
++					break;
++
++				case '%':	/* %% sequence */
++					if (*q == '%')
++						q++;
++					else
++						bail = bail_err;
++					break;
++
++				default:	/* Anything else */
++					/* Unknown sequence */
++					bail = bail_err;
++					break;
++				}
++			}
++			break;
++
++		case st_match_init:	/* Initial state for %[ match */
++			if (ch == '^' && !(flags & FL_INV)) {
++				matchinv = 1;
++			} else {
++				set_bit(matchmap, (unsigned char)ch);
++				state = st_match;
++			}
++			break;
++
++		case st_match:	/* Main state for %[ match */
++			if (ch == ']') {
++				goto match_run;
++			} else if (ch == '-') {
++				range_start = (unsigned char)ch;
++				state = st_match_range;
++			} else {
++				set_bit(matchmap, (unsigned char)ch);
++			}
++			break;
++
++		case st_match_range:	/* %[ match after - */
++			if (ch == ']') {
++				/* - was last character */
++				set_bit(matchmap, (unsigned char)'-');
++				goto match_run;
++			} else {
++				int i;
++				for (i = range_start; i < (unsigned char)ch;
++				     i++)
++					set_bit(matchmap, i);
++				state = st_match;
++			}
++			break;
++
++		      match_run:	/* Match expression finished */
++			qq = q;
++			uc = 1;	/* Anything nonzero */
++			while (width && (uc = *q)
++			       && test_bit(matchmap, uc)^matchinv) {
++				if (sarg)
++					*sarg++ = uc;
++				q++;
++			}
++			if (q != qq && sarg) {
++				*sarg = '\0';
++				converted++;
++			} else {
++				bail = bail_err;
++			}
++			if (!uc)
++				bail = bail_eof;
++			break;
++		}
++	}
++
++	if (bail == bail_eof && !converted)
++		converted = -1;	/* Return EOF (-1) */
++
++	return converted;
++}
+diff --git a/test_eq b/test_eq
+new file mode 100755
+index 0000000000000000000000000000000000000000..904415459e1301d033b4ab45deb20d01f8cb7706
+GIT binary patch
+literal 20512
+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
+HX^Q^@6hyc6
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_eq.c b/test_eq.c
+new file mode 100644
+index 0000000..7f8da56
+--- /dev/null
++++ b/test_eq.c
+@@ -0,0 +1,10 @@
++#include <stdio.h>
++#include <string.h>
++
++int main() {
++    char buf[32];
++    int result;
++    
++    result = sscanf("d", "%[a-c]", buf);
++    printf("result=%d, buf='%s', buf[0]=%d\n", result, buf, buf[0]);
++}
+diff --git a/test_sscanf b/test_sscanf
+new file mode 100755
+index 0000000000000000000000000000000000000000..6de0866a5b2aaf4b3e1dc74777bec2e856950036
+GIT binary patch
+literal 20512
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_sscanf.c b/test_sscanf.c
+new file mode 100644
+index 0000000..8641f76
+--- /dev/null
++++ b/test_sscanf.c
+@@ -0,0 +1,22 @@
++#include <stdio.h>
++#include <string.h>
++
++int main() {
++    char buf[32];
++    int result;
++    
++    // Test scanset with range endpoints
++    result = sscanf("a", "%[a-c]", buf);
++    printf("Test 'a' with '%%[a-c]': result=%d, buf='%s'\n", result, buf);
++    
++    result = sscanf("b", "%[a-c]", buf);
++    printf("Test 'b' with '%%[a-c]': result=%d, buf='%s'\n", result, buf);
++    
++    result = sscanf("c", "%[a-c]", buf);
++    printf("Test 'c' with '%%[a-c]': result=%d, buf='%s'\n", result, buf);
++    
++    result = sscanf("d", "%[a-c]", buf);
++    printf("Test 'd' with '%%[a-c]': result=%d, buf='%s'\n", result, buf);
++    
++    return 0;
++}
+diff --git a/test_sscanf_simple b/test_sscanf_simple
+new file mode 100755
+index 0000000000000000000000000000000000000000..f0ab084860ed6cbfcec891ec466d29aead26fce7
+GIT binary patch
+literal 20520
+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
+CE485j
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_sscanf_simple.c b/test_sscanf_simple.c
+new file mode 100644
+index 0000000..4ab5374
+--- /dev/null
++++ b/test_sscanf_simple.c
+@@ -0,0 +1,13 @@
++#include <stdio.h>
++#include <string.h>
++
++int main() {
++    char buf[32];
++    int result;
++    buf[0] = 0; // Clear
++    
++    // Direct test for empty match behavior
++    result = sscanf("d", "%[a-c]", buf);
++    printf("Test: result=%d, first char='%c' (0x%02x)\n", result, buf[0], buf[0]);
++    return 0;
++}

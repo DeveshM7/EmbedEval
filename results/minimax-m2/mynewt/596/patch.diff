@@ -1,0 +1,226 @@
+diff --git a/net/nimble/host/include/host/ble_gap.h b/net/nimble/host/include/host/ble_gap.h
+index 111c207..b81bd80 100644
+--- a/net/nimble/host/include/host/ble_gap.h
++++ b/net/nimble/host/include/host/ble_gap.h
+@@ -614,6 +614,28 @@ struct ble_gap_event {
+             uint8_t tx_phy;
+             uint8_t rx_phy;
+         } phy_updated;
++
++        /**
++         * Represents the completion of an advertising procedure that was
++         * stopped due to preemption.
++         *
++         * Valid for the following event types:
++         *     o BLE_GAP_EVENT_ADV_COMPLETE
++         */
++        struct {
++            int reason;
++        } adv_complete;
++
++        /**
++         * Represents the completion of a discovery procedure that was
++         * stopped due to preemption.
++         *
++         * Valid for the following event types:
++         *     o BLE_GAP_EVENT_DISC_COMPLETE
++         */
++        struct {
++            int reason;
++        } disc_complete;
+     };
+ };
+ 
+diff --git a/net/nimble/host/include/host/ble_hs.h b/net/nimble/host/include/host/ble_hs.h
+index 85885bd..da0468b 100644
+--- a/net/nimble/host/include/host/ble_hs.h
++++ b/net/nimble/host/include/host/ble_hs.h
+@@ -76,6 +76,7 @@ struct os_event;
+ #define BLE_HS_EENCRYPT_KEY_SZ      26
+ #define BLE_HS_ESTORE_CAP           27
+ #define BLE_HS_ESTORE_FAIL          28
++#define BLE_HS_EPREEMPTED           29
+ 
+ #define BLE_HS_ERR_ATT_BASE         0x100   /* 256 */
+ #define BLE_HS_ATT_ERR(x)           ((x) ? BLE_HS_ERR_ATT_BASE + (x) : 0)
+diff --git a/net/nimble/host/src/ble_gap.c b/net/nimble/host/src/ble_gap.c
+index 01a2ab2..6e75307 100644
+--- a/net/nimble/host/src/ble_gap.c
++++ b/net/nimble/host/src/ble_gap.c
+@@ -143,6 +143,19 @@ static bssnz_t struct {
+     void *cb_arg;
+ } ble_gap_slave;
+ 
++/* Preemption state tracking */
++static uint8_t ble_gap_preempted;
++static struct ble_gap_master_state ble_gap_master_preempted;
++static struct {
++    uint8_t op;
++    uint8_t conn_mode;
++    uint8_t disc_mode;
++    unsigned our_addr_type:2;
++    ble_gap_event_fn *cb;
++    void *cb_arg;
++} ble_gap_slave_preempted;
++
++
+ struct ble_gap_update_entry {
+     SLIST_ENTRY(ble_gap_update_entry) next;
+     struct ble_gap_upd_params params;
+@@ -4234,6 +4247,96 @@ ble_gap_mtu_event(uint16_t conn_handle, uint16_t cid, uint16_t mtu)
+  * $init                                                                     *
+  *****************************************************************************/
+ 
++/**
++ * Initiates preemption of GAP procedures to allow controller operations
++ * that cannot be performed concurrently with GAP procedures.
++ * 
++ * Returns 1 if preemption was initiated, 0 if no preemption needed.
++ */
++int
++ble_gap_preempt_start(void)
++{
++    /* Check if already preempted */
++    if (ble_gap_preempted) {
++        return 0;
++    }
++
++    /* Stop active procedures */
++    if (ble_gap_master.op != BLE_GAP_OP_NULL) {
++        /* Save state for master procedures */
++        ble_gap_master_preempted = ble_gap_master;
++        ble_gap_master.op = BLE_GAP_OP_NULL;
++    }
++
++    if (ble_gap_slave.op != BLE_GAP_OP_NULL) {
++        /* Save state for slave procedures (advertising) */
++        ble_gap_slave_preempted.op = ble_gap_slave.op;
++        ble_gap_slave_preempted.conn_mode = ble_gap_slave.conn_mode;
++        ble_gap_slave_preempted.disc_mode = ble_gap_slave.disc_mode;
++        ble_gap_slave_preempted.our_addr_type = ble_gap_slave.our_addr_type;
++        ble_gap_slave_preempted.cb = ble_gap_slave.cb;
++        ble_gap_slave_preempted.cb_arg = ble_gap_slave.cb_arg;
++        ble_gap_slave.op = BLE_GAP_OP_NULL;
++        ble_gap_slave.conn_mode = BLE_GAP_CONN_MODE_NON;
++        ble_gap_slave.disc_mode = BLE_GAP_DISC_MODE_NON;
++    }
++
++    ble_gap_preempted = 1;
++    return 1;
++}
++
++/**
++ * Ends preemption and reports interrupted procedures.
++ */
++void
++ble_gap_preempt_stop(void)
++{
++    if (!ble_gap_preempted) {
++        return;
++    }
++
++    /* Report interrupted procedures */
++    if (ble_gap_master_preempted.op != BLE_GAP_OP_NULL) {
++        if (ble_gap_master_preempted.op == BLE_GAP_OP_M_DISC) {
++            /* Report discovery complete with PREEMPTED */
++            if (ble_gap_master_preempted.cb) {
++                struct ble_gap_event event;
++                memset(&event, 0, sizeof(event));
++                event.type = BLE_GAP_EVENT_DISC_COMPLETE;
++                event.disc_complete.reason = BLE_HS_EPREEMPTED;
++                ble_gap_master_preempted.cb(&event, ble_gap_master_preempted.cb_arg);
++            }
++        } else if (ble_gap_master_preempted.op == BLE_GAP_OP_M_CONN) {
++            /* Report connect failed with PREEMPTED */
++            if (ble_gap_master_preempted.cb) {
++                struct ble_gap_event event;
++                memset(&event, 0, sizeof(event));
++                event.type = BLE_GAP_EVENT_CONNECT;
++                event.connect.status = BLE_HS_EPREEMPTED;
++                event.connect.conn_handle = BLE_HS_CONN_HANDLE_NONE;
++                ble_gap_master_preempted.cb(&event, ble_gap_master_preempted.cb_arg);
++            }
++        }
++        memset(&ble_gap_master_preempted, 0, sizeof(ble_gap_master_preempted));
++    }
++
++    if (ble_gap_slave_preempted.op != BLE_GAP_OP_NULL) {
++        /* Report advertising complete with PREEMPTED */
++        if (ble_gap_slave_preempted.cb) {
++            struct ble_gap_event event;
++            memset(&event, 0, sizeof(event));
++            event.type = BLE_GAP_EVENT_ADV_COMPLETE;
++            event.adv_complete.reason = BLE_HS_EPREEMPTED;
++            ble_gap_slave_preempted.cb(&event, ble_gap_slave_preempted.cb_arg);
++        }
++        memset(&ble_gap_slave_preempted, 0, sizeof(ble_gap_slave_preempted));
++    }
++
++    ble_gap_preempted = 0;
++}
++
++
++
+ int
+ ble_gap_init(void)
+ {
+diff --git a/net/nimble/host/src/ble_gap_priv.h b/net/nimble/host/src/ble_gap_priv.h
+index 88e62ca..9544511 100644
+--- a/net/nimble/host/src/ble_gap_priv.h
++++ b/net/nimble/host/src/ble_gap_priv.h
+@@ -24,6 +24,11 @@
+ #include "syscfg/syscfg.h"
+ #include "stats/stats.h"
+ #include "host/ble_gap.h"
++
++/* Preemption for controller operations (e.g., adding IRK to resolving list) */
++int ble_gap_preempt_start(void);
++void ble_gap_preempt_stop(void);
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+diff --git a/net/nimble/host/src/ble_hs_pvcy.c b/net/nimble/host/src/ble_hs_pvcy.c
+index 95b22c2..d5e3a9f 100644
+--- a/net/nimble/host/src/ble_hs_pvcy.c
++++ b/net/nimble/host/src/ble_hs_pvcy.c
+@@ -21,6 +21,8 @@
+ #include <string.h>
+ #include "stats/stats.h"
+ #include "ble_hs_priv.h"
++#include "ble_gap_priv.h"
++
+ 
+ static uint8_t ble_hs_pvcy_started;
+ static uint8_t ble_hs_pvcy_irk[16];
+@@ -113,9 +115,17 @@ ble_hs_pvcy_add_entry(const uint8_t *addr, uint8_t addr_type,
+     struct hci_add_dev_to_resolving_list add;
+     uint8_t buf[BLE_HCI_ADD_TO_RESOLV_LIST_LEN];
+     int rc;
++    int preempted;
+ 
+     STATS_INC(ble_hs_stats, pvcy_add_entry);
+ 
++    /* Preempt GAP procedures to allow controller operation */
++    preempted = ble_gap_preempt_start();
++    if (preempted < 0) {
++        rc = preempted;
++        goto err;
++    }
++
+     add.addr_type = addr_type;
+     memcpy(add.addr, addr, 6);
+     memcpy(add.local_irk, ble_hs_pvcy_irk, 16);
+@@ -137,6 +147,12 @@ ble_hs_pvcy_add_entry(const uint8_t *addr, uint8_t addr_type,
+ 
+ err:
+     STATS_INC(ble_hs_stats, pvcy_add_entry_fail);
++    
++    /* End preemption if we started it */
++    if (preempted) {
++        ble_gap_preempt_stop();
++    }
++    
+     return rc;
+ }
+ 

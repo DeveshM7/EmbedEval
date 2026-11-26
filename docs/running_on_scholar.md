@@ -963,6 +963,10 @@ python harness/results.py --runs --csv results.csv                # a row per ru
 It counts graded runs (pass, fail, not run), how they ended, and the median
 time and steps; an instance with no grade yet is "to do".
 
+The [completed Mynewt evaluation](../results/README.md) includes all 244 final
+run records, grades, and patches. The [task list](../eval-sets/mynewt.txt)
+records the 61 instances evaluated for each model.
+
 ### 13.3 Mynewt, NuttX and Contiki-NG: images built in the job
 
 The images of these projects are not published to the registry. Each worker

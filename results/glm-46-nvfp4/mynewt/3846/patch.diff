@@ -1,0 +1,1173 @@
+diff --git a/net/oic/src/api/oc_rep.c b/net/oic/src/api/oc_rep.c
+index 2983f68..97842dd 100644
+--- a/net/oic/src/api/oc_rep.c
++++ b/net/oic/src/api/oc_rep.c
+@@ -134,189 +134,385 @@ oc_free_rep(oc_rep_t *rep)
+   the next pointer of the first object.
+ */
+ 
+-/* Parse single property */
++/* Parse single property with validation */
+ static void
+ oc_parse_rep_value(CborValue *value, oc_rep_t **rep, CborError *err)
+ {
+-  size_t k, len;
+-  CborValue map, array;
+-  *rep = _alloc_rep();
+-  oc_rep_t *cur = *rep, **prev = 0;
+-  cur->next = 0;
+-  cur->value_object_array = 0;
+-  /* key */
+-  *err |= cbor_mbuf_value_calculate_string_length(value, &len);
+-  len++;
+-  oc_alloc_string(&cur->name, len);
+-  *err |= cbor_mbuf_value_copy_text_string(value, oc_string(cur->name), &len, NULL);
+-  *err |= cbor_mbuf_value_advance(value);
+-  /* value */
+-  switch (value->type) {
+-  case CborIntegerType:
+-    *err |= cbor_value_get_int64(value, &cur->value_int);
+-    cur->type = INT;
+-    break;
+-  case CborBooleanType:
+-    *err |= cbor_value_get_boolean(value, &cur->value_boolean);
+-    cur->type = BOOL;
+-    break;
+-  case CborDoubleType:
+-    *err |= cbor_value_get_double(value, &cur->value_double);
+-    cur->type = DOUBLE;
+-    break;
+-  case CborByteStringType:
+-      *err |= cbor_mbuf_value_calculate_string_length(value, &len);
+-      len++;
+-      oc_alloc_string(&cur->value_string, len);
+-      *err |= cbor_mbuf_value_copy_byte_string(
+-          value, (uint8_t *)oc_string(cur->value_string), &len, NULL);
+-      cur->type = BYTE_STRING;
+-      break;
+-  case CborTextStringType:
+-      *err |= cbor_mbuf_value_calculate_string_length(value, &len);
+-      len++;
+-      oc_alloc_string(&cur->value_string, len);
+-      *err |= cbor_mbuf_value_copy_text_string(value, oc_string(cur->value_string),
+-                                               &len, NULL);
+-      cur->type = STRING;
+-      break;
+-  case CborMapType: /* when value is a map/object */ {
+-    oc_rep_t **obj = &cur->value_object; // object points to list of properties
+-    *err |= cbor_value_enter_container(value, &map);
+-    while (!cbor_value_at_end(&map)) {
+-      oc_parse_rep_value(&map, obj, err);
+-      (*obj)->next = 0;
+-      obj = &(*obj)->next;
+-      *err |= cbor_mbuf_value_advance(&map);
++    size_t k, len;
++    CborValue map, array;
++    *rep = _alloc_rep();
++    oc_rep_t *cur = *rep;
++    cur->next = NULL;
++    cur->value_object_array = NULL;
++    
++    /* Validate key is text string */
++    if (!cbor_value_is_text_string(value)) {
++        *err = (CborError)-1;
++        return;
+     }
+-    cur->type = OBJECT;
+-  } break;
+-  case CborArrayType:
+-    *err |= cbor_value_enter_container(value, &array);
+-    len = 0;
+-    cbor_value_get_array_length(value, &len);
+-    if (len == 0) {
+-      CborValue t = array;
+-      while (!cbor_value_at_end(&t)) {
+-        len++;
+-        cbor_mbuf_value_advance(&t);
+-      }
++    
++    /* key */
++    *err |= cbor_mbuf_value_calculate_string_length(value, &len);
++    if (*err != CborNoError) {
++        return;
+     }
+-    k = 0;
+-    while (!cbor_value_at_end(&array)) {
+-      switch (array.type) {
+-      case CborIntegerType:
+-        if (k == 0) {
+-          oc_new_int_array(&cur->value_array, len);
+-          cur->type = INT | ARRAY;
+-        }
+-        *err |=
+-          cbor_value_get_int64(&array, oc_int_array(cur->value_array) + k);
++    len++;
++    oc_alloc_string(&cur->name, len);
++    *err |= cbor_mbuf_value_copy_text_string(value, oc_string(cur->name), &len, NULL);
++    if (*err != CborNoError) {
++        return;
++    }
++    *err |= cbor_mbuf_value_advance(value);
++    if (*err != CborNoError) {
++        return;
++    }
++    
++    /* value */
++    switch (value->type) {
++    case CborIntegerType:
++        *err |= cbor_value_get_int64(value, &cur->value_int);
++        cur->type = INT;
+         break;
+-      case CborDoubleType:
+-        if (k == 0) {
+-          oc_new_double_array(&cur->value_array, len);
+-          cur->type = DOUBLE | ARRAY;
+-        }
+-        *err |=
+-          cbor_value_get_double(&array, oc_double_array(cur->value_array) + k);
++    case CborBooleanType:
++        *err |= cbor_value_get_boolean(value, &cur->value_boolean);
++        cur->type = BOOL;
+         break;
+-      case CborBooleanType:
+-        if (k == 0) {
+-          oc_new_bool_array(&cur->value_array, len);
+-          cur->type = BOOL | ARRAY;
+-        }
+-        *err |=
+-          cbor_value_get_boolean(&array, oc_bool_array(cur->value_array) + k);
++    case CborDoubleType:
++        *err |= cbor_value_get_double(value, &cur->value_double);
++        cur->type = DOUBLE;
+         break;
+-      case CborByteStringType:
+-        if (k == 0) {
+-          oc_new_string_array(&cur->value_array, len);
+-          cur->type = BYTE_STRING | ARRAY;
++    case CborByteStringType:
++        *err |= cbor_mbuf_value_calculate_string_length(value, &len);
++        if (*err != CborNoError) {
++            break;
+         }
+-        *err |= cbor_mbuf_value_calculate_string_length(&array, &len);
+         len++;
++        oc_alloc_string(&cur->value_string, len);
+         *err |= cbor_mbuf_value_copy_byte_string(
+-            &array, (uint8_t *)oc_string_array_get_item(cur->value_array, k),
+-            &len, NULL);
++            value, (uint8_t *)oc_string(cur->value_string), &len, NULL);
++        cur->type = BYTE_STRING;
+         break;
+-      case CborTextStringType:
+-        if (k == 0) {
+-          oc_new_string_array(&cur->value_array, len);
+-          cur->type = STRING | ARRAY;
++    case CborTextStringType:
++        *err |= cbor_mbuf_value_calculate_string_length(value, &len);
++        if (*err != CborNoError) {
++            break;
+         }
+-        *err |= cbor_mbuf_value_calculate_string_length(&array, &len);
+         len++;
+-        *err |= cbor_mbuf_value_copy_text_string(
+-            &array, (char *)oc_string_array_get_item(cur->value_array, k), &len, NULL);
++        oc_alloc_string(&cur->value_string, len);
++        *err |= cbor_mbuf_value_copy_text_string(value, oc_string(cur->value_string),
++                                                 &len, NULL);
++        cur->type = STRING;
+         break;
+-      case CborMapType:
+-        if (k == 0) {
+-          cur->type = OBJECT | ARRAY;
+-          cur->value_object_array = _alloc_rep();
+-          prev = &cur->value_object_array;
+-        } else {
+-          (*prev)->next = _alloc_rep();
+-          prev = &(*prev)->next;
++    case CborMapType: /* when value is a map/object */
++        {
++            oc_rep_t **obj = &cur->value_object; /* object points to list of properties */
++            int prop_count = 0;
++            
++            *err |= cbor_value_enter_container(value, &map);
++            if (*err != CborNoError) {
++                break;
++            }
++            
++            while (!cbor_value_at_end(&map)) {
++                if (prop_count >= EST_NUM_REP_OBJECTS) {
++                    *err = CborErrorOutOfMemory;
++                    break;
++                }
++                
++                oc_parse_rep_value(&map, obj, err);
++                if (*err != CborNoError) {
++                    break;
++                }
++                (*obj)->next = NULL;
++                obj = &(*obj)->next;
++                *err |= cbor_mbuf_value_advance(&map);
++                if (*err != CborNoError) {
++                    break;
++                }
++                prop_count++;
++            }
++            cur->type = OBJECT;
+         }
+-        (*prev)->type = OBJECT;
+-        (*prev)->next = 0;
+-        oc_rep_t **obj = &(*prev)->value_object;
+-        /* Process a series of properties that make up an object of the array */
+-        *err |= cbor_value_enter_container(&array, &map);
+-        while (!cbor_value_at_end(&map)) {
+-          oc_parse_rep_value(&map, obj, err);
+-          obj = &(*obj)->next;
+-          *err |= cbor_mbuf_value_advance(&map);
++        break;
++    case CborArrayType:
++        {
++            *err |= cbor_value_enter_container(value, &array);
++            if (*err != CborNoError) {
++                break;
++            }
++            
++            len = 0;
++            cbor_value_get_array_length(value, &len);
++            if (len == 0) {
++                CborValue t = array;
++                while (!cbor_value_at_end(&t)) {
++                    len++;
++                    cbor_mbuf_value_advance(&t);
++                }
++            }
++            
++            k = 0;
++            CborType array_type = CborInvalidType;
++            
++            while (!cbor_value_at_end(&array)) {
++                /* Check type consistency for arrays */
++                if (k == 0) {
++                    array_type = array.type;
++                } else if (array.type != array_type) {
++                    *err = (CborError)-1;
++                    break;
++                }
++                
++                switch (array.type) {
++                case CborIntegerType:
++                    if (k == 0) {
++                        oc_new_int_array(&cur->value_array, len);
++                        cur->type = INT | ARRAY;
++                    }
++                    *err |= cbor_value_get_int64(&array, oc_int_array(cur->value_array) + k);
++                    break;
++                case CborDoubleType:
++                    if (k == 0) {
++                        oc_new_double_array(&cur->value_array, len);
++                        cur->type = DOUBLE | ARRAY;
++                    }
++                    *err |= cbor_value_get_double(&array, oc_double_array(cur->value_array) + k);
++                    break;
++                case CborBooleanType:
++                    if (k == 0) {
++                        oc_new_bool_array(&cur->value_array, len);
++                        cur->type = BOOL | ARRAY;
++                    }
++                    *err |= cbor_value_get_boolean(&array, oc_bool_array(cur->value_array) + k);
++                    break;
++                case CborByteStringType:
++                    if (k == 0) {
++                        oc_new_string_array(&cur->value_array, len);
++                        cur->type = BYTE_STRING | ARRAY;
++                    }
++                    *err |= cbor_mbuf_value_calculate_string_length(&array, &len);
++                    if (len > STRING_ARRAY_ITEM_MAX_LEN) {
++                        *err = (CborError)-1;
++                        break;
++                    }
++                    len++;
++                    *err |= cbor_mbuf_value_copy_byte_string(
++                        &array, (uint8_t *)oc_string_array_get_item(cur->value_array, k),
++                        &len, NULL);
++                    break;
++                case CborTextStringType:
++                    if (k == 0) {
++                        oc_new_string_array(&cur->value_array, len);
++                        cur->type = STRING | ARRAY;
++                    }
++                    *err |= cbor_mbuf_value_calculate_string_length(&array, &len);
++                    if (len > STRING_ARRAY_ITEM_MAX_LEN) {
++                        *err = (CborError)-1;
++                        break;
++                    }
++                    len++;
++                    *err |= cbor_mbuf_value_copy_text_string(
++                        &array, (char *)oc_string_array_get_item(cur->value_array, k), &len, NULL);
++                    break;
++                case CborMapType:
++                    if (k == 0) {
++                        cur->type = OBJECT | ARRAY;
++                        cur->value_object_array = _alloc_rep();
++                    }
++                    {
++                        oc_rep_t *map_obj = cur->value_object_array;
++                        int i;
++                        for (i = 0; i < k && map_obj; i++) {
++                            map_obj = map_obj->next;
++                        }
++                        if (map_obj) {
++                            map_obj->type = OBJECT;
++                            oc_rep_t **obj = &map_obj->value_object;
++                            *err |= cbor_value_enter_container(&array, &map);
++                            if (*err != CborNoError) {
++                                break;
++                            }
++                            while (!cbor_value_at_end(&map)) {
++                                oc_parse_rep_value(&map, obj, err);
++                                if (*err != CborNoError) {
++                                    break;
++                                }
++                                obj = &(*obj)->next;
++                                *err |= cbor_mbuf_value_advance(&map);
++                                if (*err != CborNoError) {
++                                    break;
++                                }
++                            }
++                        }
++                    }
++                    break;
++                default:
++                    *err = (CborError)-1;
++                    break;
++                }
++                k++;
++                if (*err != CborNoError) {
++                    break;
++                }
++                *err |= cbor_mbuf_value_advance(&array);
++                if (*err != CborNoError) {
++                    break;
++                }
++            }
+         }
+         break;
+-      default:
++    default:
++        *err = (CborError)-1;
+         break;
+-      }
+-      k++;
+-      *err |= cbor_mbuf_value_advance(&array);
+     }
+-    break;
+-  default:
+-    break;
+-  }
+ }
+ 
+ uint16_t
+ oc_parse_rep(struct os_mbuf *m, uint16_t payload_off,
+              uint16_t payload_size, oc_rep_t **out_rep)
+ {
+-  CborParser parser;
+-  CborValue root_value, cur_value, map;
+-  CborError err = CborNoError;
+-  struct cbor_mbuf_reader br;
++    CborParser parser;
++    CborValue root_value, cur_value, map;
++    CborError err = CborNoError;
++    struct cbor_mbuf_reader br;
++
++    /* Initialize output */
++    *out_rep = NULL;
+ 
+-  cbor_mbuf_reader_init(&br, m, payload_off);
+-  err |= cbor_reader_parser_init(&br.r, &parser, &root_value);
+-  if (cbor_value_is_map(&root_value)) {
+-    err |= cbor_value_enter_container(&root_value, &cur_value);
+-    *out_rep = 0;
+-    oc_rep_t **cur = out_rep;
+-    while (cbor_value_is_valid(&cur_value)) {
+-      oc_parse_rep_value(&cur_value, cur, &err);
+-      err |= cbor_mbuf_value_advance(&cur_value);
+-      cur = &(*cur)->next;
++    cbor_mbuf_reader_init(&br, m, payload_off);
++    err |= cbor_reader_parser_init(&br.r, &parser, &root_value);
++    if (err != CborNoError) {
++        if (*out_rep) oc_free_rep(*out_rep);
++        *out_rep = NULL;
++        return (uint16_t)err;
+     }
+-  } else if (cbor_value_is_array(&root_value)) {
+-    err |= cbor_value_enter_container(&root_value, &map);
+-    err |= cbor_value_enter_container(&map, &cur_value);
+-    *out_rep = 0;
+-    oc_rep_t **cur = out_rep;
+-    while (cbor_value_is_valid(&cur_value)) {
+-      *cur = _alloc_rep();
+-      (*cur)->type = OBJECT;
+-      oc_parse_rep_value(&cur_value, &(*cur)->value_object, &err);
+-      err |= cbor_mbuf_value_advance(&cur_value);
+-      (*cur)->next = 0;
+-      cur = &(*cur)->next;
++
++    if (cbor_value_is_map(&root_value)) {
++        /* Root is a map */
++        err |= cbor_value_enter_container(&root_value, &cur_value);
++        if (err != CborNoError) {
++            if (*out_rep) oc_free_rep(*out_rep);
++            *out_rep = NULL;
++            return (uint16_t)err;
++        }
++        
++        oc_rep_t **cur = out_rep;
++        int prop_count = 0;
++        
++        while (cbor_value_is_valid(&cur_value)) {
++            if (prop_count >= EST_NUM_REP_OBJECTS) {
++                if (*out_rep) oc_free_rep(*out_rep);
++                *out_rep = NULL;
++                return CborErrorOutOfMemory;
++            }
++            
++            oc_parse_rep_value(&cur_value, cur, &err);
++            if (err != CborNoError) {
++                if (*out_rep) oc_free_rep(*out_rep);
++                *out_rep = NULL;
++                return (uint16_t)err;
++            }
++            
++            err |= cbor_mbuf_value_advance(&cur_value);
++            if (err != CborNoError) {
++                if (*out_rep) oc_free_rep(*out_rep);
++                *out_rep = NULL;
++                return (uint16_t)err;
++            }
++            
++            cur = &(*cur)->next;
++            prop_count++;
++        }
++    } else if (cbor_value_is_array(&root_value)) {
++        /* Root is an array - must be an array of maps */
++        err |= cbor_value_enter_container(&root_value, &map);
++        if (err != CborNoError) {
++            if (*out_rep) oc_free_rep(*out_rep);
++            *out_rep = NULL;
++            return (uint16_t)err;
++        }
++        
++        /* Check if array is empty */
++        if (cbor_value_at_end(&map)) {
++            /* Empty array - return success with NULL pointer */
++            return 0;
++        }
++        
++        *out_rep = NULL;
++        oc_rep_t **cur = out_rep;
++        
++        while (cbor_value_is_valid(&map)) {
++            /* Each element must be a map */
++            if (!cbor_value_is_map(&map)) {
++                if (*out_rep) oc_free_rep(*out_rep);
++                *out_rep = NULL;
++                return (uint16_t)-1;
++            }
++            
++            *cur = _alloc_rep();
++            if (*cur == NULL) {
++                if (*out_rep) oc_free_rep(*out_rep);
++                *out_rep = NULL;
++                return CborErrorOutOfMemory;
++            }
++            
++            (*cur)->next = NULL;
++            (*cur)->type = OBJECT;
++            
++            /* Parse the map object */
++            CborValue map_content;
++            err |= cbor_value_enter_container(&map, &map_content);
++            if (err != CborNoError) {
++                if (*out_rep) oc_free_rep(*out_rep);
++                *out_rep = NULL;
++                return (uint16_t)err;
++            }
++            
++            oc_rep_t **obj = &(*cur)->value_object;
++            int prop_count = 0;
++            
++            while (!cbor_value_at_end(&map_content)) {
++                if (prop_count >= EST_NUM_REP_OBJECTS) {
++                    if (*out_rep) oc_free_rep(*out_rep);
++                    *out_rep = NULL;
++                    return CborErrorOutOfMemory;
++                }
++                
++                oc_parse_rep_value(&map_content, obj, &err);
++                if (err != CborNoError) {
++                    if (*out_rep) oc_free_rep(*out_rep);
++                    *out_rep = NULL;
++                    return (uint16_t)err;
++                }
++                
++                (*obj)->next = NULL;
++                obj = &(*obj)->next;
++                
++                err |= cbor_mbuf_value_advance(&map_content);
++                if (err != CborNoError) {
++                    if (*out_rep) oc_free_rep(*out_rep);
++                    *out_rep = NULL;
++                    return (uint16_t)err;
++                }
++                prop_count++;
++            }
++            
++            cur = &(*cur)->next;
++            err |= cbor_mbuf_value_advance(&map);
++            if (err != CborNoError) {
++                if (*out_rep) oc_free_rep(*out_rep);
++                *out_rep = NULL;
++                return (uint16_t)err;
++            }
++        }
++    } else {
++        /* Root is neither map nor array */
++        if (*out_rep) oc_free_rep(*out_rep);
++        *out_rep = NULL;
++        return (uint16_t)-1;
+     }
+-  }
+-  return (uint16_t)err;
++
++    return (uint16_t)err;
+ }
+ 
+ void
+diff --git a/net/oic/src/api/oc_rep.c.backup b/net/oic/src/api/oc_rep.c.backup
+new file mode 100644
+index 0000000..2983f68
+--- /dev/null
++++ b/net/oic/src/api/oc_rep.c.backup
+@@ -0,0 +1,328 @@
++/*
++// Copyright (c) 2016 Intel Corporation
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++*/
++
++#include <stddef.h>
++
++#include "os/mynewt.h"
++
++#include <tinycbor/cbor_mbuf_writer.h>
++#include <tinycbor/cbor_mbuf_reader.h>
++
++#include "oic/port/mynewt/config.h"
++#include "oic/oc_rep.h"
++#include "oic/port/mynewt/config.h"
++#include "port/oc_assert.h"
++#include "api/oc_priv.h"
++
++#ifdef OC_CLIENT
++static struct os_mempool oc_rep_objects;
++static uint8_t oc_rep_objects_area[OS_MEMPOOL_BYTES(EST_NUM_REP_OBJECTS,
++      sizeof(oc_rep_t))];
++#endif
++
++static struct os_mbuf *g_outm;
++CborEncoder g_encoder, root_map, links_array;
++CborError g_err;
++struct cbor_mbuf_writer g_buf_writer;
++
++void
++oc_rep_new(struct os_mbuf *m)
++{
++    g_err = CborNoError;
++    g_outm = m;
++    cbor_mbuf_writer_init(&g_buf_writer, m);
++    cbor_writer_encoder_init(&g_buf_writer.enc, &g_encoder);
++}
++
++int
++oc_rep_finalize(void)
++{
++    int size = OS_MBUF_PKTLEN(g_outm);
++    oc_rep_reset();
++    if (g_err != CborNoError) {
++        return -1;
++    }
++    return size;
++}
++
++void
++oc_rep_reset(void)
++{
++    memset(&g_encoder, 0, sizeof(g_encoder));
++}
++
++#ifdef OC_CLIENT
++static oc_rep_t *
++_alloc_rep(void)
++{
++    oc_rep_t *rep = os_memblock_get(&oc_rep_objects);
++
++    memset(rep, 0, sizeof(*rep));
++#ifdef DEBUG
++    oc_assert(rep != NULL);
++#endif
++    return rep;
++}
++
++static void
++_free_rep(oc_rep_t *rep_value)
++{
++    os_memblock_put(&oc_rep_objects, rep_value);
++}
++
++void
++oc_free_rep(oc_rep_t *rep)
++{
++    if (rep == NULL) {
++        return;
++    }
++    oc_free_rep(rep->next);
++    switch (rep->type) {
++    case BYTE_STRING_ARRAY:
++    case STRING_ARRAY:
++        oc_free_string_array(&rep->value_array);
++        break;
++    case BOOL_ARRAY:
++        oc_free_bool_array(&rep->value_array);
++        break;
++    case DOUBLE_ARRAY:
++        oc_free_double_array(&rep->value_array);
++        break;
++    case INT_ARRAY:
++        oc_free_int_array(&rep->value_array);
++        break;
++    case BYTE_STRING:
++    case STRING:
++        oc_free_string(&rep->value_string);
++        break;
++    case OBJECT:
++        oc_free_rep(rep->value_object);
++        break;
++    case OBJECT_ARRAY:
++        oc_free_rep(rep->value_object_array);
++        break;
++    default:
++        break;
++    }
++    oc_free_string(&rep->name);
++    _free_rep(rep);
++}
++
++/*
++  An Object is a collection of key-value pairs.
++  A value_object value points to the first key-value pair,
++  and subsequent items are accessed via the next pointer.
++
++  An Object Array is a collection of objects, where each object
++  is a collection of key-value pairs.
++  A value_object_array value points to the first object in the
++  array. This object is then traversed via its value_object pointer.
++  Subsequent objects in the object array are then accessed through
++  the next pointer of the first object.
++*/
++
++/* Parse single property */
++static void
++oc_parse_rep_value(CborValue *value, oc_rep_t **rep, CborError *err)
++{
++  size_t k, len;
++  CborValue map, array;
++  *rep = _alloc_rep();
++  oc_rep_t *cur = *rep, **prev = 0;
++  cur->next = 0;
++  cur->value_object_array = 0;
++  /* key */
++  *err |= cbor_mbuf_value_calculate_string_length(value, &len);
++  len++;
++  oc_alloc_string(&cur->name, len);
++  *err |= cbor_mbuf_value_copy_text_string(value, oc_string(cur->name), &len, NULL);
++  *err |= cbor_mbuf_value_advance(value);
++  /* value */
++  switch (value->type) {
++  case CborIntegerType:
++    *err |= cbor_value_get_int64(value, &cur->value_int);
++    cur->type = INT;
++    break;
++  case CborBooleanType:
++    *err |= cbor_value_get_boolean(value, &cur->value_boolean);
++    cur->type = BOOL;
++    break;
++  case CborDoubleType:
++    *err |= cbor_value_get_double(value, &cur->value_double);
++    cur->type = DOUBLE;
++    break;
++  case CborByteStringType:
++      *err |= cbor_mbuf_value_calculate_string_length(value, &len);
++      len++;
++      oc_alloc_string(&cur->value_string, len);
++      *err |= cbor_mbuf_value_copy_byte_string(
++          value, (uint8_t *)oc_string(cur->value_string), &len, NULL);
++      cur->type = BYTE_STRING;
++      break;
++  case CborTextStringType:
++      *err |= cbor_mbuf_value_calculate_string_length(value, &len);
++      len++;
++      oc_alloc_string(&cur->value_string, len);
++      *err |= cbor_mbuf_value_copy_text_string(value, oc_string(cur->value_string),
++                                               &len, NULL);
++      cur->type = STRING;
++      break;
++  case CborMapType: /* when value is a map/object */ {
++    oc_rep_t **obj = &cur->value_object; // object points to list of properties
++    *err |= cbor_value_enter_container(value, &map);
++    while (!cbor_value_at_end(&map)) {
++      oc_parse_rep_value(&map, obj, err);
++      (*obj)->next = 0;
++      obj = &(*obj)->next;
++      *err |= cbor_mbuf_value_advance(&map);
++    }
++    cur->type = OBJECT;
++  } break;
++  case CborArrayType:
++    *err |= cbor_value_enter_container(value, &array);
++    len = 0;
++    cbor_value_get_array_length(value, &len);
++    if (len == 0) {
++      CborValue t = array;
++      while (!cbor_value_at_end(&t)) {
++        len++;
++        cbor_mbuf_value_advance(&t);
++      }
++    }
++    k = 0;
++    while (!cbor_value_at_end(&array)) {
++      switch (array.type) {
++      case CborIntegerType:
++        if (k == 0) {
++          oc_new_int_array(&cur->value_array, len);
++          cur->type = INT | ARRAY;
++        }
++        *err |=
++          cbor_value_get_int64(&array, oc_int_array(cur->value_array) + k);
++        break;
++      case CborDoubleType:
++        if (k == 0) {
++          oc_new_double_array(&cur->value_array, len);
++          cur->type = DOUBLE | ARRAY;
++        }
++        *err |=
++          cbor_value_get_double(&array, oc_double_array(cur->value_array) + k);
++        break;
++      case CborBooleanType:
++        if (k == 0) {
++          oc_new_bool_array(&cur->value_array, len);
++          cur->type = BOOL | ARRAY;
++        }
++        *err |=
++          cbor_value_get_boolean(&array, oc_bool_array(cur->value_array) + k);
++        break;
++      case CborByteStringType:
++        if (k == 0) {
++          oc_new_string_array(&cur->value_array, len);
++          cur->type = BYTE_STRING | ARRAY;
++        }
++        *err |= cbor_mbuf_value_calculate_string_length(&array, &len);
++        len++;
++        *err |= cbor_mbuf_value_copy_byte_string(
++            &array, (uint8_t *)oc_string_array_get_item(cur->value_array, k),
++            &len, NULL);
++        break;
++      case CborTextStringType:
++        if (k == 0) {
++          oc_new_string_array(&cur->value_array, len);
++          cur->type = STRING | ARRAY;
++        }
++        *err |= cbor_mbuf_value_calculate_string_length(&array, &len);
++        len++;
++        *err |= cbor_mbuf_value_copy_text_string(
++            &array, (char *)oc_string_array_get_item(cur->value_array, k), &len, NULL);
++        break;
++      case CborMapType:
++        if (k == 0) {
++          cur->type = OBJECT | ARRAY;
++          cur->value_object_array = _alloc_rep();
++          prev = &cur->value_object_array;
++        } else {
++          (*prev)->next = _alloc_rep();
++          prev = &(*prev)->next;
++        }
++        (*prev)->type = OBJECT;
++        (*prev)->next = 0;
++        oc_rep_t **obj = &(*prev)->value_object;
++        /* Process a series of properties that make up an object of the array */
++        *err |= cbor_value_enter_container(&array, &map);
++        while (!cbor_value_at_end(&map)) {
++          oc_parse_rep_value(&map, obj, err);
++          obj = &(*obj)->next;
++          *err |= cbor_mbuf_value_advance(&map);
++        }
++        break;
++      default:
++        break;
++      }
++      k++;
++      *err |= cbor_mbuf_value_advance(&array);
++    }
++    break;
++  default:
++    break;
++  }
++}
++
++uint16_t
++oc_parse_rep(struct os_mbuf *m, uint16_t payload_off,
++             uint16_t payload_size, oc_rep_t **out_rep)
++{
++  CborParser parser;
++  CborValue root_value, cur_value, map;
++  CborError err = CborNoError;
++  struct cbor_mbuf_reader br;
++
++  cbor_mbuf_reader_init(&br, m, payload_off);
++  err |= cbor_reader_parser_init(&br.r, &parser, &root_value);
++  if (cbor_value_is_map(&root_value)) {
++    err |= cbor_value_enter_container(&root_value, &cur_value);
++    *out_rep = 0;
++    oc_rep_t **cur = out_rep;
++    while (cbor_value_is_valid(&cur_value)) {
++      oc_parse_rep_value(&cur_value, cur, &err);
++      err |= cbor_mbuf_value_advance(&cur_value);
++      cur = &(*cur)->next;
++    }
++  } else if (cbor_value_is_array(&root_value)) {
++    err |= cbor_value_enter_container(&root_value, &map);
++    err |= cbor_value_enter_container(&map, &cur_value);
++    *out_rep = 0;
++    oc_rep_t **cur = out_rep;
++    while (cbor_value_is_valid(&cur_value)) {
++      *cur = _alloc_rep();
++      (*cur)->type = OBJECT;
++      oc_parse_rep_value(&cur_value, &(*cur)->value_object, &err);
++      err |= cbor_mbuf_value_advance(&cur_value);
++      (*cur)->next = 0;
++      cur = &(*cur)->next;
++    }
++  }
++  return (uint16_t)err;
++}
++
++void
++oc_rep_init(void)
++{
++    os_mempool_init(&oc_rep_objects, EST_NUM_REP_OBJECTS,
++                    sizeof(oc_rep_t), oc_rep_objects_area, "oc_rep_o");
++}
++#endif
+diff --git a/test_empty_array.c b/test_empty_array.c
+new file mode 100644
+index 0000000..2a6b00b
+--- /dev/null
++++ b/test_empty_array.c
+@@ -0,0 +1,23 @@
++#include <stdio.h>
++#include <assert.h>
++#include "oic/oc_rep.h"
++
++int main() {
++    /* Initialize oc */
++    oc_rep_init();
++    
++    /* Test empty array */
++    uint8_t empty_array[] = {0x80}; /* CBOR empty array */
++    struct os_mbuf *m = os_msys_get_pkthdr(10, 0);
++    os_mbuf_append(m, empty_array, sizeof(empty_array));
++    
++    oc_rep_t *rep = NULL;
++    uint16_t rc = oc_parse_rep(m, 0, sizeof(empty_array), &rep);
++    
++    printf("Empty array test: rc=%u, rep=%p (expected: rc=0, rep=NULL)\n", rc, rep);
++    assert(rc == 0);
++    assert(rep == NULL);
++    
++    printf("Empty array test PASSED\n");
++    return 0;
++}
+diff --git a/test_oc_rep.c b/test_oc_rep.c
+new file mode 100644
+index 0000000..830ed2b
+--- /dev/null
++++ b/test_oc_rep.c
+@@ -0,0 +1,116 @@
++/*
++ * Test for the updated oc_parse_rep function
++ * Tests that empty array returns 0 and NULL, and invalid root types are rejected
++ */
++#include <stdio.h>
++#include <string.h>
++#include <assert.h>
++#include "oic/oc_rep.h"
++#include "os/mynewt.h"
++#include <tinycbor/cbor.h>
++
++/* Test helper to create mbuf from data */
++static struct os_mbuf *create_mbuf(const uint8_t *data, size_t len)
++{
++    struct os_mbuf *m = os_msys_get_pkthdr(len, 0);
++    if (!m) return NULL;
++    os_mbuf_append(m, data, len);
++    return m;
++}
++
++int main(void)
++{
++    /* Initialize the rep object pool */
++    oc_rep_init();
++    
++    /* Test Case 1: Empty array should return 0 and NULL */
++    {
++        uint8_t empty_array[] = {0x80}; /* CBOR empty array */
++        struct os_mbuf *m = create_mbuf(empty_array, sizeof(empty_array));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(empty_array), &rep);
++        
++        /* Should return success and NULL for empty array */
++        printf("Test 1 - Empty array: rc=%d, rep=%p\n", rc, rep);
++        assert(rc == 0);
++        assert(rep == NULL);
++        
++        os_mbuf_free_chain(m);
++    }
++    
++    /* Test Case 2: String as root should fail */
++    {
++        uint8_t string_root[] = {0x65, 'H', 'e', 'l', 'l', 'o'}; /* CBOR string "Hello" */
++        struct os_mbuf *m = create_mbuf(string_root, sizeof(string_root));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(string_root), &rep);
++        
++        /* Should return error and NULL */
++        printf("Test 2 - String root: rc=%d, rep=%p\n", rc, rep);
++        assert(rc != 0);
++        assert(rep == NULL);
++        
++        os_mbuf_free_chain(m);
++    }
++    
++    /* Test Case 3: Integer as root should fail */
++    {
++        uint8_t int_root[] = {0x01}; /* CBOR integer 1 */
++        struct os_mbuf *m = create_mbuf(int_root, sizeof(int_root));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(int_root), &rep);
++        
++        /* Should return error and NULL */
++        printf("Test 3 - Integer root: rc=%d, rep=%p\n", rc, rep);
++        assert(rc != 0);
++        assert(rep == NULL);
++        
++        os_mbuf_free_chain(m);
++    }
++    
++    /* Test Case 4: Array with non-map element should fail */
++    {
++        uint8_t array_with_string[] = {0x82, 0x65, 'H', 'i'}; /* Array with string */
++        struct os_mbuf *m = create_mbuf(array_with_string, sizeof(array_with_string));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(array_with_string), &rep);
++        
++        /* Should return error and NULL */
++        printf("Test 4 - Array with non-map: rc=%d, rep=%p\n", rc, rep);
++        assert(rc != 0);
++        assert(rep == NULL);
++        
++        os_mbuf_free_chain(m);
++    }
++    
++    /* Test Case 5: Valid empty map */
++    {
++        uint8_t empty_map[] = {0xA0}; /* CBOR empty map */
++        struct os_mbuf *m = create_mbuf(empty_map, sizeof(empty_map));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(empty_map), &rep);
++        
++        /* Should return success but rep can be NULL for empty map */
++        printf("Test 5 - Empty map: rc=%d, rep=%p\n", rc, rep);
++        assert(rc == 0);
++        /* Rep can be NULL for empty map, but that's OK */
++        
++        if (rep) {
++            oc_free_rep(rep);
++        }
++        os_mbuf_free_chain(m);
++    }
++    
++    printf("All tests passed!\n");
++    return 0;
++}
+diff --git a/test_parse_fix.c b/test_parse_fix.c
+new file mode 100644
+index 0000000..2b22af9
+--- /dev/null
++++ b/test_parse_fix.c
+@@ -0,0 +1,38 @@
++/*
++ * Test for the updated oc_parse_rep function
++ */
++#include <stdio.h>
++#include <string.h>
++#include <assert.h>
++
++#include "oic/oc_rep.h"
++#include "os/mynewt.h"
++#include "testutil/test_util.h"
++
++int test_main(int argc, char **argv)
++{
++    /* Test empty array */
++    struct os_mbuf *m = os_msys_get_pkthdr(10, 0);
++    uint8_t empty_array[] = {0x80}; /* CBOR empty array */
++    os_mbuf_append(m, empty_array, sizeof(empty_array));
++    
++    oc_rep_t *rep = NULL;
++    uint16_t rc = oc_parse_rep(m, 0, sizeof(empty_array), &rep);
++    
++    /* Should return success and NULL for empty array */
++    assert(rc == 0);
++    assert(rep == NULL);
++    
++    /* Test invalid root type */
++    uint8_t invalid_root[] = {0x65}; /* CBOR string - invalid as root */
++    os_mbuf_reset(m);
++    os_mbuf_append(m, invalid_root, sizeof(invalid_root));
++    
++    rc = oc_parse_rep(m, 0, sizeof(invalid_root), &rep);
++    /* Should return error */
++    assert(rc != 0);
++    assert(rep == NULL);
++    
++    printf("Test passed - empty array returns 0 and NULL\n");
++    return 0;
++}
+diff --git a/test_validation.c b/test_validation.c
+new file mode 100644
+index 0000000..426c8b9
+--- /dev/null
++++ b/test_validation.c
+@@ -0,0 +1,94 @@
++/*
++ * Test validation features added to oc_parse_rep
++ */
++#include <stdio.h>
++#include <string.h>
++#include <assert.h>
++#include "oic/oc_rep.h"
++#include "os/mynewt.h"
++#include <tinycbor/cbor.h>
++
++static struct os_mbuf *create_mbuf(const uint8_t *data, size_t len)
++{
++    struct os_mbuf *m = os_msys_get_pkthdr(len, 0);
++    if (!m) return NULL;
++    os_mbuf_append(m, data, len);
++    return m;
++}
++
++int main(void)
++{
++    /* Initialize the rep object pool */
++    oc_rep_init();
++    
++    printf("Testing empty array returns 0 and NULL...\n");
++    {
++        uint8_t empty_array[] = {0x80}; /* CBOR empty array */
++        struct os_mbuf *m = create_mbuf(empty_array, sizeof(empty_array));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(empty_array), &rep);
++        
++        printf("  Empty array test: rc=%d, rep=%p\n", rc, rep);
++        assert(rc == 0);
++        assert(rep == NULL);
++        
++        os_mbuf_free_chain(m);
++    }
++    
++    printf("Testing non-map/array root returns error...\n");
++    {
++        uint8_t int_root[] = {0x01}; /* CBOR integer 1 */
++        struct os_mbuf *m = create_mbuf(int_root, sizeof(int_root));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(int_root), &rep);
++        
++        printf("  Integer root test: rc=%d, rep=%p\n", rc, rep);
++        assert(rc != 0);
++        assert(rep == NULL);
++        
++        os_mbuf_free_chain(m);
++    }
++    
++    printf("Testing array with non-map element returns error...\n");
++    {
++        uint8_t array_mix[] = {0x82, 0xA0, 0x01}; /* Array: [empty_map, int] */
++        struct os_mbuf *m = create_mbuf(array_mix, sizeof(array_mix));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(array_mix), &rep);
++        
++        printf("  Mixed array test: rc=%d, rep=%p\n", rc, rep);
++        assert(rc != 0);
++        assert(rep == NULL);
++        
++        os_mbuf_free_chain(m);
++    }
++    
++    printf("Testing string length limit in arrays...\n");
++    {
++        uint8_t long_str[] = {0xA1, 0x61, 0x61, 0x81, 0x78, 0x18, /* Map with: "a":[ 24-byte... */ 
++                             'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',
++                             'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p',
++                             'q', 'r', 's', 't', 'u', 'v', 'w', 'x'}; /* ...string ] */
++        struct os_mbuf *m = create_mbuf(long_str, sizeof(long_str));
++        assert(m != NULL);
++        
++        oc_rep_t *rep = NULL;
++        uint16_t rc = oc_parse_rep(m, 0, sizeof(long_str), &rep);
++        
++        printf("  Long string array test: rc=%d, rep=%p\n", rc, rep);
++        assert(rc != 0); /* Should error due to 24-byte string */
++        assert(rep == NULL);
++        
++        if (rep) oc_free_rep(rep);
++        os_mbuf_free_chain(m);
++    }
++    
++    printf("All validation tests passed!\n");
++    return 0;
++}

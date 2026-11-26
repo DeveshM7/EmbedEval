@@ -1,0 +1,144 @@
+diff --git a/flash_map.patch b/flash_map.patch
+new file mode 100644
+index 0000000..3516645
+--- /dev/null
++++ b/flash_map.patch
+@@ -0,0 +1,85 @@
++*** Begin Patch
++*** Update File: sys/flash_map/src/flash_map.c
++@@
++-int
++-flash_area_read(const struct flash_area *fa, uint32_t off, void *dst,
++-    uint32_t len)
++-{
++-    if (off > fa->fa_size || off + len > fa->fa_size) {
++-        return -1;
++-    }
++-    return hal_flash_read(fa->fa_device_id, fa->fa_off + off, dst, len);
++-}
++-
++-int
++-flash_area_write(const struct flash_area *fa, uint32_t off, const void *src,
++-    uint32_t len)
++-{
++-    if (off > fa->fa_size || off + len > fa->fa_size) {
++-        return -1;
++-    }
++-    return hal_flash_write(fa->fa_device_id, fa->fa_off + off,
++-                           (void *)src, len);
++-}
++-
++-int
++-flash_area_erase(const struct flash_area *fa, uint32_t off, uint32_t len)
++-{
++-    if (off > fa->fa_size || off + len > fa->fa_size) {
++-        return -1;
++-    }
++-    return hal_flash_erase(fa->fa_device_id, fa->fa_off + off, len);
++-}
+++int
+++flash_area_read(const struct flash_area *fa, uint32_t off, void *dst,
+++    uint32_t len)
+++{
+++    /*
+++     * The original implementation used a simple `off + len > fa->fa_size`
+++     * check which can overflow when `off` is close to the maximum value of a
+++     * 32‑bit integer.  An overflow would make the expression wrap around and
+++     * incorrectly allow an out‑of‑bounds read.  The same issue applies to
+++     * write and erase operations.
+++     *
+++     * To avoid this we perform the bounds check in a way that cannot wrap:
+++     *   1) Ensure `off` itself does not exceed the area size.
+++     *   2) Ensure the requested length does not exceed the remaining bytes
+++     *      in the area (`fa->fa_size - off`).
+++     *
+++     * If either condition fails we return -1 to indicate an invalid request.
+++     */
+++    if (off > fa->fa_size) {
+++        return -1;
+++    }
+++    if (len > fa->fa_size - off) {
+++        return -1;
+++    }
+++    return hal_flash_read(fa->fa_device_id, fa->fa_off + off, dst, len);
+++}
+++
+++int
+++flash_area_write(const struct flash_area *fa, uint32_t off, const void *src,
+++    uint32_t len)
+++{
+++    if (off > fa->fa_size) {
+++        return -1;
+++    }
+++    if (len > fa->fa_size - off) {
+++        return -1;
+++    }
+++    return hal_flash_write(fa->fa_device_id, fa->fa_off + off,
+++                           (void *)src, len);
+++}
+++
+++int
+++flash_area_erase(const struct flash_area *fa, uint32_t off, uint32_t len)
+++{
+++    if (off > fa->fa_size) {
+++        return -1;
+++    }
+++    if (len > fa->fa_size - off) {
+++        return -1;
+++    }
+++    return hal_flash_erase(fa->fa_device_id, fa->fa_off + off, len);
+++}
++*** End Patch
+diff --git a/sys/flash_map/src/flash_map.c b/sys/flash_map/src/flash_map.c
+index a49391b..cb4267d 100644
+--- a/sys/flash_map/src/flash_map.c
++++ b/sys/flash_map/src/flash_map.c
+@@ -249,7 +249,10 @@ int
+ flash_area_read(const struct flash_area *fa, uint32_t off, void *dst,
+     uint32_t len)
+ {
+-    if (off > fa->fa_size || off + len > fa->fa_size) {
++    if (off > fa->fa_size) {
++        return -1;
++    }
++    if (len > fa->fa_size - off) {
+         return -1;
+     }
+     return hal_flash_read(fa->fa_device_id, fa->fa_off + off, dst, len);
+@@ -259,7 +262,10 @@ int
+ flash_area_write(const struct flash_area *fa, uint32_t off, const void *src,
+     uint32_t len)
+ {
+-    if (off > fa->fa_size || off + len > fa->fa_size) {
++    if (off > fa->fa_size) {
++        return -1;
++    }
++    if (len > fa->fa_size - off) {
+         return -1;
+     }
+     return hal_flash_write(fa->fa_device_id, fa->fa_off + off,
+@@ -269,7 +275,10 @@ flash_area_write(const struct flash_area *fa, uint32_t off, const void *src,
+ int
+ flash_area_erase(const struct flash_area *fa, uint32_t off, uint32_t len)
+ {
+-    if (off > fa->fa_size || off + len > fa->fa_size) {
++    if (off > fa->fa_size) {
++        return -1;
++    }
++    if (len > fa->fa_size - off) {
+         return -1;
+     }
+     return hal_flash_erase(fa->fa_device_id, fa->fa_off + off, len);
+@@ -320,6 +329,12 @@ int
+ flash_area_read_is_empty(const struct flash_area *fa, uint32_t off, void *dst,
+                          uint32_t len)
+ {
++    if (off > fa->fa_size) {
++        return -1;
++    }
++    if (len > fa->fa_size - off) {
++        return -1;
++    }
+     return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, dst, len);
+ }
+ 

@@ -1,0 +1,96 @@
+diff --git a/net/nimble/host/include/host/ble_gap.h b/net/nimble/host/include/host/ble_gap.h
+index 111c207..66d0544 100644
+--- a/net/nimble/host/include/host/ble_gap.h
++++ b/net/nimble/host/include/host/ble_gap.h
+@@ -579,6 +579,25 @@ struct ble_gap_event {
+         struct {
+             /** The handle of the relevant connection. */
+             uint16_t conn_handle;
++        /**
++         * Represents completion of an advertising procedure.
++         * Valid for the following event types:
++         *     o BLE_GAP_EVENT_ADV_COMPLETE
++         */
++        struct {
++            /** The reason for the advertising completion. */
++            int reason;
++        } adv_complete;
++
++        /**
++         * Represents completion of a discovery procedure.
++         * Valid for the following event types:
++         *     o BLE_GAP_EVENT_DISC_COMPLETE
++         */
++        struct {
++            /** The reason for the discovery completion. */
++            int reason;
++        } disc_complete;
+         } identity_resolved;
+ 
+         /**
+diff --git a/net/nimble/host/include/host/ble_hs.h b/net/nimble/host/include/host/ble_hs.h
+index 85885bd..18d2db7 100644
+--- a/net/nimble/host/include/host/ble_hs.h
++++ b/net/nimble/host/include/host/ble_hs.h
+@@ -63,6 +63,7 @@ struct os_event;
+ #define BLE_HS_ETIMEOUT             13
+ #define BLE_HS_EDONE                14
+ #define BLE_HS_EBUSY                15
++#define BLE_HS_EPREEMPTED         29
+ #define BLE_HS_EREJECT              16
+ #define BLE_HS_EUNKNOWN             17
+ #define BLE_HS_EROLE                18
+diff --git a/net/nimble/host/src/ble_gap.c b/net/nimble/host/src/ble_gap.c
+index 01a2ab2..0dcd2e3 100644
+--- a/net/nimble/host/src/ble_gap.c
++++ b/net/nimble/host/src/ble_gap.c
+@@ -117,6 +117,7 @@ struct ble_gap_master_state {
+ 
+ };
+ static bssnz_t struct ble_gap_master_state ble_gap_master;
++static uint8_t ble_gap_preempted;
+ 
+ 
+ #if MYNEWT_VAL(BLE_MESH)
+@@ -702,13 +703,15 @@ ble_gap_master_connect_cancelled(void)
+          * out.
+          */
+         memset(&event, 0, sizeof event);
+-        if (state.conn.cancel) {
+-            event.type = BLE_GAP_EVENT_CONN_CANCEL;
+-        } else {
++        if (ble_gap_preempted) {
+             event.type = BLE_GAP_EVENT_CONNECT;
+-            event.connect.status = BLE_HS_ETIMEOUT;
++            event.connect.status = BLE_HS_EPREEMPTED;
+             event.connect.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+-
++        } else if (state.conn.cancel) { 
++            event.type = BLE_GAP_EVENT_CONN_CANCEL; 
++        } else { 
++            event.type = BLE_GAP_EVENT_CONNECT; 
++            event.connect.status = BLE_HS_ETIMEOUT; 
+         }
+         state.cb(&event, state.cb_arg);
+     }
+@@ -2198,6 +2201,9 @@ ble_gap_adv_start(uint8_t own_addr_type, const ble_addr_t *direct_addr,
+ {
+ #if !NIMBLE_BLE_ADVERTISE
+     return BLE_HS_ENOTSUP;
++    if (ble_gap_preempted) {
++        return BLE_HS_EPREEMPTED;
++    }
+ #endif
+ 
+     uint32_t duration_ticks;
+diff --git a/net/nimble/host/src/ble_gap_priv.h b/net/nimble/host/src/ble_gap_priv.h
+index 88e62ca..a1d5010 100644
+--- a/net/nimble/host/src/ble_gap_priv.h
++++ b/net/nimble/host/src/ble_gap_priv.h
+@@ -118,3 +118,6 @@ int ble_gap_dbg_update_active(uint16_t conn_handle);
+ #endif
+ 
+ #endif
++void ble_gap_preempt_stop_all(void);
++void ble_gap_preempt_stop_all(void);
++void ble_gap_preempt_stop_all(void);

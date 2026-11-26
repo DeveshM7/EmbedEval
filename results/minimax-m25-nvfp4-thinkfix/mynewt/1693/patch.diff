@@ -1,0 +1,183 @@
+diff --git a/fs/fcb/include/fcb/fcb.h b/fs/fcb/include/fcb/fcb.h
+index e9a6e85..7d74244 100644
+--- a/fs/fcb/include/fcb/fcb.h
++++ b/fs/fcb/include/fcb/fcb.h
+@@ -78,6 +78,14 @@ struct fcb {
+ 
+ int fcb_init(struct fcb *fcb);
+ 
++/**
++ * Bookmark used to accelerate FCB log walks.
++ */
++struct fcb_log_bmark {
++    struct flash_area *flb_area;
++    uint32_t flb_elem_off;
++};
++
+ /**
+  * fcb_log is needed as the number of entries in a log
+  */
+@@ -85,12 +93,28 @@ struct fcb_log {
+     struct fcb fl_fcb;
+     uint8_t fl_entries;
+ 
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++    struct fcb_log_bmark *fl_bmarks;
++    int fl_bmark_count;
++#endif
++
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+     /* Internal - tracking storage use */
+     uint32_t fl_watermark_off;
+ #endif
+ };
+ 
++/**
++ * Configures the given fcb_log to use the supplied buffer of the given
++ * capacity for storing log-walk bookmarks.
++ *
++ * @param fcb_log     The FCB log to configure.
++ * @param buf         The bookmark buffer to use.
++ * @param bmark_count The capacity of the bookmark buffer.
++ */
++void fcb_log_init_bmarks(struct fcb_log *fcb_log, struct fcb_log_bmark *buf,
++                         int bmark_count);
++
+ /**
+  * fcb_append() appends an entry to circular buffer. When writing the
+  * contents for the entry, use loc->fl_area and loc->fl_data_off with
+diff --git a/sys/log/full/src/log_fcb.c b/sys/log/full/src/log_fcb.c
+index e6b39ad..9b22a96 100644
+--- a/sys/log/full/src/log_fcb.c
++++ b/sys/log/full/src/log_fcb.c
+@@ -27,6 +27,26 @@
+ #include "fcb/fcb.h"
+ #include "log/log.h"
+ 
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++void
++fcb_log_init_bmarks(struct fcb_log *fcb_log, struct fcb_log_bmark *buf,
++                    int bmark_count)
++{
++    fcb_log->fl_bmarks = buf;
++    fcb_log->fl_bmark_count = bmark_count;
++}
++#else
++void
++fcb_log_init_bmarks(struct fcb_log *fcb_log, struct fcb_log_bmark *buf,
++                    int bmark_count)
++{
++    (void)fcb_log;
++    (void)buf;
++    (void)bmark_count;
++}
++#endif
++
++
+ /* Assume the flash alignment requirement is no stricter than 8. */
+ #define LOG_FCB_MAX_ALIGN   8
+ 
+@@ -80,6 +100,17 @@ log_fcb_start_append(struct log *log, int len, struct fcb_entry *loc)
+             goto err;
+         }
+ 
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++        /*
++         * FCB was rotated so invalidate all bookmarks.
++         */
++        if (fcb_log->fl_bmarks) {
++            memset(fcb_log->fl_bmarks, 0,
++                   fcb_log->fl_bmark_count * sizeof(struct fcb_log_bmark));
++        }
++#endif
++
++
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+         /*
+          * FCB was rotated successfully so let's check if watermark was within
+@@ -383,11 +414,14 @@ log_fcb_walk(struct log *log, log_walk_func_t walk_func,
+     struct fcb *fcb;
+     struct fcb_entry loc;
+     struct fcb_entry *locp;
++    struct fcb_log *fcb_log;
+     int rc;
++    int i;
+ 
+-    rc = 0;
+-    fcb = &((struct fcb_log *)log->l_arg)->fl_fcb;
++    fcb_log = (struct fcb_log *)log->l_arg;
++    fcb = &fcb_log->fl_fcb;
+ 
++    rc = 0;
+     memset(&loc, 0, sizeof(loc));
+ 
+     /*
+@@ -397,11 +431,52 @@ log_fcb_walk(struct log *log, log_walk_func_t walk_func,
+         locp = &fcb->f_active;
+         rc = walk_func(log, log_offset, (void *)locp, locp->fe_data_len);
+     } else {
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++        /*
++         * If bookmarks are enabled and we have a target index, try to
++         * use bookmarks to jump to the correct position.
++         */
++        if (fcb_log->fl_bmarks && fcb_log->fl_bmark_count > 0 &&
++            log_offset->lo_index > 0) {
++            /*
++             * Search bookmarks for the closest position that is before
++             * or at our target index.
++             */
++            for (i = 0; i < fcb_log->fl_bmark_count; i++) {
++                if (fcb_log->fl_bmarks[i].flb_area == NULL) {
++                    break;
++                }
++                /*
++                 * We can only use a bookmark if it's in the oldest area
++                 * or a more recent area (not the one that was erased).
++                 */
++                if (fcb_log->fl_bmarks[i].flb_elem_off >= log_offset->lo_index) {
++                    break;
++                }
++                loc.fe_area = fcb_log->fl_bmarks[i].flb_area;
++                loc.fe_elem_off = fcb_log->fl_bmarks[i].flb_elem_off;
++            }
++        }
++#endif
+         while (fcb_getnext(fcb, &loc) == 0) {
+             rc = walk_func(log, log_offset, (void *) &loc, loc.fe_data_len);
+             if (rc) {
+                 break;
+             }
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++            /*
++             * Update bookmarks after visiting each entry.
++             */
++            if (fcb_log->fl_bmarks && fcb_log->fl_bmark_count > 0) {
++                /* Shift bookmarks */
++                for (i = fcb_log->fl_bmark_count - 1; i > 0; i--) {
++                    fcb_log->fl_bmarks[i] = fcb_log->fl_bmarks[i - 1];
++                }
++                /* Add new bookmark at current position */
++                fcb_log->fl_bmarks[0].flb_area = loc.fe_area;
++                fcb_log->fl_bmarks[0].flb_elem_off = loc.fe_elem_off;
++            }
++#endif
+         }
+     }
+     return (rc);
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index 9e530fd..7eb3298 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -100,3 +100,11 @@ syscfg.defs:
+         description: >
+             Sysinit stage for logging to the second image slot.
+         value: 101
++
++    LOG_FCB_BOOKMARKS:
++        description: >
++            Enable bookmark optimization for FCB-backed log lookups.
++            When enabled, log walks use bookmarks to speed up lookups.
++        value: 0
++        restrictions:
++            - "LOG_FCB"

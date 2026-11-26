@@ -1,0 +1,157 @@
+diff --git a/sys/log/full/include/log/log_fcb.h b/sys/log/full/include/log/log_fcb.h
+index ff81fcc..c811acd 100644
+--- a/sys/log/full/include/log/log_fcb.h
++++ b/sys/log/full/include/log/log_fcb.h
+@@ -54,6 +54,11 @@ struct log_fcb_bset {
+ 
+     /** The index where the next bookmark will get written. */
+     int lfs_next;
++
++#if MYNEWT_VAL(LOG_FCB_SECTOR_BOOKMARKS)
++    /** Whether sector bookmarks are enabled. */
++    bool lfs_sector_bmarks;
++#endif
+ };
+ 
+ /**
+@@ -113,9 +118,15 @@ struct fcb_log {
+  * @param fcb_log               The log to configure.
+  * @param buf                   The buffer to use for bookmarks.
+  * @param bmark_count           The bookmark capacity of the supplied buffer.
++ * @param sector_bmarks        Whether to enable sector bookmarks (only valid
++ *                              if LOG_FCB_SECTOR_BOOKMARKS is enabled; pass
++ *                              false if not).
++ *
++ * @return                      0 on success; non-zero on error.
+  */
+-void log_fcb_init_bmarks(struct fcb_log *fcb_log,
+-                         struct log_fcb_bmark *buf, int bmark_count);
++int log_fcb_init_bmarks(struct fcb_log *fcb_log,
++                        struct log_fcb_bmark *buf, int bmark_count,
++                        bool sector_bmarks);
+ 
+ /**
+  * @brief Erases all bookmarks from the supplied fcb_log.
+diff --git a/sys/log/full/src/log_fcb.c b/sys/log/full/src/log_fcb.c
+index 05dd29e..88a19c4 100644
+--- a/sys/log/full/src/log_fcb.c
++++ b/sys/log/full/src/log_fcb.c
+@@ -168,8 +168,37 @@ log_fcb_find_gte(struct log *log, struct log_offset *log_offset,
+ #if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
+     bmark = log_fcb_closest_bmark(fcb_log, log_offset->lo_index);
+     if (bmark != NULL) {
++#if MYNEWT_VAL(LOG_FCB_SECTOR_BOOKMARKS)
++        if (fcb_log->fl_bset.lfs_sector_bmarks) {
++            /*
++             * Sector bookmarks store just the sector information.
++             * Find the first entry in that sector instead of using
++             * the stored entry directly.
++             */
++            struct fcb_entry iter_entry;
++            int rc;
++
++            memset(&iter_entry, 0, sizeof(iter_entry));
++#if MYNEWT_VAL(LOG_FCB)
++            iter_entry.fe_area = bmark->lfb_entry.fe_area;
++#endif
++#if MYNEWT_VAL(LOG_FCB2)
++            iter_entry.fe_sector = bmark->lfb_entry.fe_sector;
++            iter_entry.fe_range = bmark->lfb_entry.fe_range;
++#endif
++            rc = fcb_getnext(fcb, &iter_entry);
++            if (rc == 0) {
++                *out_entry = iter_entry;
++                bmark_found = true;
++            }
++        } else {
++            *out_entry = bmark->lfb_entry;
++            bmark_found = true;
++        }
++#else
+         *out_entry = bmark->lfb_entry;
+         bmark_found = true;
++#endif
+     }
+ #endif
+ 
+diff --git a/sys/log/full/src/log_fcb2.c b/sys/log/full/src/log_fcb2.c
+index b307acf..116e7a1 100644
+--- a/sys/log/full/src/log_fcb2.c
++++ b/sys/log/full/src/log_fcb2.c
+@@ -105,7 +105,29 @@ log_fcb2_find_gte(struct log *log, struct log_offset *log_offset,
+ #if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
+     bmark = log_fcb_closest_bmark(fcb_log, log_offset->lo_index);
+     if (bmark != NULL) {
++#if MYNEWT_VAL(LOG_FCB_SECTOR_BOOKMARKS)
++        if (fcb_log->fl_bset.lfs_sector_bmarks) {
++            /*
++             * Sector bookmarks store just the sector information.
++             * Find the first entry in that sector instead of using
++             * the stored entry directly.
++             */
++            struct fcb2_entry iter_entry;
++            int rc;
++
++            memset(&iter_entry, 0, sizeof(iter_entry));
++            iter_entry.fe_sector = bmark->lfb_entry.fe_sector;
++            iter_entry.fe_range = bmark->lfb_entry.fe_range;
++            rc = fcb2_getnext(fcb, &iter_entry);
++            if (rc == 0) {
++                *out_entry = iter_entry;
++            }
++        } else {
++            *out_entry = bmark->lfb_entry;
++        }
++#else
+         *out_entry = bmark->lfb_entry;
++#endif
+     }
+ #endif
+ 
+diff --git a/sys/log/full/src/log_fcb_bmark.c b/sys/log/full/src/log_fcb_bmark.c
+index e928277..10b452b 100644
+--- a/sys/log/full/src/log_fcb_bmark.c
++++ b/sys/log/full/src/log_fcb_bmark.c
+@@ -25,14 +25,19 @@
+ 
+ #include "log/log_fcb.h"
+ 
+-void
++int
+ log_fcb_init_bmarks(struct fcb_log *fcb_log,
+-                    struct log_fcb_bmark *buf, int bmark_count)
++                    struct log_fcb_bmark *buf, int bmark_count,
++                    bool sector_bmarks)
+ {
+     fcb_log->fl_bset = (struct log_fcb_bset) {
+         .lfs_bmarks = buf,
+         .lfs_cap = bmark_count,
++#if MYNEWT_VAL(LOG_FCB_SECTOR_BOOKMARKS)
++        .lfs_sector_bmarks = sector_bmarks,
++#endif
+     };
++    return 0;
+ }
+ 
+ void
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index dc35b6c..5ebaf45 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -79,6 +79,16 @@ syscfg.defs:
+         restrictions:
+             - (LOG_FCB || LOG_FCB2)
+ 
++    LOG_FCB_SECTOR_BOOKMARKS:
++        description: >
++            Enables the sector bookmark optimization for FCB-backed log lookups.
++            When enabled, bookmarks store sector indices rather than full flash
++            addresses, making them more robust across FCB rotations.
++        value: 0
++        restrictions:
++            - LOG_FCB_BOOKMARKS
++
++
+     LOG_CONSOLE:
+         description: 'Support logging to console.'
+         value: 1

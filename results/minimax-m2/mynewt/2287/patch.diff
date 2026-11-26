@@ -1,0 +1,693 @@
+diff --git a/encoding/base64/include/base64/base64.h b/encoding/base64/include/base64/base64.h
+index ab317ae..08944c8 100644
+--- a/encoding/base64/include/base64/base64.h
++++ b/encoding/base64/include/base64/base64.h
+@@ -10,7 +10,7 @@
+  *  http://www.apache.org/licenses/LICENSE-2.0
+  *
+  * Unless required by applicable law or agreed to in writing,
+- * software distributed under the License is distributed on an
++ * software distributed under the License are distributed on an
+  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  * KIND, either express or implied.  See the License for the
+  * specific language governing permissions and limitations
+@@ -32,6 +32,24 @@ int base64_pad(char *, int);
+ int base64_decode_len(const char *str);
+ int base64_decode_maxlen(const char *str, void *data, int len);
+ 
++/* Decoder state for chunked base64 decoding */
++struct base64_decoder {
++    /* Public fields (must be initialized before use) */
++    const char *src;      /* Source base64 string */
++    void *dst;            /* Destination buffer */
++    int src_len;          /* Length of source (<= 0 means null-terminated) */
++    int dst_len;          /* Length of destination (<= 0 means unbounded) */
++    
++    /* Private state (internal use only) */
++    int partial_bytes[3]; /* Store partial groups across chunks */
++    int partial_count;    /* Number of valid bytes in partial_bytes */
++    int bytes_processed;  /* Total bytes processed so far */
++    int output_written;   /* Total output bytes written */
++    int is_initialized;   /* Flag to check if decoder is initialized */
++};
++
++int base64_decoder_go(struct base64_decoder *dec);
++
+ #define BASE64_ENCODE_SIZE(__size) (((((__size) - 1) / 3) * 4) + 4)
+ 
+ #ifdef __cplusplus
+diff --git a/encoding/base64/src/base64.c b/encoding/base64/src/base64.c
+index 999958f..b45ea64 100644
+--- a/encoding/base64/src/base64.c
++++ b/encoding/base64/src/base64.c
+@@ -29,13 +29,12 @@
+  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * FOR ANY DIRECT, INDIRECT, INDIRECT, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS, OR BUSINESS INTERRUPTION)
+  * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
++ * LIABILITY, OR TORT (INCLUDING, ANY OTHER WAY) OUT OF THE USE OF THIS
++ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+ #include <stdlib.h>
+@@ -146,66 +145,250 @@ token_decode(const char *token)
+     return (marker << 24) | val;
+ }
+ 
+-int
+-base64_decode(const char *str, void *data)
++static int
++base64_decode_buffer(const char **pstr, unsigned char **pq, int src_len, 
++                      int dst_len, int *partial_bytes, int *partial_count,
++                      int is_final_call, const char *dst_start)
+ {
+-    const char *p;
+-    unsigned char *q;
+-
+-    q = data;
+-    for (p = str; *p && (*p == '=' || strchr(base64_chars, *p)); p += 4) {
+-        unsigned int val = token_decode(p);
++    const char *p = *pstr;
++    unsigned char *q = *pq;
++    
++    /* Process in groups of 4 characters */
++    while (1) {
++        int i;
++        char token[4];
++        int valid_chars = 0;
++        int reached_end = 0;
++        
++        /* Check if we can read 4 characters or if we've hit null terminator */
++        for (i = 0; i < 4; i++) {
++            if (src_len > 0) {
++                if (p[i] == '\0' || (p - *pstr) + i >= src_len) {
++                    /* Null terminator reached or buffer limit reached */
++                    reached_end = 1;
++                    break;
++                }
++            } else {
++                if (p[i] == '\0') {
++                    /* Null terminator reached */
++                    reached_end = 1;
++                    break;
++                }
++            }
++            
++            token[i] = p[i];
++            valid_chars++;
++        }
++        
++        /* If we don't have a full group (4 chars), we need to handle partial */
++        if (valid_chars < 4) {
++            /* For null-terminated input, check if we hit end */
++            if (src_len <= 0 && reached_end) {
++                /* If we have partial bytes from previous call, this is an error */
++                if (*partial_count > 0) {
++                    return -1;
++                }
++                /* If we have valid chars but hit null terminator */
++                if (valid_chars > 0) {
++                    /* Check if this is just padding (should be all '=') */
++                    int all_pad = 1;
++                    for (i = 0; i < valid_chars; i++) {
++                        if (token[i] != '=') {
++                            all_pad = 0;
++                            break;
++                        }
++                    }
++                    
++                    if (!all_pad) {
++                        /* Incomplete group in final call is an error */
++                        return -1;
++                    }
++                }
++                break;
++            }
++            
++            /* For non-null-terminated input with length limit */
++            if (src_len > 0 && reached_end) {
++                if (*partial_count > 0) {
++                    /* Complete the group with the bytes we have */
++                    if (valid_chars > 0) {
++                        memcpy(partial_bytes + *partial_count, token, valid_chars);
++                        *partial_count += valid_chars;
++                    }
++                    
++                    if (*partial_count == 4) {
++                        unsigned int val = token_decode((char*)partial_bytes);
++                        unsigned int marker = (val >> 24) & 0xff;
++                        
++                        if (val == DECODE_ERROR) {
++                            return -1;
++                        }
++                        
++                        /* Check if we have space for output */
++                        if (dst_len > 0) {
++                            if (q - (unsigned char *)dst_start >= dst_len) {
++                                *pstr = p;
++                                *pq = q;
++                                return q - (unsigned char *)dst_start;
++                            }
++                        }
++                        
++                        *q++ = (val >> 16) & 0xff;
++                        if (marker < 2) {
++                            if (dst_len > 0 && q - (unsigned char *)dst_start >= dst_len) {
++                                *pstr = p;
++                                *pq = q;
++                                return q - (unsigned char *)dst_start;
++                            }
++                            *q++ = (val >> 8) & 0xff;
++                        }
++                        if (marker < 1) {
++                            if (dst_len > 0 && q - (unsigned char *)dst_start >= dst_len) {
++                                *pstr = p;
++                                *pq = q;
++                                return q - (unsigned char *)dst_start;
++                            }
++                            *q++ = val & 0xff;
++                        }
++                    }
++                    
++                    /* Reset partial state */
++                    *partial_count = 0;
++                }
++                break;
++            }
++            
++            /* Store partial bytes for next call (if this isn't the final call) */
++            if (!is_final_call && valid_chars > 0) {
++                memcpy(partial_bytes, token, valid_chars);
++                *partial_count = valid_chars;
++            }
++            
++            break;
++        }
++        
++        /* Decode the full group */
++        unsigned int val = token_decode(token);
+         unsigned int marker = (val >> 24) & 0xff;
++        
+         if (val == DECODE_ERROR) {
+             return -1;
+         }
++        
++        /* Check if we have space for output */
++        if (dst_len > 0) {
++            if (q - (unsigned char *)dst_start >= dst_len) {
++                *pstr = p;
++                *pq = q;
++                return q - (unsigned char *)dst_start;
++            }
++        }
++        
+         *q++ = (val >> 16) & 0xff;
+         if (marker < 2) {
++            if (dst_len > 0 && q - (unsigned char *)dst_start >= dst_len) {
++                *pstr = p;
++                *pq = q;
++                return q - (unsigned char *)dst_start;
++            }
+             *q++ = (val >> 8) & 0xff;
+         }
+         if (marker < 1) {
++            if (dst_len > 0 && q - (unsigned char *)dst_start >= dst_len) {
++                *pstr = p;
++                *pq = q;
++                return q - (unsigned char *)dst_start;
++            }
+             *q++ = val & 0xff;
+         }
++        
++        p += 4;
+     }
+-    return q - (unsigned char *) data;
++    
++    *pstr = p;
++    *pq = q;
++    return q - (unsigned char *)dst_start;
++}
++
++int
++base64_decode(const char *str, void *data)
++{
++    struct base64_decoder dec;
++    int result;
++    
++    /* Initialize decoder state */
++    memset(&dec, 0, sizeof(dec));
++    dec.src = str;
++    dec.dst = data;
++    dec.src_len = 0;  /* Null-terminated */
++    dec.dst_len = 0;  /* Unbounded */
++    dec.is_initialized = 1;
++    
++    result = base64_decoder_go(&dec);
++    
++    return result;
+ }
+ 
+ int
+ base64_decode_maxlen(const char *str, void *data, int len)
++{
++    struct base64_decoder dec;
++    int result;
++    
++    /* Initialize decoder state */
++    memset(&dec, 0, sizeof(dec));
++    dec.src = str;
++    dec.dst = data;
++    dec.src_len = 0;  /* Null-terminated */
++    dec.dst_len = len;  /* Bounded by len */
++    dec.is_initialized = 1;
++    
++    result = base64_decoder_go(&dec);
++    
++    return result;
++}
++
++int
++base64_decoder_go(struct base64_decoder *dec)
+ {
+     const char *p;
+     unsigned char *q;
+-
+-    q = data;
+-    for (p = str; *p && (*p == '=' || strchr(base64_chars, *p)); p += 4) {
+-        unsigned int val = token_decode(p);
+-        unsigned int marker = (val >> 24) & 0xff;
+-
+-        if (val == DECODE_ERROR) {
+-            return -1;
+-        }
+-
+-        *q++ = (val >> 16) & 0xff;
+-        if (q - (unsigned char *)data >= len) {
+-            break;
+-        }
+-
+-        if (marker < 2) {
+-            *q++ = (val >> 8) & 0xff;
+-            if (q - (unsigned char *)data >= len) {
+-                break;
+-            }
+-        }
+-
+-        if (marker < 1) {
+-            *q++ = val & 0xff;
+-            if (q - (unsigned char *)data >= len) {
+-                break;
+-            }
+-        }
++    int src_len, dst_len;
++    int result;
++    const char *dst_start;
++    
++    /* Validate decoder is initialized */
++    if (!dec || !dec->is_initialized) {
++        return -1;
+     }
+-
+-    return q - (unsigned char *) data;
++    
++    p = dec->src;
++    q = (unsigned char *)dec->dst;
++    src_len = dec->src_len;
++    dst_len = dec->dst_len;
++    dst_start = dec->dst;  /* Save start for output calculation */
++    
++    /* If src_len <= 0, use null-terminated string */
++    if (src_len <= 0) {
++        src_len = 0;  /* Use null terminator */
++    }
++    
++    /* Process the buffer */
++    result = base64_decode_buffer(&p, &q, src_len, dst_len, 
++                                  dec->partial_bytes, &dec->partial_count,
++                                  1, dst_start);  /* is_final_call = 1 */
++    
++    if (result < 0) {
++        return -1;
++    }
++    
++    /* Update decoder state */
++    dec->src = p;
++    dec->dst = q;
++    dec->bytes_processed = p - dec->src;
++    dec->output_written = result;
++    
++    return result;
+ }
+ 
+ int
+diff --git a/targets/unittest/pkg.yml b/targets/unittest/pkg.yml
+deleted file mode 100644
+index b25bf78..0000000
+--- a/targets/unittest/pkg.yml
++++ /dev/null
+@@ -1,27 +0,0 @@
+-#
+-# Licensed to the Apache Software Foundation (ASF) under one
+-# or more contributor license agreements.  See the NOTICE file
+-# distributed with this work for additional information
+-# regarding copyright ownership.  The ASF licenses this file
+-# to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
+-# with the License.  You may obtain a copy of the License at
+-#
+-#  http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing,
+-# software distributed under the License is distributed on an
+-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-# KIND, either express or implied.  See the License for the
+-# specific language governing permissions and limitations
+-# under the License.
+-#
+-
+-### Package: targets/unittest
+-pkg.name: "targets/unittest"
+-pkg.type: "target"
+-pkg.description: "Used for unit tests by the \"newt test\" command."
+-pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
+-pkg.homepage: "http://mynewt.apache.org/"
+-
+-pkg.deps: "@apache-mynewt-core/sys/sysinit"
+diff --git a/targets/unittest/target.yml b/targets/unittest/target.yml
+deleted file mode 100644
+index e10a8ac..0000000
+--- a/targets/unittest/target.yml
++++ /dev/null
+@@ -1,23 +0,0 @@
+-#
+-# Licensed to the Apache Software Foundation (ASF) under one
+-# or more contributor license agreements.  See the NOTICE file
+-# distributed with this work for additional information
+-# regarding copyright ownership.  The ASF licenses this file
+-# to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
+-# with the License.  You may obtain a copy of the License at
+-#
+-#  http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing,
+-# software distributed under the License is distributed on an
+-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-# KIND, either express or implied.  See the License for the
+-# specific language governing permissions and limitations
+-# under the License.
+-#
+-
+-### Target: targets/unittest
+-target.bsp: "@apache-mynewt-core/hw/bsp/native"
+-target.build_profile: "debug"
+-target.compiler: "@apache-mynewt-core/compiler/sim"
+diff --git a/test_chunked b/test_chunked
+new file mode 100755
+index 0000000000000000000000000000000000000000..151171fa2f667106c0d9670d13bf402e746a3a51
+GIT binary patch
+literal 16656
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_chunked2 b/test_chunked2
+new file mode 100755
+index 0000000000000000000000000000000000000000..dcfa17e8f365d328736f75d85816c45970b84c1b
+GIT binary patch
+literal 16656
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_original b/test_original
+new file mode 100755
+index 0000000000000000000000000000000000000000..a2959964cb93625f0a3d6b58d560e42c16a14f86
+GIT binary patch
+literal 16248
+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
+
+literal 0
+HcmV?d00001
+

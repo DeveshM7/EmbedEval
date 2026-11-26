@@ -1,0 +1,114 @@
+diff --git a/net/nimble/host/include/host/ble_gatt.h b/net/nimble/host/include/host/ble_gatt.h
+index d3c1d2b..c1b4275 100644
+--- a/net/nimble/host/include/host/ble_gatt.h
++++ b/net/nimble/host/include/host/ble_gatt.h
+@@ -189,6 +189,8 @@ int ble_gattc_notify_custom(uint16_t conn_handle, uint16_t att_handle,
+                             struct os_mbuf *om);
+ int ble_gattc_notify(uint16_t conn_handle, uint16_t chr_val_handle);
+ int ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle);
++int ble_gattc_indicate_custom(uint16_t conn_handle, uint16_t chr_val_handle,
++                              struct os_mbuf *om);
+ 
+ int ble_gattc_init(void);
+ 
+diff --git a/net/nimble/host/src/ble_gattc.c b/net/nimble/host/src/ble_gattc.c
+index 66344d8..de3b9d0 100644
+--- a/net/nimble/host/src/ble_gattc.c
++++ b/net/nimble/host/src/ble_gattc.c
+@@ -4436,6 +4436,9 @@ ble_gattc_notify_custom(uint16_t conn_handle, uint16_t chr_val_handle,
+         goto err;
+     }
+ 
++    /* Tell the application that a notification transmission was attempted. */
++    ble_gap_notify_tx_event(rc, conn_handle, chr_val_handle, 0);
++
+     return 0;
+ 
+ err:
+@@ -4467,14 +4470,7 @@ ble_gattc_notify(uint16_t conn_handle, uint16_t chr_val_handle)
+     return BLE_HS_ENOTSUP;
+ #endif
+ 
+-    int rc;
+-
+-    rc = ble_gattc_notify_custom(conn_handle, chr_val_handle, NULL);
+-
+-    /* Tell the application that a notification transmission was attempted. */
+-    ble_gap_notify_tx_event(rc, conn_handle, chr_val_handle, 0);
+-
+-    return rc;
++    return ble_gattc_notify_custom(conn_handle, chr_val_handle, NULL);
+ }
+ 
+ /*****************************************************************************
+@@ -4571,6 +4567,31 @@ ble_gatts_indicate_fail_notconn(uint16_t conn_handle)
+ int
+ ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
+ {
++#if !MYNEWT_VAL(BLE_GATT_INDICATE)
++    return BLE_HS_ENOTSUP;
++#endif
++
++    return ble_gattc_indicate_custom(conn_handle, chr_val_handle, NULL);
++}
++
++/**
++ * Sends a characteristic indication.  The content of the message is either
++ * passed explicitly or read from the specified characteristic if txom is NULL.
++ *
++ * @param conn_handle           The connection over which to execute the
++ *                                  procedure.
++ * @param chr_val_handle        The value attribute handle of the
++ *                                  characteristic to include in the outgoing
++ *                                  indication.
++ * @param txom                  The indication value to send.  If NULL, the
++ *                                  value is read from the characteristic.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++int
++ble_gattc_indicate_custom(uint16_t conn_handle, uint16_t chr_val_handle,
++                          struct os_mbuf *txom)
++{
+ #if !MYNEWT_VAL(BLE_GATT_INDICATE)
+     return BLE_HS_ENOTSUP;
+ #endif
+@@ -4596,19 +4617,26 @@ ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
+ 
+     ble_gattc_log_indicate(chr_val_handle);
+ 
+-    om = ble_hs_mbuf_att_pkt();
+-    if (om == NULL) {
+-        rc = BLE_HS_ENOMEM;
+-        goto done;
+-    }
++    if (txom == NULL) {
++        /* No custom attribute data; read the value from the specified
++         * attribute.
++         */
++        om = ble_hs_mbuf_att_pkt();
++        if (om == NULL) {
++            rc = BLE_HS_ENOMEM;
++            goto done;
++        }
+ 
+-    rc = ble_att_svr_read_handle(BLE_HS_CONN_HANDLE_NONE, chr_val_handle, 0,
+-                                 om, NULL);
+-    if (rc != 0) {
+-        /* Fatal error; application disallowed attribute read. */
+-        BLE_HS_DBG_ASSERT(0);
+-        rc = BLE_HS_EAPP;
+-        goto done;
++        rc = ble_att_svr_read_handle(BLE_HS_CONN_HANDLE_NONE, chr_val_handle, 0,
++                                     om, NULL);
++        if (rc != 0) {
++            /* Fatal error; application disallowed attribute read. */
++            BLE_HS_DBG_ASSERT(0);
++            rc = BLE_HS_EAPP;
++            goto done;
++        }
++    } else {
++        om = txom;
+     }
+ 
+     rc = ble_att_clt_tx_indicate(conn_handle, chr_val_handle, om);

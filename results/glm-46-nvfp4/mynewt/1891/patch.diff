@@ -1,0 +1,243 @@
+diff --git a/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h b/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h
+new file mode 100644
+index 0000000..1b4e661
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h
+@@ -0,0 +1,55 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef _TRNG_SW_H
++#define _TRNG_SW_H
++
++#include <stdint.h>
++#include "trng/trng.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct trng_sw_dev {
++    struct trng_dev dev;
++    uint32_t seed;
++};
++
++/**
++ * Add entropy to the software TRNG
++ *
++ * @param tsd The software TRNG device
++ * @param entr Pointer to entropy data
++ * @param entr_len Length of entropy data
++ *
++ * @return 0 on success
++ */
++int trng_sw_dev_add_entropy(struct trng_sw_dev *tsd, void *entr, int entr_len);
++
++/**
++ * Initialize the software TRNG device
++ */
++void trng_sw_dev_init(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _TRNG_SW_H */
+diff --git a/hw/drivers/trng/trng_sw/pkg.yml b/hw/drivers/trng/trng_sw/pkg.yml
+new file mode 100644
+index 0000000..5cb214c
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/pkg.yml
+@@ -0,0 +1,35 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++pkg.name: hw/drivers/trng/trng_sw
++pkg.description: Software TRNG driver
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.apis:
++    - TRNG_HW_IMPL
++
++pkg.deps:
++    - "@apache-mynewt-core/hw/drivers/trng"
++
++pkg.src_files:
++    - src/trng_sw.c
++pkg.inc_files:
++    - include/trng_sw/trng_sw.h
+diff --git a/hw/drivers/trng/trng_sw/src/trng_sw.c b/hw/drivers/trng/trng_sw/src/trng_sw.c
+new file mode 100644
+index 0000000..264a669
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/src/trng_sw.c
+@@ -0,0 +1,135 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/os.h"
++#include "trng/trng.h"
++#include "trng_sw/trng_sw.h"
++#include <string.h>
++#include <stdlib.h>
++
++static struct trng_sw_dev g_trng_sw_dev;
++
++static void
++mix_entropy(struct trng_sw_dev *tsd, uint32_t entropy)
++{
++    tsd->seed = tsd->seed * 1103515245 + 12345 + entropy;
++}
++
++static uint32_t
++trng_sw_get_u32(struct trng_dev *trng)
++{
++    struct trng_sw_dev *tsd = (struct trng_sw_dev *)trng;
++    uint32_t ticks = os_get_uptime_usec();
++    static uint32_t last_ticks;
++
++    /* Mix in timing entropy */
++    while (ticks == last_ticks) {
++        os_time_delay(1);
++        ticks = os_get_uptime_usec();
++    }
++    last_ticks = ticks;
++    
++    mix_entropy(tsd, ticks);
++    
++    /* LCG step */
++    tsd->seed = tsd->seed * 1103515245 + 12345;
++    
++    return tsd->seed;
++}
++
++static size_t
++trng_sw_read(struct trng_dev *trng, void *dst, size_t len)
++{
++    size_t i, rem;
++    uint32_t val;
++    uint8_t *buf = (uint8_t *)dst;
++
++    for (i = 0; i < len; i += 4) {
++        rem = len - i;
++        if (rem >= 4) {
++            val = trng_sw_get_u32(trng);
++            memcpy(&buf[i], &val, 4);
++        } else {
++            val = trng_sw_get_u32(trng);
++            memcpy(&buf[i], &val, rem);
++        }
++    }
++
++    return len;
++}
++
++int
++trng_sw_dev_add_entropy(struct trng_sw_dev *tsd, void *entr, int entr_len)
++{
++    int i, rem;
++    uint32_t val;
++    uint8_t *ptr = (uint8_t *)entr;
++
++    if (entr_len <= 0) {
++        return 0;
++    }
++
++    for (i = 0; i < entr_len; i += 4) {
++        rem = entr_len - i;
++        if (rem >= 4) {
++            memcpy(&val, &ptr[i], 4);
++        } else {
++            val = 0;
++            memcpy(&val, &ptr[i], rem);
++        }
++        mix_entropy(tsd, val);
++    }
++
++    return 0;
++}
++
++static int
++trng_sw_init(struct os_dev *dev, void *arg)
++{
++    struct trng_dev *trng;
++    struct trng_sw_dev *tsd;
++    uint32_t ticks;
++
++    trng = (struct trng_dev *)dev;
++    tsd = (struct trng_sw_dev *)dev;
++    assert(trng);
++    assert(tsd);
++
++    OS_DEV_SETHANDLERS(dev, NULL, NULL);
++
++    /* Initialize seed with clock */
++    ticks = os_get_uptime_usec();
++    tsd->seed = ticks ^ 0x12345678;
++    
++    /* Add some timing variation */
++    os_time_delay(1);
++    tsd->seed ^= os_get_uptime_usec();
++
++    trng->interface.get_u32 = trng_sw_get_u32;
++    trng->interface.read = trng_sw_read;
++
++    return 0;
++}
++
++void
++trng_sw_dev_init(void)
++{
++    os_dev_create(&g_trng_sw_dev.dev.dev, "trng", OS_DEV_INIT_PRIMARY,
++                  0, trng_sw_init, NULL);
++}

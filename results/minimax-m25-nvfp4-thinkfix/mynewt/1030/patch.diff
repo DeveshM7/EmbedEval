@@ -1,0 +1,74 @@
+diff --git a/kernel/os/include/os/os_mempool.h b/kernel/os/include/os/os_mempool.h
+index 2416ac9..a90a883 100644
+--- a/kernel/os/include/os/os_mempool.h
++++ b/kernel/os/include/os/os_mempool.h
+@@ -200,6 +200,18 @@ os_error_t os_mempool_ext_init(struct os_mempool_ext *mpe, uint16_t blocks,
+  */
+ bool os_mempool_is_sane(const struct os_mempool *mp);
+ 
++/**
++ * Clears/resets a memory pool back to a fully-free state. This re-chains
++ * all blocks into the free list and resets mp_num_free and mp_min_free.
++ * Can be called multiple times on the same pool.
++ *
++ * @param mp                    The mempool to clear.
++ *
++ * @return                      OS_INVALID_PARM if mp is NULL;
++ *                              OS_OK otherwise.
++ */
++os_error_t os_mempool_clear(struct os_mempool *mp);
++
+ /**
+  * Checks if a memory block was allocated from the specified mempool.
+  *
+diff --git a/kernel/os/src/os_mempool.c b/kernel/os/src/os_mempool.c
+index bc1cee8..63cc7c7 100644
+--- a/kernel/os/src/os_mempool.c
++++ b/kernel/os/src/os_mempool.c
+@@ -151,6 +151,46 @@ os_mempool_is_sane(const struct os_mempool *mp)
+     return true;
+ }
+ 
++
++os_error_t
++os_mempool_clear(struct os_mempool *mp)
++{
++    int true_block_size;
++    uint8_t *block_addr;
++    struct os_memblock *block_ptr;
++    uint16_t blocks;
++
++    /* Check for valid parameters */
++    if (!mp) {
++        return OS_INVALID_PARM;
++    }
++
++    /* Get the number of blocks and true block size */
++    blocks = mp->mp_num_blocks;
++    true_block_size = OS_MEMPOOL_TRUE_BLOCK_SIZE(mp);
++
++    /* Reset free and min_free counters */
++    mp->mp_num_free = blocks;
++    mp->mp_min_free = blocks;
++
++    /* Re-chain the memory blocks to the free list */
++    block_addr = (uint8_t *)mp->mp_membuf_addr;
++    block_ptr = (struct os_memblock *)block_addr;
++    SLIST_FIRST(mp) = block_ptr;
++
++    while (blocks > 1) {
++        block_addr += true_block_size;
++        SLIST_NEXT(block_ptr, mb_next) = (struct os_memblock *)block_addr;
++        block_ptr = (struct os_memblock *)block_addr;
++        --blocks;
++    }
++
++    /* Last one in the list should be NULL */
++    SLIST_NEXT(block_ptr, mb_next) = NULL;
++
++    return OS_OK;
++}
++
+ int
+ os_memblock_from(const struct os_mempool *mp, const void *block_addr)
+ {

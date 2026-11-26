@@ -1,0 +1,142 @@
+diff --git a/net/ip/native_sockets/src/native_sock.c b/net/ip/native_sockets/src/native_sock.c
+index bba83a5..1fc3a7d 100644
+--- a/net/ip/native_sockets/src/native_sock.c
++++ b/net/ip/native_sockets/src/native_sock.c
+@@ -195,7 +195,7 @@ native_sock_mn_addr_to_addr(struct mn_sockaddr *ms, struct sockaddr *sa,
+         sun->sun_len = sizeof(*sun);
+ #endif
+         sun->sun_path[0] = '\0';
+-        strncat(sun->sun_path, msun->msun_path, sizeof sun->sun_path);
++        strncat(sun->sun_path, msun->msun_path, sizeof sun->sun_path - 1);
+         if (strcmp(sun->sun_path, msun->msun_path) != 0) {
+             /* Path too long. */
+             return MN_EINVAL;
+diff --git a/sys/flash_map/include/flash_map/flash_map.h b/sys/flash_map/include/flash_map/flash_map.h
+index 217cf53..0d3a0c4 100644
+--- a/sys/flash_map/include/flash_map/flash_map.h
++++ b/sys/flash_map/include/flash_map/flash_map.h
+@@ -4,8 +4,7 @@
+  * distributed with this work for additional information
+  * regarding copyright ownership.  The ASF licenses this file
+  * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
++ * "License"); you may obtain a copy of the License at
+  *
+  *  http://www.apache.org/licenses/LICENSE-2.0
+  *
+@@ -131,6 +130,13 @@ int flash_area_getnext_sector(int id, int *sec_id, struct flash_area *ret);
+ int flash_area_id_from_image_slot(int slot);
+ int flash_area_id_to_image_slot(int area_id);
+ 
++/*
++ * Adds default flash areas that are absent from the manufacturing map.
++ * Only adds areas that do not overlap with existing areas.
++ * This function can be called directly to merge default areas into the current flash map.
++ */
++void flash_map_add_new_dflt_areas_extern(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/sys/flash_map/src/flash_map.c b/sys/flash_map/src/flash_map.c
+index 88c11e5..1291a93 100644
+--- a/sys/flash_map/src/flash_map.c
++++ b/sys/flash_map/src/flash_map.c
+@@ -26,6 +26,7 @@
+ #include "hal/hal_flash.h"
+ #include "hal/hal_flash_int.h"
+ #include "mfg/mfg.h"
++#include "sysflash/sysflash.h"
+ #include "flash_map/flash_map.h"
+ 
+ const struct flash_area *flash_map;
+@@ -425,3 +426,88 @@ flash_map_init(void)
+         flash_map_entries = num_areas;
+     }
+ }
++
++/**
++ * Checks if any areas in the flash map overlap with each other.
++ */
++static bool
++flash_map_has_overlaps(const struct flash_area *map, int count)
++{
++    int i, j;
++
++    for (i = 0; i < count; i++) {
++        for (j = i + 1; j < count; j++) {
++            /* Check for overlaps by ID or by memory region */
++            if (map[i].fa_id == map[j].fa_id ||
++                (map[i].fa_device_id == map[j].fa_device_id &&
++                 map[i].fa_off < map[j].fa_off + map[j].fa_size &&
++                 map[i].fa_off + map[i].fa_size > map[j].fa_off)) {
++                return true;
++            }
++        }
++    }
++    return false;
++}
++
++/**
++ * Adds default flash areas that are absent from the manufacturing map.
++ * Only adds areas that do not overlap with existing areas.
++ * This function can be called directly to merge default areas into the current flash map.
++ */
++void
++flash_map_add_new_dflt_areas_extern(void)
++{
++    static struct flash_area combined_areas[MYNEWT_VAL(FLASH_MAP_MAX_AREAS)];
++    int combined_count = 0;
++    int i, j;
++    bool area_exists, area_overlaps;
++
++    /* If the existing map has overlaps, don't add anything */
++    if (flash_map_has_overlaps(flash_map, flash_map_entries)) {
++        return;
++    }
++
++    /* Copy existing areas from current flash_map */
++    for (i = 0; i < flash_map_entries; i++) {
++        combined_areas[combined_count++] = flash_map[i];
++    }
++
++    /* Check each default area to see if it should be added */
++    for (i = 0; i < FLASH_AREA_COUNT; i++) {
++        area_exists = false;
++        area_overlaps = false;
++
++        /* Check if this default area already exists in the combined map */
++        for (j = 0; j < combined_count; j++) {
++            if (sysflash_map_dflt[i].fa_id == combined_areas[j].fa_id) {
++                area_exists = true;
++                break;
++            }
++        }
++
++        /* If area doesn't exist, check for overlaps */
++        if (!area_exists) {
++            for (j = 0; j < combined_count; j++) {
++                /* Check for overlaps by ID or by memory region */
++                if (sysflash_map_dflt[i].fa_id == combined_areas[j].fa_id ||
++                    (sysflash_map_dflt[i].fa_device_id == combined_areas[j].fa_device_id &&
++                     sysflash_map_dflt[i].fa_off < combined_areas[j].fa_off + combined_areas[j].fa_size &&
++                     sysflash_map_dflt[i].fa_off + sysflash_map_dflt[i].fa_size > combined_areas[j].fa_off)) {
++                    area_overlaps = true;
++                    break;
++                }
++            }
++
++            /* Add the area if it doesn't overlap */
++            if (!area_overlaps && combined_count < MYNEWT_VAL(FLASH_MAP_MAX_AREAS)) {
++                combined_areas[combined_count++] = sysflash_map_dflt[i];
++            }
++        }
++    }
++
++    /* Update the global flash map if we added anything */
++    if (combined_count > 0) {
++        flash_map = combined_areas;
++        flash_map_entries = combined_count;
++    }
++}

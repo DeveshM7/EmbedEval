@@ -1,0 +1,38 @@
+diff --git a/net/ip/native_sockets/src/native_sock.c b/net/ip/native_sockets/src/native_sock.c
+index 17c391d..252fca1 100644
+--- a/net/ip/native_sockets/src/native_sock.c
++++ b/net/ip/native_sockets/src/native_sock.c
+@@ -368,6 +368,13 @@ native_sock_connect(struct mn_socket *s, struct mn_sockaddr *addr)
+     os_mutex_pend(&nss->mtx, OS_WAIT_FOREVER);
+     if (connect(ns->ns_fd, sa, sa_len)) {
+         rc = errno;
++        if (rc == EINPROGRESS) {
++            ns->ns_poll = 1;
++            native_sock_poll_rebuild(nss);
++            os_mutex_release(&nss->mtx);
++            /* Return success; connection will be reported via writable callback */
++            return 0;
++        }
+         os_mutex_release(&nss->mtx);
+         return native_sock_err_to_mn_err(rc);
+     }
+@@ -798,14 +805,15 @@ socket_task(void *arg)
+             if (revents & POLLOUT) {
+                 if (ns->ns_type == SOCK_STREAM && ns->ns_tx) {
+                     native_sock_stream_tx(ns, 1);
++                } else {
++                    /* For non‑blocking connect the socket becomes writable when the connection is established. */
++                    mn_socket_writable(&ns->ns_sock, 0);
+                 }
+             }
+-        }
+     }
+ }
+-
+-int
+-native_sock_init(void)
++}
++int native_sock_init(void)
+ {
+     struct native_sock_state *nss = &native_sock_state;
+     int i;

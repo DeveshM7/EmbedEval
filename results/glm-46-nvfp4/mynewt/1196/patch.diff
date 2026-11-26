@@ -1,0 +1,454 @@
+diff --git a/patch_log_h.txt b/patch_log_h.txt
+new file mode 100644
+index 0000000..bcec700
+--- /dev/null
++++ b/patch_log_h.txt
+@@ -0,0 +1,32 @@
++--- sys/log/full/include/log/log.h.bak
+++++ sys/log/full/include/log/log.h
++@@ -65,6 +65,7 @@
++ 
++ typedef int (*log_walk_func_t)(struct log *, struct log_offset *log_offset,
++         void *dptr, uint16_t len);
+++typedef int (*log_walk_body_func_t)(struct log *log, struct log_offset *log_offset, const struct log_entry_hdr *hdr, void *dptr, uint16_t len);
++ 
++ typedef int (*lh_read_func_t)(struct log *, void *dptr, void *buf,
++         uint16_t offset, uint16_t len);
++@@ -260,6 +261,21 @@
++ int log_append_mbuf_typed(struct log *log, uint8_t module, uint8_t level,
++                           uint8_t etype, struct os_mbuf *om);
++ 
+++int log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype, const void *body, uint16_t body_len);
+++int log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype, struct os_mbuf *om);
+++
+++int log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr);
+++int log_read_body(struct log *log, void *dptr, void *buf, uint16_t off, uint16_t len);
+++int log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om, uint16_t off, uint16_t len);
+++
+++/* 
+++ * Walks through log entries and calls the provided walk_body_func callback for each entry.
+++ * The callback receives the entry header and the body length (entry length excluding header).
+++ * Returns 0 on success, nonzero on error or if walk was aborted.
+++ */
+++int log_walk_body(struct log *log, log_walk_body_func_t walk_body_func, struct log_offset *log_offset);
+++
+++
++ #if MYNEWT_VAL(LOG_CONSOLE)
++ struct log *log_console_get(void);
++ void log_console_init(void);
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 651bb67..3a8ca1c 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -63,6 +63,7 @@ struct log_offset {
+ 
+ typedef int (*log_walk_func_t)(struct log *, struct log_offset *log_offset,
+         void *dptr, uint16_t len);
++typedef int (*log_walk_body_func_t)(struct log *log, struct log_offset *log_offset, const struct log_entry_hdr *hdr, void *dptr, uint16_t len);
+ 
+ typedef int (*lh_read_func_t)(struct log *, void *dptr, void *buf,
+         uint16_t offset, uint16_t len);
+@@ -298,6 +299,21 @@ int log_append_mbuf_typed_no_free(struct log *log, uint8_t module,
+ int log_append_mbuf_typed(struct log *log, uint8_t module, uint8_t level,
+                           uint8_t etype, struct os_mbuf *om);
+ 
++
++int log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype, const void *body, uint16_t body_len);
++int log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype, struct os_mbuf *om);
++
++int log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr);
++int log_read_body(struct log *log, void *dptr, void *buf, uint16_t off, uint16_t len);
++int log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om, uint16_t off, uint16_t len);
++
++/* 
++ * Walks through log entries and calls the provided walk_body_func callback for each entry.
++ * The callback receives the entry header and the body length (entry length excluding header).
++ * Returns 0 on success, nonzero on error or if walk was aborted.
++ */
++int log_walk_body(struct log *log, log_walk_body_func_t walk_body_func, struct log_offset *log_offset);
++
+ #if MYNEWT_VAL(LOG_CONSOLE)
+ struct log *log_console_get(void);
+ void log_console_init(void);
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index 4fa8581..7dcad11 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -503,3 +503,168 @@ log_flush(struct log *log)
+ err:
+     return (rc);
+ }
++
++int
++log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
++                const void *body, uint16_t body_len)
++{
++    struct log_entry_hdr *hdr;
++    uint8_t *entry;
++    int total_len;
++    int rc;
++
++    /* Allocate space for header + body */
++    total_len = LOG_ENTRY_HDR_SIZE + body_len;
++    entry = malloc(total_len);
++    if (!entry) {
++        return SYS_ENOMEM;
++    }
++
++    hdr = (struct log_entry_hdr *)entry;
++    
++    /* Prepare header */
++    rc = log_append_prepare(log, module, level, etype, hdr);
++    if (rc != 0) {
++        free(entry);
++        return rc;
++    }
++
++    /* Copy body after header */
++    if (body && body_len > 0) {
++        memcpy(entry + LOG_ENTRY_HDR_SIZE, body, body_len);
++    }
++
++    /* Append the full entry */
++    rc = log->l_log->log_append(log, entry, total_len);
++    
++    free(entry);
++    return rc;
++}
++
++int
++log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
++                     struct os_mbuf *om)
++{
++    struct os_mbuf *m;
++    int rc;
++
++    if (!log->l_log->log_append_mbuf) {
++        return SYS_ENOTSUP;
++    }
++
++    /* Get total mbuf length */
++    uint16_t body_len = OS_MBUF_PKTLEN(om);
++
++    /* Prepend space for header */
++    m = os_msys_get_pkthdr(LOG_ENTRY_HDR_SIZE, 0);
++    if (!m) {
++        return SYS_ENOMEM;
++    }
++
++    /* Prepare header in-place */
++    rc = log_append_prepare(log, module, level, etype,
++                           (struct log_entry_hdr *)m->om_data);
++    if (rc != 0) {
++        os_mbuf_free(m);
++        return rc;
++    }
++
++    /* Concatenate the body mbuf chain */
++    os_mbuf_concat(m, om);
++    if (rc != 0) {
++        os_mbuf_free(m);
++        return rc;
++    }
++
++    /* Append and consume the chain */
++    rc = log->l_log->log_append_mbuf(log, m);
++    if (rc == 0) {
++        /* On success, consume the original chain as specified */
++        os_mbuf_free_chain(om);
++    } else {
++        os_mbuf_free_chain(m);
++    }
++
++    return rc;
++}
++
++int
++log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr)
++{
++    int rc;
++
++    rc = log->l_log->log_read(log, dptr, hdr, 0, sizeof(*hdr));
++    if (rc >= 0 && rc < sizeof(*hdr)) {
++        /* Partial read */
++        return -1;
++    }
++
++    return (rc == sizeof(*hdr)) ? 0 : -1;
++}
++
++int
++log_read_body(struct log *log, void *dptr, void *buf, uint16_t off, uint16_t len)
++{
++    /* Body starts after header, so offset starts after header */
++    return log->l_log->log_read(log, dptr, buf, off + LOG_ENTRY_HDR_SIZE, len);
++}
++
++int
++log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om, 
++                    uint16_t off, uint16_t len)
++{
++    /* Body starts after header, so offset starts after header */
++    return log->l_log->log_read_mbuf(log, dptr, om, off + LOG_ENTRY_HDR_SIZE, len);
++}
++
++static int
++log_walk_body_adapter(struct log *log, struct log_offset *log_offset, 
++                      void *dptr, uint16_t len)
++{
++    log_walk_body_func_t walk_body_func;
++    struct log_entry_hdr hdr;
++    int rc;
++    uint16_t body_len;
++
++    walk_body_func = (log_walk_body_func_t)log_offset->lo_arg;
++    
++    /* Read the header first */
++    rc = log_read_hdr(log, dptr, &hdr);
++    if (rc != 0) {
++        return -1;
++    }
++
++    /* Calculate body length (total length minus header) */
++    if (len > LOG_ENTRY_HDR_SIZE) {
++        body_len = len - LOG_ENTRY_HDR_SIZE;
++    } else {
++        body_len = 0;
++    }
++
++    /* Call the body-walk callback */
++    return walk_body_func(log, log_offset, &hdr, dptr, body_len);
++}
++
++int
++log_walk_body(struct log *log, log_walk_body_func_t walk_body_func, 
++              struct log_offset *log_offset)
++{
++    int rc;
++    void *saved_arg;
++
++    if (!walk_body_func) {
++        return SYS_EINVAL;
++    }
++
++    /* Save the original lo_arg and set our callback function */
++    saved_arg = log_offset->lo_arg;
++    log_offset->lo_arg = (void *)walk_body_func;
++
++    /* Use the standard walk function with our adapter */
++    rc = log->l_log->log_walk(log, log_walk_body_adapter, log_offset);
++
++    /* Restore original lo_arg */
++    log_offset->lo_arg = saved_arg;
++
++    return rc;
++}
+diff --git a/sys/log/test_log_body.c b/sys/log/test_log_body.c
+new file mode 100644
+index 0000000..f8425ab
+--- /dev/null
++++ b/sys/log/test_log_body.c
+@@ -0,0 +1,138 @@
++#include "log_test.h"
++
++TEST_CASE(test_log_append_body)
++{
++    struct log my_log;
++    const char *test_body = "test body data";
++    char read_buf[64];
++    struct log_entry_hdr hdr;
++    void *dptr;
++    int rc;
++
++    /* Initialize log */
++    memset(&my_log, 0, sizeof(my_log));
++    rc = log_cbmem_register(&my_log);
++    TEST_ASSERT(rc == 0);
++    rc = log_register("test_log", &my_log, &log_cbmem_handler, NULL,
++                      LOG_LEVEL_DEBUG);
++    TEST_ASSERT(rc == 0);
++
++    /* Append body data */
++    rc = log_append_body(&my_log, LOG_MODULE_TEST, LOG_LEVEL_INFO, 
++                         LOG_ETYPE_STRING, test_body, strlen(test_body));
++    TEST_ASSERT(rc == 0);
++
++    /* Read back the header */
++    rc = log_read_hdr(&my_log, dptr, &hdr);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(hdr.ue_module == LOG_MODULE_TEST);
++    TEST_ASSERT(hdr.ue_level == LOG_LEVEL_INFO);
++    TEST_ASSERT(hdr.ue_etype == LOG_ETYPE_STRING);
++
++    /* Read back the body */
++    rc = log_read_body(&my_log, dptr, read_buf, 0, strlen(test_body));
++    TEST_ASSERT(rc == strlen(test_body));
++    TEST_ASSERT(memcmp(read_buf, test_body, strlen(test_body)) == 0);
++}
++
++TEST_CASE(test_log_append_mbuf_body)
++{
++    struct log my_log;
++    const char *test_body = "test mbuf body data";
++    struct os_mbuf *om;
++    char read_buf[64];
++    struct log_entry_hdr hdr;
++    void *dptr;
++    int rc;
++
++    /* Initialize log */
++    memset(&my_log, 0, sizeof(my_log));
++    rc = log_cbmem_register(&my_log);
++    TEST_ASSERT(rc == 0);
++    rc = log_register("test_mbuf_log", &my_log, &log_cbmem_handler, NULL,
++                      LOG_LEVEL_DEBUG);
++    TEST_ASSERT(rc == 0);
++
++    /* Create mbuf with test data */
++    om = os_msys_get(strlen(test_body), 0);
++    TEST_ASSERT_FATAL(om != NULL);
++    rc = os_mbuf_append(om, test_body, strlen(test_body));
++    TEST_ASSERT(rc == 0);
++
++    /* Append mbuf body data */
++    rc = log_append_mbuf_body(&my_log, LOG_MODULE_TEST, LOG_LEVEL_INFO,
++                               LOG_ETYPE_STRING, om);
++    TEST_ASSERT(rc == 0);
++
++    /* Read back the header */
++    rc = log_read_hdr(&my_log, dptr, &hdr);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(hdr.ue_module == LOG_MODULE_TEST);
++    TEST_ASSERT(hdr.ue_level == LOG_LEVEL_INFO);
++    TEST_ASSERT(hdr.ue_etype == LOG_ETYPE_STRING);
++
++    /* Read back the body */
++    rc = log_read_body(&my_log, dptr, read_buf, 0, strlen(test_body));
++    TEST_ASSERT(rc == strlen(test_body));
++    TEST_ASSERT(memcmp(read_buf, test_body, strlen(test_body)) == 0);
++}
++
++static int
++walk_body_test_func(struct log *log, struct log_offset *log_offset,
++                    const struct log_entry_hdr *hdr, void *dptr, uint16_t len)
++{
++    static int call_count = 0;
++    
++    call_count++;
++
++    /* Verify header */
++    TEST_ASSERT(hdr->ue_module == LOG_MODULE_TEST);
++    TEST_ASSERT(hdr->ue_level == LOG_LEVEL_INFO);
++    TEST_ASSERT(hdr->ue_etype == LOG_ETYPE_STRING);
++    TEST_ASSERT(len == strlen("test body data") || len == strlen("test mbuf body data"));
++
++    return 0; /* Continue walking */
++}
++
++TEST_CASE(test_log_walk_body)
++{
++    struct log my_log;
++    struct log_offset log_offset;
++    const char *test_body1 = "test body data";
++    const char *test_body2 = "test mbuf body data";
++    struct os_mbuf *om;
++    int rc;
++
++    /* Initialize log */
++    memset(&my_log, 0, sizeof(my_log));
++    rc = log_cbmem_register(&my_log);
++    TEST_ASSERT(rc == 0);
++    rc = log_register("test_walk_log", &my_log, &log_cbmem_handler, NULL,
++                      LOG_LEVEL_DEBUG);
++    TEST_ASSERT(rc == 0);
++
++    /* Append two entries */
++    rc = log_append_body(&my_log, LOG_MODULE_TEST, LOG_LEVEL_INFO,
++                        LOG_ETYPE_STRING, test_body1, strlen(test_body1));
++    TEST_ASSERT(rc == 0);
++
++    om = os_msys_get_pkthdr(0, 0);
++    TEST_ASSERT_FATAL(om != NULL);
++    rc = os_mbuf_append(om, test_body2, strlen(test_body2));
++    TEST_ASSERT(rc == 0);
++    rc = log_append_mbuf_body(&my_log, LOG_MODULE_TEST, LOG_LEVEL_INFO,
++                              LOG_ETYPE_STRING, om);
++    TEST_ASSERT(rc == 0);
++
++    /* Walk through entries */
++    memset(&log_offset, 0, sizeof(log_offset));
++    rc = log_walk_body(&my_log, walk_body_test_func, &log_offset);
++    TEST_ASSERT(rc == 0);
++}
++
++TEST_SUITE(log_body_suite)
++{
++    test_log_append_body();
++    test_log_append_mbuf_body();
++    test_log_walk_body();
++}
+diff --git a/sys/log/test_log_body_fixed.c b/sys/log/test_log_body_fixed.c
+new file mode 100644
+index 0000000..4ef900d
+--- /dev/null
++++ b/sys/log/test_log_body_fixed.c
+@@ -0,0 +1,59 @@
++#include "log_test.h"
++
++TEST_CASE(test_log_append_body)
++{
++    struct log my_log;
++    const char *test_body = "test body data";
++    char read_buf[64];
++    struct log_entry_hdr hdr;
++    void *dptr;
++    int rc;
++    struct log_offset log_offset;
++
++    /* Initialize log */
++    memset(&my_log, 0, sizeof(my_log));
++    rc = log_cbmem_register(&my_log);
++    TEST_ASSERT(rc == 0);
++    rc = log_register("test_log", &my_log, &log_cbmem_handler, NULL,
++                      LOG_LEVEL_DEBUG);
++    TEST_ASSERT(rc == 0);
++
++    /* Append body data */
++    rc = log_append_body(&my_log, LOG_MODULE_TEST, LOG_LEVEL_INFO, 
++                         LOG_ETYPE_STRING, test_body, strlen(test_body));
++    TEST_ASSERT(rc == 0);
++
++    /* Get dptr for the last entry */
++    memset(&log_offset, 0, sizeof(log_offset));
++    log_offset.lo_ts = -1;  /* Get last entry */
++    
++    /* Walk to get the dptr of last entry */
++    struct {
++        void *dptr;
++        int found;
++    } walk_arg = { NULL, 0 };
++    
++    log_offset.lo_arg = &walk_arg;
++    rc = log_walk(&my_log, log_read_hdr_walk, &log_offset);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(walk_arg.found);
++    
++    dptr = walk_arg.dptr;
++
++    /* Read back the header */
++    rc = log_read_hdr(&my_log, dptr, &hdr);
++    TEST_ASSERT(rc == 0);
++    TEST_ASSERT(hdr.ue_module == LOG_MODULE_TEST);
++    TEST_ASSERT(hdr.ue_level == LOG_LEVEL_INFO);
++    TEST_ASSERT(hdr.ue_etype == LOG_ETYPE_STRING);
++
++    /* Read back the body */
++    rc = log_read_body(&my_log, dptr, read_buf, 0, strlen(test_body));
++    TEST_ASSERT(rc == strlen(test_body));
++    TEST_ASSERT(memcmp(read_buf, test_body, strlen(test_body)) == 0);
++}
++
++TEST_SUITE(log_body_suite)
++{
++    test_log_append_body();
++}

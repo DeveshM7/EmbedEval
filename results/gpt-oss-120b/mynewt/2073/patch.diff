@@ -1,0 +1,106 @@
+diff --git a/sys/flash_map/include/flash_map/flash_map.h b/sys/flash_map/include/flash_map/flash_map.h
+index 217cf53..0bbdd53 100644
+--- a/sys/flash_map/include/flash_map/flash_map.h
++++ b/sys/flash_map/include/flash_map/flash_map.h
+@@ -135,4 +135,12 @@ int flash_area_id_to_image_slot(int area_id);
+ }
+ #endif
+ 
++
++/**
++ * Add any missing default flash map areas to the current flash map.
++ * This function inspects the default flash map (sysflash_map_dflt) and
++ * appends any non‑overlapping, non‑duplicate areas to the active map.
++ */
++void flash_map_add_new_dflt_areas_extern(void);
++
+ #endif /* H_UTIL_FLASH_MAP_ */
+diff --git a/sys/flash_map/include/flash_map/flash_map.h.patch b/sys/flash_map/include/flash_map/flash_map.h.patch
+new file mode 100644
+index 0000000..91d1768
+--- /dev/null
++++ b/sys/flash_map/include/flash_map/flash_map.h.patch
+@@ -0,0 +1,20 @@
++*** Begin Patch
++*** Update File: sys/flash_map/include/flash_map/flash_map.h
++@@
++ int flash_area_id_to_image_slot(int area_id);
+++
+++/**
+++ * Add any missing default flash map areas to the current flash map.
+++ *
+++ * The function inspects the default flash map (generated from the BSP
+++ * configuration and referenced via the symbol `sysflash_map_dflt`).  For each
+++ * default area that is *not* already present in the manufacturing flash map
+++ * (identified by duplicate IDs) and that does not overlap an existing area,
+++ * the area is appended to the map.
+++ *
+++ * The function is intentionally exposed as an external API so that tests and
+++ * external callers can trigger the merge logic without having to replicate the
+++ * internal implementation details.  It takes no arguments and returns nothing.
+++ */
+++void flash_map_add_new_dflt_areas_extern(void);
++*** End Patch
+diff --git a/sys/flash_map/src/flash_map.c b/sys/flash_map/src/flash_map.c
+index 88c11e5..cda8fca 100644
+--- a/sys/flash_map/src/flash_map.c
++++ b/sys/flash_map/src/flash_map.c
+@@ -28,6 +28,10 @@
+ #include "mfg/mfg.h"
+ #include "flash_map/flash_map.h"
+ 
++// Global storage for manufacturing flash map areas
++static struct flash_area mfg_areas[MYNEWT_VAL(FLASH_MAP_MAX_AREAS)];
++static int mfg_num_areas;
++
+ const struct flash_area *flash_map;
+ int flash_map_entries;
+ 
+@@ -393,7 +397,6 @@ flash_map_read_mfg(int max_areas,
+ void
+ flash_map_init(void)
+ {
+-    static struct flash_area mfg_areas[MYNEWT_VAL(FLASH_MAP_MAX_AREAS)];
+ 
+     int num_areas;
+     int rc;
+@@ -425,3 +428,39 @@ flash_map_init(void)
+         flash_map_entries = num_areas;
+     }
+ }
++
++/*
++ * Merge default flash map areas that are missing from the manufacturing map.
++ */
++void flash_map_add_new_dflt_areas_extern(void)
++{
++    int i, j;
++    // Iterate over default map entries
++    for (i = 0; i < (int)(sizeof sysflash_map_dflt / sizeof sysflash_map_dflt[0]); i++) {
++        const struct flash_area *def = &sysflash_map_dflt[i];
++        bool duplicate = false;
++        bool overlap = false;
++        for (j = 0; j < mfg_num_areas; j++) {
++            const struct flash_area *exist = &mfg_areas[j];
++            if (def->fa_id == exist->fa_id) {
++                duplicate = true;
++                break;
++            }
++            if (def->fa_device_id == exist->fa_device_id) {
++                // Check address range overlap
++                if (!(def->fa_off + def->fa_size <= exist->fa_off ||
++                      def->fa_off >= exist->fa_off + exist->fa_size)) {
++                    overlap = true;
++                }
++            }
++        }
++        if (!duplicate && !overlap) {
++            if (mfg_num_areas < MYNEWT_VAL(FLASH_MAP_MAX_AREAS)) {
++                mfg_areas[mfg_num_areas++] = *def;
++            }
++        }
++    }
++    // Update global flash_map pointer and entry count
++    flash_map = mfg_areas;
++    flash_map_entries = mfg_num_areas;
++}

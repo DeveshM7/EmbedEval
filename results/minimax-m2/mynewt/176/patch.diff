@@ -1,0 +1,121 @@
+diff --git a/fs/fcb/include/fcb/fcb.h b/fs/fcb/include/fcb/fcb.h
+index db19a2a..d852ee4 100644
+--- a/fs/fcb/include/fcb/fcb.h
++++ b/fs/fcb/include/fcb/fcb.h
+@@ -128,7 +128,8 @@ int fcb_free_sector_cnt(struct fcb *fcb);
+ int fcb_is_empty(struct fcb *fcb);
+ 
+ int
+-fcb_offset_last_n(struct fcb *fcb, uint8_t entries, uint32_t *last_n_off);
++fcb_offset_last_n(struct fcb *fcb, uint8_t entries,
++                      struct fcb_entry *entry);
+ 
+ /*
+  * Clears FCB passed to it
+diff --git a/fs/fcb/src/fcb.c b/fs/fcb/src/fcb.c
+index 0e210df..b03d07a 100644
+--- a/fs/fcb/src/fcb.c
++++ b/fs/fcb/src/fcb.c
+@@ -205,36 +205,65 @@ fcb_sector_hdr_read(struct fcb *fcb, struct flash_area *fap,
+ }
+ 
+ /**
+- * Finds n-th element offset
+- * @param0 ptr to fcb
+- * @param1 n number of entries to calculate offset before
+- * @param2 ptr to the offset before to be returned
++ * Finds n-th element from the end of the FCB.
++ * @param fcb Pointer to FCB
++ * @param entries Number of entries back from the end (1 = most recent)
++ * @param entry Pointer to fcb_entry structure to fill
+  * @return 0 on success; non-zero on failure
+  */
+ int
+-fcb_offset_last_n(struct fcb *fcb, uint8_t entries, uint32_t *last_n_off)
++fcb_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *entry)
+ {
+     struct fcb_entry loc;
+-    struct fcb_entry start;
++    /* struct fcb_entry *offsets; */
++    int total_entries;
+     int i;
+ 
++    /* Check if FCB is empty */
++    if (fcb_is_empty(fcb)) {
++        return -1;
++    }
++
++    /* First pass: count total entries */
++    total_entries = 0;
++    memset(&loc, 0, sizeof(loc));
++    while (!fcb_getnext(fcb, &loc)) {
++        total_entries++;
++    }
++
++    /* 
++     * If n exceeds total entries, return the oldest (first) entry.
++     * The oldest entry is at index 0.
++     */
++    if (entries > total_entries) {
++        entries = total_entries;
++    }
++
++    /* 
++     * We want the entry at position (total_entries - entries) from the start.
++     * For example, with 5 entries, wanting 2nd from end (n=2):
++     * - total_entries = 5, entries = 2
++     * - Want index (5 - 2) = 3, which is the 2nd from end.
++     * 
++     * When n exceeds total entries (e.g., n=10, total=5):
++     * - entries is clamped to 5
++     * - Want index (5 - 5) = 0, which is the oldest.
++     */
++    int target_index = total_entries - entries;
++
++    /* Second pass: find the entry at target_index */
+     i = 0;
+     memset(&loc, 0, sizeof(loc));
+     while (!fcb_getnext(fcb, &loc)) {
+-        if (i == 0) {
+-            /* Start from the beginning of fcb entries */
+-            *last_n_off = loc.fe_elem_off;
+-            start = loc;
+-        }
+-        /* Update last_n_off after n entries and keep updating */
+-        if (i >= (entries - 1)) {
+-            fcb_getnext(fcb, &start);
+-            *last_n_off = start.fe_elem_off;
++        if (i == target_index) {
++            *entry = loc;
++            return 0;
+         }
+         i++;
+     }
+ 
+-    return 0;
++    /* Should not reach here */
++    return -1;
+ }
+ 
+ /**
+diff --git a/sys/log/full/src/log_fcb.c b/sys/log/full/src/log_fcb.c
+index ea104d4..a7539bd 100644
+--- a/sys/log/full/src/log_fcb.c
++++ b/sys/log/full/src/log_fcb.c
+@@ -249,13 +249,14 @@ log_fcb_rtr_erase(struct log *log, void *arg)
+     }
+ 
+     /* Calculate offset of n-th last entry */
+-    rc = fcb_offset_last_n(fcb, fcb_log->fl_entries, &offset);
++    struct fcb_entry entry;
++    rc = fcb_offset_last_n(fcb, fcb_log->fl_entries, &entry);
+     if (rc) {
+         goto err;
+     }
+ 
+     /* Copy to scratch */
+-    rc = log_fcb_copy(log, fcb, &fcb_scratch, offset);
++    rc = log_fcb_copy(log, fcb, &fcb_scratch, entry.fe_elem_off);
+     if (rc) {
+         goto err;
+     }

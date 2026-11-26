@@ -1,0 +1,429 @@
+diff --git a/boot/stub/include/boot/stub/boot_stub.h b/boot/stub/include/boot/stub/boot_stub.h
+new file mode 100644
+index 0000000..245051d
+--- /dev/null
++++ b/boot/stub/include/boot/stub/boot_stub.h
+@@ -0,0 +1,41 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this license except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++ */
++
++#ifndef H_BOOT_STUB_
++#define H_BOOT_STUB_
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Stub implementations of bootloader APIs for native builds */
++int boot_current_slot(void);
++int flash_area_id_from_image_slot(int slot);
++int flash_area_open(int id, const void **fa);
++int flash_area_read_is_empty(const void *fa, uint32_t addr, void *dst, uint32_t len);
++int flash_area_read(const void *fa, uint32_t addr, void *dst, uint32_t len);
++void flash_area_close(const void *fa);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* H_BOOT_STUB_ */
+diff --git a/boot/stub/pkg.yml b/boot/stub/pkg.yml
+new file mode 100644
+index 0000000..829d4cb
+--- /dev/null
++++ b/boot/stub/pkg.yml
+@@ -0,0 +1,27 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this license except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: boot/stub
++pkg.description: "Bootloader API stubs for native builds."
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++    - boot
++    - stub
++pkg.deps:
++    - "@apache-mynewt-core/os"
++    - "@apache-mynewt-core/hal/hal_bsp"
+diff --git a/boot/stub/src/boot_stub.c b/boot/stub/src/boot_stub.c
+new file mode 100644
+index 0000000..668d0d2
+--- /dev/null
++++ b/boot/stub/src/boot_stub.c
+@@ -0,0 +1,78 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this license except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <stddef.h>
++#include <stdlib.h>
++#include "boot/stub/boot_stub.h"
++
++int
++boot_current_slot(void)
++{
++    return 0;
++}
++
++int
++flash_area_id_from_image_slot(int slot)
++{
++    /* Return a dummy flash area ID */
++    return slot + 100;
++}
++
++struct flash_area {
++    int fa_id;
++    uint32_t fa_size;
++};
++
++int
++flash_area_open(int id, const void **fa)
++{
++    struct flash_area *area;
++
++    area = malloc(sizeof(*area));
++    if (!area) {
++        return -1;
++    }
++
++    area->fa_id = id;
++    area->fa_size = 128 * 1024; /* 128KB dummy size */
++
++    *fa = area;
++    return 0;
++}
++
++int
++flash_area_read_is_empty(const void *fa, uint32_t addr, void *dst, uint32_t len)
++{
++    /* Return 1 to indicate empty (all 0xFF) */
++    memset(dst, 0xFF, len);
++    return 1;
++}
++
++int
++flash_area_read(const void *fa, uint32_t addr, void *dst, uint32_t len)
++{
++    /* Return -1 to indicate error */
++    return -1;
++}
++
++void
++flash_area_close(const void *fa)
++{
++    free((void *)fa);
++}
+diff --git a/imgmgr_c.patch b/imgmgr_c.patch
+new file mode 100644
+index 0000000..9b17757
+--- /dev/null
++++ b/imgmgr_c.patch
+@@ -0,0 +1,29 @@
++--- a/mgmt/imgmgr/src/imgmgr.c
+++++ b/mgmt/imgmgr/src/imgmgr.c
++@@ -302,6 +302,27 @@ imgr_my_version(struct image_version *ver)
++     return imgr_read_info(boot_current_slot, ver, NULL, NULL);
++ }
++ 
+++int
+++imgr_get_image_hash(uint8_t *hash)
+++{
+++    int rc;
+++    uint8_t tmp_hash[IMGMGR_HASH_LEN];
+++    
+++    if (MYNEWT_VAL(IMGMGR_DUMMY_HDR)) {
+++        /* Return dummy hash for native builds - only first 4 bytes */
+++        memset(hash, 0xAB, 4);
+++        return 0;
+++    }
+++    
+++    rc = imgr_read_info(boot_current_slot, NULL, tmp_hash, NULL);
+++    if (rc == 0) {
+++        memcpy(hash, tmp_hash, 4);
+++    }
+++    return rc;
+++}
+++
++ /**
++  * Compares two image version numbers in a semver-compatible way.
++  *
++  * @param a                     The first version to compare.
+diff --git a/mgmt/imgmgr/include/imgmgr/imgmgr.h b/mgmt/imgmgr/include/imgmgr/imgmgr.h
+index ff6c1f4..3d7192a 100644
+--- a/mgmt/imgmgr/include/imgmgr/imgmgr.h
++++ b/mgmt/imgmgr/include/imgmgr/imgmgr.h
+@@ -101,6 +101,7 @@ int imgr_read_info(int area_id, struct image_version *ver, uint8_t *hash, uint32
+  * Returns version number of current image (if available).
+  */
+ int imgr_my_version(struct image_version *ver);
++int imgr_get_image_hash(uint8_t *hash);
+ 
+ /**
+  * @brief Configures a callback that gets called whenever a valid image upload
+diff --git a/mgmt/imgmgr/src/imgmgr.c b/mgmt/imgmgr/src/imgmgr.c
+index 81c2205..7634f19 100644
+--- a/mgmt/imgmgr/src/imgmgr.c
++++ b/mgmt/imgmgr/src/imgmgr.c
+@@ -210,6 +210,21 @@ int
+ imgr_read_info(int image_slot, struct image_version *ver, uint8_t *hash,
+                uint32_t *flags)
+ {
++
++    if (MYNEWT_VAL(IMGMGR_DUMMY_HDR)) {
++        /* Return dummy image info for native builds */
++        if (ver) {
++            memset(ver, 0, sizeof(*ver));
++        }
++        if (hash) {
++            memset(hash, 0xAB, IMGMGR_HASH_LEN);
++        }
++        if (flags) {
++            *flags = 0;
++        }
++        return 0;
++    }
++
+     struct image_header *hdr;
+     struct image_tlv *tlv;
+     int rc = -1;
+@@ -304,6 +319,25 @@ end:
+ int
+ imgr_my_version(struct image_version *ver)
+ {
++
++int
++imgr_get_image_hash(uint8_t *hash)
++{
++    int rc;
++    uint8_t tmp_hash[IMGMGR_HASH_LEN];
++    
++    if (MYNEWT_VAL(IMGMGR_DUMMY_HDR)) {
++        /* Return dummy hash for native builds - only first 4 bytes */
++        memset(hash, 0xAB, 4);
++        return 0;
++    }
++    
++    rc = imgr_read_info(boot_current_slot, NULL, tmp_hash, NULL);
++    if (rc == 0) {
++        memcpy(hash, tmp_hash, 4);
++    }
++    return rc;
++}
+     return imgr_read_info(boot_current_slot, ver, NULL, NULL);
+ }
+ 
+diff --git a/mgmt/imgmgr/syscfg.yml b/mgmt/imgmgr/syscfg.yml
+index 9ec9677..e45efb8 100644
+--- a/mgmt/imgmgr/syscfg.yml
++++ b/mgmt/imgmgr/syscfg.yml
+@@ -3,7 +3,7 @@
+ # distributed with this work for additional information
+ # regarding copyright ownership.  The ASF licenses this file
+ # to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
++# "License"); you may not use this license except in compliance
+ # with the License.  You may obtain a copy of the License at
+ #
+ #  http://www.apache.org/licenses/LICENSE-2.0
+@@ -39,6 +39,11 @@ syscfg.defs:
+         description: >
+             Send verbose error message in responses.
+         value: 0
++    IMGMGR_DUMMY_HDR:
++        description: >
++            Use dummy image header data for image-hash logging in native builds
++            without a real image.
++        value: 0
+     IMGMGR_SYSINIT_STAGE:
+         description: >
+             Sysinit stage for image management functionality.
+diff --git a/sys/log/common/include/log_common/log_common.h b/sys/log/common/include/log_common/log_common.h
+index a9ee6a1..65b4849 100644
+--- a/sys/log/common/include/log_common/log_common.h
++++ b/sys/log/common/include/log_common/log_common.h
+@@ -74,6 +74,7 @@ struct log;
+ #if MYNEWT_VAL(LOG_VERSION) > 2
+ #define LOG_ETYPE_CBOR           (1)
+ #define LOG_ETYPE_BINARY         (2)
++#define LOG_FLAGS_IMAGE_HASH    (0x80)
+ #endif
+ 
+ /* Logging medium */
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 968ddcd..c9a07bb 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -81,7 +81,7 @@ typedef int (*lh_append_func_t)(struct log *, void *buf, int len);
+ typedef int (*lh_append_body_func_t)(struct log *log,
+                                      const struct log_entry_hdr *hdr,
+                                      const void *body, int body_len);
+-typedef int (*lh_append_mbuf_func_t)(struct log *, const struct os_mbuf *om);
++typedef int (*lh_append_mbuf_func_t)(struct log *, struct os_mbuf *om);
+ typedef int (*lh_append_mbuf_body_func_t)(struct log *log,
+                                           const struct log_entry_hdr *hdr,
+                                           const struct os_mbuf *om);
+@@ -136,6 +136,8 @@ struct log_entry_hdr {
+ #endif
+ 
+ #define LOG_ENTRY_HDR_SIZE (sizeof(struct log_entry_hdr))
++#define LOG_BASE_ENTRY_HDR_SIZE (15)
++#define LOG_HDR_SIZE (MYNEWT_VAL(LOG_FLAGS_IMAGE_HASH) ? (LOG_BASE_ENTRY_HDR_SIZE + 4) : LOG_BASE_ENTRY_HDR_SIZE)
+ 
+ #define LOG_MODULE_STR(module)      log_module_get_name(module)
+ 
+@@ -528,6 +530,17 @@ int log_read_body(struct log *log, void *dptr, void *buf, uint16_t off,
+                   uint16_t len);
+ int log_read_mbuf(struct log *log, void *dptr, struct os_mbuf *om, uint16_t off,
+                   uint16_t len);
++
++/**
++ * @brief Get the length of the log entry header.
++ *
++ * @param hdr                   The log entry header.
++ *
++ * @return                      The length of the header in bytes.
++ */
++uint16_t log_hdr_len(const struct log_entry_hdr *hdr);
++int log_read_mbuf(struct log *log, void *dptr, struct os_mbuf *om, uint16_t off,
++                  uint16_t len);
+ /**
+  * @brief Reads data from the body of a log entry into an mbuf.
+  *
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index 0bff22e..6143d98 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -25,6 +25,19 @@
+ #include "os/mynewt.h"
+ #include "cbmem/cbmem.h"
+ #include "log/log.h"
++
++uint16_t
++log_hdr_len(const struct log_entry_hdr *hdr)
++{
++#if MYNEWT_VAL(LOG_VERSION) == 3 && MYNEWT_VAL(LOG_FLAGS_IMAGE_HASH)
++    if (hdr->ue_etype & LOG_FLAGS_IMAGE_HASH) {
++        return LOG_BASE_ENTRY_HDR_SIZE + 4;
++    }
++#endif
++    (void)hdr; /* Suppress unused parameter warning */
++    return LOG_BASE_ENTRY_HDR_SIZE;
++}
++
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+ #include "config/config.h"
+ #endif
+diff --git a/sys/log/full/src/log_cbmem.c b/sys/log/full/src/log_cbmem.c
+index bf4e948..9446178 100644
+--- a/sys/log/full/src/log_cbmem.c
++++ b/sys/log/full/src/log_cbmem.c
+@@ -65,7 +65,7 @@ log_cbmem_append_body(struct log *log, const struct log_entry_hdr *hdr,
+ }
+ 
+ static int
+-log_cbmem_append_mbuf(struct log *log, const struct os_mbuf *om)
++log_cbmem_append_mbuf(struct log *log, struct os_mbuf *om)
+ {
+     struct cbmem *cbmem;
+     int rc;
+diff --git a/sys/log/full/src/log_fcb.c b/sys/log/full/src/log_fcb.c
+index 8e831ac..6311ced 100644
+--- a/sys/log/full/src/log_fcb.c
++++ b/sys/log/full/src/log_fcb.c
+@@ -325,7 +325,7 @@ log_fcb_write_mbuf(struct fcb_entry *loc, const struct os_mbuf *om)
+ }
+ 
+ static int
+-log_fcb_append_mbuf(struct log *log, const struct os_mbuf *om)
++log_fcb_append_mbuf(struct log *log, struct os_mbuf *om)
+ {
+     struct fcb *fcb;
+     struct fcb_entry loc;
+diff --git a/sys/log/full/src/log_fcb_slot1.c b/sys/log/full/src/log_fcb_slot1.c
+index a3ad43a..ea09558 100644
+--- a/sys/log/full/src/log_fcb_slot1.c
++++ b/sys/log/full/src/log_fcb_slot1.c
+@@ -62,7 +62,7 @@ log_fcb_slot1_append_body(struct log *log, const struct log_entry_hdr *hdr,
+ }
+ 
+ static int
+-log_fcb_slot1_append_mbuf(struct log *log, const struct os_mbuf *om)
++log_fcb_slot1_append_mbuf(struct log *log, struct os_mbuf *om)
+ {
+     return LOG_FCB_SLOT1_CALL(log, log_append_mbuf, om);
+ }
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index a3f4569..2a17431 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -4,7 +4,7 @@
+ # distributed with this work for additional information
+ # regarding copyright ownership.  The ASF licenses this file
+ # to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
++# "License"); you may not use this license except in compliance
+ # with the License.  You may obtain a copy of the License at
+ #
+ #  http://www.apache.org/licenses/LICENSE-2.0
+@@ -32,6 +32,12 @@ syscfg.defs:
+         description: 'Limits what level log messages are compiled in.'
+         value: 0
+ 
++    LOG_FLAGS_IMAGE_HASH:
++        description: >
++            Enable image hash in log entries. When enabled, a 4-byte image hash
++            is stored immediately after the base log entry header.
++        value: 0
++
+     LOG_FCB:
+         description: 'Support logging to FCB.'
+         value: 0

@@ -1,0 +1,124 @@
+diff --git a/kernel/os/include/os/os_mbuf.h b/kernel/os/include/os/os_mbuf.h
+index 40dc16a..3daa785 100644
+--- a/kernel/os/include/os/os_mbuf.h
++++ b/kernel/os/include/os/os_mbuf.h
+@@ -655,3 +655,16 @@ int os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len);
+  *   @} OSMbuf
+  * @} OSKernel
+  */
++
++/**
++ * Packs two mbuf chains into a single compact chain. The resulting chain
++ * contains no empty mbufs, and all mbufs except possibly the last are full.
++ * If m2 is NULL, the function packs the single chain m1.
++ *
++ * @param m1 First mbuf chain.
++ * @param m2 Second mbuf chain to be appended (or NULL).
++ *
++ * @return Pointer to the head of the packed mbuf chain on success,
++ *         NULL on error.
++ */
++struct os_mbuf *os_mbuf_pack_chains(struct os_mbuf *m1, struct os_mbuf *m2);
+diff --git a/kernel/os/src/os_mbuf.c b/kernel/os/src/os_mbuf.c
+index 297ccaf..c60432e 100644
+--- a/kernel/os/src/os_mbuf.c
++++ b/kernel/os/src/os_mbuf.c
+@@ -1036,3 +1036,98 @@ os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len)
+ 
+     return 0;
+ }
++
++/**
++ * Pack one or two mbuf chains into a single compact chain
++ */
++struct os_mbuf *
++os_mbuf_pack_chains(struct os_mbuf *m1, struct os_mbuf *m2)
++{
++    struct os_mbuf *dst;
++    struct os_mbuf *src;
++    struct os_mbuf *next;
++    struct os_mbuf *last;
++    uint8_t *data;
++    uint16_t copy_len;
++    uint16_t dst_room;
++    int rc;
++
++    if (!m1) {
++        return NULL;
++    }
++
++    /* First concatenate m2 onto m1 if provided */
++    if (m2) {
++        /* Find last mbuf of m1 chain */
++        last = m1;
++        while (SLIST_NEXT(last, om_next) != NULL) {
++            last = SLIST_NEXT(last, om_next);
++        }
++        /* Append m2 chain */
++        SLIST_NEXT(last, om_next) = m2;
++
++        /* Update packet header length if m1 has one */
++        if (OS_MBUF_IS_PKTHDR(m1)) {
++            if (OS_MBUF_IS_PKTHDR(m2)) {
++                OS_MBUF_PKTHDR(m1)->omp_len += OS_MBUF_PKTHDR(m2)->omp_len;
++            } else {
++                for (src = m2; src != NULL; src = SLIST_NEXT(src, om_next)) {
++                    OS_MBUF_PKTHDR(m1)->omp_len += src->om_len;
++                }
++            }
++        }
++    }
++
++    /* Pack data - eliminate empty mbufs and fill available space */
++    dst = m1;
++    src = SLIST_NEXT(dst, om_next);
++    while (src) {
++        /* Compact destination mbuf to eliminate leading space */
++        if (OS_MBUF_IS_PKTHDR(dst)) {
++            dst->om_data = (uint8_t *)dst + sizeof(*dst) + sizeof(struct os_mbuf_pkthdr);
++        } else {
++            dst->om_data = (uint8_t *)dst + sizeof(*dst);
++        }
++        dst_room = OS_MBUF_TRAILINGSPACE(dst);
++
++        /* Move all data from source to destination, compacting */
++        while (src && src->om_len > 0) {
++            if (dst_room == 0) {
++                dst = SLIST_NEXT(dst, om_next);
++                if (!dst) {
++                    break;
++                }
++                if (OS_MBUF_IS_PKTHDR(dst)) {
++                    dst->om_data = (uint8_t *)dst + sizeof(*dst) + sizeof(struct os_mbuf_pkthdr);
++                } else {
++                    dst->om_data = (uint8_t *)dst + sizeof(*dst);
++                }
++                dst_room = OS_MBUF_TRAILINGSPACE(dst);
++                continue;
++            }
++
++            copy_len = src->om_len;
++            if (copy_len > dst_room) {
++                copy_len = dst_room;
++            }
++            data = src->om_data;
++            src->om_data += copy_len;
++            src->om_len -= copy_len;
++
++            rc = os_mbuf_append(dst, data, copy_len);
++            if (rc != 0) {
++                return m1;
++            }
++            dst_room -= copy_len;
++        }
++
++        if (src && src->om_len == 0) {
++            next = SLIST_NEXT(src, om_next);
++            os_mbuf_free(src);
++            SLIST_NEXT(dst, om_next) = next;
++            src = next;
++        }
++    }
++
++    return m1;
++}

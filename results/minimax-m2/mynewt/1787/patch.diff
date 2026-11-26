@@ -1,0 +1,230 @@
+diff --git a/encoding/cborattr/include/cborattr/cborattr.h b/encoding/cborattr/include/cborattr/cborattr.h
+index 9e69ca9..f1999d1 100644
+--- a/encoding/cborattr/include/cborattr/cborattr.h
++++ b/encoding/cborattr/include/cborattr/cborattr.h
+@@ -145,6 +145,38 @@ int cbor_read_array(struct CborValue *, const struct cbor_array_t *);
+ int cbor_read_flat_attrs(const uint8_t *data, int len,
+                          const struct cbor_attr_t *attrs);
+ struct os_mbuf;
++
++/* Output encoder structures */
++struct cbor_out_arr_val_t {
++    struct cbor_out_val_t *elems;
++    size_t len;
++};
++
++struct cbor_out_val_t {
++    CborAttrType type;
++    union {
++        long long int integer;
++        long long unsigned int uinteger;
++        double real;
++        float fval;
++        const char *string;
++        bool boolean;
++        struct {
++            const uint8_t *data;
++            size_t len;
++        } bytestring;
++        struct cbor_out_arr_val_t array;
++        struct cbor_out_attr_t *obj;
++    } val;
++};
++
++struct cbor_out_attr_t {
++    const char *attribute;
++    struct cbor_out_val_t val;
++    bool omit;
++};
++
++int cbor_write_object_msys(const struct cbor_out_attr_t *attrs, struct os_mbuf **out_om);
+ int cbor_read_mbuf_attrs(struct os_mbuf *m, uint16_t off, uint16_t len,
+                          const struct cbor_attr_t *attrs);
+ 
+diff --git a/encoding/cborattr/src/cborattr.c b/encoding/cborattr/src/cborattr.c
+index 93a85f1..8c5d0b9 100644
+--- a/encoding/cborattr/src/cborattr.c
++++ b/encoding/cborattr/src/cborattr.c
+@@ -418,3 +418,182 @@ cbor_read_mbuf_attrs(struct os_mbuf *m, uint16_t off, uint16_t len,
+     }
+     return cbor_read_object(&value, attrs);
+ }
++
++#include <cborattr/cborattr.h>
++#include <tinycbor/cbor.h>
++#include <tinycbor/cbor_mbuf_writer.h>
++
++/* Forward declaration */
++static int cbor_write_val(struct CborEncoder *encoder, const struct cbor_out_val_t *val);
++static int cbor_write_array(struct CborEncoder *encoder, const struct cbor_out_arr_val_t *array);
++
++/*
++ * Encode a single value based on its type.
++ */
++static int
++cbor_write_val(struct CborEncoder *encoder, const struct cbor_out_val_t *val)
++{
++    CborError err = CborNoError;
++
++    switch (val->type) {
++    case CborAttrNullType:
++        err = cbor_encode_null(encoder);
++        break;
++    case CborAttrBooleanType:
++        err = cbor_encode_boolean(encoder, val->val.boolean);
++        break;
++    case CborAttrIntegerType:
++        err = cbor_encode_int(encoder, val->val.integer);
++        break;
++    case CborAttrUnsignedIntegerType:
++        err = cbor_encode_uint(encoder, val->val.uinteger);
++        break;
++#if FLOAT_SUPPORT
++    case CborAttrFloatType:
++        err = cbor_encode_float(encoder, val->val.fval);
++        break;
++    case CborAttrDoubleType:
++        err = cbor_encode_double(encoder, val->val.real);
++        break;
++#endif
++    case CborAttrByteStringType:
++        err = cbor_encode_byte_string(encoder, val->val.bytestring.data,
++                                      val->val.bytestring.len);
++        break;
++    case CborAttrTextStringType:
++        err = cbor_encode_text_string(encoder, val->val.string,
++                                      strlen(val->val.string));
++        break;
++    case CborAttrArrayType:
++        err = cbor_write_array(encoder, &val->val.array);
++        break;
++    case CborAttrObjectType: {
++        CborEncoder map_encoder;
++        const struct cbor_out_attr_t *attr;
++        
++        err = cbor_encoder_create_map(encoder, &map_encoder, CborIndefiniteLength);
++        if (err != CborNoError) {
++            break;
++        }
++        
++        /* Process each attribute in the object */
++        for (attr = val->val.obj; attr->val.type != 0 && attr->attribute != NULL; attr++) {
++            /* Skip if omit is true */
++            if (attr->omit) {
++                continue;
++            }
++
++            /* Encode the key (attribute name) */
++            err = cbor_encode_text_stringz(&map_encoder, attr->attribute);
++            if (err != CborNoError) {
++                break;
++            }
++
++            /* Encode the value */
++            err = cbor_write_val(&map_encoder, &attr->val);
++            if (err != CborNoError) {
++                break;
++            }
++        }
++        
++        err |= cbor_encoder_close_container(encoder, &map_encoder);
++        break;
++    }
++    default:
++        err = CborErrorIllegalType;
++        break;
++    }
++
++    return err;
++}
++
++/*
++ * Encode an array of values.
++ */
++static int
++cbor_write_array(struct CborEncoder *encoder, const struct cbor_out_arr_val_t *array)
++{
++    CborError err = CborNoError;
++    CborEncoder array_encoder;
++    size_t i;
++    
++    err = cbor_encoder_create_array(encoder, &array_encoder, array->len);
++    if (err != CborNoError) {
++        return err;
++    }
++    
++    for (i = 0; i < array->len; i++) {
++        err = cbor_write_val(&array_encoder, &array->elems[i]);
++        if (err != CborNoError) {
++            break;
++        }
++    }
++    
++    err |= cbor_encoder_close_container(encoder, &array_encoder);
++    return err;
++}
++
++/*
++ * Encode a CBOR object from attribute list into an mbuf chain.
++ * 
++ * @param attrs    Null-terminated array of attributes
++ * @param out_om   Pointer to mbuf chain pointer to write to
++ * 
++ * @return         0 on success, non-zero on failure
++ */
++int
++cbor_write_object_msys(const struct cbor_out_attr_t *attrs, struct os_mbuf **out_om)
++{
++    struct cbor_mbuf_writer writer;
++    CborEncoder encoder;
++    CborError err = CborNoError;
++    const struct cbor_out_attr_t *attr;
++    struct os_mbuf *m;
++
++    /* Allocate mbuf if not provided */
++    if (*out_om == NULL) {
++        m = os_msys_get(0, 0);
++        if (m == NULL) {
++            return -1;
++        }
++        *out_om = m;
++    } else {
++        m = *out_om;
++    }
++
++    /* Initialize the mbuf writer */
++    cbor_mbuf_writer_init(&writer, m);
++    cbor_encoder_init(&encoder, &writer.enc, 0);
++
++    /* Create indefinite-length map */
++    CborEncoder map_encoder;
++    err = cbor_encoder_create_map(&encoder, &map_encoder, CborIndefiniteLength);
++    if (err != CborNoError) {
++        return err;
++    }
++
++    /* Process each attribute in order */
++    for (attr = attrs; attr->val.type != 0 && attr->attribute != NULL; attr++) {
++        /* Skip if omit is true */
++        if (attr->omit) {
++            continue;
++        }
++
++        /* Encode the key (attribute name) */
++        err = cbor_encode_text_stringz(&map_encoder, attr->attribute);
++        if (err != CborNoError) {
++            break;
++        }
++
++        /* Encode the value */
++        err = cbor_write_val(&map_encoder, &attr->val);
++        if (err != CborNoError) {
++            break;
++        }
++    }
++
++    /* Close the map */
++    err |= cbor_encoder_close_container(&encoder, &map_encoder);
++
++    return (err == CborNoError) ? 0 : -1;
++}

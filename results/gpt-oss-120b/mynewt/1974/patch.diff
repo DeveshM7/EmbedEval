@@ -1,0 +1,274 @@
+diff --git a/fs/fcb2/include/fcb/fcb.h b/fs/fcb2/include/fcb/fcb.h
+index d481297..68d4975 100644
+--- a/fs/fcb2/include/fcb/fcb.h
++++ b/fs/fcb2/include/fcb/fcb.h
+@@ -72,6 +72,22 @@ struct fcb {
+     uint16_t f_active_id;
+ };
+ 
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++/* Bookmark structures for FCB2 */
++struct fcb_log_bmark {
++    struct fcb_entry flb_entry;
++    uint32_t flb_index;
++};
++
++struct fcb_log_bset {
++    struct fcb_log_bmark *fls_bmarks;
++    int fls_cap;
++    int fls_size;
++    int fls_next;
++};
++#endif
++
++
+ /**
+  * Error codes.
+  */
+@@ -120,6 +136,9 @@ struct fcb_log {
+ /**
+  * fcb_append() appends an entry to circular buffer. When writing the
+  * contents for the entry, fcb_write() with fcb_entry filled by.
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++    struct fcb_log_bset fl_bset;
++#endif
+  * fcb_append(). When you're finished, call fcb_append_finish() with
+  * loc as argument.
+  */
+@@ -137,6 +156,12 @@ int fcb_append_finish(struct fcb_entry *append_loc);
+ typedef int (*fcb_walk_cb)(struct fcb_entry *loc, void *arg);
+ int fcb_walk(struct fcb *, int sector, fcb_walk_cb cb, void *cb_arg);
+ int fcb_getnext(struct fcb *fcb, struct fcb_entry *loc);
++/**
++ * Find the previous entry in the FCB.
++ * If loc->fe_range is NULL the function returns the most recent entry.
++ * If no previous entry exists it returns FCB_ERR_NOVAR.
++ */
++int fcb_getprev(struct fcb *fcb, struct fcb_entry *loc);
+ int fcb_read(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len);
+ 
+ /**
+@@ -173,6 +198,13 @@ fcb_offset_last_n(struct fcb *fcb, uint8_t entries,
+  * @param sector  sector number to erase 0..f_sector_cnt
+  *
+  * return 0 on success, error code on failure
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++void fcb_log_init_bmarks(struct fcb_log *fcb_log, struct fcb_log_bmark *buf, int bmark_count);
++void fcb_log_clear_bmarks(struct fcb_log *fcb_log);
++const struct fcb_log_bmark *fcb_log_closest_bmark(const struct fcb_log *fcb_log, uint32_t index);
++void fcb_log_add_bmark(struct fcb_log *fcb_log, const struct fcb_entry *entry, uint32_t index);
++#endif
++
+  */
+ int fcb_sector_erase(const struct fcb *fcb, int sector);
+ 
+diff --git a/fs/fcb2/src/fcb_bmark.c b/fs/fcb2/src/fcb_bmark.c
+new file mode 100644
+index 0000000..421138b
+--- /dev/null
++++ b/fs/fcb2/src/fcb_bmark.c
+@@ -0,0 +1,83 @@
++/*
++ * Copyright (c) 2024 Apache Mynewt Contributors
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "os/mynewt.h"
++
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++#include "string.h"
++
++void
++fcb_log_init_bmarks(struct fcb_log *fcb_log,
++                    struct fcb_log_bmark *buf, int bmark_count)
++{
++    fcb_log->fl_bset = (struct fcb_log_bset){
++        .fls_bmarks = buf,
++        .fls_cap = bmark_count,
++    };
++}
++
++void
++fcb_log_clear_bmarks(struct fcb_log *fcb_log)
++{
++    fcb_log->fl_bset.fls_size = 0;
++    fcb_log->fl_bset.fls_next = 0;
++}
++
++const struct fcb_log_bmark *
++fcb_log_closest_bmark(const struct fcb_log *fcb_log, uint32_t index)
++{
++    const struct fcb_log_bmark *closest = NULL;
++    uint32_t min_diff = UINT32_MAX;
++    int i;
++    for (i = 0; i < fcb_log->fl_bset.fls_size; i++) {
++        const struct fcb_log_bmark *b = &fcb_log->fl_bset.fls_bmarks[i];
++        if (b->flb_index <= index) {
++            uint32_t diff = index - b->flb_index;
++            if (diff < min_diff) {
++                min_diff = diff;
++                closest = b;
++            }
++        }
++    }
++    return closest;
++}
++
++void
++fcb_log_add_bmark(struct fcb_log *fcb_log, const struct fcb_entry *entry,
++                  uint32_t index)
++{
++    struct fcb_log_bset *bset = &fcb_log->fl_bset;
++    if (bset->fls_cap == 0) {
++        return;
++    }
++    bset->fls_bmarks[bset->fls_next] = (struct fcb_log_bmark){
++        .flb_entry = *entry,
++        .flb_index = index,
++    };
++    if (bset->fls_size < bset->fls_cap) {
++        bset->fls_size++;
++    }
++    bset->fls_next++;
++    if (bset->fls_next >= bset->fls_cap) {
++        bset->fls_next = 0;
++    }
++}
++
++#endif /* LOG_FCB_BOOKMARKS */
++
+diff --git a/fs/fcb2/src/fcb_getprev.c b/fs/fcb2/src/fcb_getprev.c
+new file mode 100644
+index 0000000..5005024
+--- /dev/null
++++ b/fs/fcb2/src/fcb_getprev.c
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (c) 2024 Apache Mynewt Contributors
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++/**
++ * Find the most recent entry in the FCB.
++ */
++static int
++fcb_get_latest(struct fcb *fcb, struct fcb_entry *out)
++{
++    struct fcb_entry tmp = {0};
++    int rc;
++    int found = 0;
++
++    while ((rc = fcb_getnext_nolock(fcb, &tmp)) == 0) {
++        *out = tmp;
++        found = 1;
++    }
++    return found ? 0 : FCB_ERR_NOVAR;
++}
++
++/**
++ * Find the previous entry in the FCB with respect to the location *loc*.
++ * If loc->fe_range is NULL the most recent entry is returned.
++ * If there is no previous valid entry the function returns FCB_ERR_NOVAR.
++ */
++int
++fcb_getprev(struct fcb *fcb, struct fcb_entry *loc)
++{
++    int rc;
++    struct fcb_entry iter = {0};
++    struct fcb_entry prev = {0};
++    int have_prev = 0;
++
++    if (loc->fe_range == NULL) {
++        return fcb_get_latest(fcb, loc);
++    }
++
++    /* Walk from the beginning until we reach the target entry, keeping track
++     * of the previous valid entry.
++     */
++    while ((rc = fcb_getnext_nolock(fcb, &iter)) == 0) {
++        if (iter.fe_sector == loc->fe_sector &&
++            iter.fe_entry_num == loc->fe_entry_num) {
++            if (!have_prev) {
++                return FCB_ERR_NOVAR;
++            }
++            *loc = prev;
++            return 0;
++        }
++        prev = iter;
++        have_prev = 1;
++    }
++
++    return FCB_ERR_NOVAR;
++}
++
+diff --git a/mgmt/imgmgr/src/imgmgr.c b/mgmt/imgmgr/src/imgmgr.c
+index d0747f2..ba45172 100644
+--- a/mgmt/imgmgr/src/imgmgr.c
++++ b/mgmt/imgmgr/src/imgmgr.c
+@@ -219,7 +219,7 @@ imgr_read_info(int image_slot, struct image_version *ver, uint8_t *hash,
+     }
+ 
+     if (hash) {
+-        memcpy(hash, dummy_hash, IMGMGR_HASH_LEN);
++        memcpy(hash, dummy_hash, sizeof dummy_hash);
+     }
+ 
+     if (ver) {
+diff --git a/sys/log/full/src/log_fcb.c b/sys/log/full/src/log_fcb.c
+index 2eb96ea..344cd6e 100644
+--- a/sys/log/full/src/log_fcb.c
++++ b/sys/log/full/src/log_fcb.c
+@@ -19,7 +19,10 @@
+ 
+ #include "os/mynewt.h"
+ 
+-#if MYNEWT_VAL(LOG_FCB)
++#if (MYNEWT_VAL(LOG_FCB) && MYNEWT_VAL(LOG_FCB2))
++#error "LOG_FCB and LOG_FCB2 are mutually exclusive"
++#endif
++#if MYNEWT_VAL(LOG_FCB) || MYNEWT_VAL(LOG_FCB2)
+ 
+ #include <string.h>
+ 
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index 3218c8f..def279b 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -42,6 +42,9 @@ syscfg.defs:
+         description: 'Support logging to FCB.'
+         value: 0
+ 
++    LOG_FCB2:
++        description: Support logging to FCB2.
++        value: 0
+     LOG_FCB_SLOT1:
+         description: >
+             Support logging to FCB located in slot 1.

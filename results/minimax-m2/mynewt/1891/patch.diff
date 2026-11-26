@@ -1,0 +1,314 @@
+diff --git a/hw/bsp/native/pkg.yml b/hw/bsp/native/pkg.yml
+index aae3477..f9f6564 100644
+--- a/hw/bsp/native/pkg.yml
++++ b/hw/bsp/native/pkg.yml
+@@ -6,7 +6,7 @@
+ # to you under the Apache License, Version 2.0 (the
+ # "License"); you may not use this file except in compliance
+ # with the License.  You may obtain a copy of the License at
+-# 
++#
+ #  http://www.apache.org/licenses/LICENSE-2.0
+ #
+ # Unless required by applicable law or agreed to in writing,
+@@ -31,4 +31,4 @@ pkg.deps:
+     - "@apache-mynewt-core/hw/drivers/uart/uart_hal"
+     - "@apache-mynewt-core/hw/drivers/flash/enc_flash/ef_tinycrypt"
+     - "@apache-mynewt-core/net/ip/native_sockets"
+-
++    - "@apache-mynewt-core/hw/drivers/trng/trng_sw"
+diff --git a/hw/bsp/native/src/hal_bsp.c b/hw/bsp/native/src/hal_bsp.c
+index de5c0f7..2302d44 100644
+--- a/hw/bsp/native/src/hal_bsp.c
++++ b/hw/bsp/native/src/hal_bsp.c
+@@ -100,4 +100,8 @@ hal_bsp_init(void)
+             OS_DEV_INIT_PRIMARY, 0, simaccel_init, (void *) NULL);
+     assert(rc == 0);
+ #endif
++
++#if MYNEWT_VAL(TRNG_SW)
++    trng_sw_dev_init();
++#endif
+ }
+diff --git a/hw/bsp/native/syscfg.yml b/hw/bsp/native/syscfg.yml
+index 5223283..da7894e 100644
+--- a/hw/bsp/native/syscfg.yml
++++ b/hw/bsp/native/syscfg.yml
+@@ -35,5 +35,8 @@ syscfg.vals:
+     REBOOT_LOG_FLASH_AREA: FLASH_AREA_REBOOT_LOG
+     COREDUMP_FLASH_AREA: FLASH_AREA_IMAGE_1
+ 
++    # Enable software TRNG for native platform
++    TRNG_SW: 1
++
+ syscfg.vals.BLE_CONTROLLER:
+     OS_CPUTIME_FREQ: 32768
+diff --git a/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h b/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h
+new file mode 100644
+index 0000000..2a0ee32
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h
+@@ -0,0 +1,53 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef __TRNG_SW_H__
++#define __TRNG_SW_H__
++
++#include <inttypes.h>
++#include <stddef.h>
++#include "trng/trng.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct trng_sw_dev {
++    struct trng_dev trng;
++};
++
++/**
++ * Add entropy to the software TRNG
++ *
++ * This function adds entropy to the software TRNG's internal pool.
++ * The entropy can be of any length, including zero-length.
++ *
++ * @param tsd   Software TRNG device
++ * @param entr  Entropy buffer
++ * @param entr_len Length of entropy buffer (can be 0)
++ *
++ * @return  0 on success, non-zero on failure
++ */
++int trng_sw_dev_add_entropy(struct trng_sw_dev *tsd, void *entr, int entr_len);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __TRNG_SW_H__ */
+diff --git a/hw/drivers/trng/trng_sw/pkg.yml b/hw/drivers/trng/trng_sw/pkg.yml
+new file mode 100644
+index 0000000..1590b64
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/pkg.yml
+@@ -0,0 +1,32 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++pkg.name: hw/drivers/trng/trng_sw
++pkg.description: Software TRNG driver
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++    - trng
++    - random
++
++pkg.apis:
++    - TRNG_HW_IMPL
++
++pkg.deps:
++    - "@apache-mynewt-core/hw/drivers/trng"
+diff --git a/hw/drivers/trng/trng_sw/src/trng_sw.c b/hw/drivers/trng/trng_sw/src/trng_sw.c
+new file mode 100644
+index 0000000..8995a37
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/src/trng_sw.c
+@@ -0,0 +1,166 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <string.h>
++#include <assert.h>
++#include "os/mynewt.h"
++#include "trng/trng.h"
++#include "trng_sw/trng_sw.h"
++#include "hal/hal_bsp.h"
++
++/* Software TRNG state */
++static uint32_t rng_state = 0x12345678;
++static uint32_t rng_counter = 0;
++
++/* Software TRNG device structure */
++static struct trng_sw_dev trng_sw_dev0;
++
++/* Simple linear congruential generator for internal state */
++static uint32_t
++trng_sw_lcg(uint32_t *state)
++{
++    *state = (*state * 1664525 + 1013904223);
++    return *state;
++}
++
++static size_t
++trng_sw_read(struct trng_dev *trng, void *ptr, size_t size)
++{
++    uint8_t *p = (uint8_t *)ptr;
++    size_t i;
++    uint32_t val;
++
++    for (i = 0; i < size; i++) {
++        /* Update state with LCG */
++        trng_sw_lcg(&rng_state);
++        rng_counter++;
++
++        /* Mix in counter for additional entropy */
++        val = rng_state ^ rng_counter;
++
++        /* Use every 4th byte to ensure we get different values */
++        p[i] = (val >> ((i % 4) * 8)) & 0xFF;
++    }
++
++    return size;
++}
++
++static uint32_t
++trng_sw_get_u32(struct trng_dev *trng)
++{
++    uint32_t val;
++
++    /* Update state with LCG */
++    trng_sw_lcg(&rng_state);
++    rng_counter++;
++
++    /* Mix in counter for additional entropy */
++    val = rng_state ^ rng_counter;
++
++    return val;
++}
++
++static int
++trng_sw_dev_open(struct os_dev *dev, uint32_t wait, void *arg)
++{
++    struct trng_dev *trng;
++
++    trng = (struct trng_dev *)dev;
++    assert(trng);
++
++    if (!(dev->od_flags & OS_DEV_F_STATUS_OPEN)) {
++        /* Initialize state with a seed if not already done */
++        if (rng_state == 0x12345678) {
++            uint8_t hw_id[16];
++            int len;
++
++            /* Try to get hardware ID for seeding */
++            len = hal_bsp_hw_id(hw_id, sizeof(hw_id));
++            if (len > 0) {
++                /* Mix hardware ID into initial state */
++                int i;
++                for (i = 0; i < len; i++) {
++                    rng_state ^= (hw_id[i] << (i % 8));
++                }
++            } else {
++                /* Fall back to a constant if HW ID is not available */
++                rng_state = 0x9E3779B9;
++            }
++        }
++    }
++
++    return OS_OK;
++}
++
++int
++trng_sw_dev_add_entropy(struct trng_sw_dev *tsd, void *entr, int entr_len)
++{
++    uint8_t *p = (uint8_t *)entr;
++    int i;
++
++    /* Accept all entropy additions, including zero-length and repeated */
++    for (i = 0; i < entr_len; i++) {
++        /* Mix entropy into state */
++        rng_state ^= (p[i] << (i % 8));
++    }
++
++    return 0;
++}
++
++int
++trng_sw_init(struct os_dev *dev, void *arg)
++{
++    struct trng_sw_dev *tsd;
++    struct trng_dev *trng;
++
++    tsd = (struct trng_sw_dev *)dev;
++    assert(tsd);
++
++    trng = &tsd->trng;
++
++    OS_DEV_SETHANDLERS(dev, trng_sw_dev_open, NULL);
++
++    trng->interface.get_u32 = trng_sw_get_u32;
++    trng->interface.read = trng_sw_read;
++
++    return 0;
++}
++
++/**
++ * Initialize the software TRNG device
++ *
++ * This function is called during system initialization to register
++ * the software TRNG device.
++ */
++void
++trng_sw_dev_init(void)
++{
++    struct trng_dev *trng;
++    struct os_dev *dev;
++    int rc;
++
++    memset(&trng_sw_dev0, 0, sizeof(trng_sw_dev0));
++
++    trng = &trng_sw_dev0.trng;
++    dev = &trng->dev;
++
++    /* Register with os_dev system as "trng" */
++    rc = os_dev_create(dev, "trng", OS_DEV_INIT_PRIMARY, 0, trng_sw_init, NULL);
++    assert(rc == 0);
++}

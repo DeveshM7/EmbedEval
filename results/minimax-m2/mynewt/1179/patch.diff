@@ -1,0 +1,128 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 6e118aa..35cf01d 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -250,6 +250,34 @@ uint8_t log_module_register(uint8_t id, const char *name);
+ const char *log_module_get_name(uint8_t id);
+ 
+ /* Log functions, manipulate a single log */
++
++/*
++ * Get minimum log level for a module
++ *
++ * This function retrieves the configured minimum log level for a module.
++ * If LOG_PER_USER_MODULE_LEVEL is disabled, this function returns 0.
++ * If the module is unconfigured, this function returns 0 (LOG_LEVEL_DEBUG).
++ *
++ * @param module  Module ID (0-255)
++ *
++ * @return  Minimum log level for the module, or 0 if disabled or unconfigured
++ */
++uint8_t log_level_get(uint8_t module);
++
++/*
++ * Set minimum log level for a module
++ *
++ * This function sets the minimum log level for a module.
++ * If LOG_PER_USER_MODULE_LEVEL is disabled, this function returns SYS_ENOTSUP.
++ * The level must be between 0 and 15 (inclusive). Values greater than 15
++ * result in SYS_EINVAL error.
++ *
++ * @param module  Module ID (0-255)
++ * @param level   Minimum log level (0-15)
++ *
++ * @return  0 on success, SYS_ENOTSUP if feature disabled, SYS_EINVAL if level > 15
++ */
++int log_level_set(uint8_t module, uint8_t level);
+ int log_register(char *name, struct log *log, const struct log_handler *,
+                  void *arg, uint8_t level);
+ int log_append_typed(struct log *, uint8_t, uint8_t, uint8_t, void *, uint16_t);
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index b6f1aa1..2382c2f 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -36,6 +36,7 @@ static STAILQ_HEAD(, log) g_log_list = STAILQ_HEAD_INITIALIZER(g_log_list);
+ static const char *g_log_module_list[ MYNEWT_VAL(LOG_MAX_USER_MODULES) ];
+ static uint8_t log_inited;
+ static uint8_t log_written;
++static uint8_t g_log_module_level[256];
+ 
+ #if MYNEWT_VAL(LOG_CLI)
+ int shell_log_dump_all_cmd(int, char **);
+@@ -166,6 +167,35 @@ log_module_get_name(uint8_t module)
+     return NULL;
+ }
+ 
++uint8_t
++log_level_get(uint8_t module)
++{
++    /* When feature is disabled, always return 0 */
++#if MYNEWT_VAL(LOG_PER_USER_MODULE_LEVEL)
++    return g_log_module_level[module];
++#else
++    return 0;
++#endif
++}
++
++int
++log_level_set(uint8_t module, uint8_t level)
++{
++    /* When feature is disabled, return SYS_ENOTSUP */
++#if MYNEWT_VAL(LOG_PER_USER_MODULE_LEVEL)
++    /* Validate level is in range 0-15 */
++    if (level > 15) {
++        return SYS_EINVAL;
++    }
++    g_log_module_level[module] = level;
++    return 0;
++#else
++    (void)module;
++    (void)level;
++    return SYS_ENOTSUP;
++#endif
++}
++
+ /**
+  * Indicates whether the specified log has been regiestered.
+  */
+@@ -312,6 +342,18 @@ log_append_prepare(struct log *log, uint8_t module, uint8_t level, uint8_t etype
+         goto err;
+     }
+ 
++    /*
++     * If the per-module minimum level is set and the log message
++     * is below it, then just drop it.
++     */
++    if (MYNEWT_VAL(LOG_PER_USER_MODULE_LEVEL)) {
++        uint8_t min_level = g_log_module_level[module];
++        if (min_level > 0 && level < min_level) {
++            rc = -1;
++            goto err;
++        }
++    }
++
+     OS_ENTER_CRITICAL(sr);
+     idx = g_log_info.li_next_index++;
+     OS_EXIT_CRITICAL(sr);
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index 306ec9d..d34e2b5 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -26,6 +26,10 @@ syscfg.defs:
+         description: 'Limits what level log messages are compiled in.'
+         value: 0
+ 
++    LOG_PER_USER_MODULE_LEVEL:
++        description: 'Enable per-module minimum log level support.'
++        value: 1
++
+     LOG_FCB:
+         description: 'Support logging to FCB.'
+         value: 0
+@@ -57,4 +61,4 @@ syscfg.defs:
+ 
+     LOG_MAX_USER_MODULES:
+         description: 'Maximum number of user modules to register'
+-        value: 1
+\ No newline at end of file
++        value: 1

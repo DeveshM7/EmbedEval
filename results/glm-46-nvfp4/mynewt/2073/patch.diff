@@ -1,0 +1,134 @@
+diff --git a/sys/flash_map/include/flash_map/flash_map.h b/sys/flash_map/include/flash_map/flash_map.h
+index 217cf53..c2d4f97 100644
+--- a/sys/flash_map/include/flash_map/flash_map.h
++++ b/sys/flash_map/include/flash_map/flash_map.h
+@@ -69,6 +69,13 @@ extern int flash_map_entries;
+  * from this on.
+  */
+ void flash_map_init(void);
++/*
++ * Add default flash areas that are missing from the manufacturing map.
++ * This function adds default areas from sysflash_map_dflt to the current
++ * flash map if they do not overlap with existing areas and if their IDs
++ * are not duplicate.
++ */
++void flash_map_add_new_dflt_areas_extern(void);
+ 
+ /*
+  * Start using flash area.
+diff --git a/sys/flash_map/src/flash_map.c b/sys/flash_map/src/flash_map.c
+index 88c11e5..b8fa425 100644
+--- a/sys/flash_map/src/flash_map.c
++++ b/sys/flash_map/src/flash_map.c
+@@ -27,6 +27,8 @@
+ #include "hal/hal_flash_int.h"
+ #include "mfg/mfg.h"
+ #include "flash_map/flash_map.h"
++/* declaration for default flash map defined in BSP */
++extern const struct flash_area sysflash_map_dflt[];
+ 
+ const struct flash_area *flash_map;
+ int flash_map_entries;
+@@ -425,3 +427,102 @@ flash_map_init(void)
+         flash_map_entries = num_areas;
+     }
+ }
++
++/*
++ * Check if two flash areas overlap
++ */
++static int
++flash_areas_overlap(const struct flash_area *a1, const struct flash_area *a2)
++{
++    uint32_t a1_end = a1->fa_off + a1->fa_size - 1;
++    uint32_t a2_end = a2->fa_off + a2->fa_size - 1;
++
++    /* No overlap if one area ends before the other starts */
++    if (a1_end < a2->fa_off || a2_end < a1->fa_off) {
++        return 0;
++    }
++    return 1;
++}
++
++/*
++ * Check if a flash area with the given ID already exists
++ */
++static int
++flash_area_id_exists(uint8_t id)
++{
++    int i;
++    
++    for (i = 0; i < flash_map_entries; i++) {
++        if (flash_map[i].fa_id == id) {
++            return 1;
++        }
++    }
++    return 0;
++}
++
++/*
++ * Add default flash areas that are missing from the manufacturing map.
++ * This function adds default areas from sysflash_map_dflt to the current
++ * flash map if they do not overlap with existing areas and if their IDs
++ * are not duplicate.
++ */
++void flash_map_add_new_dflt_areas_extern(void)
++{
++    const struct flash_area *dflt_area;
++    static struct flash_area work_map[MYNEWT_VAL(FLASH_MAP_MAX_AREAS)];
++    int i;
++    int j;
++    int new_count;
++
++    /* If no default map is available, nothing to do */
++    if (flash_map == NULL) {
++        return;
++    }
++
++    /* Copy current flash map to work buffer */
++    for (i = 0; i < flash_map_entries && i < MYNEWT_VAL(FLASH_MAP_MAX_AREAS); i++) {
++        work_map[i] = flash_map[i];
++    }
++    new_count = i;
++
++    /* Find the size of the default flash map */
++    int dflt_size = 0;
++    for (i = 0; i < MYNEWT_VAL(FLASH_MAP_MAX_AREAS); i++) {
++        if (sysflash_map_dflt[i].fa_id == 0 || sysflash_map_dflt[i].fa_id == 0xff) {
++            break;
++        }
++        dflt_size++;
++    }
++
++    /* Iterate through default areas and add non-overlapping, non-duplicate ones */
++    for (i = 0; i < dflt_size; i++) {
++        dflt_area = &sysflash_map_dflt[i];
++
++        /* Skip if ID already exists */
++        if (flash_area_id_exists(dflt_area->fa_id)) {
++            continue;
++        }
++
++        /* Skip if area overlaps with any existing area */
++        for (j = 0; j < new_count; j++) {
++            if (flash_areas_overlap(dflt_area, &work_map[j])) {
++                break;
++            }
++        }
++        
++        /* If we didn't find an overlap, add the area */
++        if (j == new_count && new_count < MYNEWT_VAL(FLASH_MAP_MAX_AREAS)) {
++            work_map[new_count] = *dflt_area;
++            new_count++;
++        }
++    }
++
++    /* Update flash map pointers if we made any changes */
++    if (new_count != flash_map_entries) {
++        /* For simplicity, we static allocate work_map. If the original
++         * flash_map was pointing to mfg_areas, we need to copy that data
++         * to our static buffer. */
++        flash_map = work_map;
++        flash_map_entries = new_count;
++    }
++}

@@ -1,0 +1,82 @@
+diff --git a/hw/sensor/include/sensor/sensor.h b/hw/sensor/include/sensor/sensor.h
+index 215946a..35518b9 100644
+--- a/hw/sensor/include/sensor/sensor.h
++++ b/hw/sensor/include/sensor/sensor.h
+@@ -621,6 +621,12 @@ struct sensor {
+      */
+     SLIST_HEAD(, sensor_err_listener) s_err_listener_list;
+ 
++    /* Error callback function (simpler API than sensor_err_listener) */
++    void (*s_err_fn)(struct sensor *sensor, void *arg, int status);
++
++    /* Argument to pass to the error callback function */
++    void *s_err_fn_arg;
++
+     /* A list of notifiers that are registered to receive events from this
+      * sensor
+      */
+@@ -738,6 +744,20 @@ int sensor_register_err_listener(struct sensor *sensor,
+ int sensor_unregister_err_listener(struct sensor *sensor,
+         struct sensor_err_listener *err_listener);
+ 
++/**
++ * Register a simple sensor error callback. This allows a calling application
++ * to receive callbacks when a read fails. The callback is only invoked on
++ * failed reads, not on successful reads.
++ *
++ * @param sensor The sensor to register an error callback on.
++ * @param err_fn The error callback function (sensor, arg, status).
++ * @param arg The argument to pass to the error callback.
++ *
++ * @return 0 on success, non-zero error code on failure.
++ */
++int sensor_register_err_func(struct sensor *sensor,
++        void (*err_fn)(struct sensor *sensor, void *arg, int status), void *arg);
++
+ /**
+  * @} SensorListenerAPI
+  */
+diff --git a/hw/sensor/src/sensor.c b/hw/sensor/src/sensor.c
+index 310acae..746fddd 100644
+--- a/hw/sensor/src/sensor.c
++++ b/hw/sensor/src/sensor.c
+@@ -1076,6 +1076,27 @@ err:
+     return (rc);
+ }
+ 
++
++int
++sensor_register_err_func(struct sensor *sensor,
++        void (*err_fn)(struct sensor *sensor, void *arg, int status), void *arg)
++{
++    int rc;
++
++    rc = sensor_lock(sensor);
++    if (rc != 0) {
++        goto err;
++    }
++
++    sensor->s_err_fn = err_fn;
++    sensor->s_err_fn_arg = arg;
++
++    sensor_unlock(sensor);
++
++    return (0);
++err:
++    return (rc);
++}
+ static int
+ sensor_set_notification(struct sensor *sensor, struct sensor_notifier *notifier)
+ {
+@@ -1225,6 +1246,11 @@ sensor_read_error_func(struct sensor *sensor, int status, sensor_type_t type)
+                                    type);
+         }
+     }
++
++    /* Call the simple error callback if registered */
++    if (sensor->s_err_fn != NULL) {
++        sensor->s_err_fn(sensor, sensor->s_err_fn_arg, status);
++    }
+ }
+ 
+ /**

@@ -1,0 +1,88 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 2d7657d..43dea1a 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -91,6 +91,7 @@ typedef int (*lh_storage_info_func_t)(struct log *, struct log_storage_info *);
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+ typedef int (*lh_set_watermark_func_t)(struct log *, uint32_t);
+ #endif
++typedef void (*log_append_cb_t)(struct log *log, uint32_t idx);
+ typedef int (*lh_registered_func_t)(struct log *);
+ 
+ struct log_handler {
+@@ -177,8 +178,10 @@ struct log {
+     void *l_arg;
+     STAILQ_ENTRY(log) l_next;
+     uint8_t l_level;
++    log_append_cb_t l_append_cb;
+ };
+ 
++void log_set_append_cb(struct log *log, log_append_cb_t cb);
+ /* Log system level functions (for all logs.) */
+ void log_init(void);
+ struct log *log_list_get_next(struct log *);
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index 3c0da89..a56cf32 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -164,6 +164,20 @@ log_list_get_next(struct log *log)
+     return (next);
+ }
+ 
++void
++log_set_append_cb(struct log *log, log_append_cb_t cb)
++{
++    log->l_append_cb = cb;
++}
++
++static void
++log_run_append_cb(struct log *log, uint32_t idx)
++{
++    if (log->l_append_cb) {
++        log->l_append_cb(log, idx);
++    }
++}
++
+ uint8_t
+ log_module_register(uint8_t id, const char *name)
+ {
+@@ -319,6 +333,7 @@ log_register(char *name, struct log *log, const struct log_handler *lh,
+     log->l_log = lh;
+     log->l_arg = arg;
+     log->l_level = level;
++    log->l_append_cb = NULL;
+ 
+     if (!log_registered(log)) {
+         STAILQ_INSERT_TAIL(&g_log_list, log, l_next);
+@@ -425,6 +440,7 @@ log_append_typed(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
+         goto err;
+     }
+ 
++    log_run_append_cb(log, ((struct log_entry_hdr *)data)->ue_index);
+     return (0);
+ err:
+     return (rc);
+@@ -445,6 +461,7 @@ log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
+     rc = log->l_log->log_append_body(log, &hdr, body, body_len);
+     if (rc != 0) {
+         return rc;
++    log_run_append_cb(log, hdr.ue_index);
+     }
+ 
+     return 0;
+@@ -481,6 +498,7 @@ log_append_mbuf_typed_no_free(struct log *log, uint8_t module, uint8_t level,
+     if (rc != 0) {
+         goto err;
+     }
++    log_run_append_cb(log, ((struct log_entry_hdr *)om->om_data)->ue_index);
+ 
+     *om_ptr = om;
+ 
+@@ -529,6 +547,7 @@ log_append_mbuf_body_no_free(struct log *log, uint8_t module, uint8_t level,
+     rc = log->l_log->log_append_mbuf_body(log, &hdr, om);
+     if (rc != 0) {
+         return rc;
++    log_run_append_cb(log, hdr.ue_index);
+     }
+ 
+     return 0;

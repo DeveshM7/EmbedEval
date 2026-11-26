@@ -1,0 +1,72 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index cafddab..b97a759 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -218,6 +218,9 @@ struct log {
+ #if MYNEWT_VAL(LOG_STATS)
+     STATS_SECT_DECL(logs) l_stats;
+ #endif
++#if !MYNEWT_VAL(LOG_GLOBAL_IDX)
++    uint32_t l_next_index;
++#endif
+ };
+ 
+ /* Log system level functions (for all logs.) */
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index b81430e..befc1a2 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -420,9 +420,15 @@ log_register(char *name, struct log *log, const struct log_handler *lh,
+         rc = log_read_last_hdr(log, &hdr);
+         if (rc == 0) {
+             OS_ENTER_CRITICAL(sr);
++#if MYNEWT_VAL(LOG_GLOBAL_IDX)
+             if (hdr.ue_index >= g_log_info.li_next_index) {
+                 g_log_info.li_next_index = hdr.ue_index + 1;
+             }
++#else
++            if (hdr.ue_index >= log->l_next_index) {
++                log->l_next_index = hdr.ue_index + 1;
++            }
++#endif
+             OS_EXIT_CRITICAL(sr);
+         }
+     }
+@@ -531,7 +537,11 @@ log_append_prepare(struct log *log, uint8_t module, uint8_t level,
+     }
+ 
+     OS_ENTER_CRITICAL(sr);
++#if MYNEWT_VAL(LOG_GLOBAL_IDX)
+     idx = g_log_info.li_next_index++;
++#else
++    idx = log->l_next_index++;
++#endif
+     OS_EXIT_CRITICAL(sr);
+ 
+     /* Try to get UTC Time */
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index b8ee6f8..4e24543 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -38,6 +38,12 @@ syscfg.defs:
+             1 - enable.
+         value: 0
+ 
++    LOG_GLOBAL_IDX:
++        description: >
++            Use a global log index across all logs. 0 - each log maintains its
++            own index; 1 - use a global index across all logs.
++        value: 1
++
+     LOG_FCB:
+         description: 'Support logging to FCB.'
+         value: 0
+@@ -81,7 +87,7 @@ syscfg.defs:
+         description: >
+             The maximum newtmgr log response length. Note that this does not
+             represent the entire length of the response sent as the response
+-            error code is added to the response after this check is performed.
++            error code is added after this check is performed.
+             If a single log entry exceeds this value the msg contents of the
+             log entry will be the following string: error: entry too large
+             (xxx bytes) with xxx being the size of the entry. Note that the

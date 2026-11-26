@@ -1,0 +1,188 @@
+diff --git a/kernel/os/src/os_mbuf.c b/kernel/os/src/os_mbuf.c
+index d5ed835..09dcd98 100644
+--- a/kernel/os/src/os_mbuf.c
++++ b/kernel/os/src/os_mbuf.c
+@@ -364,52 +364,59 @@ os_mbuf_appendfrom(struct os_mbuf *dst, const struct os_mbuf *src,
+     return 0;
+ }
+ 
++/**
++ * Duplicate an mbuf chain.
++ *
++ * The original implementation allocated all duplicated segments from the
++ * pool of the first mbuf in the chain.  When a chain spans multiple pools,
++ * this could cause the destination segment to be smaller than the source
++ * segment, leading to payload overruns.
++ *
++ * This revised version allocates each duplicated segment from the same pool
++ * as the corresponding source segment (`om->om_omp`).  This preserves the
++ * capacity, contents and ensures no writes beyond the destination payload
++ * area.
++ */
+ struct os_mbuf *
+ os_mbuf_dup(struct os_mbuf *om)
+ {
+-    struct os_mbuf_pool *omp;
+-    struct os_mbuf *head;
+-    struct os_mbuf *copy;
+-
+-    omp = om->om_omp;
+-
+-    head = NULL;
+-    copy = NULL;
++    struct os_mbuf *head = NULL;
++    struct os_mbuf *copy = NULL;
+ 
+     for (; om != NULL; om = SLIST_NEXT(om, om_next)) {
++        /* Allocate from the pool that owns the current mbuf. */
++        struct os_mbuf_pool *seg_omp = om->om_omp;
++
+         if (head) {
+-            SLIST_NEXT(copy, om_next) = os_mbuf_get(omp,
+-                    OS_MBUF_LEADINGSPACE(om));
++            SLIST_NEXT(copy, om_next) = os_mbuf_get(seg_omp,
++                                                   OS_MBUF_LEADINGSPACE(om));
+             if (!SLIST_NEXT(copy, om_next)) {
+                 os_mbuf_free_chain(head);
+                 goto err;
+             }
+-
+             copy = SLIST_NEXT(copy, om_next);
+         } else {
+-            head = os_mbuf_get(omp, OS_MBUF_LEADINGSPACE(om));
++            head = os_mbuf_get(seg_omp, OS_MBUF_LEADINGSPACE(om));
+             if (!head) {
+                 goto err;
+             }
+-
+             if (OS_MBUF_IS_PKTHDR(om)) {
+                 _os_mbuf_copypkthdr(head, om);
+             }
+             copy = head;
+         }
++
+         copy->om_flags = om->om_flags;
+         copy->om_len = om->om_len;
+         memcpy(OS_MBUF_DATA(copy, uint8_t *), OS_MBUF_DATA(om, uint8_t *),
+-                om->om_len);
++               om->om_len);
+     }
+ 
+-    return (head);
++    return head;
+ err:
+-    return (NULL);
++    return NULL;
+ }
+-
+-struct os_mbuf *
+-os_mbuf_off(const struct os_mbuf *om, int off, uint16_t *out_off)
++struct os_mbuf * os_mbuf_off(const struct os_mbuf *om, int off, uint16_t *out_off)
+ {
+     struct os_mbuf *next;
+     struct os_mbuf *cur;
+diff --git a/kernel/os/src/os_mbuf_dup.patch b/kernel/os/src/os_mbuf_dup.patch
+new file mode 100644
+index 0000000..ed429d9
+--- /dev/null
++++ b/kernel/os/src/os_mbuf_dup.patch
+@@ -0,0 +1,99 @@
++*** Begin Patch
++*** Update File: kernel/os/src/os_mbuf.c
++@@
++-struct os_mbuf *
++-os_mbuf_dup(struct os_mbuf *om)
++-{
++-    struct os_mbuf_pool *omp;
++-    struct os_mbuf *head;
++-    struct os_mbuf *copy;
++-
++-    omp = om->om_omp;
++-
++-    head = NULL;
++-    copy = NULL;
++-
++-    for (; om != NULL; om = SLIST_NEXT(om, om_next)) {
++-        if (head) {
++-            SLIST_NEXT(copy, om_next) = os_mbuf_get(omp,
++-                    OS_MBUF_LEADINGSPACE(om));
++-            if (!SLIST_NEXT(copy, om_next)) {
++-                os_mbuf_free_chain(head);
++-                goto err;
++-            }
++-
++-            copy = SLIST_NEXT(copy, om_next);
++-        } else {
++-            head = os_mbuf_get(omp, OS_MBUF_LEADINGSPACE(om));
++-            if (!head) {
++-                goto err;
++-            }
++-
++-            if (OS_MBUF_IS_PKTHDR(om)) {
++-                _os_mbuf_copypkthdr(head, om);
++-            }
++-            copy = head;
++-        }
++-        copy->om_flags = om->om_flags;
++-        copy->om_len = om->om_len;
++-        memcpy(OS_MBUF_DATA(copy, uint8_t *), OS_MBUF_DATA(om, uint8_t *),
++-                om->om_len);
++-    }
++-
++-    return (head);
++-err:
++-    return (NULL);
++-}
+++/**
+++ * Duplicate an mbuf chain.
+++ *
+++ * The original implementation allocated all duplicated segments from the
+++ * pool of the first mbuf in the chain.  When a chain spans multiple pools,
+++ * this could cause the destination segment to be smaller than the source
+++ * segment, leading to payload overruns.
+++ *
+++ * This revised version allocates each duplicated segment from the same pool
+++ * as the corresponding source segment (`om->om_omp`).  This preserves the
+++ * capacity, contents and ensures no writes beyond the destination payload
+++ * area.
+++ */
+++struct os_mbuf *
+++os_mbuf_dup(struct os_mbuf *om)
+++{
+++    struct os_mbuf *head = NULL;
+++    struct os_mbuf *copy = NULL;
+++
+++    for (; om != NULL; om = SLIST_NEXT(om, om_next)) {
+++        /* Allocate from the pool that owns the current mbuf. */
+++        struct os_mbuf_pool *seg_omp = om->om_omp;
+++
+++        if (head) {
+++            SLIST_NEXT(copy, om_next) = os_mbuf_get(seg_omp,
+++                                                   OS_MBUF_LEADINGSPACE(om));
+++            if (!SLIST_NEXT(copy, om_next)) {
+++                os_mbuf_free_chain(head);
+++                goto err;
+++            }
+++            copy = SLIST_NEXT(copy, om_next);
+++        } else {
+++            head = os_mbuf_get(seg_omp, OS_MBUF_LEADINGSPACE(om));
+++            if (!head) {
+++                goto err;
+++            }
+++            if (OS_MBUF_IS_PKTHDR(om)) {
+++                _os_mbuf_copypkthdr(head, om);
+++            }
+++            copy = head;
+++        }
+++
+++        copy->om_flags = om->om_flags;
+++        copy->om_len = om->om_len;
+++        memcpy(OS_MBUF_DATA(copy, uint8_t *), OS_MBUF_DATA(om, uint8_t *),
+++               om->om_len);
+++    }
+++
+++    return head;
+++err:
+++    return NULL;
+++}
++*** End Patch

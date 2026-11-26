@@ -1,0 +1,935 @@
+diff --git a/sys/flash_map/src/flash_map.c b/sys/flash_map/src/flash_map.c
+index a49391b..55fcf82 100644
+--- a/sys/flash_map/src/flash_map.c
++++ b/sys/flash_map/src/flash_map.c
+@@ -249,7 +249,8 @@ int
+ flash_area_read(const struct flash_area *fa, uint32_t off, void *dst,
+     uint32_t len)
+ {
+-    if (off > fa->fa_size || off + len > fa->fa_size) {
++    /* Reject ranges that overflow or extend past the area */
++    if (off + len < off || off + len > fa->fa_size) {
+         return -1;
+     }
+     return hal_flash_read(fa->fa_device_id, fa->fa_off + off, dst, len);
+@@ -259,7 +260,8 @@ int
+ flash_area_write(const struct flash_area *fa, uint32_t off, const void *src,
+     uint32_t len)
+ {
+-    if (off > fa->fa_size || off + len > fa->fa_size) {
++    /* Reject ranges that overflow or extend past the area */
++    if (off + len < off || off + len > fa->fa_size) {
+         return -1;
+     }
+     return hal_flash_write(fa->fa_device_id, fa->fa_off + off,
+@@ -269,7 +271,8 @@ flash_area_write(const struct flash_area *fa, uint32_t off, const void *src,
+ int
+ flash_area_erase(const struct flash_area *fa, uint32_t off, uint32_t len)
+ {
+-    if (off > fa->fa_size || off + len > fa->fa_size) {
++    /* Reject ranges that overflow or extend past the area */
++    if (off + len < off || off + len > fa->fa_size) {
+         return -1;
+     }
+     return hal_flash_erase(fa->fa_device_id, fa->fa_off + off, len);
+@@ -320,6 +323,14 @@ int
+ flash_area_read_is_empty(const struct flash_area *fa, uint32_t off, void *dst,
+                          uint32_t len)
+ {
++    /* Reject ranges that overflow or extend past the area */
++    if (off + len < off || off + len > fa->fa_size) {
++        return -1;
++    }
++    /* Zero-length reads are always valid */
++    if (len == 0) {
++        return 0;
++    }
+     return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, dst, len);
+ }
+ 
+diff --git a/sys/flash_map/src/flash_map.c.orig b/sys/flash_map/src/flash_map.c.orig
+new file mode 100644
+index 0000000..a49391b
+--- /dev/null
++++ b/sys/flash_map/src/flash_map.c.orig
+@@ -0,0 +1,565 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <inttypes.h>
++#include <string.h>
++#include <assert.h>
++
++#include "os/mynewt.h"
++#include "hal/hal_bsp.h"
++#include "hal/hal_flash.h"
++#include "hal/hal_flash_int.h"
++#if MYNEWT_VAL(FLASH_MAP_SUPPORT_MFG)
++#include "mfg/mfg.h"
++#endif
++#include "flash_map/flash_map.h"
++
++const struct flash_area *flash_map;
++int flash_map_entries;
++
++static int
++flash_area_find_idx(uint8_t id)
++{
++    int i;
++
++    if (flash_map == NULL) {
++        return -1;
++    }
++
++    for (i = 0; i < flash_map_entries; i++) {
++        if (flash_map[i].fa_id == id) {
++            return i;
++        }
++    }
++
++    return -1;
++}
++
++int
++flash_area_open(uint8_t id, const struct flash_area **fap)
++{
++    int idx;
++
++    if (flash_map == NULL) {
++        return SYS_EACCES;
++    }
++
++    idx = flash_area_find_idx(id);
++    if (idx == -1) {
++        return SYS_ENOENT;
++    }
++
++    *fap = &flash_map[idx];
++
++    return 0;
++}
++
++int
++flash_area_to_sectors(int id, int *cnt, struct flash_area *ret)
++{
++    const struct flash_area *fa;
++    const struct hal_flash *hf;
++    uint32_t start;
++    uint32_t size;
++    int rc;
++    int i;
++
++    rc = flash_area_open(id, &fa);
++    if (rc != 0) {
++        return rc;
++    }
++
++    *cnt = 0;
++
++    hf = hal_bsp_flash_dev(fa->fa_device_id);
++    if (!hf) {
++        flash_area_close(fa);
++        return SYS_EINVAL;
++    }
++
++    for (i = 0; i < hf->hf_sector_cnt; i++) {
++        hf->hf_itf->hff_sector_info(hf, i, &start, &size);
++        if (start >= fa->fa_off && start < fa->fa_off + fa->fa_size) {
++            if (ret) {
++                ret->fa_id = id;
++                ret->fa_device_id = fa->fa_device_id;
++                ret->fa_off = start;
++                ret->fa_size = size;
++                ret++;
++            }
++            (*cnt)++;
++        }
++    }
++    flash_area_close(fa);
++    return 0;
++}
++
++static inline int
++flash_range_end(const struct flash_sector_range *range)
++{
++    return range->fsr_flash_area.fa_off +
++        range->fsr_sector_count * range->fsr_sector_size;
++}
++
++int
++flash_area_to_sector_ranges(int id, int *cnt, struct flash_sector_range *ret)
++{
++    const struct flash_area *fa;
++    const struct hal_flash *hf;
++    struct flash_sector_range sr = { 0 };
++    struct flash_sector_range *current;
++    uint32_t start;      /* Sector start in flash */
++    uint32_t size;       /* Sector size */
++    uint32_t offset = 0; /* Address inside flash area */
++    int rc;
++    int i;
++    int allowed_ranges = UINT16_MAX;
++    int range_count = 0;
++    int sector_in_ranges = 0;
++
++    rc = flash_area_open(id, &fa);
++    if (rc != 0) {
++        return rc;
++    }
++
++    /* Respect maximum number of allowed ranges if specified and
++     * ret was given. Otherwise count required number of sector
++     * ranges.
++     */
++    if (*cnt > 0 && ret != NULL) {
++        allowed_ranges = *cnt;
++    }
++    if (ret) {
++        current = ret;
++    } else {
++        current = &sr;
++    }
++
++    hf = hal_bsp_flash_dev(fa->fa_device_id);
++    if (!hf) {
++        flash_area_close(fa);
++        return SYS_EINVAL;
++    }
++
++    for (i = 0; i < hf->hf_sector_cnt; i++) {
++        hf->hf_itf->hff_sector_info(hf, i, &start, &size);
++        if (start >= fa->fa_off && start < fa->fa_off + fa->fa_size) {
++            if (range_count) {
++                /*
++                 * Extend range if sector is adjacent to previous one.
++                 */
++                if (flash_range_end(current) == start &&
++                    current->fsr_sector_size == size) {
++                    current->fsr_flash_area.fa_size += size;
++                    offset += size;
++                    current->fsr_sector_count++;
++                    sector_in_ranges++;
++                    continue;
++                } else if (ret != NULL) {
++                    if (range_count < allowed_ranges) {
++                        current = ++ret;
++                    } else {
++                        /* Found non-adjacent sector, but there is no
++                         * space for it, just stop looking and return
++                         * what was already found.
++                         */
++                        break;
++                    }
++                }
++            }
++            /* New sector range */
++            range_count++;
++            current->fsr_flash_area.fa_device_id = fa->fa_device_id;
++            current->fsr_flash_area.fa_id = id;
++            current->fsr_flash_area.fa_off = start;
++            current->fsr_flash_area.fa_size = size;
++            current->fsr_sector_size = size;
++            current->fsr_sector_count = 1;
++            current->fsr_first_sector = (uint16_t)sector_in_ranges;
++            current->fsr_range_start = offset;
++            current->fsr_align = hal_flash_align(fa->fa_device_id);
++        }
++    }
++    *cnt = range_count;
++
++    flash_area_close(fa);
++    return 0;
++}
++
++int
++flash_area_getnext_sector(int id, int *sec_id, struct flash_area *ret)
++{
++    const struct flash_area *fa;
++    const struct hal_flash *hf;
++    uint32_t start;
++    uint32_t size;
++    int rc;
++    int i;
++
++    rc = flash_area_open(id, &fa);
++    if (rc) {
++        return rc;
++    }
++    if (!ret || *sec_id < -1) {
++        rc = SYS_EINVAL;
++        goto end;
++    }
++    hf = hal_bsp_flash_dev(fa->fa_device_id);
++    if (!hf) {
++        rc = SYS_EINVAL;
++        goto end;
++    }
++
++    i = *sec_id + 1;
++    for (; i < hf->hf_sector_cnt; i++) {
++        hf->hf_itf->hff_sector_info(hf, i, &start, &size);
++        if (start >= fa->fa_off && start < fa->fa_off + fa->fa_size) {
++            ret->fa_id = id;
++            ret->fa_device_id = fa->fa_device_id;
++            ret->fa_off = start;
++            ret->fa_size = size;
++            *sec_id = i;
++            rc = 0;
++            goto end;
++        }
++    }
++    rc = SYS_ENOENT;
++end:
++    flash_area_close(fa);
++    return rc;
++}
++
++int
++flash_area_read(const struct flash_area *fa, uint32_t off, void *dst,
++    uint32_t len)
++{
++    if (off > fa->fa_size || off + len > fa->fa_size) {
++        return -1;
++    }
++    return hal_flash_read(fa->fa_device_id, fa->fa_off + off, dst, len);
++}
++
++int
++flash_area_write(const struct flash_area *fa, uint32_t off, const void *src,
++    uint32_t len)
++{
++    if (off > fa->fa_size || off + len > fa->fa_size) {
++        return -1;
++    }
++    return hal_flash_write(fa->fa_device_id, fa->fa_off + off,
++                           (void *)src, len);
++}
++
++int
++flash_area_erase(const struct flash_area *fa, uint32_t off, uint32_t len)
++{
++    if (off > fa->fa_size || off + len > fa->fa_size) {
++        return -1;
++    }
++    return hal_flash_erase(fa->fa_device_id, fa->fa_off + off, len);
++}
++
++uint32_t
++flash_area_align(const struct flash_area *fa)
++{
++    return hal_flash_align(fa->fa_device_id);
++}
++
++uint32_t
++flash_area_erased_val(const struct flash_area *fa)
++{
++    return hal_flash_erased_val(fa->fa_device_id);
++}
++
++
++/**
++ * Checks if a flash area has been erased. Returns false if there are any
++ * non non-erased bytes.
++ *
++ * @param fa                    An opened flash area to iterate.
++ *                                  the count of flash area TLVs in the meta
++ *                                  region is greater than this number, this
++ *                                  function fails.
++ * @param empty (out)           On success, the is_empty result gets written
++ *                                  here.
++ * @return                      0 on success; nonzero on failure.
++ */
++int
++flash_area_is_empty(const struct flash_area *fa, bool *empty)
++{
++    int rc;
++
++    *empty = false;
++    rc = hal_flash_isempty_no_buf(fa->fa_device_id, fa->fa_off, fa->fa_size);
++    if (rc < 0) {
++        return rc;
++    } else if (rc == 1) {
++        *empty = true;
++    }
++
++    return 0;
++}
++
++int
++flash_area_read_is_empty(const struct flash_area *fa, uint32_t off, void *dst,
++                         uint32_t len)
++{
++    return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, dst, len);
++}
++
++/**
++ * Converts the specified image slot index to a flash area ID.  If the
++ * specified value is not a valid image slot index (0 or 1), a crash is
++ * triggered.
++ */
++int
++flash_area_id_from_image_slot(int slot)
++{
++    switch (slot) {
++    case 0:
++        return FLASH_AREA_IMAGE_0;
++#ifdef FLASH_AREA_IMAGE_1
++    case 1:
++        return FLASH_AREA_IMAGE_1;
++#endif
++    default:
++        assert(0);
++        return FLASH_AREA_IMAGE_0;
++    }
++}
++
++/**
++ * Converts the specified flash area ID to an image slot index (0 or 1).  If
++ * the area ID does not correspond to an image slot, -1 is returned.
++ */
++int
++flash_area_id_to_image_slot(int area_id)
++{
++    switch (area_id) {
++    case FLASH_AREA_IMAGE_0:
++        return 0;
++#ifdef FLASH_AREA_IMAGE_1
++    case FLASH_AREA_IMAGE_1:
++        return 1;
++#endif
++    default:
++        return -1;
++    }
++}
++
++/**
++ * Reads the flash map layout from the manufacturing meta region.  This
++ * function requires that the flash map be populated with a
++ * FLASH_AREA_BOOTLOADER entry, as the meta region is stored at the end of the
++ * boot loader area.
++ *
++ * @param max_areas             The maximum number of flash areas to read.  If
++ *                                  the count of flash area TLVs in the meta
++ *                                  region is greater than this number, this
++ *                                  function fails.
++ * @param out_areas (out)       An array of flash areas.  On success, the flash
++ *                                  map stored in the meta region gets written
++ *                                  here.
++ * @param out_num_areas (out)   On success, the number of flash areas read gets
++ *                                  written here.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++#if MYNEWT_VAL(FLASH_MAP_SUPPORT_MFG)
++static int
++flash_map_read_mfg(int max_areas,
++                   struct flash_area *out_areas, int *out_num_areas)
++{
++    struct mfg_meta_flash_area meta_flash_area;
++    struct mfg_reader reader;
++    struct flash_area *fap;
++    int rc;
++
++    *out_num_areas = 0;
++
++    /* Ensure manufacturing meta region has been located in flash. */
++    mfg_init();
++
++    mfg_open(&reader);
++
++    while (1) {
++        if (*out_num_areas >= max_areas) {
++            return -1;
++        }
++
++        rc = mfg_seek_next_with_type(&reader, MFG_META_TLV_TYPE_FLASH_AREA);
++        switch (rc) {
++        case 0:
++            break;
++        case SYS_EDONE:
++            return 0;
++        default:
++            return rc;
++        }
++
++        rc = mfg_read_tlv_flash_area(&reader, &meta_flash_area);
++        if (rc != 0) {
++            return rc;
++        }
++
++        fap = out_areas + *out_num_areas;
++        fap->fa_id = meta_flash_area.area_id;
++        fap->fa_device_id = meta_flash_area.device_id;
++        fap->fa_off = meta_flash_area.offset;
++        fap->fa_size = meta_flash_area.size;
++
++        (*out_num_areas)++;
++    }
++}
++#endif
++
++/**
++ * Determines if the specified flash area overlaps any areas in the flash map.
++ *
++ * @param area1                 The flash area to compare against the flash
++ *                                  map.
++ *
++ * @return                      True if there is an overlap; false otherwise.
++ */
++static bool
++flash_map_area_overlaps(const struct flash_area *area1)
++{
++    const struct flash_area *area2;
++    uint32_t end1;
++    uint32_t end2;
++    int i;
++
++    for (i = 0; i < flash_map_entries; i++) {
++        area2 = &flash_map[i];
++
++        if (area1->fa_device_id == area2->fa_device_id) {
++            end1 = area1->fa_off + area1->fa_size;
++            end2 = area2->fa_off + area2->fa_size;
++
++            if (end1 > area2->fa_off && area1->fa_off < end2) {
++                return true;
++            }
++        }
++    }
++
++    return false;
++}
++
++/**
++ * Adds areas from the hardcoded flash map that aren't present in, and don't
++ * overlap with, the manufacturing flash map.
++ */
++static void
++flash_map_add_new_dflt_areas(void)
++{
++    static const int num_dflt_entries =
++        sizeof sysflash_map_dflt / sizeof sysflash_map_dflt[0];
++
++    const struct flash_area *dflt_area;
++    struct flash_area *dst_area;
++    int i;
++    
++    for (i = 0; i < num_dflt_entries; i++) {
++        dflt_area = &sysflash_map_dflt[i];
++
++        /* If there is already a manufacturing area with this ID, discard the
++         * default area.
++         */
++        if (flash_area_find_idx(dflt_area->fa_id) == -1) {
++            /* Default flash map contains a new entry. */
++            if (flash_map_entries >= MYNEWT_VAL(FLASH_MAP_MAX_AREAS)) {
++                DFLT_LOG_DEBUG("failed to add default flash area: "
++                               "no room: id=%d",
++                               dflt_area->fa_id);
++                DEBUG_PANIC();
++                return;
++            } 
++
++            /* Add the default entry if it doesn't cause any overlaps. */
++            if (flash_map_area_overlaps(dflt_area)) {
++                DFLT_LOG_DEBUG("failed to add default flash area: "
++                               "overlap: id=%d",
++                               dflt_area->fa_id);
++            } else {
++                /* Cast away const. */
++                dst_area = (struct flash_area *) &flash_map[flash_map_entries];
++
++                *dst_area = *dflt_area;
++                flash_map_entries++;
++            }
++        }
++    }
++}
++
++void
++flash_map_init(void)
++{
++#if MYNEWT_VAL(FLASH_MAP_SUPPORT_MFG)
++    static struct flash_area mfg_areas[MYNEWT_VAL(FLASH_MAP_MAX_AREAS)];
++    int num_areas;
++#endif
++
++    int rc;
++
++    /* Ensure this function only gets called by sysinit. */
++    SYSINIT_ASSERT_ACTIVE();
++
++    rc = hal_flash_init();
++    SYSINIT_PANIC_ASSERT(rc == 0);
++
++    /* Use the hardcoded default flash map.  This is done for two reasons:
++     * 1. A minimal flash map configuration is required to boot strap the
++     *    process of reading the flash map from the manufacturing meta regions.
++     *    In particular, a FLASH_AREA_BOOTLOADER entry is required for the boot
++     *    MMR, as well as an entry for each extended MMR.
++     * 2. If we fail to read the flash map from the MMRs, the system continues
++     *    to use the default flash map.
++     */
++    flash_map = sysflash_map_dflt;
++    flash_map_entries = sizeof sysflash_map_dflt / sizeof sysflash_map_dflt[0];
++
++#if MYNEWT_VAL(FLASH_MAP_SUPPORT_MFG)
++    /* Attempt to read the flash map from the manufacturing meta regions.  On
++     * success, use the new flash map instead of the default hardcoded one.
++     */
++    rc = flash_map_read_mfg(sizeof mfg_areas / sizeof mfg_areas[0],
++                            mfg_areas, &num_areas);
++    if (rc != 0 || num_areas == 0) {
++        return;
++    }
++    flash_map = mfg_areas;
++    flash_map_entries = num_areas;
++#endif
++
++    /* The hardcoded flash map may contain new areas that aren't present in the
++     * manufacturing flash map.  Try including them if they don't overlap with
++     * any mfg areas.
++     */
++    flash_map_add_new_dflt_areas();
++}
++
++#if MYNEWT_VAL(SELFTEST)
++
++void
++flash_map_add_new_dflt_areas_extern(void)
++{
++    flash_map_add_new_dflt_areas();
++}
++
++#endif
+diff --git a/test_bounds b/test_bounds
+new file mode 100755
+index 0000000000000000000000000000000000000000..06e26016483375b064c8215e1b6ae1b8d7f5eb3f
+GIT binary patch
+literal 16056
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_bounds.c b/test_bounds.c
+new file mode 100644
+index 0000000..443a9e6
+--- /dev/null
++++ b/test_bounds.c
+@@ -0,0 +1,46 @@
++#include <stdio.h>
++#include <stdint.h>
++
++int main() {
++    uint32_t fa_size = 1000;
++    uint32_t off;
++    uint32_t len;
++    int rc;
++    
++    // Test 1: off=0, len=0
++    off = 0;
++    len = 0;
++    printf("Test 1: off=%u, len=%u\n", off, len);
++    printf("  off + len = %u\n", off + len);
++    printf("  off + len < off = %d\n", off + len < off);
++    printf("  off + len > fa_size = %d\n", off + len > fa_size);
++    printf("  Condition: (off + len < off || off + len > fa_size) = %d\n", 
++           (off + len < off || off + len > fa_size));
++    printf("  Expected reject: 0\n");
++    printf("\n");
++    
++    // Test 2: off=fa_size, len=0
++    off = fa_size;
++    len = 0;
++    printf("Test 2: off=%u, len=%u\n", off, len);
++    printf("  off + len = %u\n", off + len);
++    printf("  off + len < off = %d\n", off + len < off);
++    printf("  off + len > fa_size = %d\n", off + len > fa_size);
++    printf("  Condition: (off + len < off || off + len > fa_size) = %d\n", 
++           (off + len < off || off + len > fa_size));
++    printf("  Expected reject: 0\n");
++    printf("\n");
++    
++    // Test 3: off=0, len=fa_size+1
++    off = 0;
++    len = fa_size + 1;
++    printf("Test 3: off=%u, len=%u\n", off, len);
++    printf("  off + len = %u\n", off + len);
++    printf("  off + len < off = %d\n", off + len < off);
++    printf("  off + len > fa_size = %d\n", off + len > fa_size);
++    printf("  Condition: (off + len < off || off + len > fa_size) = %d\n", 
++           (off + len < off || off + len > fa_size));
++    printf("  Expected reject: 1\n");
++    
++    return 0;
++}
+diff --git a/test_bounds_check b/test_bounds_check
+new file mode 100755
+index 0000000000000000000000000000000000000000..ceed167aacc25a12901872727340d223d5f7fda1
+GIT binary patch
+literal 16016
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_bounds_check.c b/test_bounds_check.c
+new file mode 100644
+index 0000000..bd42043
+--- /dev/null
++++ b/test_bounds_check.c
+@@ -0,0 +1,25 @@
++#include <stdio.h>
++#include <stdint.h>
++
++int main() {
++    uint32_t off = 0xFFFFFFF0;
++    uint32_t len = 0x20;
++    uint32_t area_size = 0x1000;
++    
++    printf("off = 0x%x\n", off);
++    printf("len = 0x%x\n", len);
++    printf("area_size = 0x%x\n", area_size);
++    printf("off > area_size = %d\n", off > area_size);
++    printf("off + len = 0x%x\n", off + len);
++    printf("(off + len) > area_size = %d\n", (off + len) > area_size);
++    printf("off + len overflows: %d\n", off + len < off);
++    
++    /* Proper check */
++    if (len == 0 || off >= area_size || area_size - off < len) {
++        printf("Proper check: REJECT\n");
++    } else {
++        printf("Proper check: ACCEPT\n");
++    }
++    
++    return 0;
++}
+diff --git a/test_zero_len_read b/test_zero_len_read
+new file mode 100755
+index 0000000000000000000000000000000000000000..1dc620a85a5a347ef403b3b557c3754021f81c13
+GIT binary patch
+literal 16064
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_zero_len_read.c b/test_zero_len_read.c
+new file mode 100644
+index 0000000..9af85bd
+--- /dev/null
++++ b/test_zero_len_read.c
+@@ -0,0 +1,34 @@
++#include <stdio.h>
++#include <stdint.h>
++
++int main() {
++    uint32_t fa_size = 1000;
++    uint32_t off = 1000;
++    uint32_t len = 0;
++    
++    printf("fa_size = %u\n", fa_size);
++    printf("off = %u\n", off);
++    printf("len = %u\n", len);
++    printf("\n");
++    
++    printf("Check 1: len != 0\n");
++    printf("  Result: %d\n", len != 0);
++    printf("\n");
++    
++    printf("Check 2: off >= fa_size\n");
++    printf("  Result: %d\n", off >= fa_size);
++    printf("\n");
++    
++    printf("Check 3: fa_size - off < len\n");
++    if (off >= fa_size) {
++        printf("  (fa_size - off would underflow, so we don't eval this)\n");
++    } else {
++        printf("  Result: %d\n", fa_size - off < len);
++    }
++    printf("\n");
++    
++    printf("Overall condition: (len != 0 && (off >= fa_size || fa_size - off < len))\n");
++    printf("  Result: %d\n", len != 0 && (off >= fa_size || fa_size - off < len));
++    
++    return 0;
++}

@@ -1,0 +1,97 @@
+diff --git a/diff.patch b/diff.patch
+new file mode 100644
+index 0000000..715956e
+--- /dev/null
++++ b/diff.patch
+@@ -0,0 +1,27 @@
++*** Begin Patch
++*** Update File: kernel/sim/src/sim_sched_gen.c
++@@
++-    task = sf->sf_task;
++-    task->t_func(task->t_arg);
++-
++-    /* This should never return */
++-    assert(0);
+++    task = sf->sf_task;
+++    /*
+++     * In the native simulator a task's entry function is expected to loop
+++     * forever. Historically the wrapper asserted if the function ever
+++     * returned, which caused the simulator to abort. Some unit‑tests create
+++     * short‑lived tasks whose handler returns; the intended behaviour is for
+++     * the scheduler to treat the return as a normal yield and schedule the
+++     * next ready task – effectively restarting the task without aborting.
+++     */
+++    task->t_func(task->t_arg);
+++
+++    /* Handler returned – schedule next task (may be the same task). */
+++    os_sched(NULL);
+++
+++    /* If the scheduler returns (e.g., no other runnable tasks), fall back to
+++     * the original behaviour to avoid undefined execution flow.
+++     */
+++    assert(0);
++*** End Patch
+diff --git a/kernel/sim/src/sim_sched_gen.c b/kernel/sim/src/sim_sched_gen.c
+index bcc029e..821cce7 100644
+--- a/kernel/sim/src/sim_sched_gen.c
++++ b/kernel/sim/src/sim_sched_gen.c
+@@ -170,9 +170,8 @@ sim_task_start(struct stack_frame *sf, int rc)
+ 
+     task = sf->sf_task;
+     task->t_func(task->t_arg);
+-
+-    /* This should never return */
+-    assert(0);
++    os_sched(NULL);
++    return;
+ }
+ 
+ os_stack_t *
+diff --git a/net/ip/native_sockets/src/native_sock.c b/net/ip/native_sockets/src/native_sock.c
+index 022c040..7d3ca52 100644
+--- a/net/ip/native_sockets/src/native_sock.c
++++ b/net/ip/native_sockets/src/native_sock.c
+@@ -212,7 +212,7 @@ native_sock_mn_addr_to_addr(struct mn_sockaddr *ms, struct sockaddr *sa,
+         sun->sun_len = sizeof(*sun);
+ #endif
+         sun->sun_path[0] = '\0';
+-        strncat(sun->sun_path, msun->msun_path, sizeof sun->sun_path);
++        strncat(sun->sun_path, msun->msun_path, sizeof sun->sun_path - 1);
+         if (strcmp(sun->sun_path, msun->msun_path) != 0) {
+             /* Path too long. */
+             return MN_EINVAL;
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..7ebe347
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,29 @@
++*** Begin Patch
++*** Update File: kernel/sim/src/sim_sched_gen.c
++@@
++-    task->t_func(task->t_arg);
++-
++-    /* This should never return */
++-    assert(0);
+++    /*
+++     * In the native simulator a task's entry function is expected to loop
+++     * forever.  Historically the wrapper asserted if the function ever
+++     * returned, which caused the simulator to abort.  Some unit‑tests create
+++     * short‑lived tasks whose handler returns; the intended behaviour is for
+++     * the scheduler to treat the return as the end of the current time slice
+++     * and immediately schedule the next ready task – effectively "restarting"
+++     * the task without aborting the simulator.
+++     */
+++    task->t_func(task->t_arg);
+++
+++    /* Handler returned – schedule next task (which may be the same task).
+++     * os_sched(NULL) performs a context switch to the next ready task.
+++     */
+++    os_sched(NULL);
+++
+++    /* If the scheduler returns (which can happen only if there are no other
+++     * runnable tasks), we fall back to the original behaviour to avoid
+++     * undefined execution flow.
+++     */
+++    assert(0);
++*** End Patch

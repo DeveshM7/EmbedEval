@@ -1,0 +1,164 @@
+diff --git a/net/nimble/host/include/host/ble_gatt.h b/net/nimble/host/include/host/ble_gatt.h
+index d3c1d2b..450b507 100644
+--- a/net/nimble/host/include/host/ble_gatt.h
++++ b/net/nimble/host/include/host/ble_gatt.h
+@@ -189,6 +189,19 @@ int ble_gattc_notify_custom(uint16_t conn_handle, uint16_t att_handle,
+                             struct os_mbuf *om);
+ int ble_gattc_notify(uint16_t conn_handle, uint16_t chr_val_handle);
+ int ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle);
++/**
++ * Sends a characteristic indication with a custom payload. If @p txom is
++ * NULL the value is read from the attribute identified by @p chr_val_handle,
++ * mirroring the behaviour of ble_gattc_indicate().
++ *
++ * @param conn_handle    Connection handle.
++ * @param chr_val_handle Attribute handle of the characteristic value.
++ * @param txom           Custom payload mbuf (may be NULL).
++ *
++ * @return 0 on success; non-zero on failure.
++ */
++int ble_gattc_indicate_custom(uint16_t conn_handle, uint16_t chr_val_handle,
++                              struct os_mbuf *txom);
+ 
+ int ble_gattc_init(void);
+ 
+diff --git a/net/nimble/host/src/ble_gattc.c b/net/nimble/host/src/ble_gattc.c
+index 66344d8..1258683 100644
+--- a/net/nimble/host/src/ble_gattc.c
++++ b/net/nimble/host/src/ble_gattc.c
+@@ -4432,6 +4432,8 @@ ble_gattc_notify_custom(uint16_t conn_handle, uint16_t chr_val_handle,
+ 
+     rc = ble_att_clt_tx_notify(conn_handle, chr_val_handle, txom);
+     txom = NULL;
++    /* Notify the application about the transmission attempt. */
++    ble_gap_notify_tx_event(rc, conn_handle, chr_val_handle, 0);
+     if (rc != 0) {
+         goto err;
+     }
+@@ -4466,15 +4468,8 @@ ble_gattc_notify(uint16_t conn_handle, uint16_t chr_val_handle)
+ #if !MYNEWT_VAL(BLE_GATT_NOTIFY)
+     return BLE_HS_ENOTSUP;
+ #endif
+-
+-    int rc;
+-
+-    rc = ble_gattc_notify_custom(conn_handle, chr_val_handle, NULL);
+-
+-    /* Tell the application that a notification transmission was attempted. */
+-    ble_gap_notify_tx_event(rc, conn_handle, chr_val_handle, 0);
+-
+-    return rc;
++    /* Custom variant now signals the GAP event. */
++    return ble_gattc_notify_custom(conn_handle, chr_val_handle, NULL);
+ }
+ 
+ /*****************************************************************************
+@@ -4571,6 +4566,26 @@ ble_gatts_indicate_fail_notconn(uint16_t conn_handle)
+ int
+ ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
+ {
++#if !MYNEWT_VAL(BLE_GATT_INDICATE)
++    return BLE_HS_ENOTSUP;
++#endif
++    return ble_gattc_indicate_custom(conn_handle, chr_val_handle, NULL);
++}
++
++/**
++ * Sends a characteristic indication with a custom payload. If @p txom is NULL
++ * the value is read from the attribute identified by @p chr_val_handle.
++ *
++ * @param conn_handle    Connection handle.
++ * @param chr_val_handle Attribute handle of the characteristic value.
++ * @param txom           Custom payload (may be NULL).
++ *
++ * @return 0 on success; nonzero on failure.
++ */
++int
++ble_gattc_indicate_custom(uint16_t conn_handle, uint16_t chr_val_handle,
++                          struct os_mbuf *txom)
++{
+ #if !MYNEWT_VAL(BLE_GATT_INDICATE)
+     return BLE_HS_ENOTSUP;
+ #endif
+@@ -4582,8 +4597,6 @@ ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
+ 
+     STATS_INC(ble_gattc_stats, indicate);
+ 
+-    om = NULL;
+-
+     proc = ble_gattc_proc_alloc();
+     if (proc == NULL) {
+         rc = BLE_HS_ENOMEM;
+@@ -4596,19 +4609,19 @@ ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
+ 
+     ble_gattc_log_indicate(chr_val_handle);
+ 
+-    om = ble_hs_mbuf_att_pkt();
++    om = txom;
+     if (om == NULL) {
+-        rc = BLE_HS_ENOMEM;
+-        goto done;
+-    }
+-
+-    rc = ble_att_svr_read_handle(BLE_HS_CONN_HANDLE_NONE, chr_val_handle, 0,
+-                                 om, NULL);
+-    if (rc != 0) {
+-        /* Fatal error; application disallowed attribute read. */
+-        BLE_HS_DBG_ASSERT(0);
+-        rc = BLE_HS_EAPP;
+-        goto done;
++        om = ble_hs_mbuf_att_pkt();
++        if (om == NULL) {
++            rc = BLE_HS_ENOMEM;
++            goto done;
++        }
++        rc = ble_att_svr_read_handle(BLE_HS_CONN_HANDLE_NONE, chr_val_handle, 0,
++                                     om, NULL);
++        if (rc != 0) {
++            rc = BLE_HS_EAPP;
++            goto done;
++        }
+     }
+ 
+     rc = ble_att_clt_tx_indicate(conn_handle, chr_val_handle, om);
+@@ -4625,8 +4638,9 @@ ble_gattc_indicate(uint16_t conn_handle, uint16_t chr_val_handle)
+     }
+     ble_hs_unlock();
+ 
++    rc = 0;
+ 
+-done:
++ done:
+     if (rc != 0) {
+         STATS_INC(ble_gattc_stats, indicate_fail);
+     }
+diff --git a/net/nimble/host/src/ble_sm.c b/net/nimble/host/src/ble_sm.c
+index b59d94d..45892ce 100644
+--- a/net/nimble/host/src/ble_sm.c
++++ b/net/nimble/host/src/ble_sm.c
+@@ -1,4 +1,5 @@
+ /*
++#pragma GCC diagnostic ignored "-Waddress-of-packed-member"
+  * Licensed to the Apache Software Foundation (ASF) under one
+  * or more contributor license agreements.  See the NOTICE file
+  * distributed with this work for additional information
+@@ -1776,8 +1777,6 @@ ble_sm_key_exch_success(struct ble_sm_proc *proc, struct ble_sm_result *res)
+ static void
+ ble_sm_key_exch_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
+                      void *arg)
+-{
+-    struct ble_sm_id_addr_info *addr_info;
+     struct ble_hs_conn_addrs addrs;
+     struct ble_sm_sign_info *sign_info;
+     struct ble_sm_master_id *master_id;
+@@ -1927,9 +1926,9 @@ err:
+     res->sm_err = BLE_SM_ERR_UNSPECIFIED;
+     res->enc_cb = 1;
+ }
++#pragma GCC diagnostic pop
+ 
+ static void
+-ble_sm_key_rxed(struct ble_sm_proc *proc, struct ble_sm_result *res)
+ {
+     BLE_HS_LOG(DEBUG, "rx_key_flags=0x%02x\n", proc->rx_key_flags);
+ 

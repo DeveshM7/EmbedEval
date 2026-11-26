@@ -1,0 +1,106 @@
+diff --git a/add_test.patch b/add_test.patch
+new file mode 100644
+index 0000000..28c8240
+--- /dev/null
++++ b/add_test.patch
+@@ -0,0 +1,43 @@
++--- a/net/nimble/host/test/src/ble_l2cap_test.c
+++++ b/net/nimble/host/test/src/ble_l2cap_test.c
++@@ -365,6 +365,38 @@ TEST_CASE(ble_l2cap_test_case_sig_update_
++     TEST_ASSERT(ble_l2cap_test_update_arg == NULL);
++ }
++ 
+++TEST_CASE(ble_l2cap_test_case_sig_update_unknown_id_silent)
+++{
+++    struct ble_l2cap_sig_update_params params;
+++    uint8_t id;
+++    int rc;
+++
+++    ble_l2cap_test_util_init();
+++
+++    ble_l2cap_test_util_create_conn(2, ((uint8_t[]){1,2,3,4,5,6}),
+++                                    ble_l2cap_test_util_conn_cb, NULL);
+++
+++    /* Only the slave can initiate the L2CAP connection update procedure. */
+++    ble_hs_atomic_conn_set_flags(2, BLE_HS_CONN_F_MASTER, 0);
+++
+++    params.itvl_min = 0x200;
+++    params.itvl_max = 0x300;
+++    params.slave_latency = 0;
+++    params.timeout_multiplier = 0x100;
+++    rc = ble_l2cap_sig_update(2, &params, ble_l2cap_test_util_update_cb, NULL);
+++    TEST_ASSERT_FATAL(rc == 0);
+++
+++    ble_hs_test_util_tx_all();
+++
+++    /* Ensure an update request got sent. */
+++    id = ble_hs_test_util_verify_tx_l2cap_update_req(&params);
+++
+++    /* Receive response from peer with incorrect ID (unknown identifier). */
+++    rc = ble_hs_test_util_rx_l2cap_update_rsp(2, id + 1, 0);
+++    TEST_ASSERT(rc == 0);  /* Should be consumed silently */
+++
+++    /* Ensure callback did not get called for unknown identifier. */
+++    TEST_ASSERT(ble_l2cap_test_update_status == -1);
+++}
+++
++ TEST_SUITE(ble_l2cap_test_suite)
++ {
++     tu_suite_set_post_test_cb(ble_hs_test_util_post_test, NULL);
+diff --git a/fix_l2cap_update_rsp.patch b/fix_l2cap_update_rsp.patch
+new file mode 100644
+index 0000000..9109002
+--- /dev/null
++++ b/fix_l2cap_update_rsp.patch
+@@ -0,0 +1,17 @@
++--- a/net/nimble/host/src/ble_l2cap_sig.c
+++++ b/net/nimble/host/src/ble_l2cap_sig.c
++@@ -379,8 +379,12 @@ ble_l2cap_sig_update_rsp_rx(uint16_t conn_handle,
++     proc = ble_l2cap_sig_proc_extract(conn_handle,
++                                       BLE_L2CAP_SIG_PROC_OP_UPDATE,
++                                       hdr->identifier);
++-    if (proc == NULL) {
++-        return BLE_HS_ENOENT;
+++    if (proc == NULL) {
+++        /*
+++         * Silently consume unsolicited or unknown identifier responses
+++         * without error, per task requirement.
+++         */
+++        return 0;
++     }
++ 
++     rc = ble_hs_mbuf_pullup_base(om, BLE_L2CAP_SIG_UPDATE_RSP_SZ);
+diff --git a/net/nimble/host/src/ble_l2cap_sig.c b/net/nimble/host/src/ble_l2cap_sig.c
+index 3b548c0..3221981 100644
+--- a/net/nimble/host/src/ble_l2cap_sig.c
++++ b/net/nimble/host/src/ble_l2cap_sig.c
+@@ -386,7 +386,11 @@ ble_l2cap_sig_update_rsp_rx(uint16_t conn_handle,
+                                       BLE_L2CAP_SIG_PROC_OP_UPDATE,
+                                       hdr->identifier);
+     if (proc == NULL) {
+-        return BLE_HS_ENOENT;
++        /*
++         * Silently consume unsolicited or unknown identifier responses
++         * without error, per task requirement.
++         */
++        return 0;
+     }
+ 
+     rc = ble_hs_mbuf_pullup_base(om, BLE_L2CAP_SIG_UPDATE_RSP_SZ);
+diff --git a/update_test.patch b/update_test.patch
+new file mode 100644
+index 0000000..3f89d2e
+--- /dev/null
++++ b/update_test.patch
+@@ -0,0 +1,11 @@
++--- a/net/nimble/host/test/src/ble_l2cap_test.c
+++++ b/net/nimble/host/test/src/ble_l2cap_test.c
++@@ -280,7 +280,7 @@ ble_l2cap_test_case_sig_unsol_rsp(void)
++ 
++     /* Receive an unsolicited response. */
++     rc = ble_hs_test_util_rx_l2cap_update_rsp(2, 100, 0);
++-    TEST_ASSERT(rc == BLE_HS_ENOENT);
+++    TEST_ASSERT(rc == 0);
++ 
++     /* Ensure we did not send anything in return. */
++     ble_hs_test_util_tx_all();

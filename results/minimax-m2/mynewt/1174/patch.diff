@@ -1,0 +1,613 @@
+diff --git a/sys/log/modlog/include/modlog/modlog.h b/sys/log/modlog/include/modlog/modlog.h
+new file mode 100644
+index 0000000..6a1591b
+--- /dev/null
++++ b/sys/log/modlog/include/modlog/modlog.h
+@@ -0,0 +1,147 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY,
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef __SYS_LOG_MODLOG_H__
++#define __SYS_LOG_MODLOG_H__
++
++#include <stdint.h>
++#include <stdarg.h>
++#include "os/mynewt.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct log;
++struct modlog_desc;
++struct os_mbuf;
++
++/**
++ * Identifies the default module mapping.
++ */
++#define MODLOG_MODULE_DFLT    (255)
++
++/**
++ * Descriptor for a module-to-log mapping.
++ */
++struct modlog_desc {
++    struct log *log;          /**< Log instance */
++    uint8_t handle;           /**< Mapping handle */
++    uint8_t module;           /**< Module ID */
++    uint8_t min_level;         /**< Minimum log level */
++};
++
++/**
++ * Callback for iterating over module mappings.
++ *
++ * @param desc The mapping descriptor
++ * @param arg  User-provided argument
++ *
++ * @return 0 to continue iteration, non-zero to abort
++ */
++typedef int (*modlog_foreach_fn)(const struct modlog_desc *desc, void *arg);
++
++/**
++ * Retrieve a mapping by handle.
++ *
++ * @param handle   The mapping handle
++ * @param out_desc Optional output descriptor
++ *
++ * @return 0 on success, SYS_ENOENT if handle not found
++ */
++int modlog_get(uint8_t handle, struct modlog_desc *out_desc);
++
++/**
++ * Register a new module-to-log mapping.
++ *
++ * @param module    The module ID
++ * @param log       The log instance
++ * @param min_level Minimum log level for this mapping
++ * @param out_handle Optional output handle
++ *
++ * @return 0 on success, SYS_EINVAL if log is NULL, SYS_ENOMEM if no space
++ */
++int modlog_register(uint8_t module, struct log *log, uint8_t min_level,
++                    uint8_t *out_handle);
++
++/**
++ * Delete a module-to-log mapping.
++ *
++ * @param handle The mapping handle
++ *
++ * @return 0 on success, SYS_ENOENT if handle not found
++ */
++int modlog_delete(uint8_t handle);
++
++/**
++ * Append a log entry to a module.
++ *
++ * @param module The module ID
++ * @param level  The log level
++ * @param etype  The entry type
++ * @param data   The entry body (without header)
++ * @param len    The body length
++ *
++ * @return 0 on success
++ */
++int modlog_append(uint8_t module, uint8_t level, uint8_t etype,
++                  void *data, uint16_t len);
++
++/**
++ * Append a log entry to a module using an mbuf.
++ *
++ * @param module The module ID
++ * @param level  The log level
++ * @param etype  The entry type
++ * @param om     The mbuf containing the entry (with header)
++ *
++ * @return 0 on success
++ */
++int modlog_append_mbuf(uint8_t module, uint8_t level, uint8_t etype,
++                       struct os_mbuf *om);
++
++/**
++ * Iterate over all module mappings.
++ *
++ * @param fn   Callback function
++ * @param arg  User-provided argument
++ *
++ * @return 0 if iteration completed, fn's return value if aborted
++ */
++int modlog_foreach(modlog_foreach_fn *iter_fn, void *arg);
++
++/**
++ * Format and append a string log entry.
++ *
++ * @param module The module ID
++ * @param level  The log level
++ * @param msg    Format string
++ * @param ...    Format arguments
++ */
++void modlog_printf(uint16_t module, uint16_t level, const char *msg, ...);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __SYS_LOG_MODLOG_H__ */
++
++/* Internal initialization function called by sysinit */
++void modlog_pkg_init(void);
++
+diff --git a/sys/log/modlog/pkg.yml b/sys/log/modlog/pkg.yml
+new file mode 100644
+index 0000000..845cff2
+--- /dev/null
++++ b/sys/log/modlog/pkg.yml
+@@ -0,0 +1,34 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY,
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions or limitations
++# under the License.
++#
++
++pkg.name: sys/log/modlog
++pkg.description: Module-mapped logging support
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++
++pkg.deps:
++    - kernel/os
++    - sys/log/full
++
++pkg.export:
++    - modlog/modlog.h
++
++pkg.init:
++    modlog_pkg_init: 100
+diff --git a/sys/log/modlog/src/modlog.c b/sys/log/modlog/src/modlog.c
+new file mode 100644
+index 0000000..bf5a433
+--- /dev/null
++++ b/sys/log/modlog/src/modlog.c
+@@ -0,0 +1,378 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "modlog/modlog.h"
++#include <log/log.h>
++#include <os/os_mbuf.h>
++#include <os/os.h>
++#include <string.h>
++
++/* Maximum number of module mappings */
++#ifndef MYNEWT_VAL_MODLOG_MAX_MAPPINGS
++#define MODLOG_MAX_MAPPINGS  (32)
++#else
++#define MODLOG_MAX_MAPPINGS  MYNEWT_VAL_MODLOG_MAX_MAPPINGS
++#endif
++
++/* Mapping state */
++static struct {
++    bool in_use;
++    struct log *log;
++    uint8_t handle;
++    uint8_t module;
++    uint8_t min_level;
++} g_modlog_mappings[MODLOG_MAX_MAPPINGS];
++
++/* Number of mappings registered so far (used to generate handles) */
++static uint8_t g_modlog_next_handle;
++
++/**
++ * Find a free slot for a new mapping.
++ *
++ * @return Index of free slot, or -1 if none available
++ */
++static int
++modlog_find_free_slot(void)
++{
++    int i;
++
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (!g_modlog_mappings[i].in_use) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++/**
++ * Generate a unique handle.
++ *
++ * @return A unique handle
++ */
++static uint8_t
++modlog_alloc_handle(void)
++{
++    uint8_t handle;
++
++    handle = g_modlog_next_handle++;
++    /* Wraparound is fine; handles just need to be unique among active mappings */
++
++    return handle;
++}
++
++int
++modlog_get(uint8_t handle, struct modlog_desc *out_desc)
++{
++    int i;
++
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (g_modlog_mappings[i].in_use &&
++            g_modlog_mappings[i].handle == handle) {
++            if (out_desc != NULL) {
++                out_desc->log = g_modlog_mappings[i].log;
++                out_desc->handle = g_modlog_mappings[i].handle;
++                out_desc->module = g_modlog_mappings[i].module;
++                out_desc->min_level = g_modlog_mappings[i].min_level;
++            }
++            return 0;
++        }
++    }
++
++    return SYS_ENOENT;
++}
++
++int
++modlog_register(uint8_t module, struct log *log, uint8_t min_level,
++                uint8_t *out_handle)
++{
++    int slot;
++    uint8_t handle;
++
++    if (log == NULL) {
++        return SYS_EINVAL;
++    }
++
++    slot = modlog_find_free_slot();
++    if (slot < 0) {
++        return SYS_ENOMEM;
++    }
++
++    handle = modlog_alloc_handle();
++
++    g_modlog_mappings[slot].in_use = true;
++    g_modlog_mappings[slot].log = log;
++    g_modlog_mappings[slot].handle = handle;
++    g_modlog_mappings[slot].module = module;
++    g_modlog_mappings[slot].min_level = min_level;
++
++    if (out_handle != NULL) {
++        *out_handle = handle;
++    }
++
++    return 0;
++}
++
++int
++modlog_delete(uint8_t handle)
++{
++    int i;
++
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (g_modlog_mappings[i].in_use &&
++            g_modlog_mappings[i].handle == handle) {
++            g_modlog_mappings[i].in_use = false;
++            return 0;
++        }
++    }
++
++    return SYS_ENOENT;
++}
++
++/**
++ * Append an entry to a single log.
++ * The data buffer already contains a log_entry_hdr at the beginning.
++ *
++ * @param log    The log instance
++ * @param data   The entry body (with header prefix)
++ * @param len    The body length (excluding header)
++ *
++ * @return 0 on success
++ */
++static int
++modlog_append_to_log(struct log *log, void *data, uint16_t len)
++{
++    /* The data already contains the header, so we pass the whole buffer
++     * including the header to the log handler */
++    return log->l_log->log_append(log, data, len + LOG_ENTRY_HDR_SIZE);
++}
++
++/**
++ * Append an entry to a single log using mbuf.
++ *
++ * @param log    The log instance
++ * @param om     The mbuf containing the entry (with header)
++ *
++ * @return 0 on success
++ */
++static int
++modlog_append_mbuf_to_log(struct log *log, struct os_mbuf *om)
++{
++    if (log->l_log->log_append_mbuf) {
++        return log->l_log->log_append_mbuf(log, om);
++    } else {
++        /* Fallback: copy mbuf to buffer and use log_append */
++        uint16_t total_len = OS_MBUF_PKTLEN(om);
++        uint8_t *buf;
++        struct os_mbuf *om_pos;
++        uint16_t offset;
++        int rc;
++
++        if (total_len < LOG_ENTRY_HDR_SIZE) {
++            os_mbuf_free(om);
++            return -1;
++        }
++
++        buf = os_malloc(total_len);
++        if (buf == NULL) {
++            os_mbuf_free(om);
++            return -1;
++        }
++
++        /* Copy mbuf to buffer */
++        om_pos = om;
++        offset = 0;
++        while (om_pos != NULL) {
++            memcpy(buf + offset, om_pos->om_data, om_pos->om_len);
++            offset += om_pos->om_len;
++            om_pos = SLIST_NEXT(om_pos, om_next);
++        }
++
++        rc = log->l_log->log_append(log, buf, total_len);
++        os_free(buf);
++        os_mbuf_free(om);
++        return rc;
++    }
++}
++
++/**
++ * Check if an entry should be logged based on min_level.
++ *
++ * @param min_level The minimum level for the mapping
++ * @param level     The entry level
++ *
++ * @return true if the entry should be logged
++ */
++static bool
++modlog_should_log(uint8_t min_level, uint8_t level)
++{
++    return level >= min_level;
++}
++
++int
++modlog_append(uint8_t module, uint8_t level, uint8_t etype,
++              void *data, uint16_t len)
++{
++    int i;
++    bool found_specific = false;
++    uint8_t *data_copy;
++
++    /* First pass: look for exact module matches */
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (g_modlog_mappings[i].in_use &&
++            g_modlog_mappings[i].module == module) {
++            found_specific = true;
++            if (modlog_should_log(g_modlog_mappings[i].min_level, level)) {
++                /* Make a copy of the data for this log */
++                data_copy = os_malloc(len + LOG_ENTRY_HDR_SIZE);
++                if (data_copy != NULL) {
++                    memcpy(data_copy, data, len + LOG_ENTRY_HDR_SIZE);
++                    (void)modlog_append_to_log(g_modlog_mappings[i].log,
++                                              data_copy, len);
++                    os_free(data_copy);
++                }
++            }
++        }
++    }
++
++    /* If no exact match found, look for default mappings */
++    if (!found_specific) {
++        for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++            if (g_modlog_mappings[i].in_use &&
++                g_modlog_mappings[i].module == MODLOG_MODULE_DFLT) {
++                if (modlog_should_log(g_modlog_mappings[i].min_level, level)) {
++                    data_copy = os_malloc(len + LOG_ENTRY_HDR_SIZE);
++                    if (data_copy != NULL) {
++                        memcpy(data_copy, data, len + LOG_ENTRY_HDR_SIZE);
++                        (void)modlog_append_to_log(g_modlog_mappings[i].log,
++                                                  data_copy, len);
++                        os_free(data_copy);
++                    }
++                }
++            }
++        }
++    }
++
++    /* If neither specific nor default mapping exists, do nothing (return 0) */
++    return 0;
++}
++
++int
++modlog_append_mbuf(uint8_t module, uint8_t level, uint8_t etype,
++                   struct os_mbuf *om)
++{
++    int i;
++    bool found_specific = false;
++    struct os_mbuf *om_copy;
++
++    /* First pass: look for exact module matches */
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (g_modlog_mappings[i].in_use &&
++            g_modlog_mappings[i].module == module) {
++            found_specific = true;
++            if (modlog_should_log(g_modlog_mappings[i].min_level, level)) {
++                /* We need to duplicate the mbuf for each log */
++                om_copy = os_mbuf_dup(om);
++                if (om_copy != NULL) {
++                    (void)modlog_append_mbuf_to_log(g_modlog_mappings[i].log,
++                                                   om_copy);
++                }
++            }
++        }
++    }
++
++    /* If no exact match found, look for default mappings */
++    if (!found_specific) {
++        for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++            if (g_modlog_mappings[i].in_use &&
++                g_modlog_mappings[i].module == MODLOG_MODULE_DFLT) {
++                if (modlog_should_log(g_modlog_mappings[i].min_level, level)) {
++                    om_copy = os_mbuf_dup(om);
++                    if (om_copy != NULL) {
++                        (void)modlog_append_mbuf_to_log(g_modlog_mappings[i].log,
++                                                       om_copy);
++                    }
++                }
++            }
++        }
++    }
++
++    /* Always free the original mbuf */
++    os_mbuf_free(om);
++
++    return 0;
++}
++
++int
++modlog_foreach(modlog_foreach_fn *iter_fn, void *arg)
++{
++    int i;
++    int rc;
++
++    /* Iterate in ascending module order */
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (g_modlog_mappings[i].in_use) {
++            struct modlog_desc desc;
++
++            desc.log = g_modlog_mappings[i].log;
++            desc.handle = g_modlog_mappings[i].handle;
++            desc.module = g_modlog_mappings[i].module;
++            desc.min_level = g_modlog_mappings[i].min_level;
++
++            rc = (*iter_fn)(&desc, arg);
++            if (rc != 0) {
++                return rc;
++            }
++        }
++    }
++
++    return 0;
++}
++
++void
++modlog_printf(uint16_t module, uint16_t level, const char *msg, ...)
++{
++    va_list args;
++    char buf[MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN)];
++    int len;
++
++    va_start(args, msg);
++    len = vsnprintf(buf, sizeof(buf), msg, args);
++    va_end(args);
++
++    /* Ensure we don't exceed MODLOG_MAX_PRINTF_LEN - 1 for body */
++    if (len < 0) {
++        /* Formatting error */
++        return;
++    }
++
++    /* Note: The vsnprintf already handles truncation to fit in the buffer.
++     * We pass the body length (not including the header) to modlog_append. */
++    modlog_append(module, level, LOG_ETYPE_STRING, buf, len);
++}
++
++/**
++ * Initialize the modlog package.
++ */
++void
++modlog_pkg_init(void)
++{
++    /* Initialize the mappings array */
++    memset(g_modlog_mappings, 0, sizeof(g_modlog_mappings));
++    g_modlog_next_handle = 0;
++}
+diff --git a/sys/log/modlog/syscfg.yml b/sys/log/modlog/syscfg.yml
+new file mode 100644
+index 0000000..3608199
+--- /dev/null
++++ b/sys/log/modlog/syscfg.yml
+@@ -0,0 +1,30 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY,
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++# Package: sys/log/modlog
++
++syscfg.defs:
++    MODLOG_MAX_PRINTF_LEN:
++        description: 'Maximum length of formatted message for modlog_printf'
++        value: 028
++    MODLOG_CONSOLE_DFLT:
++        description: 'Register default console log mapping on init'
++        value: 0
++    MODLOG_MAX_MAPPINGS:
++        description: 'Maximum number of module mappings'
++        value: 32

@@ -1,0 +1,134 @@
+diff --git a/kernel/os/include/os/os_mbuf.h b/kernel/os/include/os/os_mbuf.h
+index 40dc16a..b875621 100644
+--- a/kernel/os/include/os/os_mbuf.h
++++ b/kernel/os/include/os/os_mbuf.h
+@@ -642,6 +642,22 @@ struct os_mbuf *os_mbuf_trim_front(struct os_mbuf *om);
+  *
+  * @return                      0 on success; SYS_[...] error code on failure.
+  */
++
++
++
++/**
++ * Concatenates two mbuf chains and packs the data into a single chain with no
++ * leading space in any mbuf. All mbufs except the last are filled to capacity.
++ * Empty mbufs are freed. If the first mbuf has a packet header, it is retained
++ * and its length is updated to include the second chain.
++ *
++ * @param m1                    The first mbuf chain.
++ * @param m2                    The second mbuf chain (may be NULL).
++ *
++ * @return                      The packed mbuf chain starting with m1.
++ */
++struct os_mbuf *os_mbuf_pack_chains(struct os_mbuf *m1, struct os_mbuf *m2);
++
+ int os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len);
+ 
+ #ifdef __cplusplus
+diff --git a/kernel/os/src/os_mbuf.c b/kernel/os/src/os_mbuf.c
+index 297ccaf..c27c325 100644
+--- a/kernel/os/src/os_mbuf.c
++++ b/kernel/os/src/os_mbuf.c
+@@ -950,6 +950,102 @@ os_mbuf_trim_front(struct os_mbuf *om)
+     return om;
+ }
+ 
++
++/**
++ * Concatenates two mbuf chains and packs the data into a single chain with no
++ * leading space in any mbuf. All mbufs except the last are filled to capacity.
++ * Empty mbufs are freed. If the first mbuf has a packet header, it is retained
++ * and its length is updated to include the second chain.
++ *
++ * @param m1                    The first mbuf chain.
++ * @param m2                    The second mbuf chain (may be NULL).
++ *
++ * @return                      The packed mbuf chain starting with m1.
++ */
++struct os_mbuf *
++os_mbuf_pack_chains(struct os_mbuf *m1, struct os_mbuf *m2)
++{
++    struct os_mbuf *cur;
++    struct os_mbuf *next;
++    struct os_mbuf *prev;
++    uint16_t copy_len;
++    uint16_t total_len;
++    
++    if (m1 == NULL) {
++        return m2;
++    }
++    
++    if (m2 != NULL) {
++        /* Find the end of m1 and append m2 */
++        cur = m1;
++        while (SLIST_NEXT(cur, om_next) != NULL) {
++            cur = SLIST_NEXT(cur, om_next);
++        }
++        SLIST_NEXT(cur, om_next) = m2;
++    }
++    
++    /* Now pack the chain to eliminate leading space and fill mbufs */
++    cur = m1;
++    prev = NULL;
++    
++    while (cur != NULL) {
++        /* If cur has no data, free it and skip it */
++        if (cur->om_len == 0) {
++            next = SLIST_NEXT(cur, om_next);
++            os_mbuf_free(cur);
++            if (prev == NULL) {
++                m1 = next;
++            } else {
++                SLIST_NEXT(prev, om_next) = next;
++            }
++            cur = next;
++            continue;
++        }
++        
++        /* Move cur's data to the start to eliminate leading space */
++        if (cur->om_data != &cur->om_databuf[0] + cur->om_pkthdr_len) {
++            /* Copy data to the start position */
++            memmove(&cur->om_databuf[0] + cur->om_pkthdr_len, 
++                    cur->om_data, cur->om_len);
++            cur->om_data = &cur->om_databuf[0] + cur->om_pkthdr_len;
++        }
++        
++        next = SLIST_NEXT(cur, om_next);
++        
++        /* If there's a next mbuf and cur has trailing space, pack data into cur */
++        if (next != NULL && next->om_len > 0) {
++            copy_len = min(OS_MBUF_TRAILINGSPACE(cur), next->om_len);
++            if (copy_len > 0) {
++                /* Copy data from next to cur */
++                memcpy(cur->om_data + cur->om_len, next->om_data, copy_len);
++                cur->om_len += copy_len;
++                next->om_len -= copy_len;
++                next->om_data += copy_len;
++                
++                /* If next is now empty, free it */
++                if (next->om_len == 0) {
++                    SLIST_NEXT(cur, om_next) = SLIST_NEXT(next, om_next);
++                    os_mbuf_free(next);
++                }
++            }
++        }
++        
++        prev = cur;
++        cur = SLIST_NEXT(cur, om_next);
++    }
++    
++    /* Update packet length if m1 has a packet header */
++    if (OS_MBUF_IS_PKTHDR(m1)) {
++        total_len = 0;
++        for (cur = m1; cur != NULL; cur = SLIST_NEXT(cur, om_next)) {
++            total_len += cur->om_len;
++        }
++        OS_MBUF_PKTHDR(m1)->omp_len = total_len;
++    }
++    
++    return m1;
++}
++
+ int
+ os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len)
+ {

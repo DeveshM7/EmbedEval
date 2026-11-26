@@ -1,0 +1,74 @@
+diff --git a/boot/boot_serial/src/boot_serial.c b/boot/boot_serial/src/boot_serial.c
+index a2324e9..9903cac 100644
+--- a/boot/boot_serial/src/boot_serial.c
++++ b/boot/boot_serial/src/boot_serial.c
+@@ -45,6 +45,7 @@
+ #include <crc/crc16.h>
+ 
+ #include <bootutil/image.h>
++#include <bootutil/bootutil.h>
+ 
+ #include "boot_serial/boot_serial.h"
+ #include "boot_serial_priv.h"
+@@ -578,8 +579,13 @@ boot_serial_start(int max_input)
+     tick = os_cputime_get32();
+ #endif
+ 
++    /* Initialize console event queues */
+     rc = console_init(NULL);
+     assert(rc == 0);
++    
++    /* Open the UART channel for boot_serial */
++    rc = boot_serial_uart_open();
++    assert(rc == 0);
+     console_echo(0);
+ 
+     buf = os_malloc(max_input);
+diff --git a/boot/bootutil/include/bootutil/bootutil.h b/boot/bootutil/include/bootutil/bootutil.h
+index 0947f50..53e2603 100644
+--- a/boot/bootutil/include/bootutil/bootutil.h
++++ b/boot/bootutil/include/bootutil/bootutil.h
+@@ -73,6 +73,10 @@ split_go(int loader_slot, int split_slot, void **entry);
+ 
+ #ifdef __cplusplus
+ }
++
++/* Opens the UART channel used by boot_serial for image upload. */
++int boot_serial_uart_open(void);
++
+ #endif
+ 
+ #endif
+diff --git a/boot/bootutil/src/bootutil_misc.c b/boot/bootutil/src/bootutil_misc.c
+index 2fe08e3..3c01477 100644
+--- a/boot/bootutil/src/bootutil_misc.c
++++ b/boot/bootutil/src/bootutil_misc.c
+@@ -493,3 +493,28 @@ done:
+     flash_area_close(fap);
+     return rc;
+ }
++
++/*
++ * Opens the UART channel used by boot_serial for image upload.
++ * This function opens the configured console UART device and returns 0 on success.
++ */
++int
++boot_serial_uart_open(void)
++{
++#if MYNEWT_VAL(CONSOLE_UART)
++    struct uart_conf uc = {
++        .uc_speed = MYNEWT_VAL(CONSOLE_UART_BAUD),
++        .uc_databits = 8,
++        .uc_stopbits = 1,
++        .uc_parity = UART_PARITY_NONE,
++        .uc_flow_ctl = MYNEWT_VAL(CONSOLE_UART_FLOW_CONTROL),
++    };
++
++    /* Open the console UART device */
++    if (!os_dev_open(MYNEWT_VAL(CONSOLE_UART_DEV), OS_TIMEOUT_NEVER, &uc)) {
++        return -1;
++    }
++#endif
++
++    return 0;
++}

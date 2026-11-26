@@ -1,0 +1,80 @@
+diff --git a/hw/hal/include/hal/hal_flash.h b/hw/hal/include/hal/hal_flash.h
+index 429837e..a4dae5b 100644
+--- a/hw/hal/include/hal/hal_flash.h
++++ b/hw/hal/include/hal/hal_flash.h
+@@ -39,6 +39,7 @@ int hal_flash_read(uint8_t flash_id, uint32_t address, void *dst,
+ int hal_flash_write(uint8_t flash_id, uint32_t address, const void *src,
+   uint32_t num_bytes);
+ int hal_flash_erase_sector(uint8_t flash_id, uint32_t sector_address);
++int hal_flash_write_protect(uint8_t id, uint8_t protect);
+ int hal_flash_erase(uint8_t flash_id, uint32_t address, uint32_t num_bytes);
+ int hal_flash_isempty(uint8_t flash_id, uint32_t address, void *dst,
+                       uint32_t num_bytes);
+diff --git a/hw/hal/src/hal_flash.c b/hw/hal/src/hal_flash.c
+index ac26a05..9e240b9 100644
+--- a/hw/hal/src/hal_flash.c
++++ b/hw/hal/src/hal_flash.c
+@@ -26,6 +26,24 @@
+ #include "hal/hal_flash.h"
+ #include "hal/hal_flash_int.h"
+ 
++
++/* Write protection state for each flash device */
++static uint8_t flash_write_protected[256];
++
++int
++hal_flash_write_protect(uint8_t id, uint8_t protect)
++{
++    const struct hal_flash *hf;
++
++    hf = hal_bsp_flash_dev(id);
++    if (!hf) {
++        return SYS_EINVAL;
++    }
++
++    flash_write_protected[id] = protect ? 1 : 0;
++    return SYS_EOK;
++}
++
+ int
+ hal_flash_init(void)
+ {
+@@ -165,6 +183,12 @@ hal_flash_write(uint8_t id, uint32_t address, const void *src,
+         return -1;
+     }
+ 
++    /* Check write protection */
++    if (flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
++
+     rc = hf->hf_itf->hff_write(hf, address, src, num_bytes);
+     if (rc != 0) {
+         return rc;
+@@ -198,6 +222,12 @@ hal_flash_erase_sector(uint8_t id, uint32_t sector_address)
+         return -1;
+     }
+ 
++    /* Check write protection */
++    if (flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
++
+     rc = hf->hf_itf->hff_erase_sector(hf, sector_address);
+     if (rc != 0) {
+         return rc;
+@@ -246,6 +276,12 @@ hal_flash_erase(uint8_t id, uint32_t address, uint32_t num_bytes)
+         return -1;
+     }
+ 
++    /* Check write protection */
++    if (flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
++
+     for (i = 0; i < hf->hf_sector_cnt; i++) {
+         rc = hf->hf_itf->hff_sector_info(hf, i, &start, &size);
+         assert(rc == 0);

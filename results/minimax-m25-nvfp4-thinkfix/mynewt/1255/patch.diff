@@ -1,0 +1,137 @@
+diff --git a/hw/sensor/include/sensor/sensor.h b/hw/sensor/include/sensor/sensor.h
+index 57c59b8..9fcc60e 100644
+--- a/hw/sensor/include/sensor/sensor.h
++++ b/hw/sensor/include/sensor/sensor.h
+@@ -291,6 +291,28 @@ struct sensor_notifier {
+     SLIST_ENTRY(sensor_notifier) sn_next;
+ };
+ 
++/**
++ * Registration for sensor error notifications
++ */
++struct sensor_err_listener {
++    /* The type of sensor data to listen for errors on, this is interpreted as
++     * a mask, and this listener is called for all sensor types on this
++     * sensor that match the mask.
++     */
++    sensor_type_t sel_sensor_type;
++
++    /* Sensor error handler function, called when a read fails */
++    void (*sel_func)(struct sensor *sensor, void *arg, int status, sensor_type_t type);
++
++    /* Opaque argument for the sensor error handler function. */
++    void *sel_arg;
++
++    /* Next item in the sensor error listener list. The head of this list is
++     * contained within the sensor object.
++     */
++    SLIST_ENTRY(sensor_err_listener) sel_next;
++};
++
+ /**
+  * Context for sensor read events
+  */
+@@ -587,6 +609,11 @@ struct sensor {
+     /* A list of sensor thresholds that are registered */
+     SLIST_HEAD(, sensor_type_traits) s_type_traits_list;
+ 
++    /* A list of error listeners that are registered to receive errors from this
++     * sensor
++     */
++    SLIST_HEAD(, sensor_err_listener) s_err_listener_list;
++
+     /* The next sensor in the global sensor list. */
+     SLIST_ENTRY(sensor) s_next;
+ };
+@@ -673,6 +700,17 @@ int sensor_register_listener(struct sensor *sensor, struct sensor_listener *list
+ 
+ int sensor_unregister_listener(struct sensor *sensor, struct sensor_listener *listener);
+ 
++/**
++ * Register a sensor error listener. This allows a calling application to
++ * register callbacks for when a sensor read fails.
++ *
++ * @param The sensor object
++ * @param The error listener to register
++ *
++ * @return 0 on success, non-zero error code on failure.
++ */
++int sensor_register_err_listener(struct sensor *sensor, struct sensor_err_listener *err_listener);
++
+ /**
+  * @} SensorListenerAPI
+  */
+diff --git a/hw/sensor/src/sensor.c b/hw/sensor/src/sensor.c
+index 36d85ef..8e0d787 100644
+--- a/hw/sensor/src/sensor.c
++++ b/hw/sensor/src/sensor.c
+@@ -1028,6 +1028,35 @@ err:
+     return (rc);
+ }
+ 
++
++/**
++ * Register a sensor error listener. This allows a calling application to
++ * register callbacks for when a sensor read fails.
++ *
++ * @param The sensor object
++ * @param The error listener to register
++ *
++ * @return 0 on success, non-zero error code on failure.
++ */
++int
++sensor_register_err_listener(struct sensor *sensor,
++        struct sensor_err_listener *err_listener)
++{
++    int rc;
++
++    rc = sensor_lock(sensor);
++    if (rc != 0) {
++        goto err;
++    }
++
++    SLIST_INSERT_HEAD(&sensor->s_err_listener_list, err_listener, sel_next);
++
++    sensor_unlock(sensor);
++
++    return (0);
++err:
++    return (rc);
++}
+ static int
+ sensor_set_notification(struct sensor *sensor, struct sensor_notifier *notifier)
+ {
+@@ -1158,6 +1187,25 @@ sensor_read_data_func(struct sensor *sensor, void *arg, void *data,
+     return (0);
+ }
+ 
++
++/**
++ * Invoke error listeners for a failed sensor read.
++ *
++ * @param sensor The sensor object
++ * @param type The sensor type for which the read was attempted
++ * @param status The error status from the failed read
++ */
++static void
++sensor_invoke_err_listeners(struct sensor *sensor, sensor_type_t type, int status)
++{
++    struct sensor_err_listener *listener;
++
++    SLIST_FOREACH(listener, &sensor->s_err_listener_list, sel_next) {
++        if (listener->sel_sensor_type & type) {
++            listener->sel_func(sensor, listener->sel_arg, status, type);
++        }
++    }
++}
+ /**
+  * Puts a interrupt event on the sensor manager evq
+  *
+@@ -2163,6 +2211,7 @@ sensor_read(struct sensor *sensor, sensor_type_t type,
+     rc = sensor->s_funcs->sd_read(sensor, type, sensor_read_data_func, &src,
+                                   timeout);
+     if (rc) {
++        sensor_invoke_err_listeners(sensor, type, rc);
+         goto err;
+     }
+ 

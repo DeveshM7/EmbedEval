@@ -1,0 +1,338 @@
+diff --git a/kernel/os/include/os/os_mbuf.h b/kernel/os/include/os/os_mbuf.h
+index f264d56..89d996a 100644
+--- a/kernel/os/include/os/os_mbuf.h
++++ b/kernel/os/include/os/os_mbuf.h
+@@ -585,6 +585,7 @@ void os_mbuf_concat(struct os_mbuf *first, struct os_mbuf *second);
+  *                              NULL on failure.
+  */
+ void *os_mbuf_extend(struct os_mbuf *om, uint16_t len);
++int os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len);
+ 
+ /**
+  * Rearrange a mbuf chain so that len bytes are contiguous,
+diff --git a/kernel/os/src/os_mbuf.c b/kernel/os/src/os_mbuf.c
+index cfb0d8f..f185c82 100644
+--- a/kernel/os/src/os_mbuf.c
++++ b/kernel/os/src/os_mbuf.c
+@@ -1059,3 +1059,117 @@ os_mbuf_trim_front(struct os_mbuf *om)
+     return om;
+ }
+ 
++int
++os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len)
++{
++    struct os_mbuf *cur;
++    uint16_t cur_off;
++    uint16_t total_len;
++    uint16_t original_total_len;
++    int rc;
++
++    /* Validate arguments */
++    if (om == NULL || len == 0) {
++        return OS_EINVAL;
++    }
++
++    /* Calculate total chain length */
++    total_len = 0;
++    for (cur = om; cur != NULL; cur = SLIST_NEXT(cur, om_next)) {
++        total_len += cur->om_len;
++    }
++    original_total_len = total_len;
++
++    /* Check if offset is valid (0 to total_len inclusive) */
++    if (off > total_len) {
++        return OS_EINVAL;
++    }
++
++    /* If inserting at end, just append */
++    if (off == total_len) {
++        rc = os_mbuf_append(om, NULL, len);
++        if (rc != 0) {
++            return OS_ENOMEM;
++        }
++        /* Update packet header length */
++        if (OS_MBUF_IS_PKTHDR(om)) {
++            OS_MBUF_PKTHDR(om)->omp_len += len;
++        }
++        return 0;
++    }
++
++    /* Find the mbuf and offset where insertion should start */
++    cur = os_mbuf_off(om, off, &cur_off);
++    if (cur == NULL) {
++        return OS_EINVAL;
++    }
++
++    /* For simplicity, use a pessimistic approach that always works */
++    /* Save all data after insertion point to temporary buffer */
++    struct os_mbuf_pool *omp = om->om_omp;
++    uint16_t remaining_data = original_total_len - off;
++    
++    /* Allocate a temporary mbuf chain to hold the tail data */
++    struct os_mbuf *temp_chain = NULL;
++    if (remaining_data > 0) {
++        struct os_mbuf *src_cur = cur;
++        uint16_t src_off = cur_off;
++        uint16_t remaining = remaining_data;
++        
++        while (remaining > 0 && src_cur != NULL) {
++            uint16_t chunk = min(remaining, src_cur->om_len - src_off);
++            if (temp_chain == NULL) {
++                temp_chain = os_mbuf_get(omp, 0);
++                if (temp_chain == NULL) {
++                    return OS_ENOMEM;
++                }
++            }
++            rc = os_mbuf_append(temp_chain, src_cur->om_data + src_off, chunk);
++            if (rc != 0) {
++                if (temp_chain) os_mbuf_free_chain(temp_chain);
++                return OS_ENOMEM;
++            }
++            remaining -= chunk;
++            src_cur = SLIST_NEXT(src_cur, om_next);
++            src_off = 0;
++        }
++    }
++    
++    /* Truncate original chain at insertion point */
++    cur->om_len = cur_off;
++    
++    /* Free all mbufs after cur */
++    struct os_mbuf *to_free = SLIST_NEXT(cur, om_next);
++    SLIST_NEXT(cur, om_next) = NULL;
++    if (to_free != NULL) {
++        os_mbuf_free_chain(to_free);
++    }
++    
++    /* Extend to create the gap */
++    rc = os_mbuf_append(om, NULL, len);
++    if (rc != 0) {
++        if (temp_chain) os_mbuf_free_chain(temp_chain);
++        return OS_ENOMEM;
++    }
++    
++    /* Append the saved tail data */
++    if (temp_chain != NULL) {
++        struct os_mbuf *temp_cur = temp_chain;
++        while (temp_cur != NULL) {
++            rc = os_mbuf_append(om, temp_cur->om_data, temp_cur->om_len);
++            if (rc != 0) {
++                os_mbuf_free_chain(temp_chain);
++                return OS_ENOMEM;
++            }
++            temp_cur = SLIST_NEXT(temp_cur, om_next);
++        }
++        os_mbuf_free_chain(temp_chain);
++    }
++
++    /* Update packet header length */
++    if (OS_MBUF_IS_PKTHDR(om)) {
++        OS_MBUF_PKTLEN(om) += len;
++    }
++
++    return 0;
++}
+diff --git a/mynewt_wrapper.h b/mynewt_wrapper.h
+new file mode 100644
+index 0000000..8545d73
+--- /dev/null
++++ b/mynewt_wrapper.h
+@@ -0,0 +1,14 @@
++#include <stdlib.h>
++#define OS_MBUF_TEST_POOL_BUF_SIZE 256
++
++void *mynewt_malloc(size_t size) {
++    return malloc(size);
++}
++
++void *mynewt_calloc(size_t n, size_t size) {
++    return calloc(n, size);
++}
++
++void mynewt_free(void *ptr) {
++    free(ptr);
++}
+diff --git a/test_widen_regex.c b/test_widen_regex.c
+new file mode 100644
+index 0000000..24ba831
+--- /dev/null
++++ b/test_widen_regex.c
+@@ -0,0 +1,89 @@
++#define _POSIX_C_SOURCE 200809L
++#include <regex.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++int test_regex_widen(void)
++{
++    const char *pattern_file = "/tmp/pattern";
++    const char *source_file = "/tmp/source";
++    FILE *fp;
++    char *pattern;
++    char *source;
++    regex_t regex;
++    int rc;
++
++    /* Create test pattern file */
++    fp = fopen(pattern_file, "w");
++    if (!fp) return -1;
++    fprintf(fp, "INSERT_HERE");
++    fclose(fp);
++
++    /* Read pattern */
++    fp = fopen(pattern_file, "r");
++    if (!fp) return -1;
++    fseek(fp, 0, SEEK_END);
++    long size = ftell(fp);
++    fseek(fp, 0, SEEK_SET);
++    pattern = malloc(size + 1);
++    fread(pattern, 1, size, fp);
++    pattern[size] = '\0';
++    fclose(fp);
++
++    /* Create source file like os_mbuf_widen */
++    fp = fopen(source_file, "w");
++    if (!fp) return -1;
++    fprintf(fp, "This is INSERT_HERE the test data");
++    fclose(fp);
++
++    /* Read source */
++    fp = fopen(source_file, "r");
++    if (!fp) return -1;
++    fseek(fp, 0, SEEK_END);
++    size = ftell(fp);
++    fseek(fp, 0, SEEK_SET);
++    source = malloc(size + 1);
++    fread(source, 1, size, fp);
++    source[size] = '\0';
++    fclose(fp);
++
++    /* Compile regex */
++    rc = regcomp(&regex, pattern, REG_EXTENDED);
++    if (rc != 0) {
++        printf("regcomp failed\n");
++        return -1;
++    }
++
++    /* Test regex substitution - like widening */
++    char *result = malloc(1000);
++    regmatch_t pmatch[1];
++    const char *insert = "NEW_DATA";
++    
++    rc = regexec(&regex, source, 1, pmatch, 0);
++    if (rc == 0) {
++        /* Found match - this is like our insertion point */
++        int match_len = pmatch[0].rm_eo - pmatch[0].rm_so;
++        int before_len = pmatch[0].rm_so;
++        int after_len = strlen(source) - pmatch[0].rm_eo;
++        
++        /* Build new string - like os_mbuf_widen */
++        strcpy(result, "NEW_DATA");
++        strcat(result, source + pmatch[0].rm_eo);
++        
++        printf("Result: %s\n", result);
++    } else {
++        printf("No match\n");
++    }
++
++    free(pattern);
++    free(source);
++    regfree(&regex);
++    
++    return 0;
++}
++
++int main(void)
++{
++    return test_regex_widen();
++}
+diff --git a/widen.c b/widen.c
+new file mode 100644
+index 0000000..324d37c
+--- /dev/null
++++ b/widen.c
+@@ -0,0 +1,83 @@
++#include <stdio.h>
++#include <string.h>
++#include "os/mynewt.h"
++#include "os/os_mbuf.h"
++
++int test_widen(void)
++{
++    struct os_mbuf *om;
++    struct os_mbuf_pool *omp;
++    uint8_t data[20];
++    int rc;
++
++    omp = &os_mbuf_pool;
++    memset(data, 0xAB, sizeof(data));
++
++    /* Test 1: basic insert in the middle */
++    om = os_mbuf_get(omp, 0);
++    if (!om) return -1;
++    rc = os_mbuf_append(om, data, 10);
++    if (rc != 0) return -1;
++    
++    printf("Before widen: len=%d\n", om->om_len);
++    rc = os_mbuf_widen(om, 5, 5);
++    printf("After widen: len=%d, rc=%d\n", om->om_len, rc);
++    if (rc != 0) return -1;
++    if (om->om_len != 15) return -1;
++
++    /* Test 2: insert at end */
++    rc = os_mbuf_widen(om, 15, 3);
++    printf("After widen at end: len=%d, rc=%d\n", om->om_len, rc);
++    if (rc != 0) return -1;
++    if (om->om_len != 18) return -1;
++
++    /* Test 3: invalid offset */
++    rc = os_mbuf_widen(om, 20, 1);
++    printf("Widen invalid offset: rc=%d\n", rc);
++    if (rc != OS_EINVAL) return -1;
++
++    os_mbuf_free_chain(om);
++    return 0;
++}
++
++int test_widen_pkthdr(void)
++{
++    struct os_mbuf *om;
++    struct os_mbuf_pool *omp;
++    uint8_t data[20];
++    int rc;
++
++    omp = &os_mbuf_pool;
++    memset(data, 0xCD, sizeof(data));
++
++    om = os_mbuf_get_pkthdr(omp, 0);
++    if (!om) return -1;
++    rc = os_mbuf_append(om, data, 10);
++    if (rc != 0) return -1;
++    
++    printf("Before widen (pkthdr): len=%d pktlen=%d\n", 
++           om->om_len, OS_MBUF_PKTLEN(om));
++    rc = os_mbuf_widen(om, 5, 4);
++    printf("After widen (pkthdr): len=%d pktlen=%d rc=%d\n", 
++           om->om_len, OS_MBUF_PKTLEN(om), rc);
++    if (rc != 0) return -1;
++    if (om->om_len != 14) return -1;
++    if (OS_MBUF_PKTLEN(om) != 14) return -1;
++
++    os_mbuf_free_chain(om);
++    return 0;
++}
++
++int main(void)
++{
++    if (test_widen() != 0) {
++        printf("test_widen failed\n");
++        return -1;
++    }
++    if (test_widen_pkthdr() != 0) {
++        printf("test_widen_pkthdr failed\n");
++        return -1;
++    }
++    printf("All tests passed\n");
++    return 0;
++}

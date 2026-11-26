@@ -1,0 +1,564 @@
+diff --git a/sys/config/include/config/config_fcb2.h b/sys/config/include/config/config_fcb2.h
+new file mode 100644
+index 0000000..b1d486a
+--- /dev/null
++++ b/sys/config/include/config/config_fcb2.h
+@@ -0,0 +1,74 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#ifndef __SYS_CONFIG_FCB2_H_
++#define __SYS_CONFIG_FCB2_H_
++
++#include "config/config.h"
++#include "config/config_store.h"
++#include "fcb/fcb.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct conf_fcb2 {
++    struct conf_store cf2_store;
++    struct fcb cf2_fcb;
++};
++
++/**
++ * Add FCB2 as a source of persisted configuration
++ *
++ * @param cf Information regarding FCB2 area to add.
++ *
++ * @return 0 on success, non-zero on failure.
++ */
++int conf_fcb2_src(struct conf_fcb2 *cf);
++
++/**
++ * Set FCB2 as the destination for persisting configuration
++ *
++ * @param cf Information regarding FCB2 area to add. This FCB2 area should have
++ *           been added using conf_fcb2_src() previously.
++ *
++ * @return 0 on success, non-zero on failure.
++ */
++int conf_fcb2_dst(struct conf_fcb2 *cf);
++
++/**
++ * Do a custom compression cycle. Caller provides a callback function which
++ * returns whether value should be copied or not. Note that compression
++ * automatically filters out old configuration values.
++ *
++ * @param cf FCB2 source to compress.
++ * @param copy_or_not Function which gets called with key/value pair.
++ *                    Returns 0 if copy should happen, 1 if key/value pair
++ *                    should be skipped.
++ * @param con_arg Argument to pass to copy_or_not callback.
++ */
++void conf_fcb2_compress(struct conf_fcb2 *cf,
++                       int (*copy_or_not)(const char *name, const char *val,
++                                          void *con_arg),
++                       void *con_arg);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __SYS_CONFIG_FCB2_H_ */
+diff --git a/sys/config/pkg.yml b/sys/config/pkg.yml
+index 93fe279..8d8649a 100644
+--- a/sys/config/pkg.yml
++++ b/sys/config/pkg.yml
+@@ -32,9 +32,12 @@ pkg.deps.CONFIG_NEWTMGR:
+     - "@apache-mynewt-core/mgmt/mgmt"
+ pkg.deps.CONFIG_FCB:
+     - "@apache-mynewt-core/fs/fcb"
++pkg.deps.CONFIG_FCB2:
++    - "@apache-mynewt-core/fs/fcb2"
+ pkg.deps.CONFIG_NFFS:
+     - "@apache-mynewt-core/fs/nffs"
+ 
+ pkg.init:
+     config_pkg_init: 'MYNEWT_VAL(CONFIG_SYSINIT_STAGE_1)'
+     config_pkg_init_stage2: 'MYNEWT_VAL(CONFIG_SYSINIT_STAGE_2)'
++
+diff --git a/sys/config/src/config_fcb2.c b/sys/config/src/config_fcb2.c
+new file mode 100644
+index 0000000..827194d
+--- /dev/null
++++ b/sys/config/src/config_fcb2.c
+@@ -0,0 +1,345 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/mynewt.h"
++
++#if MYNEWT_VAL(CONFIG_FCB2)
++
++#include <fcb/fcb.h>
++#include <string.h>
++
++#include "config/config.h"
++#include "config/config_store.h"
++#include "config/config_fcb2.h"
++#include "config/config_generic_kv.h"
++#include "config_priv.h"
++
++#define CONF_FCB2_VERS		1
++
++struct conf_fcb2_load_cb_arg {
++    conf_store_load_cb cb;
++    void *cb_arg;
++};
++
++struct conf_kv_load_cb_arg {
++    const char *name;
++    char *value;
++    size_t len;
++};
++
++static int conf_fcb2_load(struct conf_store *, conf_store_load_cb cb,
++                         void *cb_arg);
++static int conf_fcb2_save(struct conf_store *, const char *name,
++                         const char *value);
++static int conf_fcb2_kv_save(struct fcb *fcb, const char *name, const char *value);
++
++static struct conf_store_itf conf_fcb2_itf = {
++    .csi_load = conf_fcb2_load,
++    .csi_save = conf_fcb2_save,
++};
++
++int
++conf_fcb2_src(struct conf_fcb2 *cf)
++{
++    int rc;
++
++    cf->cf2_fcb.f_version = CONF_FCB2_VERS;
++    if (cf->cf2_fcb.f_sector_cnt > 1) {
++        cf->cf2_fcb.f_scratch_cnt = 1;
++    } else {
++        cf->cf2_fcb.f_scratch_cnt = 0;
++    }
++
++    rc = fcb_init(&cf->cf2_fcb);
++    if (rc) {
++        return OS_INVALID_PARM;
++    }
++
++    cf->cf2_store.cs_itf = &conf_fcb2_itf;
++    conf_src_register(&cf->cf2_store);
++
++    return OS_OK;
++}
++
++int
++conf_fcb2_dst(struct conf_fcb2 *cf)
++{
++    cf->cf2_store.cs_itf = &conf_fcb2_itf;
++    conf_dst_register(&cf->cf2_store);
++
++    return OS_OK;
++}
++
++static int
++conf_fcb2_load_cb(struct fcb_entry *loc, void *arg)
++{
++    struct conf_fcb2_load_cb_arg *argp;
++    char buf[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
++    char *name_str;
++    char *val_str;
++    int rc;
++    int len;
++
++    argp = (struct conf_fcb2_load_cb_arg *)arg;
++
++    len = loc->fe_data_len;
++    if (len >= sizeof(buf)) {
++        len = sizeof(buf) - 1;
++    }
++
++    rc = fcb_read(loc, 0, buf, len);
++    if (rc) {
++        return 0;
++    }
++    buf[len] = '\0';
++
++    rc = conf_line_parse(buf, &name_str, &val_str);
++    if (rc) {
++        return 0;
++    }
++    argp->cb(name_str, val_str, argp->cb_arg);
++    return 0;
++}
++
++static int
++conf_fcb2_load(struct conf_store *cs, conf_store_load_cb cb, void *cb_arg)
++{
++    struct conf_fcb2 *cf = (struct conf_fcb2 *)cs;
++    struct conf_fcb2_load_cb_arg arg;
++    int rc;
++
++    arg.cb = cb;
++    arg.cb_arg = cb_arg;
++    rc = fcb_walk(&cf->cf2_fcb, FCB_SECTOR_OLDEST, conf_fcb2_load_cb, &arg);
++    if (rc) {
++        return OS_EINVAL;
++    }
++    return OS_OK;
++}
++
++static int
++conf_fcb2_var_read(struct fcb_entry *loc, char *buf, char **name, char **val)
++{
++    int rc;
++
++    rc = fcb_read(loc, 0, buf, loc->fe_data_len);
++    if (rc) {
++        return rc;
++    }
++    buf[loc->fe_data_len] = '\0';
++    rc = conf_line_parse(buf, name, val);
++    return rc;
++}
++
++static void
++conf_fcb2_compress_internal(struct fcb *fcb,
++                           int (*copy_or_not)(const char *name, const char *val,
++                                              void *cn_arg),
++                           void *cn_arg)
++{
++    int rc;
++    char buf1[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
++    char buf2[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
++    struct fcb_entry loc1;
++    struct fcb_entry loc2;
++    char *name1, *val1;
++    char *name2, *val2;
++    int copy;
++
++    rc = fcb_append_to_scratch(fcb);
++    if (rc) {
++        return;
++    }
++
++    loc1.fe_range = NULL;
++    loc1.fe_sector = 0;
++    while (fcb_getnext(fcb, &loc1) == 0) {
++        if (loc1.fe_sector != fcb->f_oldest_sec) {
++            break;
++        }
++        rc = conf_fcb2_var_read(&loc1, buf1, &name1, &val1);
++        if (rc) {
++            continue;
++        }
++        if (!val1) {
++            continue;
++        }
++        loc2 = loc1;
++        copy = 1;
++        while (fcb_getnext(fcb, &loc2) == 0) {
++            rc = conf_fcb2_var_read(&loc2, buf2, &name2, &val2);
++            if (rc) {
++                continue;
++            }
++            if (!strcmp(name1, name2)) {
++                copy = 0;
++                break;
++            }
++        }
++        if (!copy) {
++            continue;
++        }
++
++        if (copy_or_not) {
++            if (copy_or_not(name1, val1, cn_arg)) {
++                /* Copy rejected */
++                continue;
++            }
++        }
++        /*
++         * Can't find one. Must copy.
++         */
++        rc = fcb_read(&loc1, 0, buf1, loc1.fe_data_len);
++        if (rc) {
++            continue;
++        }
++        rc = fcb_append(fcb, loc1.fe_data_len, &loc2);
++        if (rc) {
++            continue;
++        }
++        rc = fcb_write(&loc2, 0, buf1, loc1.fe_data_len);
++        if (rc) {
++            continue;
++        }
++        fcb_append_finish(&loc2);
++    }
++    rc = fcb_rotate(fcb);
++    if (rc) {
++        /* XXXX */
++        ;
++    }
++}
++
++static int
++conf_fcb2_append(struct fcb *fcb, char *buf, int len)
++{
++    int rc;
++    int i;
++    struct fcb_entry loc;
++
++    for (i = 0; i < 10; i++) {
++        rc = fcb_append(fcb, len, &loc);
++        if (rc != FCB_ERR_NOSPACE) {
++            break;
++        }
++        if (fcb->f_scratch_cnt == 0) {
++            return OS_ENOMEM;
++        }
++        conf_fcb2_compress_internal(fcb, NULL, NULL);
++    }
++    if (rc) {
++        return OS_EINVAL;
++    }
++    rc = fcb_write(&loc, 0, buf, len);
++    if (rc) {
++        return OS_EINVAL;
++    }
++    fcb_append_finish(&loc);
++    return OS_OK;
++}
++
++static int
++conf_fcb2_save(struct conf_store *cs, const char *name, const char *value)
++{
++    struct conf_fcb2 *cf = (struct conf_fcb2 *)cs;
++
++    return conf_fcb2_kv_save(&cf->cf2_fcb, name, value);
++}
++
++void
++conf_fcb2_compress(struct conf_fcb2 *cf,
++                  int (*copy_or_not)(const char *name, const char *val,
++                                     void *cn_arg),
++                  void *cn_arg)
++{
++    conf_fcb2_compress_internal(&cf->cf2_fcb, copy_or_not, cn_arg);
++}
++
++static int
++conf_kv_load_cb(struct fcb_entry *loc, void *arg)
++{
++    struct conf_kv_load_cb_arg *cb_arg = arg;
++    char buf[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
++    char *name_str;
++    char *val_str;
++    int rc;
++    int len;
++
++    len = loc->fe_data_len;
++    if (len >= sizeof(buf)) {
++        len = sizeof(buf) - 1;
++    }
++
++    rc = fcb_read(loc, 0, buf, len);
++    if (rc) {
++        return 0;
++    }
++    buf[len] = '\0';
++
++    rc = conf_line_parse(buf, &name_str, &val_str);
++    if (rc) {
++        return 0;
++    }
++
++    if (strcmp(name_str, cb_arg->name)) {
++        return 0;
++    }
++
++    strncpy(cb_arg->value, val_str, cb_arg->len);
++    cb_arg->value[cb_arg->len - 1] = '\0';
++
++    return 0;
++}
++
++int
++conf_fcb2_kv_load(struct fcb *fcb, const char *name, char *value, size_t len)
++{
++    struct conf_kv_load_cb_arg arg;
++    int rc;
++
++    arg.name = name;
++    arg.value = value;
++    arg.len = len;
++
++    rc = fcb_walk(fcb, FCB_SECTOR_OLDEST, conf_kv_load_cb, &arg);
++    if (rc) {
++        return OS_EINVAL;
++    }
++
++    return OS_OK;
++}
++
++int
++conf_fcb2_kv_save(struct fcb *fcb, const char *name, const char *value)
++{
++    char buf[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
++    int len;
++
++    if (!name) {
++        return OS_INVALID_PARM;
++    }
++
++    len = conf_line_make(buf, sizeof(buf), name, value);
++    if (len < 0 || len + 2 > sizeof(buf)) {
++        return OS_INVALID_PARM;
++    }
++    return conf_fcb2_append(fcb, buf, len);
++}
++
++#endif
+diff --git a/sys/config/src/config_init.c b/sys/config/src/config_init.c
+index 9a3f9e3..719ae93 100644
+--- a/sys/config/src/config_init.c
++++ b/sys/config/src/config_init.c
+@@ -21,6 +21,7 @@
+ 
+ #include "os/mynewt.h"
+ #include "bsp/bsp.h"
++#include "flash_map/flash_map.h"
+ 
+ #include "config/config.h"
+ #include "config/config_file.h"
+@@ -88,6 +89,48 @@ config_init_fcb(void)
+     SYSINIT_PANIC_ASSERT(rc == 0);
+ }
+ 
++#elif MYNEWT_VAL(CONFIG_FCB2) && MYNEWT_VAL(CONFIG_FCB2_FLASH_AREA)
++#include "fcb/fcb.h"
++#include "config/config_fcb2.h"
++
++static struct flash_sector_range conf_fcb2_range;
++
++static struct conf_fcb2 config_init_conf_fcb2 = {
++    .cf2_fcb.f_magic = MYNEWT_VAL(CONFIG_FCB2_MAGIC),
++    .cf2_fcb.f_ranges = &conf_fcb2_range,
++};
++
++static void
++config_init_fcb2(void)
++{
++    int rc;
++    struct flash_sector_range *sr;
++    const struct flash_area *area;
++
++    rc = flash_area_open(MYNEWT_VAL(CONFIG_FCB2_FLASH_AREA), &area);
++    SYSINIT_PANIC_ASSERT(rc == 0);
++
++    sr = &conf_fcb2_range;
++    sr->fsr_flash_area = *area;
++    sr->fsr_first_sector = 0;
++    sr->fsr_sector_count = MYNEWT_VAL(CONFIG_FCB2_NUM_AREAS);
++    sr->fsr_sector_size = area->fa_size / sr->fsr_sector_count;
++    sr->fsr_range_start = area->fa_off;
++    sr->fsr_align = 1;
++
++    config_init_conf_fcb2.cf2_fcb.f_sector_cnt = sr->fsr_sector_count;
++    config_init_conf_fcb2.cf2_fcb.f_range_cnt = 1;
++
++    rc = conf_fcb2_src(&config_init_conf_fcb2);
++    if (rc) {
++        flash_area_erase(area, 0, area->fa_size);
++        rc = conf_fcb2_src(&config_init_conf_fcb2);
++    }
++    SYSINIT_PANIC_ASSERT(rc == 0);
++    rc = conf_fcb2_dst(&config_init_conf_fcb2);
++    SYSINIT_PANIC_ASSERT(rc == 0);
++}
++
+ #endif
+ #endif
+ 
+@@ -104,6 +147,8 @@ config_pkg_init(void)
+     config_init_fs();
+ #elif MYNEWT_VAL(CONFIG_FCB)
+     config_init_fcb();
++#elif MYNEWT_VAL(CONFIG_FCB2) && MYNEWT_VAL(CONFIG_FCB2_FLASH_AREA)
++    config_init_fcb2();
+ #endif
+ #endif
+ }
+diff --git a/sys/config/syscfg.yml b/sys/config/syscfg.yml
+index b3995f7..9742685 100644
+--- a/sys/config/syscfg.yml
++++ b/sys/config/syscfg.yml
+@@ -22,12 +22,20 @@ syscfg.defs:
+         value: 0
+         restrictions:
+             - '!CONFIG_NFFS'
++            - '!CONFIG_FCB2'
+             - 'CONFIG_FCB_FLASH_AREA'
++    CONFIG_FCB2:
++        description: 'Config default storage is in FCB2'
++        value: 0
++        restrictions:
++            - '!CONFIG_NFFS'
++            - '!CONFIG_FCB'
+     CONFIG_NFFS:
+         description: 'Config default storage is in NFFS'
+         value: 0
+         restrictions:
+             - '!CONFIG_FCB'
++            - '!CONFIG_FCB2'
+     CONFIG_NEWTMGR:
+         description: 'Newtmgr access to config'
+         value: 0
+@@ -77,6 +85,20 @@ syscfg.defs.CONFIG_FCB:
+             used if the flash hardware cannot support this value.
+         value: 8
+ 
++syscfg.defs.CONFIG_FCB2:
++    CONFIG_FCB2_FLASH_AREA:
++        description: 'BSP flash area for config'
++        type: 'flash_owner'
++        value:
++    CONFIG_FCB2_MAGIC:
++        description: 'Magic to identify valid configuration area'
++        value: 0xc0ffeeee
++    CONFIG_FCB2_NUM_AREAS:
++        description: >
++            Number of areas to allocate in the config FCB2.  A smaller number is
++            used if the flash hardware cannot support this value.
++        value: 8
++
+ syscfg.defs.CONFIG_NFFS:
+     CONFIG_NFFS_DIR:
+         description: 'Directory where config is stored'

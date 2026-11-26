@@ -1,0 +1,214 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 6e118aa..64756f8 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -249,6 +249,32 @@ uint8_t log_module_register(uint8_t id, const char *name);
+  */
+ const char *log_module_get_name(uint8_t id);
+ 
++/*
++ * Get minimum log level for a module
++ *
++ * This function retrieves the configured minimum log level for a module.
++ * When LOG_LEVEL_PER_MODULE is disabled, returns 0 (LOG_LEVEL_DEBUG).
++ *
++ * @param module  Module id (0-255)
++ *
++ * @return  minimum log level for the module (0 when unconfigured)
++ */
++uint8_t log_level_get(uint8_t module);
++
++/*
++ * Set minimum log level for a module
++ *
++ * This function sets the minimum log level for a module. Log messages
++ * with a level lower than this minimum will be discarded.
++ * When LOG_LEVEL_PER_MODULE is disabled, returns SYS_ENOTSUP.
++ *
++ * @param module  Module id (0-255)
++ * @param level   Minimum log level (0-15)
++ *
++ * @return  0 on success, SYS_EINVAL if level > 15, SYS_ENOTSUP if feature disabled
++ */
++int log_level_set(uint8_t module, uint8_t level);
++
+ /* Log functions, manipulate a single log */
+ int log_register(char *name, struct log *log, const struct log_handler *,
+                  void *arg, uint8_t level);
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index b6f1aa1..d0a59b2 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -37,7 +37,17 @@ static const char *g_log_module_list[ MYNEWT_VAL(LOG_MAX_USER_MODULES) ];
+ static uint8_t log_inited;
+ static uint8_t log_written;
+ 
++
++/*
++ * Per-module log level map.
++ * Each entry stores the minimum log level for a module (0-255).
++ * Initialize to 0 (LOG_LEVEL_DEBUG) meaning all levels are accepted.
++ */
++#if MYNEWT_VAL(LOG_LEVEL_PER_MODULE)
++static uint8_t g_log_module_levels[256];
++#endif
+ #if MYNEWT_VAL(LOG_CLI)
++
+ int shell_log_dump_all_cmd(int, char **);
+ struct shell_cmd g_shell_log_cmd = {
+     .sc_cmd = "log",
+@@ -166,6 +176,52 @@ log_module_get_name(uint8_t module)
+     return NULL;
+ }
+ 
++/**
++ * Retrieve the minimum log level for a module.
++ *
++ * When LOG_LEVEL_PER_MODULE is disabled, returns 0 (LOG_LEVEL_DEBUG).
++ * When unconfigured, returns 0.
++ *
++ * @param module  Module ID (0-255)
++ *
++ * @return        Minimum log level for the module
++ */
++uint8_t
++log_level_get(uint8_t module)
++{
++#if MYNEWT_VAL(LOG_LEVEL_PER_MODULE)
++    return g_log_module_levels[module];
++#else
++    return 0;
++#endif
++}
++
++/**
++ * Set the minimum log level for a module.
++ *
++ * When LOG_LEVEL_PER_MODULE is disabled, returns SYS_ENOTSUP.
++ * Accepts levels 0-15. Rejects values > 15 with SYS_EINVAL.
++ *
++ * @param module  Module ID (0-255)
++ * @param level   Minimum log level (0-15)
++ *
++ * @return        0 on success, SYS_EINVAL if level > 15,
++ *                SYS_ENOTSUP if feature disabled
++ */
++int
++log_level_set(uint8_t module, uint8_t level)
++{
++#if MYNEWT_VAL(LOG_LEVEL_PER_MODULE)
++    if (level > 15) {
++        return SYS_EINVAL;
++    }
++    g_log_module_levels[module] = level;
++    return 0;
++#else
++    return SYS_ENOTSUP;
++#endif
++}
++
+ /**
+  * Indicates whether the specified log has been regiestered.
+  */
+@@ -312,6 +368,17 @@ log_append_prepare(struct log *log, uint8_t module, uint8_t level, uint8_t etype
+         goto err;
+     }
+ 
++    /*
++     * If the per-module minimum log level is configured and the log message
++     * is below the module's configured minimum, then drop it.
++     */
++#if MYNEWT_VAL(LOG_LEVEL_PER_MODULE)
++    if (level < g_log_module_levels[module]) {
++        rc = -1;
++        goto err;
++    }
++#endif
++
+     OS_ENTER_CRITICAL(sr);
+     idx = g_log_info.li_next_index++;
+     OS_EXIT_CRITICAL(sr);
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index 306ec9d..ef6af00 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -26,6 +26,10 @@ syscfg.defs:
+         description: 'Limits what level log messages are compiled in.'
+         value: 0
+ 
++    LOG_LEVEL_PER_MODULE:
++        description: 'Enable per-module minimum log level support.'
++        value: 1
++
+     LOG_FCB:
+         description: 'Support logging to FCB.'
+         value: 0
+@@ -57,4 +61,4 @@ syscfg.defs:
+ 
+     LOG_MAX_USER_MODULES:
+         description: 'Maximum number of user modules to register'
+-        value: 1
+\ No newline at end of file
++        value: 1
+diff --git a/targets/unittest/pkg.yml b/targets/unittest/pkg.yml
+deleted file mode 100644
+index b25bf78..0000000
+--- a/targets/unittest/pkg.yml
++++ /dev/null
+@@ -1,27 +0,0 @@
+-#
+-# Licensed to the Apache Software Foundation (ASF) under one
+-# or more contributor license agreements.  See the NOTICE file
+-# distributed with this work for additional information
+-# regarding copyright ownership.  The ASF licenses this file
+-# to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
+-# with the License.  You may obtain a copy of the License at
+-#
+-#  http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing,
+-# software distributed under the License is distributed on an
+-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-# KIND, either express or implied.  See the License for the
+-# specific language governing permissions and limitations
+-# under the License.
+-#
+-
+-### Package: targets/unittest
+-pkg.name: "targets/unittest"
+-pkg.type: "target"
+-pkg.description: "Used for unit tests by the \"newt test\" command."
+-pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
+-pkg.homepage: "http://mynewt.apache.org/"
+-
+-pkg.deps: "@apache-mynewt-core/sys/sysinit"
+diff --git a/targets/unittest/target.yml b/targets/unittest/target.yml
+deleted file mode 100644
+index e10a8ac..0000000
+--- a/targets/unittest/target.yml
++++ /dev/null
+@@ -1,23 +0,0 @@
+-#
+-# Licensed to the Apache Software Foundation (ASF) under one
+-# or more contributor license agreements.  See the NOTICE file
+-# distributed with this work for additional information
+-# regarding copyright ownership.  The ASF licenses this file
+-# to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
+-# with the License.  You may obtain a copy of the License at
+-#
+-#  http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing,
+-# software distributed under the License is distributed on an
+-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-# KIND, either express or implied.  See the License for the
+-# specific language governing permissions and limitations
+-# under the License.
+-#
+-
+-### Target: targets/unittest
+-target.bsp: "@apache-mynewt-core/hw/bsp/native"
+-target.build_profile: "debug"
+-target.compiler: "@apache-mynewt-core/compiler/sim"

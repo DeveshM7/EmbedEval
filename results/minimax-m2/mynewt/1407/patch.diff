@@ -1,0 +1,222 @@
+diff --git a/header_changes.patch b/header_changes.patch
+new file mode 100644
+index 0000000..5056cf6
+--- /dev/null
++++ b/header_changes.patch
+@@ -0,0 +1,25 @@
++--- a/sys/log/full/include/log/log.h
+++++ b/sys/log/full/include/log/log.h
++@@ -94,6 +94,8 @@ typedef int (*lh_registered_func_t)(struct log *);
++ typedef int (*lh_set_watermark_func_t)(struct log *, uint32_t);
++ #endif
++ typedef int (*lh_registered_func_t)(struct log *);
+++typedef void (*log_append_cb_t)(struct log *log, uint32_t idx);
++ 
++ struct log_handler {
++     int log_type;
++@@ -175,6 +177,7 @@ struct log {
++     char *l_name;
++     const struct log_handler *l_log;
++     void *l_arg;
+++    log_append_cb_t l_append_cb;
++     STAILQ_ENTRY(log) l_next;
++     uint8_t l_level;
++ };
++@@ -598,6 +599,7 @@ int log_set_watermark(struct log *log, uint32_t index);
++  */
++ int log_set_watermark(struct log *log, uint32_t index);
+++void log_set_append_cb(struct log *log, log_append_cb_t cb);
++ #endif
++ 
++ /* Handler exports */
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 2d7657d..a5064de 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -92,6 +92,7 @@ typedef int (*lh_storage_info_func_t)(struct log *, struct log_storage_info *);
+ typedef int (*lh_set_watermark_func_t)(struct log *, uint32_t);
+ #endif
+ typedef int (*lh_registered_func_t)(struct log *);
++typedef void (*log_append_cb_t)(struct log *log, uint32_t idx);
+ 
+ struct log_handler {
+     int log_type;
+@@ -175,6 +176,7 @@ struct log {
+     char *l_name;
+     const struct log_handler *l_log;
+     void *l_arg;
++    log_append_cb_t l_append_cb;
+     STAILQ_ENTRY(log) l_next;
+     uint8_t l_level;
+ };
+@@ -596,6 +598,7 @@ int log_storage_info(struct log *log, struct log_storage_info *info);
+  * @return 0 on success, error code otherwise.
+  */
+ int log_set_watermark(struct log *log, uint32_t index);
++void log_set_append_cb(struct log *log, log_append_cb_t cb);
+ #endif
+ 
+ /* Handler exports */
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index 3c0da89..6cac89d 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -413,9 +413,10 @@ log_append_typed(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
+                  void *data, uint16_t len)
+ {
+     int rc;
++    struct log_entry_hdr *hdr;
+ 
+-    rc = log_append_prepare(log, module, level, etype,
+-                            (struct log_entry_hdr *)data);
++    hdr = (struct log_entry_hdr *)data;
++    rc = log_append_prepare(log, module, level, etype, hdr);
+     if (rc != 0) {
+         goto err;
+     }
+@@ -425,6 +426,10 @@ log_append_typed(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
+         goto err;
+     }
+ 
++    if (log->l_append_cb != NULL) {
++        log->l_append_cb(log, hdr->ue_index);
++    }
++
+     return (0);
+ err:
+     return (rc);
+@@ -447,6 +452,10 @@ log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
+         return rc;
+     }
+ 
++    if (log->l_append_cb != NULL) {
++        log->l_append_cb(log, hdr.ue_index);
++    }
++
+     return 0;
+ }
+ 
+@@ -455,6 +464,7 @@ log_append_mbuf_typed_no_free(struct log *log, uint8_t module, uint8_t level,
+                               uint8_t etype, struct os_mbuf **om_ptr)
+ {
+     struct os_mbuf *om;
++    struct log_entry_hdr *hdr;
+     int rc;
+ 
+     /* Remove a loyer of indirection for convenience. */
+@@ -471,8 +481,8 @@ log_append_mbuf_typed_no_free(struct log *log, uint8_t module, uint8_t level,
+         goto err;
+     }
+ 
+-    rc = log_append_prepare(log, module, level, etype,
+-                            (struct log_entry_hdr *)om->om_data);
++    hdr = (struct log_entry_hdr *)om->om_data;
++    rc = log_append_prepare(log, module, level, etype, hdr);
+     if (rc != 0) {
+         goto err;
+     }
+@@ -482,6 +492,10 @@ log_append_mbuf_typed_no_free(struct log *log, uint8_t module, uint8_t level,
+         goto err;
+     }
+ 
++    if (log->l_append_cb != NULL) {
++        log->l_append_cb(log, hdr->ue_index);
++    }
++
+     *om_ptr = om;
+ 
+     return 0;
+@@ -531,6 +545,10 @@ log_append_mbuf_body_no_free(struct log *log, uint8_t module, uint8_t level,
+         return rc;
+     }
+ 
++    if (log->l_append_cb != NULL) {
++        log->l_append_cb(log, hdr.ue_index);
++    }
++
+     return 0;
+ }
+ 
+@@ -773,4 +791,10 @@ log_set_watermark(struct log *log, uint32_t index)
+ err:
+     return (rc);
+ }
++
++void
++log_set_append_cb(struct log *log, log_append_cb_t cb)
++{
++    log->l_append_cb = cb;
++}
+ #endif
+diff --git a/test_append_cb.c b/test_append_cb.c
+new file mode 100644
+index 0000000..854b2af
+--- /dev/null
++++ b/test_append_cb.c
+@@ -0,0 +1,66 @@
++#include <stdio.h>
++#include <string.h>
++#include "sys/log/full/include/log/log.h"
++#include "cbmem/cbmem.h"
++
++static int callback_count = 0;
++static struct log *callback_log_ptr = NULL;
++static uint32_t callback_idx = 0;
++
++static void test_callback(struct log *log, uint32_t idx) {
++    callback_count++;
++    callback_log_ptr = log;
++    callback_idx = idx;
++    printf("Callback called: log=%p, idx=%u\n", (void*)log, idx);
++}
++
++int main() {
++    struct cbmem cbmem;
++    struct log log;
++    uint8_t buf[256];
++    char *str = "test";
++    int body_len;
++    
++    log_init();
++    cbmem_init(&cbmem, CBMEM_SIZE_MIN);
++    log_register("test_log", &log, &log_cbmem_handler, &cbmem, LOG_LEVEL_DEBUG);
++    
++    printf("Test 1: No callback registered\n");
++    body_len = strlen(str);
++    memcpy(buf + LOG_ENTRY_HDR_SIZE, str, body_len);
++    log_append_typed(&log, 0, 0, LOG_ETYPE_STRING, buf, body_len);
++    printf("Callback count: %d (expected 0)\n", callback_count);
++    
++    printf("\nTest 2: Register callback and append\n");
++    callback_count = 0;
++    callback_log_ptr = NULL;
++    callback_idx = 0xFFFFFFFF;
++    
++    log_set_append_cb(&log, test_callback);
++    
++    body_len = strlen(str);
++    memcpy(buf + LOG_ENTRY_HDR_SIZE, str, body_len);
++    log_append_typed(&log, 0, 0, LOG_ETYPE_STRING, buf, body_len);
++    printf("Callback count: %d (expected 1)\n", callback_count);
++    printf("Callback log: %p (expected %p)\n", (void*)callback_log_ptr, (void*)&log);
++    printf("Callback idx: %u (expected 1)\n", callback_idx);
++    
++    printf("\nTest 3: Append again\n");
++    body_len = strlen(str);
++    memcpy(buf + LOG_ENTRY_HDR_SIZE, str, body_len);
++    log_append_typed(&log, 0, 0, LOG_ETYPE_STRING, buf, body_len);
++    printf("Callback count: %d (expected 1)\n", callback_count);
++    printf("Callback idx: %u (expected 2)\n", callback_idx);
++    
++    printf("\nTest 4: Clear callback\n");
++    log_set_append_cb(&log, NULL);
++    
++    callback_count = 0;
++    callback_idx = 0xFFFFFFFF;
++    body_len = strlen(str);
++    memcpy(buf + LOG_ENTRY_HDR_SIZE, str, body_len);
++    log_append_typed(&log, 0, 0, LOG_ETYPE_STRING, buf, body_len);
++    printf("Callback count: %d (expected 0)\n", callback_count);
++    
++    return 0;
++}

@@ -1,0 +1,302 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 651bb67..9a91a19 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -64,6 +64,9 @@ struct log_offset {
+ typedef int (*log_walk_func_t)(struct log *, struct log_offset *log_offset,
+         void *dptr, uint16_t len);
+ 
++typedef int (*log_walk_body_func_t)(struct log *log, struct log_offset *log_offset,
++        const struct log_entry_hdr *hdr, void *dptr, uint16_t len);
++
+ typedef int (*lh_read_func_t)(struct log *, void *dptr, void *buf,
+         uint16_t offset, uint16_t len);
+ typedef int (*lh_read_mbuf_func_t)(struct log *, void *dptr, struct os_mbuf *om,
+@@ -335,6 +338,91 @@ int log_walk(struct log *log, log_walk_func_t walk_func,
+         struct log_offset *log_offset);
+ int log_flush(struct log *log);
+ 
++/**
++ * @brief Appends a body without a header to the log.
++ *
++ * @param log                   The log to write to.
++ * @param module                The module ID of the entry to write.
++ * @param level                 The severity of the entry to write; one of the
++ *                                  `LOG_LEVEL_[...]` constants.
++ * @param etype                 The type of data to write; one of the
++ *                                  `LOG_ETYPE_[...]` constants.
++ * @param body                  The body data to write.
++ * @param body_len              The length of the body data.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++int log_append_body(struct log *log, uint8_t module, uint8_t level,
++                    uint8_t etype, const void *body, uint16_t body_len);
++
++/**
++ * @brief Appends a body from an mbuf chain without a header to the log.
++ *
++ * @param log                   The log to write to.
++ * @param module                The module ID of the entry to write.
++ * @param level                 The severity of the entry to write; one of the
++ *                                  `LOG_LEVEL_[...]` constants.
++ * @param etype                 The type of data to write; one of the
++ *                                  `LOG_ETYPE_[...]` constants.
++ * @param om                    The mbuf chain containing the body to write.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++int log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level,
++                         uint8_t etype, struct os_mbuf *om);
++
++/**
++ * @brief Reads the entry header from a log entry.
++ *
++ * @param log                   The log to read from.
++ * @param dptr                  The log entry pointer.
++ * @param hdr                   Pointer to store the header.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++int log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr);
++
++/**
++ * @brief Reads the body of a log entry into a flat buffer.
++ *
++ * @param log                   The log to read from.
++ * @param dptr                  The log entry pointer.
++ * @param buf                   Buffer to store the body data.
++ * @param off                   Offset within the body to start reading.
++ * @param len                   Number of bytes to read.
++ *
++ * @return                      Number of bytes read on success; -1 on failure.
++ */
++int log_read_body(struct log *log, void *dptr, void *buf, uint16_t off,
++                  uint16_t len);
++
++/**
++ * @brief Reads the body of a log entry into an mbuf.
++ *
++ * @param log                   The log to read from.
++ * @param dptr                  The log entry pointer.
++ * @param om                    The mbuf to write the body data to.
++ * @param off                   Offset within the body to start reading.
++ * @param len                   Number of bytes to read.
++ *
++ * @return                      Number of bytes read on success; -1 on failure.
++ */
++int log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om,
++                       uint16_t off, uint16_t len);
++
++/**
++ * @brief Walks log entries, calling a body callback for each entry.
++ *
++ * @param log                   The log to walk.
++ * @param walk_body_func        Callback function to call for each entry.
++ * @param log_offset            Pointer to log_offset structure.
++ *
++ * @return                      0 if the walk completed successfully; nonzero
++ *                              on error or if the walk was aborted.
++ */
++int log_walk_body(struct log *log, log_walk_body_func_t walk_body_func,
++                  struct log_offset *log_offset);
++
+ #if MYNEWT_VAL(LOG_MODULE_LEVELS)
+ /**
+  * @brief Retrieves the globally configured minimum log level for the specified
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index 4fa8581..7a2a1c8 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -503,3 +503,191 @@ log_flush(struct log *log)
+ err:
+     return (rc);
+ }
++
++/**
++ * Appends a body without header to the log.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++int
++log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
++                const void *body, uint16_t body_len)
++{
++    struct log_entry_hdr ue;
++    int rc;
++
++    rc = log_append_prepare(log, module, level, etype, &ue);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* Append the header first */
++    rc = log->l_log->log_append(log, &ue, sizeof(ue));
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* Append the body */
++    rc = log->l_log->log_append(log, (void *)body, body_len);
++    if (rc != 0) {
++        goto err;
++    }
++
++    return 0;
++err:
++    return rc;
++}
++
++/**
++ * Appends a body from an mbuf chain without header to the log.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++int
++log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level,
++                     uint8_t etype, struct os_mbuf *om)
++{
++    struct log_entry_hdr ue;
++    int rc;
++
++    if (!log->l_log->log_append_mbuf) {
++        rc = -1;
++        goto err;
++    }
++
++    rc = log_append_prepare(log, module, level, etype, &ue);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* Prepend the header to the mbuf */
++    om = os_mbuf_prepend(om, sizeof(ue));
++    if (!om) {
++        rc = -1;
++        goto err;
++    }
++
++    memcpy(om->om_data, &ue, sizeof(ue));
++
++    rc = log->l_log->log_append_mbuf(log, om);
++    if (rc != 0) {
++        goto err;
++    }
++
++    return 0;
++
++err:
++    if (om) {
++        os_mbuf_free_chain(om);
++    }
++    return rc;
++}
++
++/**
++ * Reads the entry header from a log entry.
++ *
++ * @return                      0 on success; nonzero on failure.
++ */
++int
++log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr)
++{
++    int rc;
++
++    rc = log->l_log->log_read(log, dptr, hdr, 0, sizeof(*hdr));
++    if (rc < sizeof(*hdr)) {
++        return -1;
++    }
++
++    return 0;
++}
++
++/**
++ * Reads the body of a log entry into a flat buffer.
++ *
++ * @return                      The number of bytes read; -1 on failure.
++ */
++int
++log_read_body(struct log *log, void *dptr, void *buf, uint16_t off,
++             uint16_t len)
++{
++    int rc;
++
++    /* Read body at offset = LOG_ENTRY_HDR_SIZE */
++    rc = log->l_log->log_read(log, dptr, buf, LOG_ENTRY_HDR_SIZE + off, len);
++
++    return (rc);
++}
++
++/**
++ * Reads the body of a log entry into an mbuf.
++ *
++ * @return                      The number of bytes read; -1 on failure.
++ */
++int
++log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om, uint16_t off,
++                   uint16_t len)
++{
++    int rc;
++
++    if (!om || !log->l_log->log_read_mbuf) {
++        return -1;
++    }
++
++    /* Read body at offset = LOG_ENTRY_HDR_SIZE */
++    rc = log->l_log->log_read_mbuf(log, dptr, om, LOG_ENTRY_HDR_SIZE + off, len);
++
++    return (rc);
++}
++
++/* Internal structure for log_walk_body */
++struct log_walk_body_arg {
++    log_walk_body_func_t walk_body_func;
++    struct log_entry_hdr hdr;
++};
++
++/**
++ * Internal wrapper function for log_walk_body.
++ * Called for each log entry during the walk.
++ */
++static int
++log_walk_body_wrapper(struct log *log, struct log_offset *log_offset,
++                      void *dptr, uint16_t len)
++{
++    struct log_walk_body_arg *arg;
++    int rc;
++
++    arg = (struct log_walk_body_arg *)log_offset->lo_arg;
++
++    /* Read header */
++    rc = log_read_hdr(log, dptr, &arg->hdr);
++    if (rc != 0) {
++        return rc;
++    }
++
++    /* Call the user-provided callback with header and body length */
++    return arg->walk_body_func(log, log_offset, &arg->hdr, dptr,
++                               len - LOG_ENTRY_HDR_SIZE);
++}
++
++/**
++ * Walks log entries, calling a body callback for each entry.
++ *
++ * @return                      0 if the walk completed successfully; nonzero
++ *                              on error or if the walk was aborted.
++ */
++int
++log_walk_body(struct log *log, log_walk_body_func_t walk_body_func,
++              struct log_offset *log_offset)
++{
++    struct log_walk_body_arg arg;
++    int rc;
++
++    arg.walk_body_func = walk_body_func;
++
++    /* Temporarily replace lo_arg with our wrapper arg */
++    log_offset->lo_arg = &arg;
++
++    rc = log_walk(log, log_walk_body_wrapper, log_offset);
++
++    return rc;
++}

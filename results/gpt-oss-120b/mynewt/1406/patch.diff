@@ -1,0 +1,121 @@
+diff --git a/hw/hal/include/hal/hal_flash.h b/hw/hal/include/hal/hal_flash.h
+index cc42c2b..d032632 100644
+--- a/hw/hal/include/hal/hal_flash.h
++++ b/hw/hal/include/hal/hal_flash.h
+@@ -40,7 +40,20 @@ int hal_flash_write(uint8_t flash_id, uint32_t address, const void *src,
+   uint32_t num_bytes);
+ int hal_flash_erase_sector(uint8_t flash_id, uint32_t sector_address);
+ int hal_flash_erase(uint8_t flash_id, uint32_t address, uint32_t num_bytes);
+-int hal_flash_isempty(uint8_t flash_id, uint32_t address, uint32_t num_bytes);
++/**
++ * Checks whether a flash region is empty (erased).
++ *
++ * @param flash_id  Flash device identifier.
++ * @param address   Starting address of the region to check.
++ * @param dst       Buffer where flash contents are copied when region is
++ *                  non‑empty. May be NULL if not needed.
++ * @param num_bytes Size of the region in bytes.
++ *
++ * @return 1 if region is erased, 0 if non‑empty (dst contains data if non‑NULL),
++ *         or a negative value on error.
++ */
++int hal_flash_isempty(uint8_t flash_id, uint32_t address, void *dst,
++                      uint32_t num_bytes);
+ uint8_t hal_flash_align(uint8_t flash_id);
+ uint8_t hal_flash_erased_val(uint8_t flash_id);
+ int hal_flash_init(void);
+diff --git a/hw/hal/src/hal_flash.c b/hw/hal/src/hal_flash.c
+index bed168a..c407f7c 100644
+--- a/hw/hal/src/hal_flash.c
++++ b/hw/hal/src/hal_flash.c
+@@ -337,23 +337,31 @@ hal_flash_is_erased(const struct hal_flash *hf, uint32_t address,
+ }
+ 
+ int
+-hal_flash_isempty(uint8_t id, uint32_t address, uint32_t num_bytes)
++hal_flash_isempty(uint8_t id, uint32_t address, void *dst, uint32_t num_bytes)
+ {
+     const struct hal_flash *hf;
++    int rc;
+ 
+     hf = hal_bsp_flash_dev(id);
+     if (!hf) {
+         return -1;
+     }
+     if (hal_flash_check_addr(hf, address) ||
+-      hal_flash_check_addr(hf, address + num_bytes)) {
++        hal_flash_check_addr(hf, address + num_bytes)) {
+         return -1;
+     }
+     if (hf->hf_itf->hff_is_empty) {
+-        return hf->hf_itf->hff_is_empty(hf, address, num_bytes);
++        rc = hf->hf_itf->hff_is_empty(hf, address, num_bytes);
+     } else {
+-        return hal_flash_is_erased(hf, address, num_bytes);
++        rc = hal_flash_is_erased(hf, address, num_bytes);
++    }
++    if (rc == 0 && dst) {
++        int r = hal_flash_read(id, address, dst, num_bytes);
++        if (r) {
++            return -1;
++        }
+     }
++    return rc;
+ }
+ 
+ int
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..04d6a4e
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,18 @@
++--- a/hw/hal/include/hal/hal_flash.h
+++++ b/hw/hal/include/hal/hal_flash.h
++@@
++-int hal_flash_isempty(uint8_t flash_id, uint32_t address, uint32_t num_bytes);
+++/**
+++ * Checks whether a flash region is empty (erased).
+++ *
+++ * @param flash_id  Flash device identifier.
+++ * @param address   Starting address of the region to check.
+++ * @param dst       Buffer where flash contents are copied when region is
+++ *                  non‑empty. May be NULL if not needed.
+++ * @param num_bytes Size of the region in bytes.
+++ *
+++ * @return 1 if region is erased, 0 if non‑empty (dst contains data if non‑NULL),
+++ *         or a negative value on error.
+++ */
+++int hal_flash_isempty(uint8_t flash_id, uint32_t address, void *dst,
+++                      uint32_t num_bytes);
+diff --git a/sys/flash_map/src/flash_map.c b/sys/flash_map/src/flash_map.c
+index 028bbe7..3670d96 100644
+--- a/sys/flash_map/src/flash_map.c
++++ b/sys/flash_map/src/flash_map.c
+@@ -191,7 +191,7 @@ flash_area_is_empty(const struct flash_area *fa, bool *empty)
+ {
+     int rc;
+ 
+-    rc = hal_flash_isempty(fa->fa_device_id, fa->fa_off, fa->fa_size);
++    rc = hal_flash_isempty(fa->fa_device_id, fa->fa_off, NULL, fa->fa_size);
+     if (rc < 0) {
+         return rc;
+     } else if (rc == 1) {
+@@ -205,7 +205,16 @@ flash_area_is_empty(const struct flash_area *fa, bool *empty)
+ int
+ flash_area_isempty_at(const struct flash_area *fa, uint32_t off, uint32_t len)
+ {
+-    return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, len);
++    return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, NULL, len);
++}
++
++/**
++ * Reads the flash area and reports emptiness.
++ */
++int
++flash_area_read_is_empty(const struct flash_area *fa, uint32_t off, void *dst, uint32_t len)
++{
++    return hal_flash_isempty(fa->fa_device_id, fa->fa_off + off, dst, len);
+ }
+ 
+ /**

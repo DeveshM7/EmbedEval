@@ -1,0 +1,192 @@
+diff --git a/kernel/os/src/os_msys.c b/kernel/os/src/os_msys.c
+index 3b287a3..d594087 100644
+--- a/kernel/os/src/os_msys.c
++++ b/kernel/os/src/os_msys.c
+@@ -86,13 +86,30 @@ os_msys_reset(void)
+     STAILQ_INIT(&g_msys_pool_list);
+ }
+ 
++/**
++ * Find the largest pool with an available buffer.
++ * Returns NULL if no pool has any free buffers.
++ */
+ static struct os_mbuf_pool *
+-os_msys_find_biggest_pool(void)
++os_msys_find_biggest_pool_with_free(void)
+ {
+-    /* Mempools are sorted by the blocksize, so just return last one */
+-    return STAILQ_LAST(&g_msys_pool_list, os_mbuf_pool, omp_next);
++    struct os_mbuf_pool *pool;
++    struct os_mbuf_pool *largest_with_free;
++
++    largest_with_free = NULL;
++    STAILQ_FOREACH(pool, &g_msys_pool_list, omp_next) {
++        if (pool->omp_pool->mp_num_free > 0) {
++            largest_with_free = pool;
++        }
++    }
++
++    return largest_with_free;
+ }
+ 
++/**
++ * Find the smallest pool that can accommodate the requested size.
++ * Returns NULL if no pool can accommodate the requested size.
++ */
+ static struct os_mbuf_pool *
+ os_msys_find_pool(uint16_t dsize)
+ {
+@@ -105,11 +122,27 @@ os_msys_find_pool(uint16_t dsize)
+         }
+     }
+ 
+-    if (!pool) {
+-        pool = STAILQ_LAST(&g_msys_pool_list, os_mbuf_pool, omp_next);
++    return pool;
++}
++
++/**
++ * Find the next larger pool with a free buffer, starting from the given pool.
++ * Returns NULL if no larger pool has a free buffer.
++ */
++static struct os_mbuf_pool *
++os_msys_find_next_pool_with_free(struct os_mbuf_pool *start_pool)
++{
++    struct os_mbuf_pool *pool;
++
++    pool = STAILQ_NEXT(start_pool, omp_next);
++    while (pool) {
++        if (pool->omp_pool->mp_num_free > 0) {
++            return pool;
++        }
++        pool = STAILQ_NEXT(pool, omp_next);
+     }
+ 
+-    return (pool);
++    return NULL;
+ }
+ 
+ 
+@@ -119,21 +152,52 @@ os_msys_get(uint16_t dsize, uint16_t leadingspace)
+     struct os_mbuf *m;
+     struct os_mbuf_pool *pool;
+ 
+-    /* If dsize = 0 that means user has no idea how big block size is needed,
+-    * therefore lets find for him the biggest one
+-    */
++    /*
++     * If dsize = 0, user has no idea how big a block size is needed,
++     * so find the largest pool with an available buffer.
++     */
+     if (dsize == 0) {
+-        pool = os_msys_find_biggest_pool();
+-    } else {
+-        pool = os_msys_find_pool(dsize);
++        pool = os_msys_find_biggest_pool_with_free();
++        if (!pool) {
++            goto err;
++        }
++        m = os_mbuf_get(pool, leadingspace);
++        return m;
++    }
++
++    /*
++     * Find the smallest pool that can accommodate the requested size.
++     * If that pool has no free buffer, try the next larger pool, and so on.
++     * If no pool can accommodate the requested size, use the largest
++     * free pool.  If no pool has a free buffer, fail.
++     */
++    pool = os_msys_find_pool(dsize);
++    if (pool) {
++        /* There is a pool that can accommodate the requested size */
++        while (pool) {
++            if (pool->omp_pool->mp_num_free > 0) {
++                m = os_mbuf_get(pool, leadingspace);
++                if (m) {
++                    return m;
++                }
++                /* If os_mbuf_get failed but mp_num_free > 0, try next pool */
++            }
++            /* Try next larger pool */
++            pool = os_msys_find_next_pool_with_free(pool);
++        }
++        /* No larger pool has free buffers */
++        goto err;
+     }
+ 
++    /* No pool can accommodate the requested size; use largest free pool */
++    pool = os_msys_find_biggest_pool_with_free();
+     if (!pool) {
+         goto err;
+     }
+ 
+     m = os_mbuf_get(pool, leadingspace);
+-    return (m);
++    return m;
++
+ err:
+     return (NULL);
+ }
+@@ -145,23 +209,55 @@ os_msys_get_pkthdr(uint16_t dsize, uint16_t user_hdr_len)
+     struct os_mbuf *m;
+     struct os_mbuf_pool *pool;
+ 
+-    total_pkthdr_len =  user_hdr_len + sizeof(struct os_mbuf_pkthdr);
++    total_pkthdr_len = user_hdr_len + sizeof(struct os_mbuf_pkthdr);
+ 
+-    /* If dsize = 0 that means user has no idea how big block size is needed,
+-     * therefore lets find for him the biggest one
++    /*
++     * If dsize = 0, user has no idea how big a block size is needed,
++     * so find the largest pool with an available buffer.
+      */
+     if (dsize == 0) {
+-        pool = os_msys_find_biggest_pool();
+-    } else {
+-        pool = os_msys_find_pool(dsize + total_pkthdr_len);
++        pool = os_msys_find_biggest_pool_with_free();
++        if (!pool) {
++            goto err;
++        }
++        m = os_mbuf_get_pkthdr(pool, user_hdr_len);
++        return m;
+     }
+ 
++    /*
++     * Find the smallest pool that can accommodate the requested size
++     * (including the packet header).  If that pool has no free buffer,
++     * try the next larger pool, and so on.  If no pool can accommodate
++     * the requested size, use the largest free pool.  If no pool has
++     * a free buffer, fail.
++     */
++    pool = os_msys_find_pool(dsize + total_pkthdr_len);
++    if (pool) {
++        /* There is a pool that can accommodate the requested size */
++        while (pool) {
++            if (pool->omp_pool->mp_num_free > 0) {
++                m = os_mbuf_get_pkthdr(pool, user_hdr_len);
++                if (m) {
++                    return m;
++                }
++                /* If os_mbuf_get_pkthdr failed but mp_num_free > 0, try next pool */
++            }
++            /* Try next larger pool */
++            pool = os_msys_find_next_pool_with_free(pool);
++        }
++        /* No larger pool has free buffers */
++        goto err;
++    }
++
++    /* No pool can accommodate the requested size; use largest free pool */
++    pool = os_msys_find_biggest_pool_with_free();
+     if (!pool) {
+         goto err;
+     }
+ 
+     m = os_mbuf_get_pkthdr(pool, user_hdr_len);
+-    return (m);
++    return m;
++
+ err:
+     return (NULL);
+ }

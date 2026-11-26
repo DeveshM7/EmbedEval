@@ -1,0 +1,491 @@
+diff --git a/encoding/base62/include/base62/base62.h b/encoding/base62/include/base62/base62.h
+new file mode 100644
+index 0000000..b328669
+--- /dev/null
++++ b/encoding/base62/include/base62/base62.h
+@@ -0,0 +1,72 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#ifndef __BASE62_H__
++#define __BASE62_H__
++
++#include <stdint.h>
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define BASE62_DECODE_OK 0
++#define BASE62_DECODE_ERROR -1
++#define BASE62_INVALID_ARG -2
++#define BASE62_INSUFFICIENT_MEM -3
++
++/**
++ * Encode data to base62 string
++ *
++ * @param data Pointer to data to encode
++ * @param input_size Number of bytes to encode
++ * @param encoded_text Output buffer for encoded string
++ * @param output_size On entry: maximum size of output buffer.
++ *                    On exit: number of characters written (or would be written)
++ *
++ * @return BASE62_DECODE_OK on success
++ *         BASE62_INVALID_ARG if data is NULL, encoded_text is NULL,
++ *                            output_size is NULL, or *output_size < input_size
++ *         BASE62_INSUFFICIENT_MEM if encoded output doesn't fit
++ */
++int base62_encode(const void *data, unsigned int input_size,
++    char *encoded_text, unsigned int *output_size);
++
++/**
++ * Decode base62 string to bytes
++ *
++ * @param encoded_text Base62 encoded string
++ * @param text_length Number of characters to decode
++ * @param output_data Output buffer for decoded data
++ * @param output_size On entry: maximum size of output buffer.
++ *                    On exit: number of bytes written
++ *
++ * @return BASE62_DECODE_OK on success
++ *         BASE62_DECODE_ERROR if input contains invalid characters
++ *         BASE62_INVALID_ARG if encoded_text is NULL, output_data is NULL,
++ *                            or output_size is NULL
++ */
++int base62_decode(const char *encoded_text, unsigned int text_length,
++    void *output_data, unsigned int *output_size);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __BASE62_H__ */
+diff --git a/encoding/base62/pkg.yml b/encoding/base62/pkg.yml
+new file mode 100644
+index 0000000..03e7302
+--- /dev/null
++++ b/encoding/base62/pkg.yml
+@@ -0,0 +1,26 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++pkg.name: encoding/base62
++pkg.description: Library containing base62 encoding functions
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++    - base62
++    - encoding
+diff --git a/encoding/base62/src/base62.c b/encoding/base62/src/base62.c
+new file mode 100644
+index 0000000..d6bc2e3
+--- /dev/null
++++ b/encoding/base62/src/base62.c
+@@ -0,0 +1,375 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <string.h>
++#include <stdlib.h>
++#include <base62/base62.h>
++
++/* Base62 character set: 0-9, A-Z, a-z */
++static const char base62_chars[] =
++    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
++
++#define BASE62_CHARS_LEN 62
++
++/* 
++ * Big integer implementation using array of uint32_t digits.
++ * Each digit can hold up to 2^32 - 1.
++ * We use base 2^32 for the big integer representation.
++ * Digits are stored least significant first.
++ */
++
++#define BIGINT_SIZE 64
++
++typedef struct {
++    uint32_t digits[BIGINT_SIZE];
++    unsigned int len;
++} bigint_t;
++
++/*
++ * Initialize bigint from byte array (big-endian)
++ */
++static void
++bigint_from_bytes(bigint_t *bi, const uint8_t *bytes, unsigned int nbytes)
++{
++    unsigned int i;
++    unsigned int idx = 0;
++    unsigned int remaining;
++    
++    memset(bi, 0, sizeof(*bi));
++    
++    if (nbytes == 0) {
++        bi->len = 1;
++        return;
++    }
++    
++    for (i = nbytes; i >= 4; i -= 4) {
++        uint32_t val = ((uint32_t)bytes[i - 4] << 24) |
++                       ((uint32_t)bytes[i - 3] << 16) |
++                       ((uint32_t)bytes[i - 2] << 8) |
++                       ((uint32_t)bytes[i - 1]);
++        bi->digits[idx++] = val;
++    }
++    
++    remaining = nbytes % 4;
++    if (remaining > 0) {
++        uint32_t val = 0;
++        unsigned int j;
++        for (j = 0; j < remaining; j++) {
++            val = (val << 8) | bytes[j];
++        }
++        bi->digits[idx++] = val;
++    }
++    
++    bi->len = idx;
++    if (bi->len == 0) bi->len = 1;
++    
++    while (bi->len > 1 && bi->digits[bi->len - 1] == 0) {
++        bi->len--;
++    }
++}
++
++/*
++ * Divide bigint by divisor, return remainder
++ */
++static uint32_t
++bigint_divmod(bigint_t *bi, uint32_t divisor)
++{
++    unsigned long long carry = 0;
++    int i;
++    uint32_t remainder;
++    
++    if (divisor == 0) {
++        return 0;
++    }
++    
++    for (i = bi->len - 1; i >= 0; i--) {
++        carry = (carry << 32) | bi->digits[i];
++        bi->digits[i] = carry / divisor;
++        remainder = carry % divisor;
++        carry = remainder;
++    }
++    
++    while (bi->len > 1 && bi->digits[bi->len - 1] == 0) {
++        bi->len--;
++    }
++    
++    return remainder;
++}
++
++/*
++ * Check if bigint is zero
++ */
++static int
++bigint_is_zero(const bigint_t *bi)
++{
++    unsigned int i;
++    for (i = 0; i < bi->len; i++) {
++        if (bi->digits[i] != 0) {
++            return 0;
++        }
++    }
++    return 1;
++}
++
++/*
++ * Copy bigint
++ */
++static void
++bigint_copy(bigint_t *dest, const bigint_t *src)
++{
++    memcpy(dest, src, sizeof(*dest));
++}
++
++/*
++ * Calculate the encoded length for a given input size.
++ */
++static unsigned int
++calc_encoded_len(const uint8_t *data, unsigned int input_size)
++{
++    bigint_t bi;
++    unsigned int len = 0;
++    
++    if (input_size == 0) {
++        return 1;
++    }
++    
++    bigint_from_bytes(&bi, data, input_size);
++    
++    if (bigint_is_zero(&bi)) {
++        return 1;
++    }
++    
++    {
++        bigint_t copy;
++        bigint_copy(&copy, &bi);
++        
++        while (!bigint_is_zero(&copy)) {
++            bigint_divmod(&copy, BASE62_CHARS_LEN);
++            len++;
++        }
++    }
++    
++    return len;
++}
++
++int
++base62_encode(const void *data, unsigned int input_size,
++    char *encoded_text, unsigned int *output_size)
++{
++    unsigned int needed_len;
++    bigint_t bi;
++    char digits[128];
++    int digit_count;
++    unsigned int j;
++
++    if (data == NULL || encoded_text == NULL || output_size == NULL) {
++        return BASE62_INVALID_ARG;
++    }
++
++    if (*output_size < input_size) {
++        return BASE62_INVALID_ARG;
++    }
++
++    if (input_size == 0) {
++        needed_len = 1;
++    } else {
++        needed_len = calc_encoded_len((const uint8_t *)data, input_size);
++    }
++
++    if (*output_size < needed_len) {
++        *output_size = needed_len;
++        return BASE62_INSUFFICIENT_MEM;
++    }
++
++    if (input_size == 0) {
++        encoded_text[0] = '0';
++        encoded_text[1] = '\0';
++        *output_size = 1;
++        return BASE62_DECODE_OK;
++    }
++
++    bigint_from_bytes(&bi, (const uint8_t *)data, input_size);
++
++    digit_count = 0;
++    while (!bigint_is_zero(&bi)) {
++        uint32_t rem = bigint_divmod(&bi, BASE62_CHARS_LEN);
++        digits[digit_count++] = base62_chars[rem];
++    }
++
++    for (j = 0; j < digit_count; j++) {
++        encoded_text[j] = digits[digit_count - 1 - j];
++    }
++    encoded_text[digit_count] = '\0';
++
++    *output_size = digit_count;
++    return BASE62_DECODE_OK;
++}
++
++/*
++ * Look up the value of a base62 character.
++ */
++static int
++base62_char_value(char c)
++{
++    const char *p;
++    for (p = base62_chars; *p; p++) {
++        if (*p == c) {
++            return p - base62_chars;
++        }
++    }
++    return -1;
++}
++
++/*
++ * Multiply bigint by a small value
++ */
++static void
++bigint_mul(bigint_t *bi, uint32_t mul)
++{
++    unsigned long long carry = 0;
++    unsigned int i;
++    unsigned int old_len = bi->len;
++    
++    for (i = 0; i < old_len; i++) {
++        unsigned long long tmp = ((unsigned long long)bi->digits[i] * mul) + carry;
++        bi->digits[i] = tmp & 0xFFFFFFFF;
++        carry = tmp >> 32;
++    }
++    
++    while (carry > 0) {
++        bi->digits[bi->len++] = carry & 0xFFFFFFFF;
++        carry >>= 32;
++    }
++    
++    while (bi->len > 1 && bi->digits[bi->len - 1] == 0) {
++        bi->len--;
++    }
++}
++
++/*
++ * Add a small value to bigint
++ */
++static void
++bigint_add(bigint_t *bi, uint32_t add)
++{
++    unsigned long long carry = add;
++    unsigned int i;
++    
++    for (i = 0; i < bi->len && carry > 0; i++) {
++        unsigned long long tmp = (unsigned long long)bi->digits[i] + carry;
++        bi->digits[i] = tmp & 0xFFFFFFFF;
++        carry = tmp >> 32;
++    }
++    
++    while (carry > 0) {
++        bi->digits[bi->len++] = carry & 0xFFFFFFFF;
++        carry >>= 32;
++    }
++}
++
++/*
++ * Calculate bytes needed to store bigint
++ */
++static unsigned int
++bigint_bytes_needed(const bigint_t *bi)
++{
++    unsigned int bytes_written = 0;
++    unsigned int i;
++    int j;
++    
++    if (bigint_is_zero(bi)) {
++        return 0;
++    }
++    
++    for (i = bi->len; i > 0; i--) {
++        uint32_t d = bi->digits[i - 1];
++        for (j = 3; j >= 0; j--) {
++            uint8_t b = (d >> (j * 8)) & 0xFF;
++            if (b != 0 || bytes_written > 0) {
++                bytes_written++;
++            }
++        }
++    }
++    
++    if (bytes_written == 0) {
++        bytes_written = 1;
++    }
++    
++    return bytes_written;
++}
++
++int
++base62_decode(const char *encoded_text, unsigned int text_length,
++    void *output_data, unsigned int *output_size)
++{
++    unsigned int i;
++    bigint_t bi;
++    unsigned int bytes_written;
++    uint8_t *out;
++    unsigned int out_idx;
++
++    if (encoded_text == NULL || output_data == NULL || output_size == NULL) {
++        return BASE62_INVALID_ARG;
++    }
++
++    /* Validate all input first and build the bigint */
++    memset(&bi, 0, sizeof(bi));
++    bi.len = 1;
++    
++    for (i = 0; i < text_length; i++) {
++        int char_val = base62_char_value(encoded_text[i]);
++        if (char_val < 0) {
++            return BASE62_DECODE_ERROR;
++        }
++        
++        bigint_mul(&bi, 62);
++        bigint_add(&bi, (uint32_t)char_val);
++    }
++
++    if (bigint_is_zero(&bi)) {
++        *output_size = 0;
++        return BASE62_DECODE_OK;
++    }
++
++    /* Calculate exact bytes needed */
++    bytes_written = bigint_bytes_needed(&bi);
++
++    if (*output_size < bytes_written) {
++        *output_size = bytes_written;
++        return BASE62_INSUFFICIENT_MEM;
++    }
++
++    out = (uint8_t *)output_data;
++    
++    /* Write bytes in big-endian order */
++    out_idx = 0;
++    for (i = bi.len; i > 0; i--) {
++        uint32_t d = bi.digits[i - 1];
++        int j;
++        for (j = 3; j >= 0; j--) {
++            uint8_t b = (d >> (j * 8)) & 0xFF;
++            if (b != 0 || out_idx > 0) {
++                out[out_idx++] = b;
++            }
++        }
++    }
++
++    *output_size = out_idx;
++    return BASE62_DECODE_OK;
++}

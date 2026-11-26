@@ -1,0 +1,458 @@
+diff --git a/sys/log/modlog/include/modlog/modlog.h b/sys/log/modlog/include/modlog/modlog.h
+new file mode 100644
+index 0000000..d2719f6
+--- /dev/null
++++ b/sys/log/modlog/include/modlog/modlog.h
+@@ -0,0 +1,56 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#ifndef __SYS_LOG_MODLOG_H__
++#define __SYS_LOG_MODLOG_H__
++
++#include <stdint.h>
++
++#include "log/log.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define MODLOG_MODULE_DFLT 255
++
++struct modlog_desc {
++    struct log *log;
++    uint8_t handle;
++    uint8_t module;
++    uint8_t min_level;
++};
++
++typedef int (modlog_foreach_fn)(const struct modlog_desc *desc, void *arg);
++
++int modlog_get(uint8_t handle, struct modlog_desc *out_desc);
++int modlog_register(uint8_t module, struct log *log, uint8_t min_level,
++                    uint8_t *out_handle);
++int modlog_delete(uint8_t handle);
++int modlog_append(uint8_t module, uint8_t level, uint8_t etype,
++                  void *data, uint16_t len);
++int modlog_append_mbuf(uint8_t module, uint8_t level, uint8_t etype,
++                       struct os_mbuf *om);
++int modlog_foreach(modlog_foreach_fn *cb, void *arg);
++void modlog_printf(uint16_t module, uint16_t level, const char *msg, ...);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __SYS_LOG_MODLOG_H__ */
+diff --git a/sys/log/modlog/pkg.yml b/sys/log/modlog/pkg.yml
+new file mode 100644
+index 0000000..71352ff
+--- /dev/null
++++ b/sys/log/modlog/pkg.yml
+@@ -0,0 +1,35 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++pkg.name: sys/log/modlog
++pkg.description: Module-mapped logging utilities.
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++pkg.keywords:
++    - logging
++
++pkg.deps:
++    - kernel/os
++    - sys/log/full
++
++pkg.apis:
++    - log
++
++pkg.init:
++    modlog_init: 100
+diff --git a/sys/log/modlog/src/modlog.c b/sys/log/modlog/src/modlog.c
+new file mode 100644
+index 0000000..3ed286d
+--- /dev/null
++++ b/sys/log/modlog/src/modlog.c
+@@ -0,0 +1,316 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <string.h>
++#include <stdio.h>
++#include <stdarg.h>
++
++#include "os/mynewt.h"
++#include "modlog/modlog.h"
++
++#if MYNEWT_VAL(MODLOG_CONSOLE_DFLT)
++#include "log/log.h"
++#endif
++
++#define MODLOG_MAX_MAPPINGS 16
++
++static struct modlog_desc g_modlog_mappings[MODLOG_MAX_MAPPINGS];
++static uint8_t g_modlog_next_handle = 1;
++
++static int
++modlog_find_by_handle(uint8_t handle)
++{
++    int i;
++
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (g_modlog_mappings[i].log && g_modlog_mappings[i].handle == handle) {
++            return i;
++        }
++    }
++
++    return -1;
++}
++
++static int
++modlog_find_all_by_module(uint8_t module, uint8_t *handles, int max_handles)
++{
++    int count = 0;
++    int i;
++    uint8_t dflt_handles[MODLOG_MAX_MAPPINGS];
++    int dflt_count = 0;
++    int j;
++
++    /* First pass: exact match */
++    for (i = 0; i < MODLOG_MAX_MAPPINGS && count < max_handles; i++) {
++        if (!g_modlog_mappings[i].log) {
++            continue;
++        }
++
++        if (g_modlog_mappings[i].module == module) {
++            handles[count++] = g_modlog_mappings[i].handle;
++        } else if (g_modlog_mappings[i].module == MODLOG_MODULE_DFLT) {
++            dflt_handles[dflt_count++] = g_modlog_mappings[i].handle;
++        }
++    }
++
++    /* Second pass: default mappings if no exact match */
++    if (count == 0) {
++        for (j = 0; j < dflt_count && count < max_handles; j++) {
++            handles[count++] = dflt_handles[j];
++        }
++    }
++
++    return count;
++}
++
++int
++modlog_get(uint8_t handle, struct modlog_desc *out_desc)
++{
++    int idx;
++
++    idx = modlog_find_by_handle(handle);
++    if (idx < 0) {
++        return SYS_ENOENT;
++    }
++
++    if (out_desc) {
++        *out_desc = g_modlog_mappings[idx];
++    }
++
++    return 0;
++}
++
++int
++modlog_register(uint8_t module, struct log *log, uint8_t min_level,
++                uint8_t *out_handle)
++{
++    int i;
++    int idx;
++    uint8_t handle;
++
++    if (!log) {
++        return SYS_EINVAL;
++    }
++
++    /* Find empty slot */
++    idx = -1;
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (!g_modlog_mappings[i].log) {
++            idx = i;
++            break;
++        }
++    }
++
++    if (idx < 0) {
++        return SYS_ENOMEM;
++    }
++
++    /* Generate unique handle */
++    do {
++        handle = g_modlog_next_handle++;
++        if (g_modlog_next_handle == 0) {
++            g_modlog_next_handle = 1;
++        }
++    } while (modlog_find_by_handle(handle) >= 0);
++
++    g_modlog_mappings[idx].log = log;
++    g_modlog_mappings[idx].handle = handle;
++    g_modlog_mappings[idx].module = module;
++    g_modlog_mappings[idx].min_level = min_level;
++
++    if (out_handle) {
++        *out_handle = handle;
++    }
++
++    return 0;
++}
++
++int
++modlog_delete(uint8_t handle)
++{
++    int idx;
++
++    idx = modlog_find_by_handle(handle);
++    if (idx < 0) {
++        return SYS_ENOENT;
++    }
++
++    memset(&g_modlog_mappings[idx], 0, sizeof(g_modlog_mappings[idx]));
++
++    return 0;
++}
++
++int
++modlog_append(uint8_t module, uint8_t level, uint8_t etype,
++              void *data, uint16_t len)
++{
++    uint8_t handles[MODLOG_MAX_MAPPINGS];
++    int count;
++    int i;
++    struct modlog_desc desc;
++
++    count = modlog_find_all_by_module(module, handles, MODLOG_MAX_MAPPINGS);
++
++    for (i = 0; i < count; i++) {
++        if (modlog_get(handles[i], &desc) != 0) {
++            continue;
++        }
++
++        /* Level filtering: discard entries with level < min_level */
++        if (level < desc.min_level) {
++            continue;
++        }
++
++        /* Forward entry to mapped log unchanged */
++        log_append_typed(desc.log, module, level, etype, data, len);
++    }
++
++    return 0;
++}
++
++int
++modlog_append_mbuf(uint8_t module, uint8_t level, uint8_t etype,
++                  struct os_mbuf *om)
++{
++    uint8_t handles[MODLOG_MAX_MAPPINGS];
++    int count;
++    int i;
++    struct modlog_desc desc;
++
++    count = modlog_find_all_by_module(module, handles, MODLOG_MAX_MAPPINGS);
++
++    for (i = 0; i < count; i++) {
++        if (modlog_get(handles[i], &desc) != 0) {
++            continue;
++        }
++
++        /* Level filtering: discard entries with level < min_level */
++        if (level < desc.min_level) {
++            continue;
++        }
++
++        /* Forward entry to mapped log unchanged */
++        log_append_mbuf_typed(desc.log, module, level, etype, om);
++    }
++
++    /* Always free the mbuf, even if no mapping matches */
++    os_mbuf_free_chain(om);
++
++    return 0;
++}
++
++/* Forward declaration */
++typedef int (modlog_foreach_fn_t)(const struct modlog_desc *desc, void *arg);
++
++int
++modlog_foreach(modlog_foreach_fn_t *callback, void *arg)
++{
++    int i;
++    int j;
++    int rc;
++    struct modlog_desc desc;
++    struct modlog_desc sorted[MODLOG_MAX_MAPPINGS];
++    int count = 0;
++
++    /* Collect and sort by module (ascending) */
++    for (i = 0; i < MODLOG_MAX_MAPPINGS; i++) {
++        if (!g_modlog_mappings[i].log) {
++            continue;
++        }
++        sorted[count++] = g_modlog_mappings[i];
++    }
++
++    /* Simple bubble sort by module */
++    for (i = 0; i < count - 1; i++) {
++        for (j = 0; j < count - i - 1; j++) {
++            if (sorted[j].module > sorted[j + 1].module) {
++                desc = sorted[j];
++                sorted[j] = sorted[j + 1];
++                sorted[j + 1] = desc;
++            }
++        }
++    }
++
++    /* Visit in sorted order */
++    for (i = 0; i < count; i++) {
++        rc = callback(&sorted[i], arg);
++        if (rc != 0) {
++            return rc;
++        }
++    }
++
++    return 0;
++}
++
++void
++modlog_printf(uint16_t module, uint16_t level, const char *msg, ...)
++{
++    va_list args;
++    char buf[LOG_ENTRY_HDR_SIZE + MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN)];
++    int len;
++    uint16_t max_len;
++
++    max_len = MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN) - 1;
++
++    va_start(args, msg);
++    len = vsnprintf(&buf[LOG_ENTRY_HDR_SIZE], max_len, msg, args);
++    va_end(args);
++
++    if (len >= max_len) {
++        len = max_len - 1;
++    }
++
++    /* Append LOG_ETYPE_STRING entry */
++    modlog_append(module, level, LOG_ETYPE_STRING, (uint8_t *)buf, len);
++}
++
++#if MYNEWT_VAL(MODLOG_CONSOLE_DFLT)
++static struct log g_modlog_console_log;
++
++static void
++modlog_init_inner(void)
++{
++    int rc;
++
++    /* Register console log */
++    rc = log_register("modlog_console", &g_modlog_console_log,
++                      &log_console_handler, NULL, LOG_LEVEL_DEBUG);
++    if (rc != 0) {
++        return;
++    }
++
++    /* Register default mapping to console log */
++    rc = modlog_register(MODLOG_MODULE_DFLT, &g_modlog_console_log,
++                         LOG_LEVEL_DEBUG, NULL);
++    (void)rc;
++}
++#else
++static void
++modlog_init_inner(void)
++{
++    /* No default console mapping */
++}
++#endif
++
++void
++modlog_init(void)
++{
++    SYSINIT_ASSERT_ACTIVE();
++    modlog_init_inner();
++}
+diff --git a/sys/log/modlog/syscfg.yml b/sys/log/modlog/syscfg.yml
+new file mode 100644
+index 0000000..21c556c
+--- /dev/null
++++ b/sys/log/modlog/syscfg.yml
+@@ -0,0 +1,27 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++syscfg.defs:
++    MODLOG_MAX_PRINTF_LEN:
++        description: 'Maximum length of formatted message in modlog_printf.'
++        value: 128
++
++    MODLOG_CONSOLE_DFLT:
++        description: 'Register a default mapping to the console log on init.'
++        value: 1

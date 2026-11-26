@@ -1,0 +1,101 @@
+diff --git a/sys/flash_map/include/flash_map/flash_map.h b/sys/flash_map/include/flash_map/flash_map.h
+index 217cf53..fe8d072 100644
+--- a/sys/flash_map/include/flash_map/flash_map.h
++++ b/sys/flash_map/include/flash_map/flash_map.h
+@@ -131,6 +131,13 @@ int flash_area_getnext_sector(int id, int *sec_id, struct flash_area *ret);
+ int flash_area_id_from_image_slot(int slot);
+ int flash_area_id_to_image_slot(int area_id);
+ 
++/*
++ * Adds default flash areas that are absent from the manufacturing map.
++ * Only adds areas that do not overlap with existing areas.
++ * Overlapping or duplicate IDs are not added.
++ */
++void flash_map_add_new_dflt_areas_extern(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/sys/flash_map/src/flash_map.c b/sys/flash_map/src/flash_map.c
+index 88c11e5..429c468 100644
+--- a/sys/flash_map/src/flash_map.c
++++ b/sys/flash_map/src/flash_map.c
+@@ -425,3 +425,78 @@ flash_map_init(void)
+         flash_map_entries = num_areas;
+     }
+ }
++
++/**
++ * Adds default flash areas that are absent from the manufacturing map.
++ * Only adds areas that don't overlap with existing areas.
++ * Overlapping or duplicate IDs are not added.
++ */
++void
++flash_map_add_new_dflt_areas_extern(void)
++{
++    const struct flash_area *dflt;
++    const struct flash_area *cur;
++    struct flash_area *mfg;
++    int num_dflt;
++    int num_mfg;
++    int i, j;
++    int max_areas = MYNEWT_VAL(FLASH_MAP_MAX_AREAS);
++    bool found;
++    bool overlaps;
++
++    /* Get pointers to the default flash map and current flash map */
++    dflt = sysflash_map_dflt;
++    num_dflt = sizeof sysflash_map_dflt / sizeof sysflash_map_dflt[0];
++
++    cur = flash_map;
++    num_mfg = flash_map_entries;
++
++    /* If the current map is the same as default, nothing to add */
++    if (cur == dflt) {
++        return;
++    }
++
++    /* If current map is full, nothing we can add */
++    if (num_mfg >= max_areas) {
++        return;
++    }
++
++    /* Cast to non-const so we can modify the mfg areas */
++    mfg = (struct flash_area *)cur;
++
++    /* Iterate through default areas */
++    for (i = 0; i < num_dflt; i++) {
++        found = false;
++        overlaps = false;
++
++        /* Check if this default area is already in the current map */
++        for (j = 0; j < num_mfg; j++) {
++            /* Check for duplicate ID */
++            if (dflt[i].fa_id == mfg[j].fa_id) {
++                found = true;
++                break;
++            }
++
++            /* Check for overlap - areas overlap if their ranges intersect */
++            /* Two areas overlap if: start1 < end2 && start2 < end1 */
++            if (dflt[i].fa_device_id == mfg[j].fa_device_id) {
++                uint32_t dflt_start = dflt[i].fa_off;
++                uint32_t dflt_end = dflt[i].fa_off + dflt[i].fa_size;
++                uint32_t mfg_start = mfg[j].fa_off;
++                uint32_t mfg_end = mfg[j].fa_off + mfg[j].fa_size;
++
++                if (dflt_start < mfg_end && mfg_start < dflt_end) {
++                    overlaps = true;
++                    break;
++                }
++            }
++        }
++
++        /* If not found (not a duplicate) and doesn't overlap, add it */
++        if (!found && !overlaps && num_mfg < max_areas) {
++            mfg[num_mfg] = dflt[i];
++            num_mfg++;
++            flash_map_entries = num_mfg;
++        }
++    }
++}

@@ -1,0 +1,483 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 651bb67..d03e936 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -308,6 +308,24 @@ log_append(struct log *log, uint8_t module, uint8_t level, void *data,
+            uint16_t len)
+ {
+     return log_append_typed(log, module, level, LOG_ETYPE_STRING, data, len);
++
++/* Body-only log operations */
++int log_append_body(struct log *log, uint8_t module, uint8_t level,
++                    uint8_t etype, const void *body, uint16_t body_len);
++int log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level,
++                         uint8_t etype, struct os_mbuf *om);
++int log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr);
++int log_read_body(struct log *log, void *dptr, void *buf, uint16_t off,
++                  uint16_t len);
++int log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om,
++                       uint16_t off, uint16_t len);
++typedef int (*log_walk_body_func_t)(struct log *log,
++                                     struct log_offset *log_offset,
++                                     const struct log_entry_hdr *hdr,
++                                     void *dptr, uint16_t len);
++int log_walk_body(struct log *log, log_walk_body_func_t walk_body_func,
++                  struct log_offset *log_offset);
++
+ }
+ 
+ static inline int
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index 4fa8581..85a4bd3 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -25,6 +25,7 @@
+ #include "os/mynewt.h"
+ #include "cbmem/cbmem.h"
+ #include "log/log.h"
++#include "fcb/fcb.h"
+ 
+ #if MYNEWT_VAL(LOG_CLI)
+ #include "shell/shell.h"
+@@ -503,3 +504,379 @@ log_flush(struct log *log)
+ err:
+     return (rc);
+ }
++
++/**
++ * Appends a body (flat buffer) without the header.
++ */
++int
++log_append_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
++                const void *body, uint16_t body_len)
++{
++    struct log_entry_hdr hdr;
++    int rc;
++    uint8_t *buf;
++    uint16_t meta_len;
++
++    rc = log_append_prepare(log, module, level, etype, &hdr);
++    if (rc != 0) {
++        return rc;
++    }
++
++    /* Calculate metadata length */
++    meta_len = 1 + 1 + 4 + 8;  /* module + level + index + ts */
++#if MYNEWT_VAL(LOG_VERSION) > 2
++    meta_len += 1;  /* etype */
++#endif
++
++    /* Allocate buffer for body + metadata */
++    buf = malloc(body_len + meta_len);
++    if (!buf) {
++        return -1;
++    }
++
++    /* Copy body */
++    memcpy(buf, body, body_len);
++
++    /* Append metadata at the end */
++    uint8_t off = body_len;
++    buf[off++] = hdr.ue_module;
++    buf[off++] = hdr.ue_level;
++    memcpy(&buf[off], &hdr.ue_index, 4);
++    off += 4;
++    memcpy(&buf[off], &hdr.ue_ts, 8);
++    off += 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++    buf[off++] = hdr.ue_etype;
++#endif
++
++    /* Append body + metadata */
++    if (log->l_log->log_append) {
++        rc = log->l_log->log_append(log, buf, body_len + meta_len);
++        free(buf);
++        if (rc != 0) {
++            return rc;
++        }
++    } else {
++        free(buf);
++        return -1;
++    }
++
++    return 0;
++}
++
++int
++log_append_mbuf_body(struct log *log, uint8_t module, uint8_t level, uint8_t etype,
++                     struct os_mbuf *om)
++{
++    struct log_entry_hdr hdr;
++    int rc;
++    uint16_t len;
++    uint16_t meta_len;
++    struct os_mbuf *om_with_meta;
++    uint8_t *metadata;
++    struct os_mbuf *om_tmp;
++
++    rc = log_append_prepare(log, module, level, etype, &hdr);
++    if (rc != 0) {
++        os_mbuf_free_chain(om);
++        return rc;
++    }
++
++    /* Calculate total mbuf length */
++    len = 0;
++    om_tmp = om;
++    while (om_tmp) {
++        len += om_tmp->om_len;
++        om_tmp = SLIST_NEXT(om_tmp, om_next);
++    }
++
++    /* Calculate metadata length */
++    meta_len = 1 + 1 + 4 + 8;  /* module + level + index + ts */
++#if MYNEWT_VAL(LOG_VERSION) > 2
++    meta_len += 1;  /* etype */
++#endif
++
++    /* Get a new mbuf for body + metadata */
++    om_with_meta = os_mbuf_get(NULL, 0);
++    if (!om_with_meta) {
++        os_mbuf_free_chain(om);
++        return -1;
++    }
++
++    /* Copy body data */
++    om_tmp = om;
++    while (om_tmp) {
++        rc = os_mbuf_append(om_with_meta, om_tmp->om_data, om_tmp->om_len);
++        if (rc != 0) {
++            os_mbuf_free_chain(om);
++            os_mbuf_free_chain(om_with_meta);
++            return -1;
++        }
++        om_tmp = SLIST_NEXT(om_tmp, om_next);
++    }
++
++    /* Build metadata */
++    metadata = malloc(meta_len);
++    if (!metadata) {
++        os_mbuf_free_chain(om);
++        os_mbuf_free_chain(om_with_meta);
++        return -1;
++    }
++
++    uint8_t offset = 0;
++    metadata[offset++] = hdr.ue_module;
++    metadata[offset++] = hdr.ue_level;
++    memcpy(&metadata[offset], &hdr.ue_index, 4);
++    offset += 4;
++    memcpy(&metadata[offset], &hdr.ue_ts, 8);
++    offset += 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++    metadata[offset++] = hdr.ue_etype;
++#endif
++
++    /* Append metadata */
++    rc = os_mbuf_append(om_with_meta, metadata, meta_len);
++    free(metadata);
++
++    if (rc != 0) {
++        os_mbuf_free_chain(om);
++        os_mbuf_free_chain(om_with_meta);
++        return -1;
++    }
++
++    /* Append body + metadata */
++    if (log->l_log->log_append_mbuf) {
++        rc = log->l_log->log_append_mbuf(log, om_with_meta);
++        os_mbuf_free_chain(om);  /* Free original mbuf as per API */
++
++        if (rc != 0) {
++            return rc;
++        }
++    } else {
++        os_mbuf_free_chain(om);
++        os_mbuf_free_chain(om_with_meta);
++        return -1;
++    }
++
++    return 0;
++}
++
++int
++log_read_hdr(struct log *log, void *dptr, struct log_entry_hdr *hdr)
++{
++    /* Try to read header from storage first */
++    int rc = log->l_log->log_read(log, dptr, hdr, 0, sizeof(*hdr));
++
++    if (rc == sizeof(*hdr)) {
++        /* Header was stored normally */
++        return 0;
++    }
++
++    /* Check if this is a body-only entry by looking for metadata at the end */
++    if (log->l_log->log_type == LOG_TYPE_STORAGE ||
++        log->l_log->log_type == LOG_TYPE_MEMORY) {
++
++        uint16_t total_len;
++        uint8_t meta_len = 1 + 1 + 4 + 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++        meta_len += 1;
++#endif
++
++        /* Get total length */
++        if (log->l_log->log_type == LOG_TYPE_STORAGE) {
++            struct fcb_entry *loc = (struct fcb_entry *)dptr;
++            total_len = loc->fe_data_len;
++        } else {
++            struct cbmem_entry_hdr *cbmem_hdr = (struct cbmem_entry_hdr *)dptr;
++            total_len = cbmem_hdr->ceh_len;
++        }
++
++        /* Read metadata from the end */
++        uint8_t *meta_buf = malloc(meta_len);
++        if (!meta_buf) {
++            return -1;
++        }
++
++        rc = log->l_log->log_read(log, dptr, meta_buf,
++                                   total_len - meta_len, meta_len);
++        if (rc != meta_len) {
++            free(meta_buf);
++            return -1;
++        }
++
++        /* Parse metadata */
++        uint8_t offset = 0;
++        hdr->ue_module = meta_buf[offset++];
++        hdr->ue_level = meta_buf[offset++];
++        memcpy(&hdr->ue_index, &meta_buf[offset], 4);
++        offset += 4;
++        memcpy(&hdr->ue_ts, &meta_buf[offset], 8);
++        offset += 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++        hdr->ue_etype = meta_buf[offset++];
++#endif
++
++        free(meta_buf);
++        return 0;
++    }
++
++    return -1;
++}
++
++int
++log_read_body(struct log *log, void *dptr, void *buf, uint16_t off, uint16_t len)
++{
++    if (log->l_log->log_type == LOG_TYPE_STORAGE) {
++        struct fcb_entry *loc = (struct fcb_entry *)dptr;
++        uint16_t total_len = loc->fe_data_len;
++        uint8_t meta_len = 1 + 1 + 4 + 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++        meta_len += 1;
++#endif
++        uint16_t body_len = total_len - meta_len;
++
++        if (off >= body_len) {
++            return 0;
++        }
++
++        uint16_t read_len = len;
++        if (off + read_len > body_len) {
++            read_len = body_len - off;
++        }
++
++        return log->l_log->log_read(log, dptr, buf, off, read_len);
++    } else if (log->l_log->log_type == LOG_TYPE_MEMORY) {
++        struct cbmem_entry_hdr *cbmem_hdr = (struct cbmem_entry_hdr *)dptr;
++        uint16_t total_len = cbmem_hdr->ceh_len;
++        uint8_t meta_len = 1 + 1 + 4 + 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++        meta_len += 1;
++#endif
++        uint16_t body_len = total_len - meta_len;
++
++        if (off >= body_len) {
++            return 0;
++        }
++
++        uint16_t read_len = len;
++        if (off + read_len > body_len) {
++            read_len = body_len - off;
++        }
++
++        /* Skip cbmem header */
++        return log->l_log->log_read(log, dptr, buf,
++                                     sizeof(*cbmem_hdr) + off, read_len);
++    }
++
++    return -1;
++}
++
++int
++log_read_mbuf_body(struct log *log, void *dptr, struct os_mbuf *om,
++                   uint16_t off, uint16_t len)
++{
++    if (!log->l_log->log_read_mbuf) {
++        return -1;
++    }
++
++    if (log->l_log->log_type == LOG_TYPE_STORAGE) {
++        struct fcb_entry *loc = (struct fcb_entry *)dptr;
++        uint16_t total_len = loc->fe_data_len;
++        uint8_t meta_len = 1 + 1 + 4 + 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++        meta_len += 1;
++#endif
++        uint16_t body_len = total_len - meta_len;
++
++        if (off >= body_len) {
++            return 0;
++        }
++
++        uint16_t read_len = len;
++        if (off + read_len > body_len) {
++            read_len = body_len - off;
++        }
++
++        return log->l_log->log_read_mbuf(log, dptr, om, off, read_len);
++    } else if (log->l_log->log_type == LOG_TYPE_MEMORY) {
++        struct cbmem_entry_hdr *cbmem_hdr = (struct cbmem_entry_hdr *)dptr;
++        uint16_t total_len = cbmem_hdr->ceh_len;
++        uint8_t meta_len = 1 + 1 + 4 + 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++        meta_len += 1;
++#endif
++        uint16_t body_len = total_len - meta_len;
++
++        if (off >= body_len) {
++            return 0;
++        }
++
++        uint16_t read_len = len;
++        if (off + read_len > body_len) {
++            read_len = body_len - off;
++        }
++
++        return log->l_log->log_read_mbuf(log, dptr, om,
++                                          sizeof(*cbmem_hdr) + off, read_len);
++    }
++
++    return -1;
++}
++
++/* Body-walk callback wrapper */
++struct log_walk_body_cb_arg {
++    int (*func)(struct log *, struct log_offset *,
++                const struct log_entry_hdr *, void *, uint16_t);
++    struct log_offset *log_offset;
++};
++
++static int
++log_walk_body_wrapper(struct log *log, struct log_offset *log_offset,
++                       void *dptr, uint16_t total_len)
++{
++    struct log_walk_body_cb_arg *arg = log_offset->lo_arg;
++    struct log_entry_hdr hdr;
++    int rc;
++
++    /* Try to read header */
++    rc = log_read_hdr(log, dptr, &hdr);
++    if (rc != 0) {
++        /* Skip if we can't read header */
++        return 0;
++    }
++
++    /* Calculate body length */
++    uint8_t meta_len = 1 + 1 + 4 + 8;
++#if MYNEWT_VAL(LOG_VERSION) > 2
++    meta_len += 1;
++#endif
++
++    uint16_t body_len = total_len;
++    if (total_len > meta_len) {
++        body_len = total_len - meta_len;
++    }
++
++    /* Call the body-walk function */
++    rc = arg->func(log, log_offset, &hdr, dptr, body_len);
++
++    return rc;
++}
++
++int
++log_walk_body(struct log *log,
++              int (*walk_body_func)(struct log *, struct log_offset *,
++                                   const struct log_entry_hdr *, void *, uint16_t),
++              struct log_offset *log_offset)
++{
++    struct log_walk_body_cb_arg arg;
++    int rc;
++
++    arg.func = walk_body_func;
++    arg.log_offset = log_offset;
++    log_offset->lo_arg = &arg;
++
++    /* Walk all entries */
++    rc = log->l_log->log_walk(log, log_walk_body_wrapper, log_offset);
++
++    return rc;
++}
+diff --git a/targets/unittest/pkg.yml b/targets/unittest/pkg.yml
+deleted file mode 100644
+index b25bf78..0000000
+--- a/targets/unittest/pkg.yml
++++ /dev/null
+@@ -1,27 +0,0 @@
+-#
+-# Licensed to the Apache Software Foundation (ASF) under one
+-# or more contributor license agreements.  See the NOTICE file
+-# distributed with this work for additional information
+-# regarding copyright ownership.  The ASF licenses this file
+-# to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
+-# with the License.  You may obtain a copy of the License at
+-#
+-#  http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing,
+-# software distributed under the License is distributed on an
+-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-# KIND, either express or implied.  See the License for the
+-# specific language governing permissions and limitations
+-# under the License.
+-#
+-
+-### Package: targets/unittest
+-pkg.name: "targets/unittest"
+-pkg.type: "target"
+-pkg.description: "Used for unit tests by the \"newt test\" command."
+-pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
+-pkg.homepage: "http://mynewt.apache.org/"
+-
+-pkg.deps: "@apache-mynewt-core/sys/sysinit"
+diff --git a/targets/unittest/target.yml b/targets/unittest/target.yml
+deleted file mode 100644
+index e10a8ac..0000000
+--- a/targets/unittest/target.yml
++++ /dev/null
+@@ -1,23 +0,0 @@
+-#
+-# Licensed to the Apache Software Foundation (ASF) under one
+-# or more contributor license agreements.  See the NOTICE file
+-# distributed with this work for additional information
+-# regarding copyright ownership.  The ASF licenses this file
+-# to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
+-# with the License.  You may obtain a copy of the License at
+-#
+-#  http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing,
+-# software distributed under the License is distributed on an
+-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-# KIND, either express or implied.  See the License for the
+-# specific language governing permissions and limitations
+-# under the License.
+-#
+-
+-### Target: targets/unittest
+-target.bsp: "@apache-mynewt-core/hw/bsp/native"
+-target.build_profile: "debug"
+-target.compiler: "@apache-mynewt-core/compiler/sim"

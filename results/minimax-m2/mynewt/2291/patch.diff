@@ -1,0 +1,159 @@
+diff --git a/libc/baselibc/src/jrand48.c b/libc/baselibc/src/jrand48.c
+index 8e2b3ac..d3bc167 100644
+--- a/libc/baselibc/src/jrand48.c
++++ b/libc/baselibc/src/jrand48.c
+@@ -5,7 +5,7 @@
+ #include <stdlib.h>
+ #include <stdint.h>
+ 
+-long jrand48(unsigned short xsubi[3])
++long jrand48(unsigned short *xsubi)
+ {
+ 	uint64_t x;
+ 
+diff --git a/libc/baselibc/src/nrand48.c b/libc/baselibc/src/nrand48.c
+index cb3532b..63d68e3 100644
+--- a/libc/baselibc/src/nrand48.c
++++ b/libc/baselibc/src/nrand48.c
+@@ -5,7 +5,7 @@
+ #include <stdlib.h>
+ #include <stdint.h>
+ 
+-long nrand48(unsigned short xsubi[3])
++long nrand48(unsigned short *xsubi)
+ {
+ 	return (long)((uint32_t) jrand48(xsubi) >> 1);
+ }
+diff --git a/libc/baselibc/src/tinyprintf.c b/libc/baselibc/src/tinyprintf.c
+index 5a15015..c185e9d 100644
+--- a/libc/baselibc/src/tinyprintf.c
++++ b/libc/baselibc/src/tinyprintf.c
+@@ -45,8 +45,8 @@ DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++(INCLUDING, BUT NOT LIMITED TO, ANY LIABILITY OR OTHER THEORY OF LIABILITY,
++EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ */
+ 
+@@ -198,13 +198,39 @@ static unsigned putchw(FILE *putp, struct param *p)
+     return written;
+ }
+ 
++#if MYNEWT_VAL(FLOAT_USER)
++struct MemFile {
++    char *buffer;
++    size_t bytes_written;
++};
++
++static int mf_putc(char c, FILE *f)
++{
++    struct MemFile *mf = f->cookie;
++    if (mf->bytes_written < SIZE_MAX) {
++        mf->buffer[mf->bytes_written++] = c;
++    }
++    return 1;
++}
++
++static FILE *fmemopen_w(struct MemFile *mf, char *buf, size_t size)
++{
++    static FILE f;
++    mf->buffer = buf;
++    mf->bytes_written = 0;
++    f.cookie = mf;
++    f.putc = mf_putc;
++    return &f;
++}
++#endif
++
+ static unsigned long long
+ intarg(int lng, int sign, va_list *va)
+ {
+     unsigned long long val;
+ 
+     switch (lng) {
+-    case 0:
++    case 0:  /* int */
+         if (sign) {
+             val = va_arg(*va, int);
+         } else {
+@@ -212,7 +238,23 @@ intarg(int lng, int sign, va_list *va)
+         }
+         break;
+ 
+-    case 1:
++    case 1:  /* short (h) - truncate to 16 bits */
++        if (sign) {
++            val = (unsigned long long)(short)va_arg(*va, int);
++        } else {
++            val = (unsigned long long)(unsigned short)va_arg(*va, unsigned int);
++        }
++        break;
++
++    case 2:  /* char (hh) - truncate to 8 bits */
++        if (sign) {
++            val = (unsigned long long)(signed char)va_arg(*va, int);
++        } else {
++            val = (unsigned long long)(unsigned char)va_arg(*va, unsigned int);
++        }
++        break;
++
++    case 3:  /* long */
+         if (sign) {
+             val = va_arg(*va, long);
+         } else {
+@@ -220,7 +262,7 @@ intarg(int lng, int sign, va_list *va)
+         }
+         break;
+ 
+-    case 2:
++    case 4:  /* long long */
+     default:
+         if (sign) {
+             val = va_arg(*va, long long);
+@@ -295,13 +337,21 @@ size_t tfp_format(FILE *putp, const char *fmt, va_list va)
+             } else if (ch >= '0' && ch <= '9') {
+                 ch = a2i(ch, &fmt, 10, &(p.width));
+             }
+-            if (ch == 'l') {
++            if (ch == 'h') {
+                 ch = *(fmt++);
+-                lng = 1;
++                lng = 1;  /* short (16-bit) */
++
++                if (ch == 'h') {
++                    ch = *(fmt++);
++                    lng = 2;  /* char (8-bit) */
++                }
++            } else if (ch == 'l') {
++                ch = *(fmt++);
++                lng = 3;  /* long */
+ 
+                 if (ch == 'l') {
+                     ch = *(fmt++);
+-                    lng = 2;
++                    lng = 4;  /* long long */
+                 }
+             }
+ 
+@@ -432,6 +482,7 @@ int printf(const char *fmt, ...)
+ 
+ int vsnprintf(char *str, size_t size, const char *fmt, va_list va)
+ {
++#if MYNEWT_VAL(FLOAT_USER)
+     struct MemFile state;
+     FILE *f = fmemopen_w(&state, str, size);
+     tfp_format(f, fmt, va);
+@@ -443,6 +494,9 @@ int vsnprintf(char *str, size_t size, const char *fmt, va_list va)
+         }
+     }
+     return state.bytes_written;
++#else
++    return 0;
++#endif
+ }
+ 
+ int snprintf(char *str, size_t size, const char *fmt, ...)

@@ -1,0 +1,77 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index cafddab..e35468f 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -215,6 +215,9 @@ struct log {
+     log_append_cb *l_append_cb;
+     uint8_t l_level;
+     uint16_t l_max_entry_len;   /* Log body length; if 0 disables check. */
++#if !MYNEWT_VAL(LOG_GLOBAL_IDX)
++    uint32_t l_next_index;
++#endif
+ #if MYNEWT_VAL(LOG_STATS)
+     STATS_SECT_DECL(logs) l_stats;
+ #endif
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index b81430e..38e8a4d 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -392,6 +392,9 @@ log_register(char *name, struct log *log, const struct log_handler *lh,
+     log->l_level = level;
+     log->l_append_cb = NULL;
+     log->l_max_entry_len = 0;
++#if !MYNEWT_VAL(LOG_GLOBAL_IDX)
++    log->l_next_index = 0;
++#endif
+ 
+     if (!log_registered(log)) {
+         STAILQ_INSERT_TAIL(&g_log_list, log, l_next);
+@@ -420,9 +423,15 @@ log_register(char *name, struct log *log, const struct log_handler *lh,
+         rc = log_read_last_hdr(log, &hdr);
+         if (rc == 0) {
+             OS_ENTER_CRITICAL(sr);
++#if MYNEWT_VAL(LOG_GLOBAL_IDX)
+             if (hdr.ue_index >= g_log_info.li_next_index) {
+                 g_log_info.li_next_index = hdr.ue_index + 1;
+             }
++#else
++            if (hdr.ue_index >= log->l_next_index) {
++                log->l_next_index = hdr.ue_index + 1;
++            }
++#endif
+             OS_EXIT_CRITICAL(sr);
+         }
+     }
+@@ -530,9 +539,15 @@ log_append_prepare(struct log *log, uint8_t module, uint8_t level,
+         goto err;
+     }
+ 
++#if MYNEWT_VAL(LOG_GLOBAL_IDX)
+     OS_ENTER_CRITICAL(sr);
+     idx = g_log_info.li_next_index++;
+     OS_EXIT_CRITICAL(sr);
++#else
++    OS_ENTER_CRITICAL(sr);
++    idx = log->l_next_index++;
++    OS_EXIT_CRITICAL(sr);
++#endif
+ 
+     /* Try to get UTC Time */
+     rc = os_gettimeofday(&tv, NULL);
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index b8ee6f8..a1e3782 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -135,6 +135,12 @@ syscfg.defs:
+         value: 0
+         restrictions: LOG_STORAGE_WATERMARK
+ 
++    LOG_GLOBAL_IDX:
++        description: >
++            Use a global log index across all logs. When disabled, each log
++            maintains its own index.
++        value: 1
++
+     LOG_SYSINIT_STAGE_MAIN:
+         description: >
+             Primary sysinit stage for logging functionality.

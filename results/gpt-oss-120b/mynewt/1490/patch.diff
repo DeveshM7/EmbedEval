@@ -1,0 +1,83 @@
+diff --git a/hw/hal/include/hal/hal_flash.h b/hw/hal/include/hal/hal_flash.h
+index 429837e..1203d0b 100644
+--- a/hw/hal/include/hal/hal_flash.h
++++ b/hw/hal/include/hal/hal_flash.h
+@@ -64,6 +64,21 @@ uint8_t hal_flash_align(uint8_t flash_id);
+ uint8_t hal_flash_erased_val(uint8_t flash_id);
+ int hal_flash_init(void);
+ 
++/**
++ * @brief Enable or disable write protection for a flash device.
++ *
++ * When protection is enabled, any write, erase sector, or erase operation
++ * for the specified flash device must return SYS_EACCES and must not modify
++ * the flash contents.  Protection can be cleared by passing a zero for the
++ * p protect argument.
++ *
++ * @param id        Flash device identifier.
++ * @param protect   Non‑zero to enable protection, zero to clear it.
++ *
++ * @return 0 on success, or SYS_EINVAL if @p id does not correspond to a
++ *         valid flash device.
++ */
++int hal_flash_write_protect(uint8_t id, uint8_t protect);
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/hw/hal/src/hal_flash.c b/hw/hal/src/hal_flash.c
+index ac26a05..3d36031 100644
+--- a/hw/hal/src/hal_flash.c
++++ b/hw/hal/src/hal_flash.c
+@@ -26,6 +26,9 @@
+ #include "hal/hal_flash.h"
+ #include "hal/hal_flash_int.h"
+ 
++#include "defs/error.h"
++/* Write-protect flag for each flash device */
++static uint8_t g_flash_protect[256];
+ int
+ hal_flash_init(void)
+ {
+@@ -160,6 +163,7 @@ hal_flash_write(uint8_t id, uint32_t address, const void *src,
+     if (!hf) {
+         return -1;
+     }
++    if (g_flash_protect[id]) { return SYS_EACCES; }
+     if (hal_flash_check_addr(hf, address) ||
+       hal_flash_check_addr(hf, address + num_bytes)) {
+         return -1;
+@@ -194,6 +198,7 @@ hal_flash_erase_sector(uint8_t id, uint32_t sector_address)
+     if (!hf) {
+         return -1;
+     }
++    if (g_flash_protect[id]) { return SYS_EACCES; }
+     if (hal_flash_check_addr(hf, sector_address)) {
+         return -1;
+     }
+@@ -233,6 +238,7 @@ hal_flash_erase(uint8_t id, uint32_t address, uint32_t num_bytes)
+     if (!hf) {
+         return -1;
+     }
++    if (g_flash_protect[id]) { return SYS_EACCES; }
+     if (hal_flash_check_addr(hf, address) ||
+       hal_flash_check_addr(hf, address + num_bytes)) {
+         return -1;
+@@ -338,3 +344,18 @@ hal_flash_ioctl(uint8_t id, uint32_t cmd, void *args)
+ {
+     return 0;
+ }
++/*
++ * Public API to enable/disable write protection for a flash device.
++ */
++int
++hal_flash_write_protect(uint8_t id, uint8_t protect)
++{
++    const struct hal_flash *hf;
++
++    hf = hal_bsp_flash_dev(id);
++    if (!hf) {
++        return SYS_EINVAL;
++    }
++    g_flash_protect[id] = protect ? 1 : 0;
++    return 0;
++}

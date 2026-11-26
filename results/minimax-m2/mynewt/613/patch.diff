@@ -1,0 +1,419 @@
+diff --git a/net/nimble/host/include/host/ble_hs.h b/net/nimble/host/include/host/ble_hs.h
+index 85885bd..521f81d 100644
+--- a/net/nimble/host/include/host/ble_hs.h
++++ b/net/nimble/host/include/host/ble_hs.h
+@@ -169,6 +169,7 @@ struct ble_hs_cfg {
+ };
+ 
+ extern struct ble_hs_cfg ble_hs_cfg;
++extern uint16_t ble_hs_hci_avail_pkts;
+ 
+ int ble_hs_synced(void);
+ int ble_hs_start(void);
+diff --git a/net/nimble/host/src/ble_hs_conn.c b/net/nimble/host/src/ble_hs_conn.c
+index 91a8456..2f5508c 100644
+--- a/net/nimble/host/src/ble_hs_conn.c
++++ b/net/nimble/host/src/ble_hs_conn.c
+@@ -141,6 +141,8 @@ ble_hs_conn_alloc(uint16_t conn_handle)
+     conn->bhc_handle = conn_handle;
+ 
+     SLIST_INIT(&conn->bhc_channels);
++    conn->bhc_tx_bufs = NULL;
++    conn->bhc_tx_bufs_tail = NULL;
+ 
+     chan = ble_att_create_chan(conn_handle);
+     if (chan == NULL) {
+diff --git a/net/nimble/host/src/ble_hs_conn_priv.h b/net/nimble/host/src/ble_hs_conn_priv.h
+index 56bc6d3..ad7d920 100644
+--- a/net/nimble/host/src/ble_hs_conn_priv.h
++++ b/net/nimble/host/src/ble_hs_conn_priv.h
+@@ -17,6 +17,8 @@
+  * under the License.
+  */
+ 
++#include <sys/queue.h>
++
+ #ifndef H_BLE_HS_CONN_
+ #define H_BLE_HS_CONN_
+ 
+@@ -36,6 +38,7 @@ typedef uint8_t ble_hs_conn_flags_t;
+ 
+ #define BLE_HS_CONN_F_MASTER        0x01
+ #define BLE_HS_CONN_F_TERMINATING   0x02
++#define BLE_HS_CONN_F_TX_FRAG      0x04
+ 
+ struct ble_hs_conn {
+     SLIST_ENTRY(ble_hs_conn) bhc_next;
+@@ -64,6 +67,11 @@ struct ble_hs_conn {
+ 
+     struct ble_gap_sec_state bhc_sec_state;
+ 
++    /* TX queue for ACL packets waiting for controller buffers */
++    STAILQ_ENTRY(ble_hs_conn) bhc_tx_queue;
++    struct os_mbuf *bhc_tx_bufs;  /* Head of TX queue */
++    struct os_mbuf *bhc_tx_bufs_tail;  /* Tail of TX queue */
++
+     ble_gap_event_fn *bhc_cb;
+     void *bhc_cb_arg;
+ };
+diff --git a/net/nimble/host/src/ble_hs_hci.c b/net/nimble/host/src/ble_hs_hci.c
+index 1b0a39d..2b87fd7 100644
+--- a/net/nimble/host/src/ble_hs_hci.c
++++ b/net/nimble/host/src/ble_hs_hci.c
+@@ -35,6 +35,7 @@ static struct os_sem ble_hs_hci_sem;
+ 
+ static uint8_t *ble_hs_hci_ack;
+ static uint16_t ble_hs_hci_buf_sz;
++uint16_t ble_hs_hci_avail_pkts;
+ static uint8_t ble_hs_hci_max_pkts;
+ static uint32_t ble_hs_hci_sup_feat;
+ 
+@@ -50,8 +51,8 @@ ble_hs_hci_set_phony_ack_cb(ble_hs_hci_phony_ack_fn *cb)
+ }
+ #endif
+ 
+-static void
+-ble_hs_hci_lock(void)
++
++static void ble_hs_hci_lock(void)
+ {
+     int rc;
+ 
+@@ -59,8 +60,8 @@ ble_hs_hci_lock(void)
+     BLE_HS_DBG_ASSERT_EVAL(rc == 0 || rc == OS_NOT_STARTED);
+ }
+ 
+-static void
+-ble_hs_hci_unlock(void)
++
++static void ble_hs_hci_unlock(void)
+ {
+     int rc;
+ 
+@@ -77,11 +78,12 @@ ble_hs_hci_set_buf_sz(uint16_t pktlen, uint8_t max_pkts)
+ 
+     ble_hs_hci_buf_sz = pktlen;
+     ble_hs_hci_max_pkts = max_pkts;
++    ble_hs_hci_avail_pkts = max_pkts;
+ 
+     return 0;
+ }
+ 
+-static int
++
+ ble_hs_hci_rx_cmd_complete(uint8_t event_code, uint8_t *data, int len,
+                            struct ble_hs_hci_ack *out_ack)
+ {
+@@ -124,7 +126,7 @@ ble_hs_hci_rx_cmd_complete(uint8_t event_code, uint8_t *data, int len,
+     return 0;
+ }
+ 
+-static int
++
+ ble_hs_hci_rx_cmd_status(uint8_t event_code, uint8_t *data, int len,
+                          struct ble_hs_hci_ack *out_ack)
+ {
+@@ -151,7 +153,7 @@ ble_hs_hci_rx_cmd_status(uint8_t event_code, uint8_t *data, int len,
+     return 0;
+ }
+ 
+-static int
++
+ ble_hs_hci_process_ack(uint16_t expected_opcode,
+                        uint8_t *params_buf, uint8_t params_buf_len,
+                        struct ble_hs_hci_ack *out_ack)
+@@ -217,7 +219,7 @@ ble_hs_hci_process_ack(uint16_t expected_opcode,
+     return rc;
+ }
+ 
+-static int
++
+ ble_hs_hci_wait_for_ack(void)
+ {
+     int rc;
+@@ -411,15 +413,52 @@ ble_hs_hci_acl_hdr_prepend(struct os_mbuf *om, uint16_t handle,
+     return om;
+ }
+ 
++
+ /**
+- * Transmits an HCI ACL data packet.  This function consumes the supplied mbuf,
+- * regardless of the outcome.
+- *
+- * XXX: Ensure the controller has sufficient buffer capacity for the outgoing
+- * fragments.
++ * Flushes the transmit queue for a connection.
+  */
+-int
+-ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom)
++
++void ble_hs_hci_tx_queue_flush(struct ble_hs_conn *conn)
++{
++    struct os_mbuf *om;
++
++    while ((om = conn->bhc_tx_bufs) != NULL) {
++        conn->bhc_tx_bufs = SLIST_NEXT(conn->bhc_tx_bufs, om_next);
++        os_mbuf_free_chain(om);
++    }
++}
++
++/**
++ * Transmits queued packets for a connection if buffers are available.
++ */
++
++void ble_hs_hci_tx_queue_drain(struct ble_hs_conn *conn)
++{
++    struct os_mbuf *txom;
++    int rc;
++
++    while (ble_hs_hci_avail_pkts > 0 && (txom = conn->bhc_tx_bufs) != NULL) {
++        conn->bhc_tx_bufs = SLIST_NEXT(conn->bhc_tx_bufs, om_next);
++        
++        rc = ble_hs_hci_acl_tx_frag(conn, txom);
++        if (rc != 0) {
++            /* Failed to transmit, put it back at the front of the queue */
++            SLIST_NEXT(txom, om_next) = conn->bhc_tx_bufs; conn->bhc_tx_bufs = txom;;
++            break;
++        }
++    }
++    
++    /* If queue is empty, clear the TX_FRAG flag */
++    if ((conn->bhc_tx_bufs == NULL)) {
++        conn->bhc_flags &= ~BLE_HS_CONN_F_TX_FRAG;
++    }
++}
++
++/**
++ * Transmits a single ACL fragment (without queueing).
++ */
++
++int ble_hs_hci_acl_tx_frag(struct ble_hs_conn *connection, struct os_mbuf *txom)
+ {
+     struct os_mbuf *frag;
+     uint8_t pb;
+@@ -433,6 +472,12 @@ ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom)
+ 
+     /* Send fragments until the entire packet has been sent. */
+     while (txom != NULL) {
++        if (ble_hs_hci_avail_pkts == 0) {
++            /* No buffers available, shouldn't happen */
++            os_mbuf_free_chain(txom);
++            return BLE_HS_ENOMEM;
++        }
++        
+         frag = mem_split_frag(&txom, ble_hs_hci_max_acl_payload_sz(),
+                               ble_hs_hci_frag_alloc, NULL);
+ 
+@@ -455,6 +500,7 @@ ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom)
+         }
+ 
+         connection->bhc_outstanding_pkts++;
++        ble_hs_hci_avail_pkts--;
+     }
+ 
+     return 0;
+@@ -466,6 +512,43 @@ err:
+     return rc;
+ }
+ 
++
++/**
++ * Transmits an HCI ACL data packet.  This function consumes the supplied mbuf,
++ * regardless of the outcome.
++ *
++ * XXX: Ensure the controller has sufficient buffer capacity for the outgoing
++ * fragments.
++ */
++int
++ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom)
++{
++    int rc;
++
++    /* Check if controller has available buffers */
++    if (ble_hs_hci_avail_pkts > 0) {
++        /* Transmit immediately */
++        rc = ble_hs_hci_acl_tx_frag(connection, txom);
++        if (rc == 0 && !(connection->bhc_tx_bufs != NULL)) {
++            /* Transmission succeeded and there are queued packets, 
++             * try to drain the queue */
++            ble_hs_hci_tx_queue_drain(connection);
++        }
++    } else {
++                SLIST_NEXT(txom, om_next) = NULL;
++                if (connection->bhc_tx_bufs_tail) {
++                    SLIST_NEXT(connection->bhc_tx_bufs_tail, om_next) = txom;
++                } else {
++                    connection->bhc_tx_bufs = txom;
++                }
++                connection->bhc_tx_bufs_tail = txom;
++        connection->bhc_flags |= BLE_HS_CONN_F_TX_FRAG;
++        rc = 0;
++    }
++
++    return rc;
++}
++
+ void
+ ble_hs_hci_set_le_supported_feat(uint32_t feat)
+ {
+diff --git a/net/nimble/host/src/ble_hs_hci_evt.c b/net/nimble/host/src/ble_hs_hci_evt.c
+index a6e7324..4b1bc3a 100644
+--- a/net/nimble/host/src/ble_hs_hci_evt.c
++++ b/net/nimble/host/src/ble_hs_hci_evt.c
+@@ -142,6 +142,7 @@ static int
+ ble_hs_hci_evt_disconn_complete(uint8_t event_code, uint8_t *data, int len)
+ {
+     struct hci_disconn_complete evt;
++    struct ble_hs_conn *conn;
+ 
+     if (len < BLE_HCI_EVENT_DISCONN_COMPLETE_LEN) {
+         return BLE_HS_ECONTROLLER;
+@@ -151,6 +152,19 @@ ble_hs_hci_evt_disconn_complete(uint8_t event_code, uint8_t *data, int len)
+     evt.connection_handle = get_le16(data + 3);
+     evt.reason = data[5];
+ 
++    ble_hs_lock();
++    
++    /* Flush any queued TX packets for this connection */
++    conn = ble_hs_conn_find(evt.connection_handle);
++    if (conn != NULL) {
++        ble_hs_hci_tx_queue_flush(conn);
++        /* Return any outstanding packets to the available count */
++        ble_hs_hci_avail_pkts += conn->bhc_outstanding_pkts;
++        conn->bhc_outstanding_pkts = 0;
++    }
++    
++    ble_hs_unlock();
++
+     ble_gap_rx_disconn_complete(&evt);
+ 
+     return 0;
+@@ -214,6 +228,7 @@ ble_hs_hci_evt_num_completed_pkts(uint8_t event_code, uint8_t *data, int len)
+     uint8_t num_handles;
+     int off;
+     int i;
++    struct ble_hs_conn *conn;
+ 
+     if (len < BLE_HCI_EVENT_HDR_LEN + BLE_HCI_EVENT_NUM_COMP_PKTS_HDR_LEN) {
+         return BLE_HS_ECONTROLLER;
+@@ -227,15 +242,24 @@ ble_hs_hci_evt_num_completed_pkts(uint8_t event_code, uint8_t *data, int len)
+     }
+     off++;
+ 
++    ble_hs_lock();
++    
+     for (i = 0; i < num_handles; i++) {
+         handle = get_le16(data + off);
+         num_pkts = get_le16(data + off + 2);
+         off += (2 * sizeof(uint16_t));
+ 
+-        /* XXX: Do something with these values. */
+-        (void)handle;
+-        (void)num_pkts;
++        /* Update available buffer count */
++        ble_hs_hci_avail_pkts += num_pkts;
++        
++        /* Find connection and resume transmission if needed */
++        conn = ble_hs_conn_find(handle);
++        if (conn != NULL && (conn->bhc_flags & BLE_HS_CONN_F_TX_FRAG)) {
++            ble_hs_hci_tx_queue_drain(conn);
++        }
+     }
++    
++    ble_hs_unlock();
+ 
+     return 0;
+ }
+diff --git a/net/nimble/host/src/ble_hs_hci_priv.h b/net/nimble/host/src/ble_hs_hci_priv.h
+index 82c63ad..5c0aff6 100644
+--- a/net/nimble/host/src/ble_hs_hci_priv.h
++++ b/net/nimble/host/src/ble_hs_hci_priv.h
+@@ -164,6 +164,7 @@ uint16_t ble_hs_hci_util_handle_pb_bc_join(uint16_t handle, uint8_t pb,
+                                            uint8_t bc);
+ 
+ int ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom);
++void ble_hs_hci_tx_queue_flush(struct ble_hs_conn *conn);
+ 
+ int ble_hs_hci_cmd_build_set_data_len(uint16_t connection_handle,
+                                       uint16_t tx_octets, uint16_t tx_time,
+diff --git a/net/nimble/host/src/ble_hs_startup.c b/net/nimble/host/src/ble_hs_startup.c
+index 8c19453..af7f080 100644
+--- a/net/nimble/host/src/ble_hs_startup.c
++++ b/net/nimble/host/src/ble_hs_startup.c
+@@ -6,7 +6,7 @@
+  * to you under the Apache License, Version 2.0 (the
+  * "License"); you may not use this file except in compliance
+  * with the License.  You may obtain a copy of the License at
+- *
++ * 
+  *  http://www.apache.org/licenses/LICENSE-2.0
+  *
+  * Unless required by applicable law or agreed to in writing,
+@@ -73,6 +73,27 @@ ble_hs_startup_le_read_buf_sz_tx(void)
+     pktlen = get_le16(ack_params + 0);
+     max_pkts = ack_params[2];
+ 
++    /* If LE buffer size is 0, read BR/EDR buffer size */
++    if (pktlen == 0 || max_pkts == 0) {
++        uint8_t br_params[BLE_HCI_CB_RD_BUF_SIZE_RSPLEN];
++        uint8_t br_params_len;
++        
++        rc = ble_hs_hci_cmd_tx(BLE_HCI_OP(BLE_HCI_OGF_CTLR_BASEBAND,
++                                          BLE_HCI_OCF_CB_RD_BUF_SIZE),
++                               NULL, 0, br_params, sizeof br_params,
++                               &br_params_len);
++        if (rc != 0) {
++            return rc;
++        }
++        
++        if (br_params_len != BLE_HCI_CB_RD_BUF_SIZE_RSPLEN) {
++            return BLE_HS_ECONTROLLER;
++        }
++        
++        pktlen = get_le16(br_params + 1);
++        max_pkts = br_params[3];
++    }
++
+     rc = ble_hs_hci_set_buf_sz(pktlen, max_pkts);
+     if (rc != 0) {
+         return rc;
+@@ -125,8 +146,8 @@ ble_hs_startup_le_set_evmask_tx(void)
+      *     0x0000000000001000 LE Extended Advertising Report Event
+      *     0x0000000000010000 LE Extended Scan Timeout Event
+      *     0x0000000000020000 LE Extended Advertising Set Terminated Event
+-     *     0x0000000000040000 LE Scan Request Received Event
+-     *     0x0000000000080000 LE Channel Selection Algorithm Event
++     *     0x0000000000000400 LE Scan Request Received Event
++     *     0x0000000000000800 LE Channel Selection Algorithm Event
+      */
+     ble_hs_hci_cmd_build_le_set_event_mask(0x00000000000F1A7F, buf, sizeof buf);
+     rc = ble_hs_hci_cmd_tx_empty_ack(BLE_HCI_OP(BLE_HCI_OGF_LE,
+@@ -219,8 +240,6 @@ ble_hs_startup_go(void)
+         return rc;
+     }
+ 
+-    /* XXX: Read buffer size. */
+-
+     rc = ble_hs_startup_le_read_sup_f_tx();
+     if (rc != 0) {
+         return rc;
+diff --git a/net/nimble/include/nimble/hci_common.h b/net/nimble/include/nimble/hci_common.h
+index 6a9472b..26454bb 100644
+--- a/net/nimble/include/nimble/hci_common.h
++++ b/net/nimble/include/nimble/hci_common.h
+@@ -68,6 +68,7 @@ extern "C" {
+ 
+ /* List of OCF for Controller and Baseband commands (OGF=0x03) */
+ #define BLE_HCI_OCF_CB_SET_EVENT_MASK       (0x0001)
++#define BLE_HCI_OCF_CB_RD_BUF_SIZE            (0x0002)
+ #define BLE_HCI_OCF_CB_RESET                (0x0003)
+ #define BLE_HCI_OCF_CB_READ_TX_PWR          (0x002D)
+ #define BLE_HCI_OCF_CB_SET_EVENT_MASK2      (0x0063)
+@@ -171,6 +172,7 @@ extern "C" {
+ 
+ /* --- Set event mask (OGF 0x03, OCF 0x0001 --- */
+ #define BLE_HCI_SET_EVENT_MASK_LEN          (8)
++#define BLE_HCI_CB_RD_BUF_SIZE_RSPLEN       (7)  /* Status + ACL len + ACL max pkts + SCO len + SCO max pkts +..*/
+ 
+ /* --- Read BD_ADDR (OGF 0x04, OCF 0x0009 --- */
+ #define BLE_HCI_IP_RD_BD_ADDR_ACK_PARAM_LEN (6)

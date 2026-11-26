@@ -1,0 +1,115 @@
+diff --git a/hw/hal/include/hal/hal_flash.h b/hw/hal/include/hal/hal_flash.h
+index 429837e..8cd2ae3 100644
+--- a/hw/hal/include/hal/hal_flash.h
++++ b/hw/hal/include/hal/hal_flash.h
+@@ -64,6 +64,23 @@ uint8_t hal_flash_align(uint8_t flash_id);
+ uint8_t hal_flash_erased_val(uint8_t flash_id);
+ int hal_flash_init(void);
+ 
++/**
++ * @brief Enables or disables write protection for a flash device.
++ *
++ * When write protection is enabled, hal_flash_write(), hal_flash_erase(), and
++ * hal_flash_erase_sector() for that flash ID will return SYS_EACCES and will
++ * not modify the flash contents.
++ *
++ * @param id                    The ID of the flash device to protect.
++ * @param protect               Non-zero to enable write protection; zero to
++ *                              disable protection.
++ *
++ * @return                      0 on success;
++ *                              SYS_EINVAL if id does not identify a valid
++ *                              flash device in the HAL.
++ */
++int hal_flash_write_protect(uint8_t id, uint8_t protect);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/hw/hal/src/hal_flash.c b/hw/hal/src/hal_flash.c
+index ac26a05..66285b7 100644
+--- a/hw/hal/src/hal_flash.c
++++ b/hw/hal/src/hal_flash.c
+@@ -25,6 +25,15 @@
+ #include "hal/hal_bsp.h"
+ #include "hal/hal_flash.h"
+ #include "hal/hal_flash_int.h"
++#include "defs/error.h"
++
++/*
++ * Maximum number of flash devices supported.
++ * This should be sufficient for most systems.
++ */
++#define HAL_FLASH_MAX_DEVICES    8
++
++static uint8_t hal_flash_write_protected[HAL_FLASH_MAX_DEVICES];
+ 
+ int
+ hal_flash_init(void)
+@@ -33,6 +42,10 @@ hal_flash_init(void)
+     uint8_t i;
+     int rc = 0;
+ 
++    for (i = 0; i < HAL_FLASH_MAX_DEVICES; i++) {
++        hal_flash_write_protected[i] = 0;
++    }
++
+     for (i = 0; ; i++) {
+         hf = hal_bsp_flash_dev(i);
+         if (!hf) {
+@@ -90,6 +103,22 @@ hal_flash_check_addr(const struct hal_flash *hf, uint32_t addr)
+     return 0;
+ }
+ 
++int
++hal_flash_write_protect(uint8_t id, uint8_t protect)
++{
++    const struct hal_flash *hf;
++
++    hf = hal_bsp_flash_dev(id);
++    if (!hf) {
++        return SYS_EINVAL;
++    }
++
++    if (id < HAL_FLASH_MAX_DEVICES) {
++        hal_flash_write_protected[id] = protect ? 1 : 0;
++    }
++    return 0;
++}
++
+ int
+ hal_flash_read(uint8_t id, uint32_t address, void *dst, uint32_t num_bytes)
+ {
+@@ -156,6 +185,10 @@ hal_flash_write(uint8_t id, uint32_t address, const void *src,
+     const struct hal_flash *hf;
+     int rc;
+ 
++    if (id < HAL_FLASH_MAX_DEVICES && hal_flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
+     hf = hal_bsp_flash_dev(id);
+     if (!hf) {
+         return -1;
+@@ -190,6 +223,10 @@ hal_flash_erase_sector(uint8_t id, uint32_t sector_address)
+     (void) size;
+     (void) i;
+ 
++    if (id < HAL_FLASH_MAX_DEVICES && hal_flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
+     hf = hal_bsp_flash_dev(id);
+     if (!hf) {
+         return -1;
+@@ -229,6 +266,10 @@ hal_flash_erase(uint8_t id, uint32_t address, uint32_t num_bytes)
+     int i;
+     int rc;
+ 
++    if (id < HAL_FLASH_MAX_DEVICES && hal_flash_write_protected[id]) {
++        return SYS_EACCES;
++    }
++
+     hf = hal_bsp_flash_dev(id);
+     if (!hf) {
+         return -1;

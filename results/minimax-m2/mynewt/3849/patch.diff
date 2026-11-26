@@ -1,0 +1,1091 @@
+diff --git a/fix_cbmem.py b/fix_cbmem.py
+new file mode 100644
+index 0000000..2839525
+--- /dev/null
++++ b/fix_cbmem.py
+@@ -0,0 +1,163 @@
++import re
++
++with open('/testbed/util/cbmem/src/cbmem.c.bak', 'r') as f:
++    content = f.read()
++
++# Fix cbmem_read function
++old_func = '''cbmem_read(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr, void *buf,
++        uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    if (off > hdr->ceh_len) {
++        rc = -1;
++        cbmem_lock_release(cbmem);
++        goto err;
++    }
++
++    memcpy(buf, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++
++    rc = cbmem_lock_release(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    return (len);
++err:
++    return (-1);
++}'''
++
++new_func = '''cbmem_read(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr, void *buf,
++        uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    memcpy(buf, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++
++    rc = cbmem_lock_release(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    return (len);
++err:
++    return (-1);
++}'''
++
++content = content.replace(old_func, new_func)
++
++# Fix cbmem_read_mbuf function
++old_func = '''int cbmem_read_mbuf(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr,
++                    struct os_mbuf *om, uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    if (off > hdr->ceh_len) {
++        rc = -1;
++        cbmem_lock_release(cbmem);
++        goto err;
++    }
++
++    rc = os_mbuf_append(om, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++    if (rc != 0) {
++        cbmem_lock_release(cbmem);
++        goto err;
++    }
++
++    cbmem_lock_release(cbmem);
++
++    return (len);
++err:
++    return (-1);
++
++}'''
++
++new_func = '''int cbmem_read_mbuf(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr,
++                    struct os_mbuf *om, uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    rc = os_mbuf_append(om, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++    if (rc != 0) {
++        cbmem_lock_release(cbmem);
++        goto err;
++    }
++
++    cbmem_lock_release(cbmem);
++
++    return (len);
++err:
++    return (-1);
++
++}'''
++
++content = content.replace(old_func, new_func)
++
++with open('/testbed/util/cbmem/src/cbmem.c', 'w') as f:
++    f.write(content)
+diff --git a/fix_cbmem2.py b/fix_cbmem2.py
+new file mode 100644
+index 0000000..18a735d
+--- /dev/null
++++ b/fix_cbmem2.py
+@@ -0,0 +1,169 @@
++import re
++
++with open('/testbed/util/cbmem/src/cbmem.c', 'r') as f:
++    content = f.read()
++
++# Fix cbmem_read function
++old_func = '''cbmem_read(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr, void *buf,
++        uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    memcpy(buf, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++
++    rc = cbmem_lock_release(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    return (len);
++err:
++    return (-1);
++}'''
++
++new_func = '''cbmem_read(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr, void *buf,
++        uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* If offset is at or beyond the end of the entry, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    memcpy(buf, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++
++    rc = cbmem_lock_release(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    return (len);
++err:
++    return (-1);
++}'''
++
++content = content.replace(old_func, new_func)
++
++# Fix cbmem_read_mbuf function
++old_func = '''int cbmem_read_mbuf(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr,
++                    struct os_mbuf *om, uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    rc = os_mbuf_append(om, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++    if (rc != 0) {
++        cbmem_lock_release(cbmem);
++        goto err;
++    }
++
++    cbmem_lock_release(cbmem);
++
++    return (len);
++err:
++    return (-1);
++
++}'''
++
++new_func = '''int cbmem_read_mbuf(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr,
++                    struct os_mbuf *om, uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* If offset is at or beyond the end of the entry, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    rc = os_mbuf_append(om, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++    if (rc != 0) {
++        cbmem_lock_release(cbmem);
++        goto err;
++    }
++
++    cbmem_lock_release(cbmem);
++
++    return (len);
++err:
++    return (-1);
++
++}'''
++
++content = content.replace(old_func, new_func)
++
++with open('/testbed/util/cbmem/src/cbmem.c', 'w') as f:
++    f.write(content)
+diff --git a/fix_cbmem_read.c b/fix_cbmem_read.c
+new file mode 100644
+index 0000000..ff23130
+--- /dev/null
++++ b/fix_cbmem_read.c
+@@ -0,0 +1,37 @@
++cbmem_read(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr, void *buf,
++        uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    memcpy(buf, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++
++    rc = cbmem_lock_release(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    return (len);
++err:
++    return (-1);
++}
+diff --git a/fix_cbmem_read_mbuf.c b/fix_cbmem_read_mbuf.c
+new file mode 100644
+index 0000000..d3f52d5
+--- /dev/null
++++ b/fix_cbmem_read_mbuf.c
+@@ -0,0 +1,39 @@
++int cbmem_read_mbuf(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr,
++                    struct os_mbuf *om, uint16_t off, uint16_t len)
++{
++    int rc;
++
++    rc = cbmem_lock_acquire(cbmem);
++    if (rc != 0) {
++        goto err;
++    }
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > hdr->ceh_len) {
++        len = hdr->ceh_len - off;
++    }
++
++    rc = os_mbuf_append(om, (uint8_t *) hdr + sizeof(*hdr) + off, len);
++    if (rc != 0) {
++        cbmem_lock_release(cbmem);
++        goto err;
++    }
++
++    cbmem_lock_release(cbmem);
++
++    return (len);
++err:
++    return (-1);
++
++}
+diff --git a/fix_fcb.py b/fix_fcb.py
+new file mode 100644
+index 0000000..253eb7c
+--- /dev/null
++++ b/fix_fcb.py
+@@ -0,0 +1,146 @@
++import re
++
++with open('/testbed/sys/log/full/src/log_fcb.c.bak', 'r') as f:
++    content = f.read()
++
++# Fix log_fcb_read function
++old_func = '''static int
++log_fcb_read(struct log *log, const void *dptr, void *buf, uint16_t offset,
++  uint16_t len)
++{
++    struct fcb_entry *loc;
++    int rc;
++
++    loc = (struct fcb_entry *)dptr;
++
++    if (offset + len > loc->fe_data_len) {
++        len = loc->fe_data_len - offset;
++    }
++    rc = flash_area_read(loc->fe_area, loc->fe_data_off + offset, buf, len);
++    if (rc == 0) {
++        return len;
++    } else {
++        return 0;
++    }
++}'''
++
++new_func = '''static int
++log_fcb_read(struct log *log, const void *dptr, void *buf, uint16_t offset,
++             uint16_t len)
++{
++    struct fcb_entry *loc;
++    int rc;
++
++    loc = (struct fcb_entry *)dptr;
++
++    /* If offset is at or beyond data length, return 0 */
++    if (offset >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (offset + len > loc->fe_data_len) {
++        len = loc->fe_data_len - offset;
++    }
++
++    rc = flash_area_read(loc->fe_area, loc->fe_data_off + offset, buf, len);
++    if (rc == 0) {
++        return len;
++    } else {
++        return 0;
++    }
++}'''
++
++content = content.replace(old_func, new_func)
++
++# Fix log_fcb_read_mbuf function
++old_func = '''static int
++log_fcb_read_mbuf(struct log *log, const void *dptr, struct os_mbuf *om,
++                  uint16_t offset, uint16_t len)
++{
++    struct fcb_entry *loc;
++    uint8_t data[128];
++    uint16_t read_len;
++    uint16_t rem_len;
++    int rc;
++
++    loc = (struct fcb_entry *)dptr;
++
++    if (offset + len > loc->fe_data_len) {
++        len = loc->fe_data_len - offset;
++    }
++
++    rem_len = len;
++
++    while (rem_len > 0) {
++        read_len = min(rem_len, sizeof(data));
++        rc = flash_area_read(loc->fe_area, loc->fe_data_off + offset, data,
++                             read_len);
++        if (rc) {
++            goto done;
++        }
++        rc = os_mbuf_append(om, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rem_len -= read_len;
++        offset += read_len;
++    }
++
++done:
++    return len - rem_len;
++}'''
++
++new_func = '''static int
++log_fcb_read_mbuf(struct log *log, const void *dptr, struct os_mbuf *om,
++                  uint16_t offset, uint16_t len)
++{
++    struct fcb_entry *loc;
++    uint8_t data[128];
++    uint16_t read_len;
++    uint16_t rem_len;
++    int rc;
++
++    loc = (struct fcb_entry *)dptr;
++
++    /* If offset is at or beyond data length, return 0 */
++    if (offset >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (offset + len > loc->fe_data_len) {
++        len = loc->fe_data_len - offset;
++    }
++
++    rem_len = len;
++
++    while (rem_len > 0) {
++        read_len = min(rem_len, sizeof(data));
++        rc = flash_area_read(loc->fe_area, loc->fe_data_off + offset, data,
++                             read_len);
++        if (rc) {
++            goto done;
++        }
++        rc = os_mbuf_append(om, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rem_len -= read_len;
++        offset += read_len;
++    }
++
++done:
++    return len - rem_len;
++}'''
++
++content = content.replace(old_func, new_func)
++
++with open('/testbed/sys/log/full/src/log_fcb.c', 'w') as f:
++    f.write(content)
+diff --git a/fix_fcb2.py b/fix_fcb2.py
+new file mode 100644
+index 0000000..35af747
+--- /dev/null
++++ b/fix_fcb2.py
+@@ -0,0 +1,142 @@
++import re
++
++with open('/testbed/sys/log/full/src/log_fcb2.c.bak', 'r') as f:
++    content = f.read()
++
++# Fix log_fcb2_read function
++old_func = '''log_fcb2_read(struct log *log, const void *dptr, void *buf, uint16_t off, uint16_t len)
++{
++    struct fcb2_entry *loc;
++    int rc;
++
++    loc = (struct fcb2_entry *)dptr;
++
++    if (off + len > loc->fe_data_len) {
++        len = loc->fe_data_len - off;
++    }
++    rc = fcb2_read(loc, off, buf, len);
++    if (rc == 0) {
++        return len;
++    } else {
++        return 0;
++    }
++}'''
++
++new_func = '''log_fcb2_read(struct log *log, const void *dptr, void *buf, uint16_t off, uint16_t len)
++{
++    struct fcb2_entry *loc;
++    int rc;
++
++    loc = (struct fcb2_entry *)dptr;
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > loc->fe_data_len) {
++        len = loc->fe_data_len - off;
++    }
++
++    rc = fcb2_read(loc, off, buf, len);
++    if (rc == 0) {
++        return len;
++    } else {
++        return 0;
++    }
++}'''
++
++content = content.replace(old_func, new_func)
++
++# Fix log_fcb2_read_mbuf function
++old_func = '''static int
++log_fcb2_read_mbuf(struct log *log, const void *dptr, struct os_mbuf *om,
++                   uint16_t off, uint16_t len)
++{
++    struct fcb2_entry *loc;
++    uint8_t data[128];
++    uint16_t read_len;
++    uint16_t rem_len;
++    int rc;
++
++    loc = (struct fcb2_entry *)dptr;
++
++    if (off + len > loc->fe_data_len) {
++        len = loc->fe_data_len - off;
++    }
++
++    rem_len = len;
++
++    while (rem_len > 0) {
++        read_len = min(rem_len, sizeof(data));
++        rc = fcb2_read(loc, off, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rc = os_mbuf_append(om, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rem_len -= read_len;
++        off += read_len;
++    }
++
++done:
++    return len - rem_len;
++}'''
++
++new_func = '''static int
++log_fcb2_read_mbuf(struct log *log, const void *dptr, struct os_mbuf *om,
++                   uint16_t off, uint16_t len)
++{
++    struct fcb2_entry *loc;
++    uint8_t data[128];
++    uint16_t read_len;
++    uint16_t rem_len;
++    int rc;
++
++    loc = (struct fcb2_entry *)dptr;
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > loc->fe_data_len) {
++        len = loc->fe_data_len - off;
++    }
++
++    rem_len = len;
++
++    while (rem_len > 0) {
++        read_len = min(rem_len, sizeof(data));
++        rc = fcb2_read(loc, off, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rc = os_mbuf_append(om, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rem_len -= read_len;
++        off += read_len;
++    }
++
++done:
++    return len - rem_len;
++}'''
++
++content = content.replace(old_func, new_func)
++
++with open('/testbed/sys/log/full/src/log_fcb2.c', 'w') as f:
++    f.write(content)
+diff --git a/fix_log_fcb2_read.c b/fix_log_fcb2_read.c
+new file mode 100644
+index 0000000..34e2c80
+--- /dev/null
++++ b/fix_log_fcb2_read.c
+@@ -0,0 +1,26 @@
++log_fcb2_read(struct log *log, const void *dptr, void *buf, uint16_t off, uint16_t len)
++{
++    struct fcb2_entry *loc;
++    int rc;
++
++    loc = (struct fcb2_entry *)dptr;
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > loc->fe_data_len) {
++        len = loc->fe_data_len - off;
++    }
++
++    rc = fcb2_read(loc, off, buf, len);
++    if (rc == 0) {
++        return len;
++    } else {
++        return 0;
++    }
++}
+diff --git a/fix_log_fcb2_read_mbuf.c b/fix_log_fcb2_read_mbuf.c
+new file mode 100644
+index 0000000..138c593
+--- /dev/null
++++ b/fix_log_fcb2_read_mbuf.c
+@@ -0,0 +1,45 @@
++static int
++log_fcb2_read_mbuf(struct log *log, const void *dptr, struct os_mbuf *om,
++                   uint16_t off, uint16_t len)
++{
++    struct fcb2_entry *loc;
++    uint8_t data[128];
++    uint16_t read_len;
++    uint16_t rem_len;
++    int rc;
++
++    loc = (struct fcb2_entry *)dptr;
++
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (off + len > loc->fe_data_len) {
++        len = loc->fe_data_len - off;
++    }
++
++    rem_len = len;
++
++    while (rem_len > 0) {
++        read_len = min(rem_len, sizeof(data));
++        rc = fcb2_read(loc, off, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rc = os_mbuf_append(om, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rem_len -= read_len;
++        off += read_len;
++    }
++
++done:
++    return len - rem_len;
++}
+diff --git a/fix_log_fcb_read.c b/fix_log_fcb_read.c
+new file mode 100644
+index 0000000..326d566
+--- /dev/null
++++ b/fix_log_fcb_read.c
+@@ -0,0 +1,28 @@
++static int
++log_fcb_read(struct log *log, const void *dptr, void *buf, uint16_t offset,
++             uint16_t len)
++{
++    struct fcb_entry *loc;
++    int rc;
++
++    loc = (struct fcb_entry *)dptr;
++
++    /* If offset is at or beyond data length, return 0 */
++    if (offset >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (offset + len > loc->fe_data_len) {
++        len = loc->fe_data_len - offset;
++    }
++
++    rc = flash_area_read(loc->fe_area, loc->fe_data_off + offset, buf, len);
++    if (rc == 0) {
++        return len;
++    } else {
++        return 0;
++    }
++}
+diff --git a/fix_log_fcb_read_mbuf.c b/fix_log_fcb_read_mbuf.c
+new file mode 100644
+index 0000000..37342f3
+--- /dev/null
++++ b/fix_log_fcb_read_mbuf.c
+@@ -0,0 +1,45 @@
++static int
++log_fcb_read_mbuf(struct log *log, const void *dptr, struct os_mbuf *om,
++                  uint16_t offset, uint16_t len)
++{
++    struct fcb_entry *loc;
++    uint8_t data[128];
++    uint16_t read_len;
++    uint16_t rem_len;
++    int rc;
++
++    loc = (struct fcb_entry *)dptr;
++
++    /* If offset is at or beyond data length, return 0 */
++    if (offset >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
++    if (offset + len > loc->fe_data_len) {
++        len = loc->fe_data_len - offset;
++    }
++
++    rem_len = len;
++
++    while (rem_len > 0) {
++        read_len = min(rem_len, sizeof(data));
++        rc = flash_area_read(loc->fe_area, loc->fe_data_off + offset, data,
++                             read_len);
++        if (rc) {
++            goto done;
++        }
++        rc = os_mbuf_append(om, data, read_len);
++        if (rc) {
++            goto done;
++        }
++
++        rem_len -= read_len;
++        offset += read_len;
++    }
++
++done:
++    return len - rem_len;
++}
+diff --git a/simple_test.c b/simple_test.c
+new file mode 100644
+index 0000000..a6d739f
+--- /dev/null
++++ b/simple_test.c
+@@ -0,0 +1,39 @@
++#include <stdio.h>
++#include <string.h>
++#include "cbmem/cbmem.h"
++#include "log/log.h"
++
++int main() {
++    uint8_t cbmem_buf[2048];
++    struct cbmem cbmem;
++    struct log log;
++    const char *test_str = "test";
++    int len = strlen(test_str);
++    int rc;
++    
++    /* Initialize cbmem */
++    rc = cbmem_init(&cbmem, cbmem_buf, sizeof(cbmem_buf));
++    if (rc != 0) {
++        printf("cbmem_init failed\n");
++        return 1;
++    }
++    
++    /* Append a log entry */
++    log_append_body(&log, 0, 0, LOG_ETYPE_STRING, test_str, len);
++    
++    /* Get the first entry */
++    void *dptr = cbmem_get_first(&cbmem);
++    if (!dptr) {
++        printf("cbmem_get_first failed\n");
++        return 1;
++    }
++    
++    /* Read at exact body length */
++    uint8_t buf[64];
++    memset(buf, 0xBB, sizeof(buf));
++    rc = log_read_body(&log, dptr, buf, len, sizeof(buf));
++    printf("log_read_body returned %d\n", rc);
++    printf("buffer unchanged: %d\n", memcmp(buf, "\xBB\xBB\xBB\xBB", 4) == 0);
++    
++    return 0;
++}
+diff --git a/sys/log/full/src/log_fcb.c b/sys/log/full/src/log_fcb.c
+index cf4850d..a37ad79 100644
+--- a/sys/log/full/src/log_fcb.c
++++ b/sys/log/full/src/log_fcb.c
+@@ -714,16 +714,25 @@ log_fcb_read_entry_len(struct log *log, const void *dptr)
+ 
+ static int
+ log_fcb_read(struct log *log, const void *dptr, void *buf, uint16_t offset,
+-  uint16_t len)
++             uint16_t len)
+ {
+     struct fcb_entry *loc;
+     int rc;
+ 
+     loc = (struct fcb_entry *)dptr;
+ 
++    /* If offset is at or beyond data length, return 0 */
++    if (offset >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
+     if (offset + len > loc->fe_data_len) {
+         len = loc->fe_data_len - offset;
+     }
++
+     rc = flash_area_read(loc->fe_area, loc->fe_data_off + offset, buf, len);
+     if (rc == 0) {
+         return len;
+@@ -744,6 +753,14 @@ log_fcb_read_mbuf(struct log *log, const void *dptr, struct os_mbuf *om,
+ 
+     loc = (struct fcb_entry *)dptr;
+ 
++    /* If offset is at or beyond data length, return 0 */
++    if (offset >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
+     if (offset + len > loc->fe_data_len) {
+         len = loc->fe_data_len - offset;
+     }
+diff --git a/sys/log/full/src/log_fcb2.c b/sys/log/full/src/log_fcb2.c
+index 2bb2e60..a68eea3 100644
+--- a/sys/log/full/src/log_fcb2.c
++++ b/sys/log/full/src/log_fcb2.c
+@@ -423,9 +423,18 @@ log_fcb2_read(struct log *log, const void *dptr, void *buf, uint16_t off, uint16
+ 
+     loc = (struct fcb2_entry *)dptr;
+ 
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
+     if (off + len > loc->fe_data_len) {
+         len = loc->fe_data_len - off;
+     }
++
+     rc = fcb2_read(loc, off, buf, len);
+     if (rc == 0) {
+         return len;
+@@ -446,6 +455,14 @@ log_fcb2_read_mbuf(struct log *log, const void *dptr, struct os_mbuf *om,
+ 
+     loc = (struct fcb2_entry *)dptr;
+ 
++    /* If offset is at or beyond data length, return 0 */
++    if (off >= loc->fe_data_len) {
++        return 0;
++    }
++
++    /* Only read the maximum number of bytes, if we exceed that,
++     * truncate the read.
++     */
+     if (off + len > loc->fe_data_len) {
+         len = loc->fe_data_len - off;
+     }
+diff --git a/util/cbmem/src/cbmem.c b/util/cbmem/src/cbmem.c
+index 582ca72..67d6027 100644
+--- a/util/cbmem/src/cbmem.c
++++ b/util/cbmem/src/cbmem.c
+@@ -306,6 +306,15 @@ cbmem_read(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr, void *buf,
+         goto err;
+     }
+ 
++    /* If offset is at or beyond the end of the entry, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
+     /* Only read the maximum number of bytes, if we exceed that,
+      * truncate the read.
+      */
+@@ -313,12 +322,6 @@ cbmem_read(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr, void *buf,
+         len = hdr->ceh_len - off;
+     }
+ 
+-    if (off > hdr->ceh_len) {
+-        rc = -1;
+-        cbmem_lock_release(cbmem);
+-        goto err;
+-    }
+-
+     memcpy(buf, (uint8_t *) hdr + sizeof(*hdr) + off, len);
+ 
+     rc = cbmem_lock_release(cbmem);
+@@ -341,6 +344,15 @@ int cbmem_read_mbuf(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr,
+         goto err;
+     }
+ 
++    /* If offset is at or beyond the end of the entry, return 0 */
++    if (off >= hdr->ceh_len) {
++        rc = cbmem_lock_release(cbmem);
++        if (rc != 0) {
++            goto err;
++        }
++        return 0;
++    }
++
+     /* Only read the maximum number of bytes, if we exceed that,
+      * truncate the read.
+      */
+@@ -348,12 +360,6 @@ int cbmem_read_mbuf(struct cbmem *cbmem, struct cbmem_entry_hdr *hdr,
+         len = hdr->ceh_len - off;
+     }
+ 
+-    if (off > hdr->ceh_len) {
+-        rc = -1;
+-        cbmem_lock_release(cbmem);
+-        goto err;
+-    }
+-
+     rc = os_mbuf_append(om, (uint8_t *) hdr + sizeof(*hdr) + off, len);
+     if (rc != 0) {
+         cbmem_lock_release(cbmem);

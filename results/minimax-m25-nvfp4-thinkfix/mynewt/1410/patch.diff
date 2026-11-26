@@ -1,0 +1,110 @@
+diff --git a/fs/fcb/include/fcb/fcb.h b/fs/fcb/include/fcb/fcb.h
+index d6677b2..4f7ddb4 100644
+--- a/fs/fcb/include/fcb/fcb.h
++++ b/fs/fcb/include/fcb/fcb.h
+@@ -144,6 +144,16 @@ fcb_offset_last_n(struct fcb *fcb, uint8_t entries,
+  */
+ int fcb_clear(struct fcb *fcb);
+ 
++/**
++ * Get information about the specified FCB area.
++ * @param fcb Pointer to FCB
++ * @param fa Pointer to flash area, or NULL for oldest area
++ * @param elemsp Pointer to store number of elements in area
++ * @param bytesp Pointer to store total bytes of user data in area
++ * @return 0 on success, non-zero on error
++ */
++int fcb_area_info(struct fcb *fcb, struct flash_area *fa, int *elemsp, int *bytesp);
++
+ #ifdef __cplusplus
+ }
+ 
+diff --git a/fs/fcb/src/fcb_area_info.c b/fs/fcb/src/fcb_area_info.c
+new file mode 100644
+index 0000000..9fcee01
+--- /dev/null
++++ b/fs/fcb/src/fcb_area_info.c
+@@ -0,0 +1,83 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++struct fcb_area_info_arg {
++    int elem_cnt;
++    int byte_cnt;
++};
++
++static int
++fcb_area_info_cb(struct fcb_entry *loc, void *arg)
++{
++    struct fcb_area_info_arg *ai_arg = (struct fcb_area_info_arg *)arg;
++
++    ai_arg->elem_cnt++;
++    ai_arg->byte_cnt += loc->fe_data_len;
++
++    return 0;
++}
++
++/**
++ * Get information about the specified FCB area.
++ *
++ * @param fcb Pointer to FCB
++ * @param fa Pointer to flash area, or NULL for oldest area
++ * @param elemsp Pointer to store number of elements in area
++ * @param bytesp Pointer to store total bytes of user data in area
++ * @return 0 on success, non-zero on error
++ */
++int
++fcb_area_info(struct fcb *fcb, struct flash_area *fa, int *elemsp, int *bytesp)
++{
++    struct fcb_area_info_arg ai_arg;
++    int rc;
++
++    if (!elemsp || !bytesp) {
++        return FCB_ERR_ARGS;
++    }
++
++    /* If fa is NULL, use the oldest area */
++    if (fa == NULL) {
++        fa = fcb->f_oldest;
++    }
++
++    ai_arg.elem_cnt = 0;
++    ai_arg.byte_cnt = 0;
++
++    rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    if (rc && rc != OS_NOT_STARTED) {
++        return FCB_ERR_ARGS;
++    }
++
++    rc = fcb_walk(fcb, fa, fcb_area_info_cb, &ai_arg);
++
++    os_mutex_release(&fcb->f_mtx);
++
++    if (rc != 0 && rc != FCB_ERR_NOVAR) {
++        return rc;
++    }
++
++    *elemsp = ai_arg.elem_cnt;
++    *bytesp = ai_arg.byte_cnt;
++
++    return 0;
++}

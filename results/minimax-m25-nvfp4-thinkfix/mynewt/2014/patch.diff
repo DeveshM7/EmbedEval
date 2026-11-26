@@ -1,0 +1,2529 @@
+diff --git a/fs/fcb2/include/fcb/fcb2.h b/fs/fcb2/include/fcb/fcb2.h
+new file mode 100644
+index 0000000..947c21a
+--- /dev/null
++++ b/fs/fcb2/include/fcb/fcb2.h
+@@ -0,0 +1,206 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#ifndef __SYS_FCB2_H_
++#define __SYS_FCB2_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * \defgroup FCB2 Flash circular buffer.
++ * @{
++ */
++
++#include <inttypes.h>
++#include <limits.h>
++#include <assert.h>
++
++#include <syscfg/syscfg.h>
++#include <os/os_mutex.h>
++#include <flash_map/flash_map.h>
++
++#define FCB2_MAX_LEN	(CHAR_MAX | CHAR_MAX << 7) /* Max length of element */
++
++#define FCB2_SECTOR_OLDEST UINT16_MAX
++
++struct fcb2;
++
++/**
++ * Entry location point to sector, and offset
++ * within that sector.
++ */
++struct fcb2_entry {
++    struct flash_sector_range *fe_range;  /* ptr to area within fcb2->f_ranges */
++    uint16_t fe_sector;     /* sector number in fcb2 flash */
++    uint16_t fe_data_len;   /* size of data area */
++    uint32_t fe_data_off;   /* start of data in sector */
++    uint16_t fe_entry_num;  /* entry number in sector */
++};
++
++/* Number of bytes needed for fcb2_sector_entry on flash */
++#define FCB2_ENTRY_SIZE          6
++#define FCB2_CRC_LEN             2
++
++struct fcb2_disk_area {
++    uint32_t fd_magic;
++    uint8_t  fd_ver;
++    uint8_t  _pad;
++    uint16_t fd_id;
++};
++
++struct fcb2 {
++    /* Caller of fcb2_init fills this in */
++    uint32_t f_magic;       /* As placed on the disk */
++    uint8_t f_version;      /* Current version number of the data */
++    uint8_t f_scratch_cnt;  /* How many sectors should be kept empty */
++    uint8_t f_range_cnt;    /* Number of elements in range array */
++    uint16_t f_sector_cnt;  /* Number of sectors used by fcb2 */
++    uint16_t f_oldest_sec;  /* Index of oldest sector */
++    struct flash_sector_range *f_ranges;
++
++    /* Flash circular buffer internal state */
++    struct os_mutex f_mtx;	/* Locking for accessing the FCB2 data */
++    struct fcb2_entry f_active;
++    uint16_t f_active_id;
++};
++
++/**
++ * Error codes.
++ */
++#define FCB2_OK           0
++#define FCB2_ERR_ARGS    -1
++#define FCB2_ERR_FLASH   -2
++#define FCB2_ERR_NOVAR   -3
++#define FCB2_ERR_NOSPACE -4
++#define FCB2_ERR_NOMEM   -5
++#define FCB2_ERR_CRC     -6
++#define FCB2_ERR_MAGIC   -7
++#define FCB2_ERR_VERSION -8
++
++int fcb2_init(struct fcb2 *fcb2);
++
++/*
++ * Initialize fcb2 for specific flash area
++ *
++ * Function initializes FCB2 structure with data taken from specified flash
++ * area.
++ * If FCB2 was not initialized before in this area, area will be erased.
++ *
++ * @param fcb2            Fcb2 to initialize
++ * @param flash_area_id  flash area for this fcb2
++ * @param magic          User defined magic value that is stored in each
++ *                       flash sector used by fcb2
++ * @param version        version of fcb2
++ *
++ */
++int fcb2_init_flash_area(struct fcb2 *fcb2, int flash_area_id, uint32_t magic,
++    uint8_t version);
++
++/**
++ * fcb2_append() appends an entry to circular buffer. When writing the
++ * contents for the entry, fcb2_write() with fcb2_entry filled by.
++ * fcb2_append(). When you're finished, call fcb2_append_finish() with
++ * loc as argument.
++ */
++int fcb2_append(struct fcb2 *fcb2, uint16_t len, struct fcb2_entry *loc);
++int fcb2_write(struct fcb2_entry *loc, uint16_t off, const void *buf,
++              uint16_t len);
++int fcb2_append_finish(struct fcb2_entry *append_loc);
++
++/**
++ * Walk over all log entries in FCB2, or entries in a given flash_area.
++ * cb gets called for every entry. If cb wants to stop the walk, it should
++ * return non-zero value.
++ *
++ * Entry data can be read using fcb2_read().
++ */
++typedef int (*fcb2_walk_cb)(struct fcb2_entry *loc, void *arg);
++int fcb2_walk(struct fcb2 *, int sector, fcb2_walk_cb cb, void *cb_arg);
++int fcb2_getnext(struct fcb2 *fcb2, struct fcb2_entry *loc);
++int fcb2_getprev(struct fcb2 *fcb2, struct fcb2_entry *loc);
++int fcb2_read(struct fcb2_entry *loc, uint16_t off, void *buf, uint16_t len);
++
++/**
++ * Erases the data from oldest sector.
++ */
++int fcb2_rotate(struct fcb2 *fcb2);
++
++/**
++ * Start using the scratch block.
++ */
++int fcb2_append_to_scratch(struct fcb2 *fcb2);
++
++/**
++ * How many sectors are unused.
++ */
++int fcb2_free_sector_cnt(struct fcb2 *fcb2);
++
++/**
++ * Whether FCB2 has any data.
++ */
++int fcb2_is_empty(struct fcb2 *fcb2);
++
++/**
++ * Element at offset *entries* from last position (backwards).
++ */
++int
++fcb2_offset_last_n(struct fcb2 *fcb2, uint8_t entries,
++                  struct fcb2_entry *last_n_entry);
++
++/**
++ * Erase sector in FCB2
++ *
++ * @param fcb2     FCB2 to use
++ * @param sector  sector number to erase 0..f_sector_cnt
++ *
++ * return 0 on success, error code on failure
++ */
++int fcb2_sector_erase(const struct fcb2 *fcb2, int sector);
++
++/**
++ * Get total size of FCB2
++ *
++ * @param fcb2     FCB2 to use
++ *
++ * return FCB2's size in bytes
++ */
++int fcb2_get_total_size(const struct fcb2 *fcb2);
++
++/**
++ * Clears FCB2 passed to it
++ */
++int fcb2_clear(struct fcb2 *fcb2);
++
++/**
++ * Usage report for a given FCB2 sector. Returns number of elements and the
++ * number of bytes stored in them.
++ */
++int fcb2_area_info(struct fcb2 *fcb2, int sector, int *elemsp, int *bytesp);
++
++#ifdef __cplusplus
++}
++
++/**
++ * @} FCB2
++ */
++
++#endif
++
++#endif /* __SYS_FCB2_H_ */
+diff --git a/fs/fcb2/src/fcb.c b/fs/fcb2/src/fcb.c
+index 80451d6..ea0f629 100644
+--- a/fs/fcb2/src/fcb.c
++++ b/fs/fcb2/src/fcb.c
+@@ -19,12 +19,12 @@
+ #include <limits.h>
+ #include <stdlib.h>
+ 
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ #include "string.h"
+ 
+ int
+-fcb_init(struct fcb *fcb)
++fcb2_init(struct fcb2 *fcb2)
+ {
+     struct flash_sector_range *range;
+     struct flash_sector_range *newest_srp = NULL;
+@@ -32,20 +32,20 @@ fcb_init(struct fcb *fcb)
+     int i;
+     int oldest = -1, newest = -1;
+     int oldest_sec = -1, newest_sec = -1;
+-    struct fcb_disk_area fda;
++    struct fcb2_disk_area fda;
+ 
+-    if (!fcb->f_ranges || fcb->f_sector_cnt - fcb->f_scratch_cnt < 1) {
+-        return FCB_ERR_ARGS;
++    if (!fcb2->f_ranges || fcb2->f_sector_cnt - fcb2->f_scratch_cnt < 1) {
++        return FCB2_ERR_ARGS;
+     }
+ 
+     /* Fill last used, first used */
+-    for (i = 0; i < fcb->f_sector_cnt; i++) {
+-        range = fcb_get_sector_range(fcb, i);
++    for (i = 0; i < fcb2->f_sector_cnt; i++) {
++        range = fcb2_get_sector_range(fcb2, i);
+         /* Require alignment to be a power of two.  Some code depends on this
+          * assumption.
+          */
+         assert((range->fsr_align & (range->fsr_align - 1)) == 0);
+-        rc = fcb_sector_hdr_read(fcb, range, i, &fda);
++        rc = fcb2_sector_hdr_read(fcb2, range, i, &fda);
+         if (rc < 0) {
+             return rc;
+         }
+@@ -58,11 +58,11 @@ fcb_init(struct fcb *fcb)
+             newest_srp = range;
+             continue;
+         }
+-        if (FCB_ID_GT(fda.fd_id, newest)) {
++        if (FCB2_ID_GT(fda.fd_id, newest)) {
+             newest = fda.fd_id;
+             newest_sec = i;
+             newest_srp = range;
+-        } else if (FCB_ID_GT(oldest, fda.fd_id)) {
++        } else if (FCB2_ID_GT(oldest, fda.fd_id)) {
+             oldest = fda.fd_id;
+             oldest_sec = i;
+         }
+@@ -72,45 +72,45 @@ fcb_init(struct fcb *fcb)
+          * No initialized areas.
+          */
+         oldest_sec = newest_sec = 0;
+-        newest_srp = fcb->f_ranges;
+-        rc = fcb_sector_hdr_init(fcb, newest_sec, 0);
++        newest_srp = fcb2->f_ranges;
++        rc = fcb2_sector_hdr_init(fcb2, newest_sec, 0);
+         if (rc) {
+             return rc;
+         }
+         newest = oldest = 0;
+     }
+-    fcb->f_oldest_sec = oldest_sec;
+-    fcb->f_active.fe_range = newest_srp;
+-    fcb->f_active.fe_sector = newest_sec;
+-    fcb->f_active.fe_data_off =
+-        fcb_len_in_flash(newest_srp, sizeof(struct fcb_disk_area));
+-    fcb->f_active.fe_entry_num = 0;
+-    fcb->f_active_id = newest;
++    fcb2->f_oldest_sec = oldest_sec;
++    fcb2->f_active.fe_range = newest_srp;
++    fcb2->f_active.fe_sector = newest_sec;
++    fcb2->f_active.fe_data_off =
++        fcb2_len_in_flash(newest_srp, sizeof(struct fcb2_disk_area));
++    fcb2->f_active.fe_entry_num = 0;
++    fcb2->f_active_id = newest;
+ 
+     while (1) {
+-        rc = fcb_getnext_in_area(fcb, &fcb->f_active);
+-        if (rc == FCB_ERR_NOVAR) {
+-            rc = FCB_OK;
++        rc = fcb2_getnext_in_area(fcb2, &fcb2->f_active);
++        if (rc == FCB2_ERR_NOVAR) {
++            rc = FCB2_OK;
+             break;
+         }
+         if (rc != 0) {
+             break;
+         }
+     }
+-    os_mutex_init(&fcb->f_mtx);
++    os_mutex_init(&fcb2->f_mtx);
+     return rc;
+ }
+ 
+ int
+-fcb_free_sector_cnt(struct fcb *fcb)
++fcb2_free_sector_cnt(struct fcb2 *fcb2)
+ {
+     int i;
+     int sector;
+ 
+-    sector = fcb->f_active.fe_sector;
+-    for (i = 0; i < fcb->f_sector_cnt; i++) {
+-        sector = fcb_getnext_sector(fcb, sector);
+-        if (sector == fcb->f_oldest_sec) {
++    sector = fcb2->f_active.fe_sector;
++    for (i = 0; i < fcb2->f_sector_cnt; i++) {
++        sector = fcb2_getnext_sector(fcb2, sector);
++        if (sector == fcb2->f_oldest_sec) {
+             break;
+         }
+     }
+@@ -118,24 +118,24 @@ fcb_free_sector_cnt(struct fcb *fcb)
+ }
+ 
+ int
+-fcb_is_empty(struct fcb *fcb)
++fcb2_is_empty(struct fcb2 *fcb2)
+ {
+-    return (fcb->f_active.fe_sector == fcb->f_oldest_sec &&
+-        fcb->f_active.fe_data_off ==
+-            fcb_len_in_flash(fcb->f_active.fe_range,
+-                             sizeof(struct fcb_disk_area)));
++    return (fcb2->f_active.fe_sector == fcb2->f_oldest_sec &&
++        fcb2->f_active.fe_data_off ==
++            fcb2_len_in_flash(fcb2->f_active.fe_range,
++                             sizeof(struct fcb2_disk_area)));
+ }
+ 
+ struct flash_sector_range *
+-fcb_get_sector_range(const struct fcb *fcb, int sector)
++fcb2_get_sector_range(const struct fcb2 *fcb2, int sector)
+ {
+     int i;
+-    struct flash_sector_range *srp = fcb->f_ranges;
++    struct flash_sector_range *srp = fcb2->f_ranges;
+ 
+-    if (FCB_SECTOR_OLDEST == sector) {
+-        sector = fcb->f_oldest_sec;
++    if (FCB2_SECTOR_OLDEST == sector) {
++        sector = fcb2->f_oldest_sec;
+     }
+-    for (i = 0; i < fcb->f_range_cnt; ++i, ++srp) {
++    for (i = 0; i < fcb2->f_range_cnt; ++i, ++srp) {
+         if (srp->fsr_sector_count <= sector) {
+             sector -= srp->fsr_sector_count;
+             continue;
+@@ -149,23 +149,23 @@ fcb_get_sector_range(const struct fcb *fcb, int sector)
+  * Initialize erased sector for use.
+  */
+ int
+-fcb_sector_hdr_init(struct fcb *fcb, int sector, uint16_t id)
++fcb2_sector_hdr_init(struct fcb2 *fcb2, int sector, uint16_t id)
+ {
+-    struct fcb_disk_area fda;
+-    struct fcb_sector_info info;
++    struct fcb2_disk_area fda;
++    struct fcb2_sector_info info;
+     struct flash_sector_range *range;
+     int sector_in_range;
+     int rc;
+ 
+-    rc = fcb_get_sector_info(fcb, sector, &info);
++    rc = fcb2_get_sector_info(fcb2, sector, &info);
+     if (rc) {
+         return rc;
+     }
+     range = info.si_range;
+     sector_in_range = sector - range->fsr_first_sector;
+ 
+-    fda.fd_magic = fcb->f_magic;
+-    fda.fd_ver = fcb->f_version;
++    fda.fd_magic = fcb2->f_magic;
++    fda.fd_ver = fcb2->f_version;
+     fda._pad = 0xff;
+     fda.fd_id = id;
+ 
+@@ -173,22 +173,22 @@ fcb_sector_hdr_init(struct fcb *fcb, int sector, uint16_t id)
+     rc = flash_area_write(&range->fsr_flash_area,
+         sector_in_range * range->fsr_sector_size, &fda, sizeof(fda));
+     if (rc) {
+-        return FCB_ERR_FLASH;
++        return FCB2_ERR_FLASH;
+     }
+     return 0;
+ }
+ 
+ /**
+- * Checks whether FCB sector contains data or not.
++ * Checks whether FCB2 sector contains data or not.
+  * Returns <0 in error.
+  * Returns 0 if sector is unused;
+  * Returns 1 if sector has data.
+  */
+ int
+-fcb_sector_hdr_read(struct fcb *fcb, struct flash_sector_range *srp,
+-    uint16_t sec, struct fcb_disk_area *fdap)
++fcb2_sector_hdr_read(struct fcb2 *fcb2, struct flash_sector_range *srp,
++    uint16_t sec, struct fcb2_disk_area *fdap)
+ {
+-    struct fcb_disk_area fda;
++    struct fcb2_disk_area fda;
+     int rc;
+     uint32_t off = (sec - srp->fsr_first_sector) * srp->fsr_sector_size;
+ 
+@@ -197,28 +197,28 @@ fcb_sector_hdr_read(struct fcb *fcb, struct flash_sector_range *srp,
+     }
+     rc = flash_area_read_is_empty(&srp->fsr_flash_area, off, fdap, sizeof(*fdap));
+     if (rc < 0) {
+-        return FCB_ERR_FLASH;
++        return FCB2_ERR_FLASH;
+     } else if (rc == 1) {
+         return 0;
+     }
+-    if (fdap->fd_magic != fcb->f_magic) {
+-        return FCB_ERR_MAGIC;
++    if (fdap->fd_magic != fcb2->f_magic) {
++        return FCB2_ERR_MAGIC;
+     }
+-    if (fdap->fd_ver != fcb->f_version) {
+-        return FCB_ERR_VERSION;
++    if (fdap->fd_ver != fcb2->f_version) {
++        return FCB2_ERR_VERSION;
+     }
+     return 1;
+ }
+ 
+ /**
+- * Finds the fcb entry that gives back upto n entries at the end.
+- * @param0 ptr to fcb
+- * @param1 n number of fcb entries the user wants to get
+- * @param2 ptr to the fcb_entry to be returned
+- * @return 0 on there are any fcbs aviable; OS_ENOENT otherwise
++ * Finds the fcb2 entry that gives back upto n entries at the end.
++ * @param0 ptr to fcb2
++ * @param1 n number of fcb2 entries the user wants to get
++ * @param2 ptr to the fcb2_entry to be returned
++ * @return 0 on there are any fcb2s aviable; OS_ENOENT otherwise
+  */
+ int
+-fcb_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *loc)
++fcb2_offset_last_n(struct fcb2 *fcb2, uint8_t entries, struct fcb2_entry *loc)
+ {
+     int i;
+ 
+@@ -229,7 +229,7 @@ fcb_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *loc)
+ 
+     i = 0;
+     memset(loc, 0, sizeof(*loc));
+-    while (!fcb_getprev(fcb, loc)) {
++    while (!fcb2_getprev(fcb2, loc)) {
+         --entries;
+         i++;
+         if (entries == 0) {
+@@ -237,22 +237,22 @@ fcb_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *loc)
+         }
+     }
+ 
+-    return (i == 0) ? FCB_ERR_NOVAR : 0;
++    return (i == 0) ? FCB2_ERR_NOVAR : 0;
+ }
+ 
+ /**
+- * Clear fcb
+- * @param fcb
++ * Clear fcb2
++ * @param fcb2
+  * @return 0 on success; non-zero on failure
+  */
+ int
+-fcb_clear(struct fcb *fcb)
++fcb2_clear(struct fcb2 *fcb2)
+ {
+     int rc;
+ 
+     rc = 0;
+-    while (!fcb_is_empty(fcb)) {
+-        rc = fcb_rotate(fcb);
++    while (!fcb2_is_empty(fcb2)) {
++        rc = fcb2_rotate(fcb2);
+         if (rc) {
+             break;
+         }
+@@ -261,7 +261,7 @@ fcb_clear(struct fcb *fcb)
+ }
+ 
+ int
+-fcb_init_flash_area(struct fcb *fcb, int flash_area_id, uint32_t magic,
++fcb2_init_flash_area(struct fcb2 *fcb2, int flash_area_id, uint32_t magic,
+     uint8_t version)
+ {
+     const struct flash_area *fa;
+@@ -272,7 +272,7 @@ fcb_init_flash_area(struct fcb *fcb, int flash_area_id, uint32_t magic,
+     /*
+      * We don't know how big the area is so need to check how many sectors are
+      * there and then read information about all sectors - this is needed to
+-     * properly initialize FCB. Critical log is somewhat important and shall be
++     * properly initialize FCB2. Critical log is somewhat important and shall be
+      * created, so we just assert on any error.
+      *
+      * XXX Should we do something else here?
+@@ -285,26 +285,26 @@ fcb_init_flash_area(struct fcb *fcb, int flash_area_id, uint32_t magic,
+                                      sector_ranges);
+     assert(rc == 0 && sector_range_cnt > 0);
+ 
+-    fcb->f_ranges = sector_ranges;
+-    fcb->f_range_cnt = sector_range_cnt;
+-    fcb->f_sector_cnt = sector_ranges[sector_range_cnt - 1].fsr_first_sector +
++    fcb2->f_ranges = sector_ranges;
++    fcb2->f_range_cnt = sector_range_cnt;
++    fcb2->f_sector_cnt = sector_ranges[sector_range_cnt - 1].fsr_first_sector +
+         sector_ranges[sector_range_cnt - 1].fsr_sector_count;
+-    fcb->f_magic = magic;
+-    fcb->f_version = version;
++    fcb2->f_magic = magic;
++    fcb2->f_version = version;
+ 
+     /*
+      * Initialize log in dedicated flash area. This has to succeed since it
+      * should be in dedicated flash area and nothing should prevent us from
+      * creating log there.
+      */
+-    rc = fcb_init(fcb);
++    rc = fcb2_init(fcb2);
+     if (rc) {
+         /* Need to erase full area here */
+         rc = flash_area_open(flash_area_id, &fa);
+         assert(rc == 0);
+ 
+         flash_area_erase(fa, 0, fa->fa_size);
+-        rc = fcb_init(fcb);
++        rc = fcb2_init(fcb2);
+         assert(rc == 0);
+     }
+ 
+@@ -312,17 +312,17 @@ fcb_init_flash_area(struct fcb *fcb, int flash_area_id, uint32_t magic,
+ }
+ 
+ int
+-fcb_get_sector_info(const struct fcb *fcb, int sector,
+-    struct fcb_sector_info *info)
++fcb2_get_sector_info(const struct fcb2 *fcb2, int sector,
++    struct fcb2_sector_info *info)
+ {
+-    struct flash_sector_range *srp = fcb->f_ranges;
++    struct flash_sector_range *srp = fcb2->f_ranges;
+     int i;
+ 
+-    if (sector == FCB_SECTOR_OLDEST) {
+-        sector = fcb->f_oldest_sec;
++    if (sector == FCB2_SECTOR_OLDEST) {
++        sector = fcb2->f_oldest_sec;
+     }
+ 
+-    for (i = 0; i < fcb->f_range_cnt; ++i, ++srp) {
++    for (i = 0; i < fcb2->f_range_cnt; ++i, ++srp) {
+         if (srp->fsr_sector_count <= sector) {
+             sector -= srp->fsr_sector_count;
+             continue;
+@@ -333,29 +333,29 @@ fcb_get_sector_info(const struct fcb *fcb, int sector,
+             sector * srp->fsr_sector_size;
+         return 0;
+     }
+-    return FCB_ERR_ARGS;
++    return FCB2_ERR_ARGS;
+ }
+ 
+ int
+-fcb_get_total_size(const struct fcb *fcb)
++fcb2_get_total_size(const struct fcb2 *fcb2)
+ {
+-    struct flash_sector_range *srp = fcb->f_ranges;
++    struct flash_sector_range *srp = fcb2->f_ranges;
+     int size = 0;
+     int i;
+ 
+-    for (i = 0; i < fcb->f_range_cnt; ++i, ++srp) {
++    for (i = 0; i < fcb2->f_range_cnt; ++i, ++srp) {
+         size += srp->fsr_sector_count * srp->fsr_sector_count;
+     }
+     return size;
+ }
+ 
+ int
+-fcb_sector_erase(const struct fcb *fcb, int sector)
++fcb2_sector_erase(const struct fcb2 *fcb2, int sector)
+ {
+-    struct fcb_sector_info info;
++    struct fcb2_sector_info info;
+     int rc;
+ 
+-    rc = fcb_get_sector_info(fcb, sector, &info);
++    rc = fcb2_get_sector_info(fcb2, sector, &info);
+     if (rc) {
+         goto end;
+     }
+diff --git a/fs/fcb2/src/fcb_append.c b/fs/fcb2/src/fcb_append.c
+index a039ece..16b8f23 100644
+--- a/fs/fcb2/src/fcb_append.c
++++ b/fs/fcb2/src/fcb_append.c
+@@ -18,22 +18,22 @@
+  */
+ #include <stddef.h>
+ 
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ #include "crc/crc8.h"
+ 
+ int
+-fcb_new_sector(struct fcb *fcb, int cnt)
++fcb2_new_sector(struct fcb2 *fcb2, int cnt)
+ {
+ 
+     int new_sector = -1;
+-    int sector = fcb->f_active.fe_sector;
++    int sector = fcb2->f_active.fe_sector;
+     do {
+-        sector = fcb_getnext_sector(fcb, sector);
++        sector = fcb2_getnext_sector(fcb2, sector);
+         if (new_sector < 0) {
+             new_sector = sector;
+         }
+-        if (sector == fcb->f_oldest_sec) {
++        if (sector == fcb2->f_oldest_sec) {
+             new_sector = -1;
+             break;
+         }
+@@ -46,39 +46,39 @@ fcb_new_sector(struct fcb *fcb, int cnt)
+  * Take one of the scratch blocks into use, if at all possible.
+  */
+ int
+-fcb_append_to_scratch(struct fcb *fcb)
++fcb2_append_to_scratch(struct fcb2 *fcb2)
+ {
+     int sector;
+     int rc;
+     struct flash_sector_range *range;
+ 
+-    sector = fcb_new_sector(fcb, 0);
++    sector = fcb2_new_sector(fcb2, 0);
+     if (sector < 0) {
+-        return FCB_ERR_NOSPACE;
++        return FCB2_ERR_NOSPACE;
+     }
+-    rc = fcb_sector_hdr_init(fcb, sector, fcb->f_active_id + 1);
++    rc = fcb2_sector_hdr_init(fcb2, sector, fcb2->f_active_id + 1);
+     if (rc) {
+         return rc;
+     }
+-    range = fcb_get_sector_range(fcb, sector);
+-    fcb->f_active.fe_range = range;
+-    fcb->f_active.fe_sector = sector;
+-    fcb->f_active.fe_data_off =
+-        fcb_len_in_flash(range, sizeof(struct fcb_disk_area));
+-    fcb->f_active.fe_entry_num = 1;
+-    fcb->f_active_id++;
+-    return FCB_OK;
++    range = fcb2_get_sector_range(fcb2, sector);
++    fcb2->f_active.fe_range = range;
++    fcb2->f_active.fe_sector = sector;
++    fcb2->f_active.fe_data_off =
++        fcb2_len_in_flash(range, sizeof(struct fcb2_disk_area));
++    fcb2->f_active.fe_entry_num = 1;
++    fcb2->f_active_id++;
++    return FCB2_OK;
+ }
+ 
+ static inline int
+-fcb_sector_flash_offset(const struct fcb_entry *loc)
++fcb2_sector_flash_offset(const struct fcb2_entry *loc)
+ {
+     return (loc->fe_sector - loc->fe_range->fsr_first_sector) *
+         loc->fe_range->fsr_sector_size;
+ }
+ 
+ int
+-fcb_write_to_sector(struct fcb_entry *loc, int off, const void *buf, int len)
++fcb2_write_to_sector(struct fcb2_entry *loc, int off, const void *buf, int len)
+ {
+     /* For negative offsets write from the end of sector */
+     if (off < 0) {
+@@ -89,11 +89,11 @@ fcb_write_to_sector(struct fcb_entry *loc, int off, const void *buf, int len)
+         len = loc->fe_range->fsr_sector_size - off;
+     }
+     return flash_area_write(&loc->fe_range->fsr_flash_area,
+-        fcb_sector_flash_offset(loc) + off, buf, len);
++        fcb2_sector_flash_offset(loc) + off, buf, len);
+ }
+ 
+ int
+-fcb_read_from_sector(struct fcb_entry *loc, int off, void *buf, int len)
++fcb2_read_from_sector(struct fcb2_entry *loc, int off, void *buf, int len)
+ {
+     /* For negative offsets read from the end of sector */
+     if (off < 0) {
+@@ -104,119 +104,119 @@ fcb_read_from_sector(struct fcb_entry *loc, int off, void *buf, int len)
+         len = loc->fe_range->fsr_sector_size - off;
+     }
+     return flash_area_read(&loc->fe_range->fsr_flash_area,
+-        fcb_sector_flash_offset(loc) + off, buf, len);
++        fcb2_sector_flash_offset(loc) + off, buf, len);
+ }
+ 
+ int
+-fcb_entry_location_in_range(const struct fcb_entry *loc)
++fcb2_entry_location_in_range(const struct fcb2_entry *loc)
+ {
+     const struct flash_sector_range *range = loc->fe_range;
+ 
+     return range->fsr_sector_size *
+         (1 + loc->fe_sector - range->fsr_first_sector) -
+-        (loc->fe_entry_num * fcb_len_in_flash(loc->fe_range, FCB_ENTRY_SIZE));
++        (loc->fe_entry_num * fcb2_len_in_flash(loc->fe_range, FCB2_ENTRY_SIZE));
+ }
+ 
+ int
+-fcb_active_sector_free_space(const struct fcb *fcb)
++fcb2_active_sector_free_space(const struct fcb2 *fcb2)
+ {
+-    const struct fcb_entry *active = &fcb->f_active;
++    const struct fcb2_entry *active = &fcb2->f_active;
+     const struct flash_sector_range *range = active->fe_range;
+ 
+     return range->fsr_sector_size - active->fe_data_off -
+-        (active->fe_entry_num * fcb_len_in_flash(range, FCB_ENTRY_SIZE));
++        (active->fe_entry_num * fcb2_len_in_flash(range, FCB2_ENTRY_SIZE));
+ }
+ 
+ int
+-fcb_write(struct fcb_entry *loc, uint16_t off, const void *buf, uint16_t len)
++fcb2_write(struct fcb2_entry *loc, uint16_t off, const void *buf, uint16_t len)
+ {
+     int pos = loc->fe_data_off + off;
+-    /* Make sure tha write does not exceed lenght declared in fcb_append */
++    /* Make sure tha write does not exceed lenght declared in fcb2_append */
+     if (off + len > loc->fe_data_len) {
+         len = loc->fe_data_len - off;
+     }
+-    return fcb_write_to_sector(loc, pos, buf, len);
++    return fcb2_write_to_sector(loc, pos, buf, len);
+ }
+ 
+ int
+-fcb_read(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len)
++fcb2_read(struct fcb2_entry *loc, uint16_t off, void *buf, uint16_t len)
+ {
+     int pos = loc->fe_data_off + off;
+     /* Make sure that read is only from entry data */
+     if (off + len > loc->fe_data_len) {
+         len = loc->fe_data_len - off;
+     }
+-    return fcb_read_from_sector(loc, pos, buf, len);
++    return fcb2_read_from_sector(loc, pos, buf, len);
+ }
+ 
+ int
+-fcb_element_length_in_flash(const struct fcb_entry *loc, int len)
++fcb2_element_length_in_flash(const struct fcb2_entry *loc, int len)
+ {
+-    return fcb_len_in_flash(loc->fe_range, len) +
+-        fcb_len_in_flash(loc->fe_range, FCB_CRC_LEN);
++    return fcb2_len_in_flash(loc->fe_range, len) +
++        fcb2_len_in_flash(loc->fe_range, FCB2_CRC_LEN);
+ }
+ 
+ int
+-fcb_append(struct fcb *fcb, uint16_t len, struct fcb_entry *append_loc)
++fcb2_append(struct fcb2 *fcb2, uint16_t len, struct fcb2_entry *append_loc)
+ {
+-    struct fcb_entry *active;
++    struct fcb2_entry *active;
+     struct flash_sector_range *range;
+-    uint8_t flash_entry[FCB_ENTRY_SIZE];
++    uint8_t flash_entry[FCB2_ENTRY_SIZE];
+     int sector;
+     int rc;
+ 
+-    if (len == 0 || len >= FCB_MAX_LEN) {
+-        return FCB_ERR_ARGS;
++    if (len == 0 || len >= FCB2_MAX_LEN) {
++        return FCB2_ERR_ARGS;
+     }
+ 
+-    rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    rc = os_mutex_pend(&fcb2->f_mtx, OS_WAIT_FOREVER);
+     if (rc && rc != OS_NOT_STARTED) {
+-        return FCB_ERR_ARGS;
++        return FCB2_ERR_ARGS;
+     }
+-    active = &fcb->f_active;
+-    if (fcb_active_sector_free_space(fcb) < fcb_element_length_in_flash(active,
++    active = &fcb2->f_active;
++    if (fcb2_active_sector_free_space(fcb2) < fcb2_element_length_in_flash(active,
+                                                                         len)) {
+-        sector = fcb_new_sector(fcb, fcb->f_scratch_cnt);
++        sector = fcb2_new_sector(fcb2, fcb2->f_scratch_cnt);
+         if (sector >= 0) {
+-            range = fcb_get_sector_range(fcb, sector);
++            range = fcb2_get_sector_range(fcb2, sector);
+         }
+         if (sector < 0 || (range->fsr_sector_size <
+-            fcb_len_in_flash(range, sizeof(struct fcb_disk_area)) +
+-            fcb_len_in_flash(range, len) +
+-            fcb_len_in_flash(range, FCB_CRC_LEN))) {
+-            rc = FCB_ERR_NOSPACE;
++            fcb2_len_in_flash(range, sizeof(struct fcb2_disk_area)) +
++            fcb2_len_in_flash(range, len) +
++            fcb2_len_in_flash(range, FCB2_CRC_LEN))) {
++            rc = FCB2_ERR_NOSPACE;
+             goto err;
+         }
+-        rc = fcb_sector_hdr_init(fcb, sector, fcb->f_active_id + 1);
++        rc = fcb2_sector_hdr_init(fcb2, sector, fcb2->f_active_id + 1);
+         if (rc) {
+             goto err;
+         }
+-        fcb->f_active.fe_range = range;
+-        fcb->f_active.fe_sector = sector;
++        fcb2->f_active.fe_range = range;
++        fcb2->f_active.fe_sector = sector;
+         /* Start with offset just after sector header */
+-        fcb->f_active.fe_data_off =
+-            fcb_len_in_flash(range, sizeof(struct fcb_disk_area));
++        fcb2->f_active.fe_data_off =
++            fcb2_len_in_flash(range, sizeof(struct fcb2_disk_area));
+         /* No entries as yet */
+-        fcb->f_active.fe_entry_num = 1;
+-        fcb->f_active.fe_data_len = 0;
+-        fcb->f_active_id++;
++        fcb2->f_active.fe_entry_num = 1;
++        fcb2->f_active.fe_data_len = 0;
++        fcb2->f_active_id++;
+     } else {
+         range = active->fe_range;
+     }
+ 
+     /* Write new entry at the end of the sector */
+-    flash_entry[0] = (uint8_t)(fcb->f_active.fe_data_off >> 16);
+-    flash_entry[1] = (uint8_t)(fcb->f_active.fe_data_off >> 8);
+-    flash_entry[2] = (uint8_t)(fcb->f_active.fe_data_off >> 0);
++    flash_entry[0] = (uint8_t)(fcb2->f_active.fe_data_off >> 16);
++    flash_entry[1] = (uint8_t)(fcb2->f_active.fe_data_off >> 8);
++    flash_entry[2] = (uint8_t)(fcb2->f_active.fe_data_off >> 0);
+     flash_entry[3] = (uint8_t)(len >> 8);
+     flash_entry[4] = (uint8_t)(len >> 0);
+-    flash_entry[5] = crc8_calc(crc8_init(), flash_entry, FCB_ENTRY_SIZE - 1);
++    flash_entry[5] = crc8_calc(crc8_init(), flash_entry, FCB2_ENTRY_SIZE - 1);
+ 
+-    rc = fcb_write_to_sector(active,
+-        active->fe_entry_num * -fcb_len_in_flash(range, FCB_ENTRY_SIZE),
+-        flash_entry, FCB_ENTRY_SIZE);
++    rc = fcb2_write_to_sector(active,
++        active->fe_entry_num * -fcb2_len_in_flash(range, FCB2_ENTRY_SIZE),
++        flash_entry, FCB2_ENTRY_SIZE);
+     if (rc) {
+-        rc = FCB_ERR_FLASH;
++        rc = FCB2_ERR_FLASH;
+         goto err;
+     }
+     *append_loc = *active;
+@@ -224,35 +224,35 @@ fcb_append(struct fcb *fcb, uint16_t len, struct fcb_entry *append_loc)
+     append_loc->fe_data_len = len;
+ 
+     /* Prepare active element num and offset for new append */
+-    active->fe_data_off += fcb_element_length_in_flash(active, len);
++    active->fe_data_off += fcb2_element_length_in_flash(active, len);
+     active->fe_entry_num++;
+ 
+-    os_mutex_release(&fcb->f_mtx);
++    os_mutex_release(&fcb2->f_mtx);
+ 
+-    return FCB_OK;
++    return FCB2_OK;
+ err:
+-    os_mutex_release(&fcb->f_mtx);
++    os_mutex_release(&fcb2->f_mtx);
+     return rc;
+ }
+ 
+ int
+-fcb_append_finish(struct fcb_entry *loc)
++fcb2_append_finish(struct fcb2_entry *loc)
+ {
+     int rc;
+     uint16_t crc;
+     uint8_t fl_crc[2];
+     uint32_t off;
+ 
+-    rc = fcb_elem_crc16(loc, &crc);
++    rc = fcb2_elem_crc16(loc, &crc);
+     if (rc) {
+         return rc;
+     }
+     put_be16(fl_crc, crc);
+-    off = loc->fe_data_off + fcb_len_in_flash(loc->fe_range, loc->fe_data_len);
++    off = loc->fe_data_off + fcb2_len_in_flash(loc->fe_range, loc->fe_data_len);
+ 
+-    rc = fcb_write_to_sector(loc, off, fl_crc, sizeof(fl_crc));
++    rc = fcb2_write_to_sector(loc, off, fl_crc, sizeof(fl_crc));
+     if (rc) {
+-        return FCB_ERR_FLASH;
++        return FCB2_ERR_FLASH;
+     }
+     return 0;
+ }
+diff --git a/fs/fcb2/src/fcb_area_info.c b/fs/fcb2/src/fcb_area_info.c
+index 80c41c4..a1a6b89 100644
+--- a/fs/fcb2/src/fcb_area_info.c
++++ b/fs/fcb2/src/fcb_area_info.c
+@@ -17,19 +17,19 @@
+  * under the License.
+  */
+ 
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ 
+ int
+-fcb_area_info(struct fcb *fcb, int sector, int *elemsp, int *bytesp)
++fcb2_area_info(struct fcb2 *fcb2, int sector, int *elemsp, int *bytesp)
+ {
+-    struct fcb_entry loc;
+-    struct fcb_sector_info info;
++    struct fcb2_entry loc;
++    struct fcb2_sector_info info;
+     int rc;
+     int elems = 0;
+     int bytes = 0;
+ 
+-    rc = fcb_get_sector_info(fcb, sector, &info);
++    rc = fcb2_get_sector_info(fcb2, sector, &info);
+     if (rc) {
+         return rc;
+     }
+@@ -37,12 +37,12 @@ fcb_area_info(struct fcb *fcb, int sector, int *elemsp, int *bytesp)
+     loc.fe_sector = info.si_sector_in_range + loc.fe_range->fsr_first_sector;
+     loc.fe_entry_num = 0;
+     /* In case caller passed oldest, get real sector number */
+-    if (sector == FCB_SECTOR_OLDEST) {
++    if (sector == FCB2_SECTOR_OLDEST) {
+         sector =  loc.fe_sector;
+     }
+ 
+     while (1) {
+-        rc = fcb_getnext(fcb, &loc);
++        rc = fcb2_getnext(fcb2, &loc);
+         if (rc) {
+             break;
+         }
+diff --git a/fs/fcb2/src/fcb_elem_info.c b/fs/fcb2/src/fcb_elem_info.c
+index a222f36..10b12e5 100644
+--- a/fs/fcb2/src/fcb_elem_info.c
++++ b/fs/fcb2/src/fcb_elem_info.c
+@@ -20,16 +20,16 @@
+ #include <crc/crc8.h>
+ #include <crc/crc16.h>
+ 
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ 
+ /*
+  * Given offset in flash area, compute crc16 over the data.
+  */
+ int
+-fcb_elem_crc16(struct fcb_entry *loc, uint16_t *c16p)
++fcb2_elem_crc16(struct fcb2_entry *loc, uint16_t *c16p)
+ {
+-    uint8_t tmp_str[FCB_TMP_BUF_SZ];
++    uint8_t tmp_str[FCB2_TMP_BUF_SZ];
+     int blk_sz;
+     uint16_t crc16;
+     uint32_t off;
+@@ -46,9 +46,9 @@ fcb_elem_crc16(struct fcb_entry *loc, uint16_t *c16p)
+             blk_sz = sizeof(tmp_str);
+         }
+ 
+-        rc = fcb_read_from_sector(loc, off, tmp_str, blk_sz);
++        rc = fcb2_read_from_sector(loc, off, tmp_str, blk_sz);
+         if (rc) {
+-            return FCB_ERR_FLASH;
++            return FCB2_ERR_FLASH;
+         }
+         crc16 = crc16_ccitt(crc16, tmp_str, blk_sz);
+     }
+@@ -58,9 +58,9 @@ fcb_elem_crc16(struct fcb_entry *loc, uint16_t *c16p)
+ }
+ 
+ static int
+-fcb_read_entry(struct fcb_entry *loc)
++fcb2_read_entry(struct fcb2_entry *loc)
+ {
+-    uint8_t buf[FCB_ENTRY_SIZE];
++    uint8_t buf[FCB2_ENTRY_SIZE];
+     uint8_t entry_crc;
+     uint32_t entry_offset;
+     uint32_t offset;
+@@ -68,30 +68,30 @@ fcb_read_entry(struct fcb_entry *loc)
+     int rc;
+ 
+     assert(loc != NULL);
+-    entry_offset = fcb_entry_location_in_range(loc);
++    entry_offset = fcb2_entry_location_in_range(loc);
+     rc = flash_area_read_is_empty(&loc->fe_range->fsr_flash_area,
+         entry_offset, buf, sizeof(buf));
+     if (rc < 0) {
+         /* Error reading from flash */
+-        return FCB_ERR_FLASH;
++        return FCB2_ERR_FLASH;
+     } else if (rc == 1) {
+         /* Entry not filled on flash */
+-        return FCB_ERR_NOVAR;
++        return FCB2_ERR_NOVAR;
+     }
+     /* Check entry CRC first */
+-    entry_crc = crc8_calc(crc8_init(), buf, FCB_ENTRY_SIZE - 1);
+-    if (entry_crc != buf[FCB_ENTRY_SIZE - 1]) {
+-        return FCB_ERR_CRC;
++    entry_crc = crc8_calc(crc8_init(), buf, FCB2_ENTRY_SIZE - 1);
++    if (entry_crc != buf[FCB2_ENTRY_SIZE - 1]) {
++        return FCB2_ERR_CRC;
+     }
+     offset = (buf[0] << 16) | (buf[1] << 8) | (buf[2] << 0);
+     len = (buf[3] << 8) | (buf[4] << 0);
+     /* Sanity check for entry */
+-    if (offset < fcb_len_in_flash(loc->fe_range, sizeof(struct fcb_disk_area)) ||
+-        len > FCB_MAX_LEN ||
++    if (offset < fcb2_len_in_flash(loc->fe_range, sizeof(struct fcb2_disk_area)) ||
++        len > FCB2_MAX_LEN ||
+         offset + len > entry_offset) {
+         /* Entry was found but data stored does not make any sense
+          * report as CRC error so it can be skipped */
+-        return FCB_ERR_CRC;
++        return FCB2_ERR_CRC;
+     }
+ 
+     /* Entry looks decent, pass to the caller */
+@@ -102,30 +102,30 @@ fcb_read_entry(struct fcb_entry *loc)
+ }
+ 
+ int
+-fcb_elem_info(struct fcb_entry *loc)
++fcb2_elem_info(struct fcb2_entry *loc)
+ {
+     int rc;
+     uint16_t crc16;
+     uint8_t fl_crc16[2];
+ 
+     /* Read entry from the end of the sector */
+-    rc = fcb_read_entry(loc);
++    rc = fcb2_read_entry(loc);
+     if (rc != 0) {
+         return rc;
+     }
+ 
+     /* Read actual data and calculate CRC */
+-    rc = fcb_elem_crc16(loc, &crc16);
++    rc = fcb2_elem_crc16(loc, &crc16);
+     if (rc) {
+         return rc;
+     }
+ 
+     /* Read CRC from flash */
+-    rc = fcb_read_from_sector(loc,
+-        loc->fe_data_off + fcb_len_in_flash(loc->fe_range, loc->fe_data_len),
++    rc = fcb2_read_from_sector(loc,
++        loc->fe_data_off + fcb2_len_in_flash(loc->fe_range, loc->fe_data_len),
+         &fl_crc16, 2);
+     if (rc || get_be16(fl_crc16) != crc16) {
+-        return FCB_ERR_CRC;
++        return FCB2_ERR_CRC;
+     }
+ 
+     return 0;
+diff --git a/fs/fcb2/src/fcb_getnext.c b/fs/fcb2/src/fcb_getnext.c
+index f90e26d..4e192e7 100644
+--- a/fs/fcb2/src/fcb_getnext.c
++++ b/fs/fcb2/src/fcb_getnext.c
+@@ -18,32 +18,32 @@
+  */
+ #include <stddef.h>
+ 
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ 
+ int
+-fcb_getnext_in_area(struct fcb *fcb, struct fcb_entry *loc)
++fcb2_getnext_in_area(struct fcb2 *fcb2, struct fcb2_entry *loc)
+ {
+-    int rc = FCB_ERR_CRC;
++    int rc = FCB2_ERR_CRC;
+     int off;
+     int len;
+ 
+-    while (rc == FCB_ERR_CRC) {
++    while (rc == FCB2_ERR_CRC) {
+         len = loc->fe_data_len;
+         off = loc->fe_data_off;
+         loc->fe_data_len = 0;
+         loc->fe_entry_num++;
+-        rc = fcb_elem_info(loc);
++        rc = fcb2_elem_info(loc);
+         if (len) {
+-            loc->fe_data_off = off + fcb_len_in_flash(loc->fe_range, len) +
+-                fcb_len_in_flash(loc->fe_range, 2);
++            loc->fe_data_off = off + fcb2_len_in_flash(loc->fe_range, len) +
++                fcb2_len_in_flash(loc->fe_range, 2);
+         }
+     }
+     return rc;
+ }
+ 
+ int
+-fcb_getnext_nolock(struct fcb *fcb, struct fcb_entry *loc)
++fcb2_getnext_nolock(struct fcb2 *fcb2, struct fcb2_entry *loc)
+ {
+     int rc;
+ 
+@@ -51,48 +51,48 @@ fcb_getnext_nolock(struct fcb *fcb, struct fcb_entry *loc)
+         /*
+          * Find the first one we have in flash.
+          */
+-        loc->fe_sector = fcb->f_oldest_sec;
+-        loc->fe_range = fcb_get_sector_range(fcb, loc->fe_sector);
++        loc->fe_sector = fcb2->f_oldest_sec;
++        loc->fe_range = fcb2_get_sector_range(fcb2, loc->fe_sector);
+     }
+     if (loc->fe_entry_num == 0) {
+         /*
+          * If offset is zero, we serve the first entry from the area.
+          */
+         loc->fe_entry_num = 1;
+-        rc = fcb_elem_info(loc);
++        rc = fcb2_elem_info(loc);
+     } else {
+-        rc = fcb_getnext_in_area(fcb, loc);
++        rc = fcb2_getnext_in_area(fcb2, loc);
+     }
+     switch (rc) {
+     case 0:
+         return 0;
+-    case FCB_ERR_CRC:
++    case FCB2_ERR_CRC:
+         break;
+     default:
+         goto next_sector;
+     }
+-    while (rc == FCB_ERR_CRC) {
+-        rc = fcb_getnext_in_area(fcb, loc);
++    while (rc == FCB2_ERR_CRC) {
++        rc = fcb2_getnext_in_area(fcb2, loc);
+         if (rc == 0) {
+             return 0;
+         }
+ 
+-        if (rc != FCB_ERR_CRC) {
++        if (rc != FCB2_ERR_CRC) {
+             /*
+              * Moving to next sector.
+              */
+ next_sector:
+-            if (loc->fe_sector == fcb->f_active.fe_sector) {
+-                return FCB_ERR_NOVAR;
++            if (loc->fe_sector == fcb2->f_active.fe_sector) {
++                return FCB2_ERR_NOVAR;
+             }
+-            loc->fe_sector = fcb_getnext_sector(fcb, loc->fe_sector);
+-            loc->fe_range = fcb_get_sector_range(fcb, loc->fe_sector);
++            loc->fe_sector = fcb2_getnext_sector(fcb2, loc->fe_sector);
++            loc->fe_range = fcb2_get_sector_range(fcb2, loc->fe_sector);
+             loc->fe_entry_num = 1;
+-            rc = fcb_elem_info(loc);
++            rc = fcb2_elem_info(loc);
+             switch (rc) {
+             case 0:
+                 return 0;
+-            case FCB_ERR_CRC:
++            case FCB2_ERR_CRC:
+                 break;
+             default:
+                 goto next_sector;
+@@ -104,16 +104,16 @@ next_sector:
+ }
+ 
+ int
+-fcb_getnext(struct fcb *fcb, struct fcb_entry *loc)
++fcb2_getnext(struct fcb2 *fcb2, struct fcb2_entry *loc)
+ {
+     int rc;
+ 
+-    rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    rc = os_mutex_pend(&fcb2->f_mtx, OS_WAIT_FOREVER);
+     if (rc && rc != OS_NOT_STARTED) {
+-        return FCB_ERR_ARGS;
++        return FCB2_ERR_ARGS;
+     }
+-    rc = fcb_getnext_nolock(fcb, loc);
+-    os_mutex_release(&fcb->f_mtx);
++    rc = fcb2_getnext_nolock(fcb2, loc);
++    os_mutex_release(&fcb2->f_mtx);
+ 
+     return rc;
+ }
+diff --git a/fs/fcb2/src/fcb_getprev.c b/fs/fcb2/src/fcb_getprev.c
+index e98c86c..a39a35e 100644
+--- a/fs/fcb2/src/fcb_getprev.c
++++ b/fs/fcb2/src/fcb_getprev.c
+@@ -18,11 +18,11 @@
+  */
+ #include <stddef.h>
+ 
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ 
+ static int
+-fcb_sector_find_last(struct fcb *fcb, struct fcb_entry *loc)
++fcb2_sector_find_last(struct fcb2 *fcb2, struct fcb2_entry *loc)
+ {
+     int rc;
+     int last_valid = 0;
+@@ -30,11 +30,11 @@ fcb_sector_find_last(struct fcb *fcb, struct fcb_entry *loc)
+     loc->fe_entry_num = 1;
+ 
+     do {
+-        rc = fcb_elem_info(loc);
++        rc = fcb2_elem_info(loc);
+         if (rc == 0) {
+             last_valid = loc->fe_entry_num;
+         }
+-        if (rc == FCB_ERR_NOVAR) {
++        if (rc == FCB2_ERR_NOVAR) {
+             /*
+              * Out entries in this sector
+              */
+@@ -43,10 +43,10 @@ fcb_sector_find_last(struct fcb *fcb, struct fcb_entry *loc)
+                 /*
+                  * No valid entries in this sector.
+                  */
+-                return FCB_ERR_NOVAR;
++                return FCB2_ERR_NOVAR;
+             } else {
+                 loc->fe_entry_num = last_valid;
+-                rc = fcb_elem_info(loc);
++                rc = fcb2_elem_info(loc);
+                 assert(rc == 0); /* must be; just succeeded a bit earlier */
+                 return rc;
+             }
+@@ -57,19 +57,19 @@ fcb_sector_find_last(struct fcb *fcb, struct fcb_entry *loc)
+ }
+ 
+ int
+-fcb_getprev(struct fcb *fcb, struct fcb_entry *loc)
++fcb2_getprev(struct fcb2 *fcb2, struct fcb2_entry *loc)
+ {
+     int rc;
+ 
+-    rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    rc = os_mutex_pend(&fcb2->f_mtx, OS_WAIT_FOREVER);
+     if (rc && rc != OS_NOT_STARTED) {
+-        return FCB_ERR_ARGS;
++        return FCB2_ERR_ARGS;
+     }
+     if (loc->fe_range == NULL) {
+         /*
+          * Find the last element.
+          */
+-        *loc = fcb->f_active;
++        *loc = fcb2->f_active;
+     }
+      while (1) {
+         loc->fe_entry_num--;
+@@ -77,26 +77,26 @@ fcb_getprev(struct fcb *fcb, struct fcb_entry *loc)
+             /*
+              * Need to get from previous sector.
+              */
+-            if (loc->fe_sector == fcb->f_oldest_sec) {
+-                return FCB_ERR_NOVAR;
++            if (loc->fe_sector == fcb2->f_oldest_sec) {
++                return FCB2_ERR_NOVAR;
+             }
+             if (loc->fe_sector == 0) {
+-                loc->fe_sector = fcb->f_sector_cnt - 1;
++                loc->fe_sector = fcb2->f_sector_cnt - 1;
+             } else {
+                 loc->fe_sector--;
+             }
+-            loc->fe_range = fcb_get_sector_range(fcb, loc->fe_sector);
+-            rc = fcb_sector_find_last(fcb, loc);
++            loc->fe_range = fcb2_get_sector_range(fcb2, loc->fe_sector);
++            rc = fcb2_sector_find_last(fcb2, loc);
+             if (rc == 0) {
+                 break;
+             }
+         } else {
+-            rc = fcb_elem_info(loc);
++            rc = fcb2_elem_info(loc);
+             if (rc == 0) {
+                 break;
+             }
+         }
+     }
+-    os_mutex_release(&fcb->f_mtx);
++    os_mutex_release(&fcb2->f_mtx);
+     return rc;
+ }
+diff --git a/fs/fcb2/src/fcb_priv.h b/fs/fcb2/src/fcb_priv.h
+index a1ec9d5..0e85aa6 100644
+--- a/fs/fcb2/src/fcb_priv.h
++++ b/fs/fcb2/src/fcb_priv.h
+@@ -16,32 +16,25 @@
+  * specific language governing permissions and limitations
+  * under the License.
+  */
+-#ifndef __SYS_FCB_PRIV_H_
+-#define __SYS_FCB_PRIV_H_
++#ifndef __SYS_FCB2_PRIV_H_
++#define __SYS_FCB2_PRIV_H_
+ 
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+ 
+-#define FCB_TMP_BUF_SZ  32
++#define FCB2_TMP_BUF_SZ  32
+ 
+-#define FCB_ID_GT(a, b) (((int16_t)(a) - (int16_t)(b)) > 0)
++#define FCB2_ID_GT(a, b) (((int16_t)(a) - (int16_t)(b)) > 0)
+ 
+-struct fcb_disk_area {
+-    uint32_t fd_magic;
+-    uint8_t  fd_ver;
+-    uint8_t  _pad;
+-    uint16_t fd_id;
+-};
+-
+-struct fcb_sector_info {
++struct fcb2_sector_info {
+     struct flash_sector_range *si_range;  /* Sector range */
+-    uint32_t si_sector_offset;            /* Sector offset in fcb */
++    uint32_t si_sector_offset;            /* Sector offset in fcb2 */
+     uint16_t si_sector_in_range;          /* Sector number relative to si_range */
+ };
+ 
+ static inline int
+-fcb_len_in_flash(const struct flash_sector_range *range, uint16_t len)
++fcb2_len_in_flash(const struct flash_sector_range *range, uint16_t len)
+ {
+     if (range->fsr_align <= 1) {
+         return len;
+@@ -49,74 +42,74 @@ fcb_len_in_flash(const struct flash_sector_range *range, uint16_t len)
+     return (len + (range->fsr_align - 1)) & ~(range->fsr_align - 1);
+ }
+ 
+-int fcb_getnext_in_area(struct fcb *fcb, struct fcb_entry *loc);
++int fcb2_getnext_in_area(struct fcb2 *fcb2, struct fcb2_entry *loc);
+ 
+ static inline int
+-fcb_getnext_sector(struct fcb *fcb, int sector)
++fcb2_getnext_sector(struct fcb2 *fcb2, int sector)
+ {
+-    if (++sector >= fcb->f_sector_cnt) {
++    if (++sector >= fcb2->f_sector_cnt) {
+         sector = 0;
+     }
+     return sector;
+ }
+ 
+-int fcb_getnext_nolock(struct fcb *fcb, struct fcb_entry *loc);
++int fcb2_getnext_nolock(struct fcb2 *fcb2, struct fcb2_entry *loc);
+ 
+-int fcb_elem_info(struct fcb_entry *loc);
+-int fcb_elem_crc16(struct fcb_entry *loc, uint16_t *c16p);
+-int fcb_sector_hdr_init(struct fcb *fcb, int sector, uint16_t id);
+-int fcb_entry_location_in_range(const struct fcb_entry *loc);
++int fcb2_elem_info(struct fcb2_entry *loc);
++int fcb2_elem_crc16(struct fcb2_entry *loc, uint16_t *c16p);
++int fcb2_sector_hdr_init(struct fcb2 *fcb2, int sector, uint16_t id);
++int fcb2_entry_location_in_range(const struct fcb2_entry *loc);
+ 
+-struct flash_sector_range *fcb_get_sector_range(const struct fcb *fcb,
++struct flash_sector_range *fcb2_get_sector_range(const struct fcb2 *fcb2,
+     int sector);
+ 
+-int fcb_sector_hdr_read(struct fcb *, struct flash_sector_range *srp,
+-    uint16_t sec, struct fcb_disk_area *fdap);
++int fcb2_sector_hdr_read(struct fcb2 *, struct flash_sector_range *srp,
++    uint16_t sec, struct fcb2_disk_area *fdap);
+ 
+ /**
+- * Finds sector range for given fcb sector.
++ * Finds sector range for given fcb2 sector.
+  */
+-struct flash_sector_range *fcb_get_sector_range(const struct fcb *fcb,
++struct flash_sector_range *fcb2_get_sector_range(const struct fcb2 *fcb2,
+     int sector);
+ 
+ /**
+- * @brief Get information about sector from fcb.
++ * @brief Get information about sector from fcb2.
+  *
+- * @param fcb     fcb to check sector
+- * @param sector  fcb sector number
+- *                sector can be specified as FCB_SECTOR_OLDEST.
++ * @param fcb2     fcb2 to check sector
++ * @param sector  fcb2 sector number
++ *                sector can be specified as FCB2_SECTOR_OLDEST.
+  * @param info    pointer to structure that will receive sector information
+  *
+  * @return 0 if sector information was extracted correctly
+- *        FCB_ERR_ARGS if sector number was outside fcb range.
++ *        FCB2_ERR_ARGS if sector number was outside fcb2 range.
+  */
+-int fcb_get_sector_info(const struct fcb *fcb, int sector,
+-    struct fcb_sector_info *info);
++int fcb2_get_sector_info(const struct fcb2 *fcb2, int sector,
++    struct fcb2_sector_info *info);
+ 
+ /**
+- * @brief Write data to fcb sector.
++ * @brief Write data to fcb2 sector.
+  *
+- * @param loc     location of the sector from fcb_get_sector_loc().
++ * @param loc     location of the sector from fcb2_get_sector_loc().
+  * @param off     offset from the beginning of the sector to start write
+  * @param buf     pointer to data to be written
+- * @param len     number of bytes to write to the fcb sector
++ * @param len     number of bytes to write to the fcb2 sector
+  *
+  * @return 0 if write was successful non zero otherwise.
+  */
+-int fcb_write_to_sector(struct fcb_entry *loc, int off,
++int fcb2_write_to_sector(struct fcb2_entry *loc, int off,
+     const void *buf, int len);
+ 
+ /**
+- * @brief Read data from fcb sector.
++ * @brief Read data from fcb2 sector.
+  *
+- * @param loc     location of the sector from fcb_get_sector_loc().
++ * @param loc     location of the sector from fcb2_get_sector_loc().
+  * @param off     offset from the beginning of the sector to start read
+  * @param buf     pointer to output buffer
+- * @param len     number of bytes to read from the fcb sector
++ * @param len     number of bytes to read from the fcb2 sector
+  *
+  * @return 0 if read was successful non zero otherwise.
+  */
+-int fcb_read_from_sector(struct fcb_entry *loc, int off, void *buf, int len);
++int fcb2_read_from_sector(struct fcb2_entry *loc, int off, void *buf, int len);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/fs/fcb2/src/fcb_rotate.c b/fs/fcb2/src/fcb_rotate.c
+index 53364e5..ee1fc4a 100644
+--- a/fs/fcb2/src/fcb_rotate.c
++++ b/fs/fcb2/src/fcb_rotate.c
+@@ -17,47 +17,47 @@
+  * under the License.
+  */
+ 
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ 
+ int
+-fcb_rotate(struct fcb *fcb)
++fcb2_rotate(struct fcb2 *fcb2)
+ {
+     int sector;
+     int rc = 0;
+     struct flash_sector_range *range;
+ 
+-    rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    rc = os_mutex_pend(&fcb2->f_mtx, OS_WAIT_FOREVER);
+     if (rc && rc != OS_NOT_STARTED) {
+-        return FCB_ERR_ARGS;
++        return FCB2_ERR_ARGS;
+     }
+ 
+-    rc = fcb_sector_erase(fcb, fcb->f_oldest_sec);
++    rc = fcb2_sector_erase(fcb2, fcb2->f_oldest_sec);
+     if (rc) {
+-        rc = FCB_ERR_FLASH;
++        rc = FCB2_ERR_FLASH;
+         goto out;
+     }
+-    if (fcb->f_oldest_sec == fcb->f_active.fe_sector) {
++    if (fcb2->f_oldest_sec == fcb2->f_active.fe_sector) {
+         /*
+          * Need to create a new active sector, as we're wiping the current.
+          */
+-        sector = fcb_getnext_sector(fcb, fcb->f_oldest_sec);
++        sector = fcb2_getnext_sector(fcb2, fcb2->f_oldest_sec);
+ 
+-        rc = fcb_sector_hdr_init(fcb, sector, fcb->f_active_id + 1);
++        rc = fcb2_sector_hdr_init(fcb2, sector, fcb2->f_active_id + 1);
+         if (rc) {
+             goto out;
+         }
+-        range = fcb_get_sector_range(fcb, sector);
+-        fcb->f_active.fe_sector = sector;
+-        fcb->f_active.fe_range = range;
+-        fcb->f_active.fe_data_off =
+-            fcb_len_in_flash(range, sizeof(struct fcb_disk_area));
+-        fcb->f_active.fe_entry_num = 1;
+-        fcb->f_active.fe_data_len = 0;
+-        fcb->f_active_id++;
++        range = fcb2_get_sector_range(fcb2, sector);
++        fcb2->f_active.fe_sector = sector;
++        fcb2->f_active.fe_range = range;
++        fcb2->f_active.fe_data_off =
++            fcb2_len_in_flash(range, sizeof(struct fcb2_disk_area));
++        fcb2->f_active.fe_entry_num = 1;
++        fcb2->f_active.fe_data_len = 0;
++        fcb2->f_active_id++;
+     }
+-    fcb->f_oldest_sec = fcb_getnext_sector(fcb, fcb->f_oldest_sec);
++    fcb2->f_oldest_sec = fcb2_getnext_sector(fcb2, fcb2->f_oldest_sec);
+ out:
+-    os_mutex_release(&fcb->f_mtx);
++    os_mutex_release(&fcb2->f_mtx);
+     return rc;
+ }
+diff --git a/fs/fcb2/src/fcb_walk.c b/fs/fcb2/src/fcb_walk.c
+index e6e1084..43f8094 100644
+--- a/fs/fcb2/src/fcb_walk.c
++++ b/fs/fcb2/src/fcb_walk.c
+@@ -17,16 +17,16 @@
+  * under the License.
+  */
+ 
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ #include "fcb_priv.h"
+ 
+ int
+-fcb_get_sector_loc(const struct fcb *fcb, int sector, struct fcb_entry *entry)
++fcb2_get_sector_loc(const struct fcb2 *fcb2, int sector, struct fcb2_entry *entry)
+ {
+-    struct fcb_sector_info info;
++    struct fcb2_sector_info info;
+     int rc = 0;
+ 
+-    rc = fcb_get_sector_info(fcb, sector, &info);
++    rc = fcb2_get_sector_info(fcb2, sector, &info);
+     if (rc == 0) {
+         entry->fe_range = info.si_range;
+         entry->fe_sector = info.si_sector_in_range +
+@@ -41,30 +41,30 @@ fcb_get_sector_loc(const struct fcb *fcb, int sector, struct fcb_entry *entry)
+  * only elements with that flash_area are reported.
+  */
+ int
+-fcb_walk(struct fcb *fcb, int sector, fcb_walk_cb cb, void *cb_arg)
++fcb2_walk(struct fcb2 *fcb2, int sector, fcb2_walk_cb cb, void *cb_arg)
+ {
+-    struct fcb_entry loc;
++    struct fcb2_entry loc;
+     int rc;
+ 
+-    fcb_get_sector_loc(fcb, sector, &loc);
++    fcb2_get_sector_loc(fcb2, sector, &loc);
+     loc.fe_data_off = 0;
+     loc.fe_entry_num = 0;
+ 
+-    rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    rc = os_mutex_pend(&fcb2->f_mtx, OS_WAIT_FOREVER);
+     if (rc && rc != OS_NOT_STARTED) {
+-        return FCB_ERR_ARGS;
++        return FCB2_ERR_ARGS;
+     }
+-    while ((rc = fcb_getnext_nolock(fcb, &loc)) != FCB_ERR_NOVAR) {
+-        os_mutex_release(&fcb->f_mtx);
+-        if (sector != FCB_SECTOR_OLDEST && loc.fe_sector != sector) {
++    while ((rc = fcb2_getnext_nolock(fcb2, &loc)) != FCB2_ERR_NOVAR) {
++        os_mutex_release(&fcb2->f_mtx);
++        if (sector != FCB2_SECTOR_OLDEST && loc.fe_sector != sector) {
+             return 0;
+         }
+         rc = cb(&loc, cb_arg);
+         if (rc) {
+             return rc;
+         }
+-        os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++        os_mutex_pend(&fcb2->f_mtx, OS_WAIT_FOREVER);
+     }
+-    os_mutex_release(&fcb->f_mtx);
++    os_mutex_release(&fcb2->f_mtx);
+     return 0;
+ }
+diff --git a/sys/config/include/config/config_fcb2.h b/sys/config/include/config/config_fcb2.h
+index 7072521..aee4426 100644
+--- a/sys/config/include/config/config_fcb2.h
++++ b/sys/config/include/config/config_fcb2.h
+@@ -21,6 +21,7 @@
+ 
+ #include "config/config.h"
+ #include "config/config_store.h"
++#include "fcb/fcb2.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -28,7 +29,7 @@ extern "C" {
+ 
+ struct conf_fcb2 {
+     struct conf_store cf2_store;
+-    struct fcb cf2_fcb;
++    struct fcb2 cf2_fcb;
+ };
+ 
+ /**
+diff --git a/sys/config/include/config/config_generic_kv.h b/sys/config/include/config/config_generic_kv.h
+index d9997c3..df21410 100644
+--- a/sys/config/include/config/config_generic_kv.h
++++ b/sys/config/include/config/config_generic_kv.h
+@@ -21,12 +21,51 @@
+ 
+ #include <stddef.h>
+ #include "config/config.h"
+-#include "fcb/fcb.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+ 
++#if MYNEWT_VAL(CONFIG_FCB2)
++#include "fcb/fcb2.h"
++
++/**
++ * Load value for given key from FCB2 key-value storage area
++ *
++ * This loads latest value set for given key from FCB2 key-value storage area.
++ * The FCB2 kv store can be any FCB2 provided by application, however it's up to
++ * application to make sure such FCB2 was not used for other purposes. Trying to
++ * load value from FCB2 which was used for other purposes may yield undefined
++ * results.
++ *
++ * The returned value is always null-terminated.
++ *
++ * @param fcb2    FCB2 with kv store
++ * @param name   Key name to load
++ * @param value  Buffer to store value
++ * @param len    Length of buffer
++ *
++ * @return OS_OK on success, error code otherwise
++ */
++int conf_fcb2_kv_load(struct fcb2 *fcb2, const char *name, char *value, size_t len);
++
++/**
++ * Store value for given key to FCB2 key-value storage area
++ *
++ * This stores new value for given key to FCB2 key-value storage area.
++ * The FCB2 kv store can be any FCB2 provided by application.
++ *
++ * @param fcb2    FCB2 with kv store
++ * @param name   Key name to store
++ * @param value  Value to store
++ *
++ * @return OS_OK on success, error code otherwise
++ */
++int conf_fcb2_kv_save(struct fcb2 *fcb2, const char *name, const char *value);
++
++#else
++#include "fcb/fcb.h"
++
+ /**
+  * Load value for given key from FCB key-value storage area
+  *
+@@ -61,6 +100,8 @@ int conf_fcb_kv_load(struct fcb *fcb, const char *name, char *value, size_t len)
+  */
+ int conf_fcb_kv_save(struct fcb *fcb, const char *name, const char *value);
+ 
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/sys/config/src/config_fcb2.c b/sys/config/src/config_fcb2.c
+index f3627ae..be8e2df 100644
+--- a/sys/config/src/config_fcb2.c
++++ b/sys/config/src/config_fcb2.c
+@@ -21,7 +21,7 @@
+ 
+ #if MYNEWT_VAL(CONFIG_FCB2)
+ 
+-#include <fcb/fcb.h>
++#include <fcb/fcb2.h>
+ #include <string.h>
+ 
+ #include "config/config.h"
+@@ -65,7 +65,7 @@ conf_fcb2_src(struct conf_fcb2 *cf)
+         cf->cf2_fcb.f_scratch_cnt = 0;
+     }
+     while (1) {
+-        rc = fcb_init(&cf->cf2_fcb);
++        rc = fcb2_init(&cf->cf2_fcb);
+         if (rc) {
+             return OS_INVALID_PARM;
+         }
+@@ -75,8 +75,8 @@ conf_fcb2_src(struct conf_fcb2 *cf)
+          * situation is recognized by checking if the scratch block is missing.
+          */
+         if (cf->cf2_fcb.f_scratch_cnt &&
+-            fcb_free_sector_cnt(&cf->cf2_fcb) < 1) {
+-            fcb_sector_erase(&cf->cf2_fcb, cf->cf2_fcb.f_active.fe_sector);
++            fcb2_free_sector_cnt(&cf->cf2_fcb) < 1) {
++            fcb2_sector_erase(&cf->cf2_fcb, cf->cf2_fcb.f_active.fe_sector);
+         } else {
+             break;
+         }
+@@ -98,7 +98,7 @@ conf_fcb2_dst(struct conf_fcb2 *cf)
+ }
+ 
+ static int
+-conf_fcb2_load_cb(struct fcb_entry *loc, void *arg)
++conf_fcb2_load_cb(struct fcb2_entry *loc, void *arg)
+ {
+     struct conf_fcb2_load_cb_arg *argp;
+     char buf[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
+@@ -114,7 +114,7 @@ conf_fcb2_load_cb(struct fcb_entry *loc, void *arg)
+         len = sizeof(buf) - 1;
+     }
+ 
+-    rc = fcb_read(loc, 0, buf, len);
++    rc = fcb2_read(loc, 0, buf, len);
+     if (rc) {
+         return 0;
+     }
+@@ -137,7 +137,7 @@ conf_fcb2_load(struct conf_store *cs, conf_store_load_cb cb, void *cb_arg)
+ 
+     arg.cb = cb;
+     arg.cb_arg = cb_arg;
+-    rc = fcb_walk(&cf->cf2_fcb, FCB_SECTOR_OLDEST, conf_fcb2_load_cb, &arg);
++    rc = fcb2_walk(&cf->cf2_fcb, FCB2_SECTOR_OLDEST, conf_fcb2_load_cb, &arg);
+     if (rc) {
+         return OS_EINVAL;
+     }
+@@ -145,11 +145,11 @@ conf_fcb2_load(struct conf_store *cs, conf_store_load_cb cb, void *cb_arg)
+ }
+ 
+ static int
+-conf_fcb2_var_read(struct fcb_entry *loc, char *buf, char **name, char **val)
++conf_fcb2_var_read(struct fcb2_entry *loc, char *buf, char **name, char **val)
+ {
+     int rc;
+ 
+-    rc = fcb_read(loc, 0, buf, loc->fe_data_len);
++    rc = fcb2_read(loc, 0, buf, loc->fe_data_len);
+     if (rc) {
+         return rc;
+     }
+@@ -159,7 +159,7 @@ conf_fcb2_var_read(struct fcb_entry *loc, char *buf, char **name, char **val)
+ }
+ 
+ static void
+-conf_fcb2_compress_internal(struct fcb *fcb,
++conf_fcb2_compress_internal(struct fcb2 *fcb2,
+                             int (*copy_or_not)(const char *name, const char *val,
+                                                void *cn_arg),
+                             void *cn_arg)
+@@ -167,21 +167,21 @@ conf_fcb2_compress_internal(struct fcb *fcb,
+     int rc;
+     char buf1[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
+     char buf2[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
+-    struct fcb_entry loc1;
+-    struct fcb_entry loc2;
++    struct fcb2_entry loc1;
++    struct fcb2_entry loc2;
+     char *name1, *val1;
+     char *name2, *val2;
+     int copy;
+ 
+-    rc = fcb_append_to_scratch(fcb);
++    rc = fcb2_append_to_scratch(fcb2);
+     if (rc) {
+         return; /* XXX */
+     }
+ 
+     loc1.fe_range = NULL;
+     loc1.fe_entry_num = 0;
+-    while (fcb_getnext(fcb, &loc1) == 0) {
+-        if (loc1.fe_sector != fcb->f_oldest_sec) {
++    while (fcb2_getnext(fcb2, &loc1) == 0) {
++        if (loc1.fe_sector != fcb2->f_oldest_sec) {
+             break;
+         }
+         rc = conf_fcb2_var_read(&loc1, buf1, &name1, &val1);
+@@ -193,7 +193,7 @@ conf_fcb2_compress_internal(struct fcb *fcb,
+         }
+         loc2 = loc1;
+         copy = 1;
+-        while (fcb_getnext(fcb, &loc2) == 0) {
++        while (fcb2_getnext(fcb2, &loc2) == 0) {
+             rc = conf_fcb2_var_read(&loc2, buf2, &name2, &val2);
+             if (rc) {
+                 continue;
+@@ -216,21 +216,21 @@ conf_fcb2_compress_internal(struct fcb *fcb,
+         /*
+          * Can't find one. Must copy.
+          */
+-        rc = fcb_read(&loc1, 0, buf1, loc1.fe_data_len);
++        rc = fcb2_read(&loc1, 0, buf1, loc1.fe_data_len);
+         if (rc) {
+             continue;
+         }
+-        rc = fcb_append(fcb, loc1.fe_data_len, &loc2);
++        rc = fcb2_append(fcb2, loc1.fe_data_len, &loc2);
+         if (rc) {
+             continue;
+         }
+-        rc = fcb_write(&loc2, 0, buf1, loc1.fe_data_len);
++        rc = fcb2_write(&loc2, 0, buf1, loc1.fe_data_len);
+         if (rc) {
+             continue;
+         }
+-        fcb_append_finish(&loc2);
++        fcb2_append_finish(&loc2);
+     }
+-    rc = fcb_rotate(fcb);
++    rc = fcb2_rotate(fcb2);
+     if (rc) {
+         /* XXXX */
+         ;
+@@ -238,30 +238,30 @@ conf_fcb2_compress_internal(struct fcb *fcb,
+ }
+ 
+ static int
+-conf_fcb2_append(struct fcb *fcb, char *buf, int len)
++conf_fcb2_append(struct fcb2 *fcb2, char *buf, int len)
+ {
+     int rc;
+     int i;
+-    struct fcb_entry loc;
++    struct fcb2_entry loc;
+ 
+     for (i = 0; i < 10; i++) {
+-        rc = fcb_append(fcb, len, &loc);
+-        if (rc != FCB_ERR_NOSPACE) {
++        rc = fcb2_append(fcb2, len, &loc);
++        if (rc != FCB2_ERR_NOSPACE) {
+             break;
+         }
+-        if (fcb->f_scratch_cnt == 0) {
++        if (fcb2->f_scratch_cnt == 0) {
+             return OS_ENOMEM;
+         }
+-        conf_fcb2_compress_internal(fcb, NULL, NULL);
++        conf_fcb2_compress_internal(fcb2, NULL, NULL);
+     }
+     if (rc) {
+         return OS_EINVAL;
+     }
+-    rc = fcb_write(&loc, 0, buf, len);
++    rc = fcb2_write(&loc, 0, buf, len);
+     if (rc) {
+         return OS_EINVAL;
+     }
+-    fcb_append_finish(&loc);
++    fcb2_append_finish(&loc);
+     return OS_OK;
+ }
+ 
+@@ -270,7 +270,7 @@ conf_fcb2_save(struct conf_store *cs, const char *name, const char *value)
+ {
+     struct conf_fcb2 *cf = (struct conf_fcb2 *)cs;
+ 
+-    return conf_fcb_kv_save(&cf->cf2_fcb, name, value);
++    return conf_fcb2_kv_save(&cf->cf2_fcb, name, value);
+ }
+ 
+ void
+@@ -283,7 +283,7 @@ conf_fcb2_compress(struct conf_fcb2 *cf,
+ }
+ 
+ static int
+-conf_kv_load_cb(struct fcb_entry *loc, void *arg)
++conf_kv_load_cb(struct fcb2_entry *loc, void *arg)
+ {
+     struct conf_kv_load_cb_arg *cb_arg = arg;
+     char buf[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
+@@ -297,7 +297,7 @@ conf_kv_load_cb(struct fcb_entry *loc, void *arg)
+         len = sizeof(buf) - 1;
+     }
+ 
+-    rc = fcb_read(loc, 0, buf, len);
++    rc = fcb2_read(loc, 0, buf, len);
+     if (rc) {
+         return 0;
+     }
+@@ -319,7 +319,7 @@ conf_kv_load_cb(struct fcb_entry *loc, void *arg)
+ }
+ 
+ int
+-conf_fcb_kv_load(struct fcb *fcb, const char *name, char *value, size_t len)
++conf_fcb2_kv_load(struct fcb2 *fcb2, const char *name, char *value, size_t len)
+ {
+     struct conf_kv_load_cb_arg arg;
+     int rc;
+@@ -328,7 +328,7 @@ conf_fcb_kv_load(struct fcb *fcb, const char *name, char *value, size_t len)
+     arg.value = value;
+     arg.len = len;
+ 
+-    rc = fcb_walk(fcb, 0, conf_kv_load_cb, &arg);
++    rc = fcb2_walk(fcb2, 0, conf_kv_load_cb, &arg);
+     if (rc) {
+         return OS_EINVAL;
+     }
+@@ -337,7 +337,7 @@ conf_fcb_kv_load(struct fcb *fcb, const char *name, char *value, size_t len)
+ }
+ 
+ int
+-conf_fcb_kv_save(struct fcb *fcb, const char *name, const char *value)
++conf_fcb2_kv_save(struct fcb2 *fcb2, const char *name, const char *value)
+ {
+     char buf[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
+     int len;
+@@ -350,7 +350,7 @@ conf_fcb_kv_save(struct fcb *fcb, const char *name, const char *value)
+     if (len < 0 || len + 2 > sizeof(buf)) {
+         return OS_INVALID_PARM;
+     }
+-    return conf_fcb2_append(fcb, buf, len);
++    return conf_fcb2_append(fcb2, buf, len);
+ }
+ 
+ #endif
+diff --git a/sys/log/full/include/log/log_fcb.h b/sys/log/full/include/log/log_fcb.h
+index 05e52f0..bacb65b 100644
+--- a/sys/log/full/include/log/log_fcb.h
++++ b/sys/log/full/include/log/log_fcb.h
+@@ -23,12 +23,20 @@
+ extern "C" {
+ #endif
+ 
++#if MYNEWT_VAL(LOG_FCB2)
++#include <fcb/fcb2.h>
++#else
+ #include <fcb/fcb.h>
++#endif
+ 
+ /** An individual fcb log bookmark. */
+ struct log_fcb_bmark {
+     /* FCB entry that the bookmark points to. */
++#if MYNEWT_VAL(LOG_FCB2)
++    struct fcb2_entry lfb_entry;
++#else
+     struct fcb_entry lfb_entry;
++#endif
+ 
+     /* The index of the log entry that the FCB entry contains. */
+     uint32_t lfb_index;
+@@ -53,7 +61,11 @@ struct log_fcb_bset {
+  * fcb_log is needed as the number of entries in a log
+  */
+ struct fcb_log {
++#if MYNEWT_VAL(LOG_FCB2)
++    struct fcb2 fl_fcb;
++#else
+     struct fcb fl_fcb;
++#endif
+     uint8_t fl_entries;
+ 
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+@@ -125,7 +137,12 @@ log_fcb_closest_bmark(const struct fcb_log *fcb_log, uint32_t index);
+  * @param entry                 The entry the bookmark should point to.
+  * @param index                 The log entry index of the bookmark.
+  */
+-void log_fcb_add_bmark(struct fcb_log *fcb_log, const struct fcb_entry *entry,
++void log_fcb_add_bmark(struct fcb_log *fcb_log,
++#if MYNEWT_VAL(LOG_FCB2)
++                       const struct fcb2_entry *entry,
++#else
++                       const struct fcb_entry *entry,
++#endif
+                        uint32_t index);
+ #endif
+ 
+diff --git a/sys/log/full/src/log_fcb2.c b/sys/log/full/src/log_fcb2.c
+index 6528202..2d5ee76 100644
+--- a/sys/log/full/src/log_fcb2.c
++++ b/sys/log/full/src/log_fcb2.c
+@@ -25,7 +25,7 @@
+ 
+ #include "flash_map/flash_map.h"
+ #include "log/log.h"
+-#include "fcb/fcb.h"
++#include "fcb/fcb2.h"
+ 
+ /* Assume the flash alignment requirement is no stricter than 8. */
+ #define LOG_FCB2_MAX_ALIGN   8
+@@ -54,14 +54,14 @@ static int log_fcb2_rtr_erase(struct log *log);
+  */
+ static int
+ log_fcb2_find_gte(struct log *log, struct log_offset *log_offset,
+-                  struct fcb_entry *out_entry)
++                  struct fcb2_entry *out_entry)
+ {
+ #if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
+     const struct log_fcb_bmark *bmark;
+ #endif
+     struct log_entry_hdr hdr;
+     struct fcb_log *fcb_log;
+-    struct fcb *fcb;
++    struct fcb2 *fcb;
+     int rc;
+ 
+     fcb_log = log->l_arg;
+@@ -69,8 +69,8 @@ log_fcb2_find_gte(struct log *log, struct log_offset *log_offset,
+ 
+     /* Attempt to read the last entry.  If this fails, the FCB is empty. */
+     memset(out_entry, 0, sizeof(*out_entry));
+-    rc = fcb_getprev(fcb, out_entry);
+-    if (rc == FCB_ERR_NOVAR) {
++    rc = fcb2_getprev(fcb, out_entry);
++    if (rc == FCB2_ERR_NOVAR) {
+         return SYS_ENOENT;
+     } else if (rc != 0) {
+         return SYS_EUNKNOWN;
+@@ -98,7 +98,7 @@ log_fcb2_find_gte(struct log *log, struct log_offset *log_offset,
+      * Start from beginning.
+      */
+     memset(out_entry, 0, sizeof(*out_entry));
+-    rc = fcb_getnext(fcb, out_entry);
++    rc = fcb2_getnext(fcb, out_entry);
+     if (rc != 0) {
+         return SYS_EUNKNOWN;
+     }
+@@ -119,15 +119,15 @@ log_fcb2_find_gte(struct log *log, struct log_offset *log_offset,
+         if (hdr.ue_index >= log_offset->lo_index) {
+             return 0;
+         }
+-    } while (fcb_getnext(fcb, out_entry) == 0);
++    } while (fcb2_getnext(fcb, out_entry) == 0);
+ 
+     return SYS_ENOENT;
+ }
+ 
+ static int
+-log_fcb2_start_append(struct log *log, int len, struct fcb_entry *loc)
++log_fcb2_start_append(struct log *log, int len, struct fcb2_entry *loc)
+ {
+-    struct fcb *fcb;
++    struct fcb2 *fcb;
+     struct fcb_log *fcb_log;
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+     int old_sec;
+@@ -141,12 +141,12 @@ log_fcb2_start_append(struct log *log, int len, struct fcb_entry *loc)
+     fcb = &fcb_log->fl_fcb;
+ 
+     while (1) {
+-        rc = fcb_append(fcb, len, loc);
++        rc = fcb2_append(fcb, len, loc);
+         if (rc == 0) {
+             break;
+         }
+ 
+-        if (rc != FCB_ERR_NOSPACE) {
++        if (rc != FCB2_ERR_NOSPACE) {
+             goto err;
+         }
+ 
+@@ -163,7 +163,7 @@ log_fcb2_start_append(struct log *log, int len, struct fcb_entry *loc)
+ #endif
+ 
+ #if MYNEWT_VAL(LOG_STATS)
+-        rc = fcb_area_info(fcb, FCB_SECTOR_OLDEST, &cnt, NULL);
++        rc = fcb2_area_info(fcb, FCB2_SECTOR_OLDEST, &cnt, NULL);
+         if (rc == 0) {
+             LOG_STATS_INCN(log, lost, cnt);
+         }
+@@ -174,7 +174,7 @@ log_fcb2_start_append(struct log *log, int len, struct fcb_entry *loc)
+         log_fcb_clear_bmarks(fcb_log);
+ #endif
+ 
+-        rc = fcb_rotate(fcb);
++        rc = fcb2_rotate(fcb);
+         if (rc) {
+             goto err;
+         }
+@@ -223,7 +223,7 @@ log_fcb2_append_body(struct log *log, const struct log_entry_hdr *hdr,
+ {
+     uint8_t buf[LOG_BASE_ENTRY_HDR_SIZE + LOG_IMG_HASHLEN +
+                 LOG_FCB2_MAX_ALIGN - 1];
+-    struct fcb_entry loc;
++    struct fcb2_entry loc;
+     const uint8_t *u8p;
+     int hdr_alignment;
+     int chunk_sz;
+@@ -262,7 +262,7 @@ log_fcb2_append_body(struct log *log, const struct log_entry_hdr *hdr,
+     }
+     memcpy(buf + hdr_len, u8p, hdr_alignment);
+ 
+-    rc = fcb_write(&loc, 0, buf, chunk_sz);
++    rc = fcb2_write(&loc, 0, buf, chunk_sz);
+     if (rc != 0) {
+         return rc;
+     }
+@@ -273,13 +273,13 @@ log_fcb2_append_body(struct log *log, const struct log_entry_hdr *hdr,
+     body_len -= hdr_alignment;
+ 
+     if (body_len > 0) {
+-        rc = fcb_write(&loc, chunk_sz, u8p, body_len);
++        rc = fcb2_write(&loc, chunk_sz, u8p, body_len);
+         if (rc != 0) {
+             return rc;
+         }
+     }
+ 
+-    rc = fcb_append_finish(&loc);
++    rc = fcb2_append_finish(&loc);
+     if (rc != 0) {
+         return rc;
+     }
+@@ -299,12 +299,12 @@ log_fcb2_append(struct log *log, void *buf, int len)
+ }
+ 
+ static int
+-log_fcb2_write_mbuf(struct fcb_entry *loc, struct os_mbuf *om, int off)
++log_fcb2_write_mbuf(struct fcb2_entry *loc, struct os_mbuf *om, int off)
+ {
+     int rc;
+ 
+     while (om) {
+-        rc = fcb_write(loc, off, om->om_data, om->om_len);
++        rc = fcb2_write(loc, off, om->om_data, om->om_len);
+         if (rc != 0) {
+             return SYS_EIO;
+         }
+@@ -320,7 +320,7 @@ static int
+ log_fcb2_append_mbuf_body(struct log *log, const struct log_entry_hdr *hdr,
+                           struct os_mbuf *om)
+ {
+-    struct fcb_entry loc;
++    struct fcb2_entry loc;
+     int len;
+     int rc;
+ 
+@@ -342,7 +342,7 @@ log_fcb2_append_mbuf_body(struct log *log, const struct log_entry_hdr *hdr,
+         return rc;
+     }
+ 
+-    rc = fcb_write(&loc, 0, hdr, LOG_BASE_ENTRY_HDR_SIZE);
++    rc = fcb2_write(&loc, 0, hdr, LOG_BASE_ENTRY_HDR_SIZE);
+     if (rc != 0) {
+         return rc;
+     }
+@@ -350,7 +350,7 @@ log_fcb2_append_mbuf_body(struct log *log, const struct log_entry_hdr *hdr,
+ 
+     if (hdr->ue_flags & LOG_FLAGS_IMG_HASH) {
+         /* Write LOG_IMG_HASHLEN bytes of image hash */
+-        rc = fcb_write(&loc, len, hdr->ue_imghash, LOG_IMG_HASHLEN);
++        rc = fcb2_write(&loc, len, hdr->ue_imghash, LOG_IMG_HASHLEN);
+         if (rc != 0) {
+             return rc;
+         }
+@@ -362,7 +362,7 @@ log_fcb2_append_mbuf_body(struct log *log, const struct log_entry_hdr *hdr,
+         return rc;
+     }
+ 
+-    rc = fcb_append_finish(&loc);
++    rc = fcb2_append_finish(&loc);
+     if (rc != 0) {
+         return rc;
+     }
+@@ -415,15 +415,15 @@ log_fcb2_append_mbuf(struct log *log, struct os_mbuf *om)
+ static int
+ log_fcb2_read(struct log *log, void *dptr, void *buf, uint16_t off, uint16_t len)
+ {
+-    struct fcb_entry *loc;
++    struct fcb2_entry *loc;
+     int rc;
+ 
+-    loc = (struct fcb_entry *)dptr;
++    loc = (struct fcb2_entry *)dptr;
+ 
+     if (off + len > loc->fe_data_len) {
+         len = loc->fe_data_len - off;
+     }
+-    rc = fcb_read(loc, off, buf, len);
++    rc = fcb2_read(loc, off, buf, len);
+     if (rc == 0) {
+         return len;
+     } else {
+@@ -435,13 +435,13 @@ static int
+ log_fcb2_read_mbuf(struct log *log, void *dptr, struct os_mbuf *om,
+                    uint16_t off, uint16_t len)
+ {
+-    struct fcb_entry *loc;
++    struct fcb2_entry *loc;
+     uint8_t data[128];
+     uint16_t read_len;
+     uint16_t rem_len;
+     int rc;
+ 
+-    loc = (struct fcb_entry *)dptr;
++    loc = (struct fcb2_entry *)dptr;
+ 
+     if (off + len > loc->fe_data_len) {
+         len = loc->fe_data_len - off;
+@@ -451,7 +451,7 @@ log_fcb2_read_mbuf(struct log *log, void *dptr, struct os_mbuf *om,
+ 
+     while (rem_len > 0) {
+         read_len = min(rem_len, sizeof(data));
+-        rc = fcb_read(loc, off, data, read_len);
++        rc = fcb2_read(loc, off, data, read_len);
+         if (rc) {
+             goto done;
+         }
+@@ -473,9 +473,9 @@ static int
+ log_fcb2_walk(struct log *log, log_walk_func_t walk_func,
+               struct log_offset *log_off)
+ {
+-    struct fcb *fcb;
++    struct fcb2 *fcb;
+     struct fcb_log *fcb_log;
+-    struct fcb_entry loc;
++    struct fcb2_entry loc;
+     int rc;
+ 
+     fcb_log = log->l_arg;
+@@ -512,7 +512,7 @@ log_fcb2_walk(struct log *log, log_walk_func_t walk_func,
+                 return 0;
+             }
+         }
+-    } while (fcb_getnext(fcb, &loc) == 0);
++    } while (fcb2_getnext(fcb, &loc) == 0);
+ 
+     return 0;
+ }
+@@ -521,7 +521,7 @@ static int
+ log_fcb2_flush(struct log *log)
+ {
+     struct fcb_log *fcb_log;
+-    struct fcb *fcb;
++    struct fcb2 *fcb;
+ 
+     fcb_log = (struct fcb_log *)log->l_arg;
+     fcb = &fcb_log->fl_fcb;
+@@ -530,18 +530,18 @@ log_fcb2_flush(struct log *log)
+     log_fcb_clear_bmarks(fcb_log);
+ #endif
+ 
+-    return fcb_clear(fcb);
++    return fcb2_clear(fcb);
+ }
+ 
+ static int
+ log_fcb2_registered(struct log *log)
+ {
+-    struct fcb *fcb;
++    struct fcb2 *fcb;
+     int i;
+     struct fcb_log *fl;
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+ #if MYNEWT_VAL(LOG_PERSIST_WATERMARK)
+-    struct fcb_entry loc;
++    struct fcb2_entry loc;
+ #endif
+ #endif
+ 
+@@ -559,7 +559,7 @@ log_fcb2_registered(struct log *log)
+     /* Set watermark to first element */
+     memset(&loc, 0, sizeof(loc));
+ 
+-    if (fcb_getnext(fcb, &loc)) {
++    if (fcb2_getnext(fcb, &loc)) {
+         fl->fl_watermark_sec = loc.fe_sector;
+         fl->fl_watermark_off = loc.fe_data_off;
+     } else {
+@@ -568,7 +568,7 @@ log_fcb2_registered(struct log *log)
+     }
+ #else
+     /* Initialize watermark to designated unknown value*/
+-    fl->fl_watermark_sec = FCB_SECTOR_OLDEST;
++    fl->fl_watermark_sec = FCB2_SECTOR_OLDEST;
+     fl->fl_watermark_off = 0xffffffff;
+ #endif
+ #endif
+@@ -580,7 +580,7 @@ static int
+ log_fcb2_storage_info(struct log *log, struct log_storage_info *info)
+ {
+     struct fcb_log *fl;
+-    struct fcb *fcb;
++    struct fcb2 *fcb;
+     int i;
+     int j;
+     int sec;
+@@ -593,7 +593,7 @@ log_fcb2_storage_info(struct log *log, struct log_storage_info *info)
+ 
+     rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
+     if (rc && rc != OS_NOT_STARTED) {
+-        return FCB_ERR_ARGS;
++        return FCB2_ERR_ARGS;
+     }
+ 
+     el_min_sec = fcb->f_oldest_sec;
+@@ -650,7 +650,7 @@ log_fcb2_storage_info(struct log *log, struct log_storage_info *info)
+         }
+     }
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+-    if (fl->fl_watermark_sec == FCB_SECTOR_OLDEST) {
++    if (fl->fl_watermark_sec == FCB2_SECTOR_OLDEST) {
+         info->used_unread = 0xffffffff;
+     }
+ #endif
+@@ -666,12 +666,12 @@ static int
+ log_fcb2_new_watermark_index(struct log *log, struct log_offset *log_off,
+                              void *dptr, uint16_t len)
+ {
+-    struct fcb_entry *loc;
++    struct fcb2_entry *loc;
+     struct fcb_log *fl;
+     struct log_entry_hdr ueh;
+     int rc;
+ 
+-    loc = (struct fcb_entry *)dptr;
++    loc = (struct fcb2_entry *)dptr;
+     fl = (struct fcb_log *)log->l_arg;
+ 
+     rc = log_fcb2_read(log, loc, &ueh, 0, sizeof(ueh));
+@@ -696,7 +696,7 @@ log_fcb2_set_watermark(struct log *log, uint32_t index)
+     int rc;
+     struct log_offset log_offset;
+     struct fcb_log *fl;
+-    struct fcb *fcb;
++    struct fcb2 *fcb;
+ 
+     fl = (struct fcb_log *)log->l_arg;
+     fcb = &fl->fl_fcb;
+@@ -734,8 +734,8 @@ done:
+  * @return 0 on success; non-zero on error
+  */
+ static int
+-log_fcb2_copy_entry(struct log *log, struct fcb_entry *entry,
+-                    struct fcb *dst_fcb)
++log_fcb2_copy_entry(struct log *log, struct fcb2_entry *entry,
++                    struct fcb2 *dst_fcb)
+ {
+     struct log_entry_hdr ueh;
+     char data[LOG_PRINTF_MAX_ENTRY_LEN + LOG_BASE_ENTRY_HDR_SIZE +
+@@ -743,7 +743,7 @@ log_fcb2_copy_entry(struct log *log, struct fcb_entry *entry,
+     uint16_t hdr_len;
+     int dlen;
+     int rc;
+-    struct fcb *fcb_tmp;
++    struct fcb2 *fcb_tmp;
+ 
+     rc = log_fcb2_read(log, entry, &ueh, 0, LOG_BASE_ENTRY_HDR_SIZE);
+     if (rc != LOG_BASE_ENTRY_HDR_SIZE) {
+@@ -785,10 +785,10 @@ err:
+  * @return 0 on success; non-zero on error
+  */
+ static int
+-log_fcb2_copy(struct log *log, struct fcb *src_fcb, struct fcb *dst_fcb,
+-              struct fcb_entry *from)
++log_fcb2_copy(struct log *log, struct fcb2 *src_fcb, struct fcb2 *dst_fcb,
++              struct fcb2_entry *from)
+ {
+-    struct fcb_entry entry;
++    struct fcb2_entry entry;
+     int rc;
+ 
+     rc = 0;
+@@ -799,8 +799,8 @@ log_fcb2_copy(struct log *log, struct fcb *src_fcb, struct fcb *dst_fcb,
+         if (rc) {
+             break;
+         }
+-        rc = fcb_getnext(src_fcb, &entry);
+-        if (rc == FCB_ERR_NOVAR) {
++        rc = fcb2_getnext(src_fcb, &entry);
++        if (rc == FCB2_ERR_NOVAR) {
+             rc = 0;
+             break;
+         }
+@@ -821,9 +821,9 @@ static int
+ log_fcb2_rtr_erase(struct log *log)
+ {
+     struct fcb_log *fcb_log;
+-    struct fcb fcb_scratch;
+-    struct fcb *fcb;
+-    struct fcb_entry entry;
++    struct fcb2 fcb_scratch;
++    struct fcb2 *fcb;
++    struct fcb2_entry entry;
+     int rc;
+     struct flash_sector_range range;
+     int range_cnt;
+@@ -851,13 +851,13 @@ log_fcb2_rtr_erase(struct log *log)
+     fcb_scratch.f_version = g_log_info.li_version;
+ 
+     flash_area_erase(&range.fsr_flash_area, 0, range.fsr_flash_area.fa_size);
+-    rc = fcb_init(&fcb_scratch);
++    rc = fcb2_init(&fcb_scratch);
+     if (rc) {
+         goto err;
+     }
+ 
+     /* Calculate offset of n-th last entry */
+-    rc = fcb_offset_last_n(fcb, fcb_log->fl_entries, &entry);
++    rc = fcb2_offset_last_n(fcb, fcb_log->fl_entries, &entry);
+     if (rc) {
+         goto err;
+     }
+@@ -875,7 +875,7 @@ log_fcb2_rtr_erase(struct log *log)
+     }
+ 
+     memset(&entry, 0, sizeof(entry));
+-    rc = fcb_getnext(&fcb_scratch, &entry);
++    rc = fcb2_getnext(&fcb_scratch, &entry);
+     if (rc) {
+         goto err;
+     }
+diff --git a/sys/log/full/src/log_fcb_bmark.c b/sys/log/full/src/log_fcb_bmark.c
+index 92e4791..12f104a 100644
+--- a/sys/log/full/src/log_fcb_bmark.c
++++ b/sys/log/full/src/log_fcb_bmark.c
+@@ -68,6 +68,34 @@ log_fcb_closest_bmark(const struct fcb_log *fcb_log, uint32_t index)
+     return closest;
+ }
+ 
++#if MYNEWT_VAL(LOG_FCB2)
++void
++log_fcb_add_bmark(struct fcb_log *fcb_log, const struct fcb2_entry *entry,
++                  uint32_t index)
++{
++    struct log_fcb_bset *bset;
++
++    bset = &fcb_log->fl_bset;
++
++    if (bset->lfs_cap == 0) {
++        return;
++    }
++
++    bset->lfs_bmarks[bset->lfs_next] = (struct log_fcb_bmark) {
++        .lfb_entry = *entry,
++        .lfb_index = index,
++    };
++
++    if (bset->lfs_size < bset->lfs_cap) {
++        bset->lfs_size++;
++    }
++
++    bset->lfs_next++;
++    if (bset->lfs_next >= bset->lfs_cap) {
++        bset->lfs_next = 0;
++    }
++}
++#else
+ void
+ log_fcb_add_bmark(struct fcb_log *fcb_log, const struct fcb_entry *entry,
+                   uint32_t index)
+@@ -94,5 +122,6 @@ log_fcb_add_bmark(struct fcb_log *fcb_log, const struct fcb_entry *entry,
+         bset->lfs_next = 0;
+     }
+ }
++#endif
+ 
+ #endif /* MYNEWT_VAL(LOG_FCB_BOOKMARKS) */
+diff --git a/sys/reboot/src/log_reboot.c b/sys/reboot/src/log_reboot.c
+index 24e335f..ea5ca79 100644
+--- a/sys/reboot/src/log_reboot.c
++++ b/sys/reboot/src/log_reboot.c
+@@ -31,8 +31,12 @@
+ #include "flash_map/flash_map.h"
+ 
+ #if MYNEWT_VAL(REBOOT_LOG_FCB)
++#if MYNEWT_VAL(LOG_FCB2)
++#include "fcb/fcb2.h"
++#else
+ #include "fcb/fcb.h"
+ #endif
++#endif
+ 
+ uint16_t reboot_cnt;
+ static char reboot_cnt_str[12];
+@@ -86,7 +90,7 @@ static int
+ log_reboot_init_fcb(void)
+ {
+     const struct flash_area *ptr;
+-    struct fcb *fcbp;
++    struct fcb2 *fcbp;
+     int rc;
+ 
+     if (flash_area_open(MYNEWT_VAL(REBOOT_LOG_FLASH_AREA), &ptr)) {
+@@ -113,10 +117,18 @@ log_reboot_init_fcb(void)
+ #endif
+     reboot_log_fcb.fl_entries = MYNEWT_VAL(REBOOT_LOG_ENTRY_COUNT);
+ 
++    #if MYNEWT_VAL(LOG_FCB2)
++    rc = fcb2_init(fcbp);
++#else
+     rc = fcb_init(fcbp);
++#endif
+     if (rc) {
+         flash_area_erase(ptr, 0, ptr->fa_size);
+-        rc = fcb_init(fcbp);
++        #if MYNEWT_VAL(LOG_FCB2)
++    rc = fcb2_init(fcbp);
++#else
++    rc = fcb_init(fcbp);
++#endif
+         if (rc) {
+             return rc;
+         }

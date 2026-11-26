@@ -1,0 +1,85 @@
+diff --git a/sys/log/modlog/src/modlog.c b/sys/log/modlog/src/modlog.c
+index 3264b07..28f2747 100644
+--- a/sys/log/modlog/src/modlog.c
++++ b/sys/log/modlog/src/modlog.c
+@@ -223,7 +223,7 @@ modlog_append_one(struct modlog_mapping *mm, uint8_t module, uint8_t level,
+     int rc;
+ 
+     if (level >= mm->desc.min_level) {
+-        rc = log_append_typed(mm->desc.log, module,
++        rc = log_append_body(mm->desc.log, module,
+                               level, etype, data, len);
+         if (rc != 0) {
+             return SYS_EIO;
+@@ -273,12 +273,12 @@ modlog_append_no_lock(uint8_t module, uint8_t level, uint8_t etype,
+ 
+ static int
+ modlog_append_mbuf_one(struct modlog_mapping *mm, uint8_t module,
+-                       uint8_t level, uint8_t etype, struct os_mbuf **om)
++                       uint8_t level, uint8_t etype, struct os_mbuf *om)
+ {
+     int rc;
+ 
+     if (level >= mm->desc.min_level) {
+-        rc = log_append_mbuf_typed_no_free(mm->desc.log, module,
++        rc = log_append_mbuf_body(mm->desc.log, module,
+                                            level, etype, om);
+         if (rc != 0) {
+             return SYS_EIO;
+@@ -293,6 +293,7 @@ modlog_append_mbuf_no_lock(uint8_t module, uint8_t level, uint8_t etype,
+                            struct os_mbuf *om)
+ {
+     struct modlog_mapping *mm;
++    struct os_mbuf *om_copy;
+     bool found;
+     int rc;
+ 
+@@ -301,8 +302,17 @@ modlog_append_mbuf_no_lock(uint8_t module, uint8_t level, uint8_t etype,
+         if (mm->desc.module == module) {
+             found = true;
+ 
+-            rc = modlog_append_mbuf_one(mm, module, level, etype, &om);
++            /* Duplicate mbuf for each handler; log_append_mbuf_body
++             * takes ownership.
++             */
++            om_copy = os_mbuf_dup(om);
++            if (om_copy == NULL) {
++                return SYS_ENOMEM;
++            }
++
++            rc = modlog_append_mbuf_one(mm, module, level, etype, om_copy);
+             if (rc != 0) {
++                os_mbuf_free_chain(om_copy);
+                 return rc;
+             }
+         } else if (mm->desc.module > module) {
+@@ -316,8 +326,14 @@ modlog_append_mbuf_no_lock(uint8_t module, uint8_t level, uint8_t etype,
+              mm != NULL;
+              mm = SLIST_NEXT(mm, next)) {
+ 
+-            rc = modlog_append_mbuf_one(mm, module, level, etype, &om);
++            om_copy = os_mbuf_dup(om);
++            if (om_copy == NULL) {
++                return SYS_ENOMEM;
++            }
++
++            rc = modlog_append_mbuf_one(mm, module, level, etype, om_copy);
+             if (rc != 0) {
++                os_mbuf_free_chain(om_copy);
+                 return rc;
+             }
+         }
+@@ -455,11 +471,11 @@ void
+ modlog_printf(uint16_t module, uint16_t level, const char *msg, ...)
+ {
+     va_list args;
+-    char buf[LOG_ENTRY_HDR_SIZE + MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN)];
++    char buf[MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN)];
+     int len;
+ 
+     va_start(args, msg);
+-    len = vsnprintf(buf + LOG_ENTRY_HDR_SIZE,
++    len = vsnprintf(buf,
+                     MYNEWT_VAL(MODLOG_MAX_PRINTF_LEN),
+                     msg, args);
+     va_end(args);

@@ -1,0 +1,72 @@
+diff --git a/kernel/os/include/os/os_mempool.h b/kernel/os/include/os/os_mempool.h
+index 2416ac9..805c603 100644
+--- a/kernel/os/include/os/os_mempool.h
++++ b/kernel/os/include/os/os_mempool.h
+@@ -188,6 +188,17 @@ os_error_t os_mempool_init(struct os_mempool *mp, uint16_t blocks,
+ os_error_t os_mempool_ext_init(struct os_mempool_ext *mpe, uint16_t blocks,
+                                uint32_t block_size, void *membuf, char *name);
+ 
++/**
++ * Clears (reinitializes) an already-initialized memory pool. All blocks are
++ * returned to the free list, the free counters are reset, and the free list
++ * is rebuilt.  The function may be called repeatedly on the same pool.
++ *
++ * @param mp Pointer to the memory pool.
++ *
++ * @return OS_INVALID_PARM if @p mp is NULL; otherwise OS_OK.
++ */
++os_error_t os_mempool_clear(struct os_mempool *mp);
++
+ /**
+  * Performs an integrity check of the specified mempool.  This function
+  * attempts to detect memory corruption in the specified memory pool.
+diff --git a/kernel/os/src/os_mempool.c b/kernel/os/src/os_mempool.c
+index bc1cee8..c011394 100644
+--- a/kernel/os/src/os_mempool.c
++++ b/kernel/os/src/os_mempool.c
+@@ -135,6 +135,45 @@ os_mempool_ext_init(struct os_mempool_ext *mpe, uint16_t blocks,
+     return 0;
+ }
+ 
++/**
++ * Clears (reinitializes) an already-initialized memory pool. All blocks are
++ * returned to the free list, the free counters are reset, and the free list
++ * is rebuilt.  The function may be called repeatedly on the same pool.
++ */
++os_error_t
++os_mempool_clear(struct os_mempool *mp)
++{
++    int true_block_size;
++    uint8_t *block_addr;
++    struct os_memblock *block_ptr;
++    uint16_t blocks;
++
++    if (mp == NULL) {
++        return OS_INVALID_PARM;
++    }
++
++    /* Reset counters */
++    mp->mp_num_free = mp->mp_num_blocks;
++    mp->mp_min_free = mp->mp_num_blocks;
++
++    /* Rebuild free list */
++    true_block_size = OS_MEM_TRUE_BLOCK_SIZE(mp->mp_block_size);
++    block_addr = (uint8_t *)mp->mp_membuf_addr;
++    block_ptr = (struct os_memblock *)block_addr;
++    SLIST_FIRST(mp) = block_ptr;
++    blocks = mp->mp_num_blocks;
++    while (blocks > 1) {
++        block_addr += true_block_size;
++        os_mempool_poison(block_addr, true_block_size);
++        SLIST_NEXT(block_ptr, mb_next) = (struct os_memblock *)block_addr;
++        block_ptr = (struct os_memblock *)block_addr;
++        --blocks;
++    }
++    SLIST_NEXT(block_ptr, mb_next) = NULL;
++
++    return OS_OK;
++}
++
+ bool
+ os_mempool_is_sane(const struct os_mempool *mp)
+ {

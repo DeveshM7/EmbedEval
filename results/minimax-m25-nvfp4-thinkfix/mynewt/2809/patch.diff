@@ -1,0 +1,63 @@
+diff --git a/fs/fcb2/src/fcb_append.c b/fs/fcb2/src/fcb_append.c
+index 156bb15..e53438c 100644
+--- a/fs/fcb2/src/fcb_append.c
++++ b/fs/fcb2/src/fcb_append.c
+@@ -112,10 +112,21 @@ int
+ fcb2_entry_location_in_range(const struct fcb2_entry *loc)
+ {
+     const struct flash_sector_range *range = loc->fe_range;
++    uint32_t sector_size;
++    int entry_offset;
+ 
+-    return range->fsr_sector_size *
+-        (1 + loc->fe_sector - range->fsr_first_sector) -
++    sector_size = range->fsr_sector_size *
++        (1 + loc->fe_sector - range->fsr_first_sector);
++
++    /* Check if entry would be beyond the sector */
++    entry_offset = sector_size -
+         (loc->fe_entry_num * fcb2_len_in_flash(loc->fe_range, FCB2_ENTRY_SIZE));
++
++    if (entry_offset < 0) {
++        return -1;
++    }
++
++    return entry_offset;
+ }
+ 
+ int
+diff --git a/fs/fcb2/src/fcb_elem_info.c b/fs/fcb2/src/fcb_elem_info.c
+index ea1d9b8..f7047aa 100644
+--- a/fs/fcb2/src/fcb_elem_info.c
++++ b/fs/fcb2/src/fcb_elem_info.c
+@@ -62,15 +62,19 @@ fcb2_read_entry(struct fcb2_entry *loc)
+ {
+     uint8_t buf[FCB2_ENTRY_SIZE];
+     uint8_t entry_crc;
+-    uint32_t entry_offset;
++    int entry_offset;
+     uint32_t offset;
+     uint16_t len;
+     int rc;
+ 
+     assert(loc != NULL);
+     entry_offset = fcb2_entry_location_in_range(loc);
++    if (entry_offset < 0) {
++        /* Entry location is beyond sector */
++        return FCB2_ERR_NOVAR;
++    }
+     rc = flash_area_read_is_empty(&loc->fe_range->fsr_flash_area,
+-        entry_offset, buf, sizeof(buf));
++        (uint32_t)entry_offset, buf, sizeof(buf));
+     if (rc < 0) {
+         /* Error reading from flash */
+         return FCB2_ERR_FLASH;
+@@ -89,7 +93,7 @@ fcb2_read_entry(struct fcb2_entry *loc)
+     if (offset < fcb2_len_in_flash(loc->fe_range,
+                                    sizeof(struct fcb2_disk_area)) ||
+         len > FCB2_MAX_LEN ||
+-        offset + len > entry_offset) {
++        offset + len > (uint32_t)entry_offset) {
+         /* Entry was found but data stored does not make any sense
+          * report as CRC error so it can be skipped */
+         return FCB2_ERR_CRC;

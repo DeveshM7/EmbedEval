@@ -1,0 +1,306 @@
+diff --git a/net/nimble/host/include/host/ble_hs_hci.h b/net/nimble/host/include/host/ble_hs_hci.h
+index 4b36074..e8d6439 100644
+--- a/net/nimble/host/include/host/ble_hs_hci.h
++++ b/net/nimble/host/include/host/ble_hs_hci.h
+@@ -22,6 +22,11 @@
+ 
+ #include <inttypes.h>
+ 
++/**
++ * The number of ACL data packets that the controller can accept.
++ */
++extern uint16_t ble_hs_hci_avail_pkts;
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+diff --git a/net/nimble/host/src/ble_hs_conn.c b/net/nimble/host/src/ble_hs_conn.c
+index 91a8456..0ab2d9d 100644
+--- a/net/nimble/host/src/ble_hs_conn.c
++++ b/net/nimble/host/src/ble_hs_conn.c
+@@ -217,6 +217,12 @@ ble_hs_conn_free(struct ble_hs_conn *conn)
+         ble_hs_conn_delete_chan(conn, chan);
+     }
+ 
++    /* Free any queued TX packets. */
++    if (conn->bhc_tx_q != NULL) {
++        os_mbuf_free_chain(conn->bhc_tx_q);
++        conn->bhc_tx_q = NULL;
++    }
++
+ #if MYNEWT_VAL(BLE_HS_DEBUG)
+     memset(conn, 0xff, sizeof *conn);
+ #endif
+diff --git a/net/nimble/host/src/ble_hs_conn_priv.h b/net/nimble/host/src/ble_hs_conn_priv.h
+index 56bc6d3..d8b56b3 100644
+--- a/net/nimble/host/src/ble_hs_conn_priv.h
++++ b/net/nimble/host/src/ble_hs_conn_priv.h
+@@ -21,6 +21,7 @@
+ #define H_BLE_HS_CONN_
+ 
+ #include <inttypes.h>
++#include "os/os.h"
+ #include "ble_l2cap_priv.h"
+ #include "ble_gatt_priv.h"
+ #include "ble_att_priv.h"
+@@ -36,6 +37,7 @@ typedef uint8_t ble_hs_conn_flags_t;
+ 
+ #define BLE_HS_CONN_F_MASTER        0x01
+ #define BLE_HS_CONN_F_TERMINATING   0x02
++#define BLE_HS_CONN_F_TX_FRAG      0x04
+ 
+ struct ble_hs_conn {
+     SLIST_ENTRY(ble_hs_conn) bhc_next;
+@@ -59,6 +61,9 @@ struct ble_hs_conn {
+     uint32_t bhc_rx_timeout;
+     uint16_t bhc_outstanding_pkts;
+ 
++    struct os_mbuf *bhc_tx_q;
++    struct os_mbuf *bhc_tx_q_end;
++
+     struct ble_att_svr_conn bhc_att_svr;
+     struct ble_gatts_conn bhc_gatt_svr;
+ 
+diff --git a/net/nimble/host/src/ble_hs_hci.c b/net/nimble/host/src/ble_hs_hci.c
+index 1b0a39d..ad0f910 100644
+--- a/net/nimble/host/src/ble_hs_hci.c
++++ b/net/nimble/host/src/ble_hs_hci.c
+@@ -36,6 +36,7 @@ static struct os_sem ble_hs_hci_sem;
+ static uint8_t *ble_hs_hci_ack;
+ static uint16_t ble_hs_hci_buf_sz;
+ static uint8_t ble_hs_hci_max_pkts;
++uint16_t ble_hs_hci_avail_pkts;
+ static uint32_t ble_hs_hci_sup_feat;
+ 
+ #if MYNEWT_VAL(BLE_HS_PHONY_HCI_ACKS)
+@@ -77,11 +78,12 @@ ble_hs_hci_set_buf_sz(uint16_t pktlen, uint8_t max_pkts)
+ 
+     ble_hs_hci_buf_sz = pktlen;
+     ble_hs_hci_max_pkts = max_pkts;
++    ble_hs_hci_avail_pkts = max_pkts;
+ 
+     return 0;
+ }
+ 
+-static int
++int
+ ble_hs_hci_rx_cmd_complete(uint8_t event_code, uint8_t *data, int len,
+                            struct ble_hs_hci_ack *out_ack)
+ {
+@@ -124,7 +126,7 @@ ble_hs_hci_rx_cmd_complete(uint8_t event_code, uint8_t *data, int len,
+     return 0;
+ }
+ 
+-static int
++int
+ ble_hs_hci_rx_cmd_status(uint8_t event_code, uint8_t *data, int len,
+                          struct ble_hs_hci_ack *out_ack)
+ {
+@@ -151,7 +153,7 @@ ble_hs_hci_rx_cmd_status(uint8_t event_code, uint8_t *data, int len,
+     return 0;
+ }
+ 
+-static int
++int
+ ble_hs_hci_process_ack(uint16_t expected_opcode,
+                        uint8_t *params_buf, uint8_t params_buf_len,
+                        struct ble_hs_hci_ack *out_ack)
+@@ -217,7 +219,7 @@ ble_hs_hci_process_ack(uint16_t expected_opcode,
+     return rc;
+ }
+ 
+-static int
++int
+ ble_hs_hci_wait_for_ack(void)
+ {
+     int rc;
+@@ -414,9 +416,6 @@ ble_hs_hci_acl_hdr_prepend(struct os_mbuf *om, uint16_t handle,
+ /**
+  * Transmits an HCI ACL data packet.  This function consumes the supplied mbuf,
+  * regardless of the outcome.
+- *
+- * XXX: Ensure the controller has sufficient buffer capacity for the outgoing
+- * fragments.
+  */
+ int
+ ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom)
+@@ -425,6 +424,22 @@ ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom)
+     uint8_t pb;
+     int rc;
+ 
++    /* If the controller buffer size has not been set yet, just send the packet.
++     * Otherwise, check if there are available buffers.
++     */
++    if (ble_hs_hci_buf_sz > 0 && ble_hs_hci_avail_pkts == 0) {
++        if (connection->bhc_tx_q == NULL) {
++            connection->bhc_tx_q = txom;
++        } else {
++            SLIST_NEXT(connection->bhc_tx_q_end, om_next) = txom;
++        }
++        /* Find the end of the queue */
++        connection->bhc_tx_q_end = txom;
++        /* Set the flag to indicate that we have a partial transmission */
++        connection->bhc_flags |= BLE_HS_CONN_F_TX_FRAG;
++        return 0;
++    }
++
+     /* The first fragment uses the first-non-flush packet boundary value.
+      * After sending the first fragment, pb gets set appropriately for all
+      * subsequent fragments in this packet.
+@@ -455,6 +470,7 @@ ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom)
+         }
+ 
+         connection->bhc_outstanding_pkts++;
++        ble_hs_hci_avail_pkts--;
+     }
+ 
+     return 0;
+@@ -466,6 +482,7 @@ err:
+     return rc;
+ }
+ 
++
+ void
+ ble_hs_hci_set_le_supported_feat(uint32_t feat)
+ {
+@@ -488,4 +505,37 @@ ble_hs_hci_init(void)
+ 
+     rc = os_mutex_init(&ble_hs_hci_mutex);
+     BLE_HS_DBG_ASSERT_EVAL(rc == 0);
++
++    /* Note: ble_hs_hci_avail_pkts is initialized to 0 by default.
++     * It will be set to the appropriate value when the controller buffer
++     * size is read during startup, or explicitly by ble_hs_hci_set_buf_sz.
++     */
++}
++
++/**
++ * Resume transmitting queued packets for a connection. This is called when
++ * the controller reports that packets have been completed (freed buffers).
++ */
++int
++ble_hs_hci_acl_tx_restart(struct ble_hs_conn *conn)
++{
++    struct os_mbuf *txom;
++    int rc;
++
++    while (conn->bhc_tx_q != NULL && ble_hs_hci_avail_pkts > 0) {
++        txom = conn->bhc_tx_q;
++        conn->bhc_tx_q = SLIST_NEXT(txom, om_next);
++        SLIST_NEXT(txom, om_next) = NULL;
++
++        rc = ble_hs_hci_acl_tx(conn, txom);
++        if (rc != 0) {
++            return rc;
++        }
++    }
++
++    if (conn->bhc_tx_q == NULL) {
++        conn->bhc_flags &= ~BLE_HS_CONN_F_TX_FRAG;
++    }
++
++    return 0;
+ }
+diff --git a/net/nimble/host/src/ble_hs_hci_evt.c b/net/nimble/host/src/ble_hs_hci_evt.c
+index a6e7324..5dfde19 100644
+--- a/net/nimble/host/src/ble_hs_hci_evt.c
++++ b/net/nimble/host/src/ble_hs_hci_evt.c
+@@ -214,6 +214,7 @@ ble_hs_hci_evt_num_completed_pkts(uint8_t event_code, uint8_t *data, int len)
+     uint8_t num_handles;
+     int off;
+     int i;
++    struct ble_hs_conn *conn;
+ 
+     if (len < BLE_HCI_EVENT_HDR_LEN + BLE_HCI_EVENT_NUM_COMP_PKTS_HDR_LEN) {
+         return BLE_HS_ECONTROLLER;
+@@ -232,9 +233,23 @@ ble_hs_hci_evt_num_completed_pkts(uint8_t event_code, uint8_t *data, int len)
+         num_pkts = get_le16(data + off + 2);
+         off += (2 * sizeof(uint16_t));
+ 
+-        /* XXX: Do something with these values. */
+-        (void)handle;
+-        (void)num_pkts;
++        /* Update the available packet count. */
++        ble_hs_hci_avail_pkts += num_pkts;
++
++        /* Find the connection and resume transmitting if needed. */
++        conn = ble_hs_conn_find(handle);
++        if (conn != NULL) {
++            if (conn->bhc_outstanding_pkts >= num_pkts) {
++                conn->bhc_outstanding_pkts -= num_pkts;
++            } else {
++                conn->bhc_outstanding_pkts = 0;
++            }
++
++            /* Resume transmitting queued packets for this connection. */
++            if (conn->bhc_flags & BLE_HS_CONN_F_TX_FRAG) {
++                ble_hs_hci_acl_tx_restart(conn);
++            }
++        }
+     }
+ 
+     return 0;
+diff --git a/net/nimble/host/src/ble_hs_hci_priv.h b/net/nimble/host/src/ble_hs_hci_priv.h
+index 82c63ad..e2f5793 100644
+--- a/net/nimble/host/src/ble_hs_hci_priv.h
++++ b/net/nimble/host/src/ble_hs_hci_priv.h
+@@ -164,6 +164,7 @@ uint16_t ble_hs_hci_util_handle_pb_bc_join(uint16_t handle, uint8_t pb,
+                                            uint8_t bc);
+ 
+ int ble_hs_hci_acl_tx(struct ble_hs_conn *connection, struct os_mbuf *txom);
++int ble_hs_hci_acl_tx_restart(struct ble_hs_conn *conn);
+ 
+ int ble_hs_hci_cmd_build_set_data_len(uint16_t connection_handle,
+                                       uint16_t tx_octets, uint16_t tx_time,
+diff --git a/net/nimble/host/src/ble_hs_startup.c b/net/nimble/host/src/ble_hs_startup.c
+index 8c19453..d365f14 100644
+--- a/net/nimble/host/src/ble_hs_startup.c
++++ b/net/nimble/host/src/ble_hs_startup.c
+@@ -73,6 +73,27 @@ ble_hs_startup_le_read_buf_sz_tx(void)
+     pktlen = get_le16(ack_params + 0);
+     max_pkts = ack_params[2];
+ 
++    /* If the LE buffer size is 0, use the BR/EDR buffer size instead. */
++    if (pktlen == 0 || max_pkts == 0) {
++        uint8_t br_edr_params[BLE_HCI_RD_BUF_SIZE_BR_EDR_RSPLEN];
++
++        rc = ble_hs_hci_cmd_tx(BLE_HCI_OP(BLE_HCI_OGF_CTLR_BASEBAND,
++                                         BLE_HCI_OCF_CB_RD_BUF_SIZE),
++                              NULL, 0, br_edr_params, sizeof br_edr_params,
++                              &ack_params_len);
++        if (rc != 0) {
++            return rc;
++        }
++
++        if (ack_params_len != BLE_HCI_RD_BUF_SIZE_BR_EDR_RSPLEN) {
++            return BLE_HS_ECONTROLLER;
++        }
++
++        /* Skip status byte (first byte). */
++        pktlen = get_le16(br_edr_params + 1);
++        max_pkts = br_edr_params[4];
++    }
++
+     rc = ble_hs_hci_set_buf_sz(pktlen, max_pkts);
+     if (rc != 0) {
+         return rc;
+diff --git a/net/nimble/include/nimble/hci_common.h b/net/nimble/include/nimble/hci_common.h
+index 6a9472b..b3b6a3b 100644
+--- a/net/nimble/include/nimble/hci_common.h
++++ b/net/nimble/include/nimble/hci_common.h
+@@ -67,6 +67,7 @@ extern "C" {
+ #define BLE_HCI_OCF_RD_REM_VER_INFO         (0x001D)
+ 
+ /* List of OCF for Controller and Baseband commands (OGF=0x03) */
++#define BLE_HCI_OCF_CB_RD_BUF_SIZE         (0x0002)
+ #define BLE_HCI_OCF_CB_SET_EVENT_MASK       (0x0001)
+ #define BLE_HCI_OCF_CB_RESET                (0x0003)
+ #define BLE_HCI_OCF_CB_READ_TX_PWR          (0x002D)
+@@ -194,6 +195,7 @@ extern "C" {
+ /* --- LE read buffer size (OCF 0x0002) --- */
+ #define BLE_HCI_RD_BUF_SIZE_LEN             (0)
+ #define BLE_HCI_RD_BUF_SIZE_RSPLEN          (3) /* No status byte. */
++#define BLE_HCI_RD_BUF_SIZE_BR_EDR_RSPLEN    (7) /* With status byte. */
+ 
+ /* --- LE read local supported features (OCF 0x0003) --- */
+ #define BLE_HCI_RD_LOC_SUPP_FEAT_RSPLEN     (8)

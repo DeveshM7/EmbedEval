@@ -1,0 +1,180 @@
+diff --git a/kernel/os/include/os/os_mbuf.h b/kernel/os/include/os/os_mbuf.h
+index f264d56..9ed5f8c 100644
+--- a/kernel/os/include/os/os_mbuf.h
++++ b/kernel/os/include/os/os_mbuf.h
+@@ -585,6 +585,21 @@ void os_mbuf_concat(struct os_mbuf *first, struct os_mbuf *second);
+  *                              NULL on failure.
+  */
+ void *os_mbuf_extend(struct os_mbuf *om, uint16_t len);
++/**
++ * Inserts an uninitialized gap of len bytes at off within the mbuf
++ * chain om. The data before off remains unchanged, the data after
++ * off is shifted forward, and the packet header length (if present) is
++ * increased by len.
++ *
++ * @param om   The mbuf chain to modify.
++ * @param off  Insertion offset (0 u2264 off u2264 current length).
++ * @param len  Number of bytes to insert.
++ *
++ * @return 0 on success, SYS_EINVAL for an invalid off or SYS_ENOMEM if the
++ *         required capacity cannot be allocated.  On error the original chain
++ *         is left unchanged and no memory is leaked.
++ */
++int os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len);
+ 
+ /**
+  * Rearrange a mbuf chain so that len bytes are contiguous,
+diff --git a/kernel/os/src/os_mbuf_widen.c b/kernel/os/src/os_mbuf_widen.c
+new file mode 100644
+index 0000000..984caa8
+--- /dev/null
++++ b/kernel/os/src/os_mbuf_widen.c
+@@ -0,0 +1,120 @@
++#include "os/os.h"
++#include <string.h>
++#include "os/os_mbuf.h"
++#include "defs/error.h"
++
++int
++os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len)
++{
++    struct os_mbuf *cur, *gap_head = NULL, *gap_tail = NULL;
++    uint16_t cur_off;
++    uint16_t total_len = 0;
++    uint16_t remain;
++    struct os_mbuf_pool *pool;
++    struct os_mbuf *next;
++    uint16_t tail_len;
++    uint16_t copy_len;
++    uint16_t to_copy;
++
++    if (om == NULL) {
++        return SYS_EINVAL;
++    }
++
++    /* Compute total length */
++    for (cur = om; cur != NULL; cur = SLIST_NEXT(cur, om_next)) {
++        total_len += cur->om_len;
++    }
++
++    if (off > total_len) {
++        return SYS_EINVAL;
++    }
++
++    if (len == 0) {
++        return 0;
++    }
++
++    pool = om->om_omp;
++    remain = len;
++    while (remain > 0) {
++        struct os_mbuf *newm = os_mbuf_get(pool, 0);
++        if (!newm) {
++            if (gap_head) {
++                os_mbuf_free_chain(gap_head);
++            }
++            return SYS_ENOMEM;
++        }
++        newm->om_len = min(pool->omp_databuf_len, remain);
++        remain -= newm->om_len;
++        if (!gap_head) {
++            gap_head = gap_tail = newm;
++        } else {
++            SLIST_NEXT(gap_tail, om_next) = newm;
++            gap_tail = newm;
++        }
++    }
++
++    /* Insert at end */
++    if (off == total_len) {
++        cur = om;
++        while (SLIST_NEXT(cur, om_next) != NULL) {
++            cur = SLIST_NEXT(cur, om_next);
++        }
++        SLIST_NEXT(cur, om_next) = gap_head;
++        if (OS_MBUF_IS_PKTHDR(om)) {
++            OS_MBUF_PKTHDR(om)->omp_len += len;
++        }
++        return 0;
++    }
++
++    cur = os_mbuf_off(om, off, &cur_off);
++    if (!cur) {
++        os_mbuf_free_chain(gap_head);
++        return SYS_EINVAL;
++    }
++
++    if (cur_off == cur->om_len) {
++        next = SLIST_NEXT(cur, om_next);
++        SLIST_NEXT(cur, om_next) = gap_head;
++        SLIST_NEXT(gap_tail, om_next) = next;
++        if (OS_MBUF_IS_PKTHDR(om)) {
++            OS_MBUF_PKTHDR(om)->omp_len += len;
++        }
++        return 0;
++    }
++
++    /* Split current mbuf */
++    tail_len = cur->om_len - cur_off;
++    struct os_mbuf *tail_head = NULL, *tail_tail = NULL;
++    to_copy = tail_len;
++    const uint8_t *src = cur->om_data + cur_off;
++    while (to_copy > 0) {
++        struct os_mbuf *newm = os_mbuf_get(pool, 0);
++        if (!newm) {
++            os_mbuf_free_chain(gap_head);
++            os_mbuf_free_chain(tail_head);
++            return SYS_ENOMEM;
++        }
++        copy_len = min(pool->omp_databuf_len, to_copy);
++        newm->om_len = copy_len;
++        memcpy(newm->om_data, src, copy_len);
++        src += copy_len;
++        to_copy -= copy_len;
++        if (!tail_head) {
++            tail_head = tail_tail = newm;
++        } else {
++            SLIST_NEXT(tail_tail, om_next) = newm;
++            tail_tail = newm;
++        }
++    }
++
++    cur->om_len = cur_off;
++    next = SLIST_NEXT(cur, om_next);
++    SLIST_NEXT(cur, om_next) = gap_head;
++    SLIST_NEXT(gap_tail, om_next) = tail_head;
++    SLIST_NEXT(tail_tail, om_next) = next;
++
++    if (OS_MBUF_IS_PKTHDR(om)) {
++        OS_MBUF_PKTHDR(om)->omp_len += len;
++    }
++    return 0;
++}
+diff --git a/mbuf_widen.patch b/mbuf_widen.patch
+new file mode 100644
+index 0000000..6c831ff
+--- /dev/null
++++ b/mbuf_widen.patch
+@@ -0,0 +1,22 @@
++*** Begin Patch
++*** Update File: kernel/os/include/os/os_mbuf.h
++@@
++ int os_mbuf_adj(struct os_mbuf *mp, int req_len);
++@@
++ void *os_mbuf_extend(struct os_mbuf *om, uint16_t len);
+++/**
+++ * Inserts an uninitialized gap of ``len`` bytes at ``off`` within the mbuf
+++ * chain ``om``. The data before ``off`` remains unchanged, the data after ``off``
+++ * is shifted forward, and the packet header length (if present) is increased by
+++ * ``len``.
+++ *
+++ * @param om   The mbuf chain to modify.
+++ * @param off  Insertion offset (0 ≤ off ≤ current length).
+++ * @param len  Number of bytes to insert.
+++ *
+++ * @return 0 on success, SYS_EINVAL for an invalid ``off`` or SYS_ENOMEM if the
+++ *         required capacity cannot be allocated.  On error the original chain
+++ *         is left unchanged and no memory is leaked.
+++ */
+++int os_mbuf_widen(struct os_mbuf *om, uint16_t off, uint16_t len);
++*** End Patch

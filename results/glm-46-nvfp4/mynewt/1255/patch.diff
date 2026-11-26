@@ -1,0 +1,191 @@
+diff --git a/hw/sensor/include/sensor/sensor.h b/hw/sensor/include/sensor/sensor.h
+index 57c59b8..6270591 100644
+--- a/hw/sensor/include/sensor/sensor.h
++++ b/hw/sensor/include/sensor/sensor.h
+@@ -267,6 +267,33 @@ struct sensor_listener {
+     SLIST_ENTRY(sensor_listener) sl_next;
+ };
+ 
++
++/**
++ * Error callback function type
++ */
++typedef void (*sensor_err_func_t)(struct sensor *sensor, void *arg, int status, sensor_type_t type);
++
++/**
++ * Sensor error listener structure.
++ */
++struct sensor_err_listener {
++    /* The type of sensor data to listen for errors, this is interpreted as a
++     * mask, and this listener is called for all sensor types on this
++     * sensor that match the mask.
++     */
++    sensor_type_t sel_sensor_type;
++
++    /* Sensor error handler function, called when read fails */
++    sensor_err_func_t sel_func;
++
++    /* Argument for the sensor error listener */
++    void *sel_arg;
++
++    /* Next item in the sensor error listener list.  The head of this list is
++     * contained within the sensor object.
++     */
++    SLIST_ENTRY(sensor_err_listener) sel_next;
++};
+ /**
+  * Registration for sensor event notifications
+  */
+@@ -579,6 +606,10 @@ struct sensor {
+      */
+     SLIST_HEAD(, sensor_listener) s_listener_list;
+ 
++    /* A list of error listeners that are registered to receive error callbacks
++     * from this sensor
++     */
++    SLIST_HEAD(, sensor_err_listener) s_err_listener_list;
+     /* A list of notifiers that are registered to receive events from this
+      * sensor
+      */
+@@ -673,6 +704,8 @@ int sensor_register_listener(struct sensor *sensor, struct sensor_listener *list
+ 
+ int sensor_unregister_listener(struct sensor *sensor, struct sensor_listener *listener);
+ 
++int sensor_register_err_listener(struct sensor *sensor, struct sensor_err_listener *err_listener);
++int sensor_unregister_err_listener(struct sensor *sensor, struct sensor_err_listener *err_listener);
+ /**
+  * @} SensorListenerAPI
+  */
+diff --git a/hw/sensor/src/sensor.c b/hw/sensor/src/sensor.c
+index 36d85ef..041da1e 100644
+--- a/hw/sensor/src/sensor.c
++++ b/hw/sensor/src/sensor.c
+@@ -1033,6 +1033,54 @@ sensor_set_notification(struct sensor *sensor, struct sensor_notifier *notifier)
+ {
+     int rc;
+ 
++int
++sensor_register_err_listener(struct sensor *sensor,
++        struct sensor_err_listener *err_listener)
++{
++    int rc;
++
++    rc = sensor_lock(sensor);
++    if (rc != 0) {
++        goto err;
++    }
++
++    SLIST_INSERT_HEAD(&sensor->s_err_listener_list, err_listener, sel_next);
++
++    sensor_unlock(sensor);
++
++    return (0);
++err:
++    return (rc);
++}
++
++int
++sensor_unregister_err_listener(struct sensor *sensor,
++        struct sensor_err_listener *err_listener)
++{
++    int rc;
++    struct sensor_err_listener *tmp;
++
++    rc = sensor_lock(sensor);
++    if (rc != 0) {
++        goto err;
++    }
++
++    SLIST_FOREACH(tmp, &sensor->s_err_listener_list, sel_next) {
++        if (err_listener == tmp) {
++        /* Remove this entry from the list */
++            SLIST_REMOVE(&sensor->s_err_listener_list, err_listener, sensor_err_listener,
++                    sel_next);
++            break;
++        }
++    }
++
++    sensor_unlock(sensor);
++
++    return (0);
++err:
++    return (rc);
++}
++
+     if (sensor->s_funcs->sd_set_notification) {
+         rc = sensor->s_funcs->sd_set_notification(sensor,
+                  notifier->sn_sensor_event_type);
+@@ -2166,8 +2214,73 @@ sensor_read(struct sensor *sensor, sensor_type_t type,
+         goto err;
+     }
+ 
++    /* On error, notify error listeners */
++    if (rc != 0) {
++        struct sensor_err_listener *err_listener;
++        
++        SLIST_FOREACH(err_listener, &sensor->s_err_listener_list, sel_next) {
++            if (err_listener->sel_sensor_type & type) {
++                err_listener->sel_func(sensor, err_listener->sel_arg, rc, type);
++            }
++        }
++    }
+ err:
+     sensor_unlock(sensor);
+     return (rc);
+ }
+ 
++
++/*
++ * Register a sensor error listener. This allows a calling application to receive
++ * error callbacks when sensor reads fail.
++ */
++int
++sensor_register_err_listener(struct sensor *sensor,
++        struct sensor_err_listener *err_listener)
++{
++    int rc;
++
++    rc = sensor_lock(sensor);
++    if (rc != 0) {
++        goto err;
++    }
++
++    SLIST_INSERT_HEAD(&sensor->s_err_listener_list, err_listener, sel_next);
++
++    sensor_unlock(sensor);
++
++    return (0);
++err:
++    return (rc);
++}
++
++/*
++ * Un-register a sensor error listener.
++ */
++int
++sensor_unregister_err_listener(struct sensor *sensor,
++        struct sensor_err_listener *err_listener)
++{
++    int rc;
++    struct sensor_err_listener *tmp;
++
++    rc = sensor_lock(sensor);
++    if (rc != 0) {
++        goto err;
++    }
++
++    SLIST_FOREACH(tmp, &sensor->s_err_listener_list, sel_next) {
++        if (err_listener == tmp) {
++        /* Remove this entry from the list */
++            SLIST_REMOVE(&sensor->s_err_listener_list, err_listener, sensor_err_listener,
++                    sel_next);
++            break;
++        }
++    }
++
++    sensor_unlock(sensor);
++
++    return (0);
++err:
++    return (rc);
++}

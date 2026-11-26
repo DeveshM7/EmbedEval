@@ -1,0 +1,218 @@
+diff --git a/net/nimble/controller/include/controller/ble_ll_conn.h b/net/nimble/controller/include/controller/ble_ll_conn.h
+index 041504d..4ecacbd 100644
+--- a/net/nimble/controller/include/controller/ble_ll_conn.h
++++ b/net/nimble/controller/include/controller/ble_ll_conn.h
+@@ -115,6 +115,7 @@ union ble_ll_conn_sm_flags {
+         uint32_t encrypted:1;
+         uint32_t encrypt_chg_sent:1;
+         uint32_t le_ping_supp:1;
++        uint32_t csa2_supp:1;
+     } cfbit;
+     uint32_t conn_flags;
+ } __attribute__((packed));
+@@ -153,6 +154,7 @@ struct ble_ll_conn_sm
+     uint8_t unmapped_chan;
+     uint8_t last_unmapped_chan;
+     uint8_t num_used_chans;
++    uint16_t channel_id;
+ 
+     /* RSSI */
+     int8_t conn_rssi;
+@@ -272,6 +274,7 @@ struct ble_ll_conn_sm
+ #define CONN_F_ENCRYPTED(csm)       ((csm)->csmflags.cfbit.encrypted)
+ #define CONN_F_ENC_CHANGE_SENT(csm) ((csm)->csmflags.cfbit.encrypt_chg_sent)
+ #define CONN_F_LE_PING_SUPP(csm)    ((csm)->csmflags.cfbit.le_ping_supp)
++#define CONN_F_CSA2_SUPP(csm)       ((csm)->csmflags.cfbit.csa2_supp)
+ 
+ /* Role */
+ #define CONN_IS_MASTER(csm)         (csm->conn_role == BLE_LL_CONN_ROLE_MASTER)
+diff --git a/net/nimble/controller/include/controller/ble_ll_test.h b/net/nimble/controller/include/controller/ble_ll_test.h
+new file mode 100644
+index 0000000..7fab4b9
+--- /dev/null
++++ b/net/nimble/controller/include/controller/ble_ll_test.h
+@@ -0,0 +1,33 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef H_BLE_LL_TEST_
++#define H_BLE_LL_TEST_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int ble_ll_csa2_test_all(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* H_BLE_LL_TEST_ */
+diff --git a/net/nimble/controller/src/ble_ll_conn.c b/net/nimble/controller/src/ble_ll_conn.c
+index 2d4c099..d257d4d 100644
+--- a/net/nimble/controller/src/ble_ll_conn.c
++++ b/net/nimble/controller/src/ble_ll_conn.c
+@@ -572,10 +572,19 @@ ble_ll_conn_calc_access_addr(void)
+  * @return uint8_t
+  */
+ uint8_t
+-ble_ll_conn_calc_dci(struct ble_ll_conn_sm *conn)
++/**
++ * Calculate data channel index for connection.
++ *
++ * @param conn Pointer to connection state machine.
++ * @param latency Number of connection events to skip.
++ *
++ * @return uint8_t Data channel index.
++ */
++uint8_t
++ble_ll_conn_calc_dci(struct ble_ll_conn_sm *conn, uint16_t latency)
+ {
+-    int     i;
+-    int     j;
++    int i;
++    int j;
+     uint8_t chan;
+     uint8_t curchan;
+     uint8_t remap_index;
+@@ -584,6 +593,61 @@ ble_ll_conn_calc_dci(struct ble_ll_conn_sm *conn)
+     uint8_t mask;
+     uint8_t usable_chans;
+ 
++#if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_CSA2)
++    /* Use CSA2 if supported */
++    if (CONN_F_CSA2_SUPP(conn)) {
++        uint16_t counter;
++        uint16_t channel_id;
++        uint16_t unmapped_channel;
++        uint16_t num_used_chans;
++        
++        /* Calculate channel identifier from access address */
++        channel_id = (conn->access_addr ^ (conn->access_addr >> 16)) & 0xFFFF;
++        
++        /* Get event counter plus latency */
++        counter = conn->event_cntr + latency;
++        
++        /* Calculate unmapped channel */
++        unmapped_channel = (conn->last_unmapped_chan + conn->hop_inc) % BLE_PHY_NUM_DATA_CHANS;
++        
++        /* Set the current unmapped channel */
++        conn->unmapped_chan = unmapped_channel;
++        
++        /* Check if unmapped channel is valid */
++        bitpos = 1 << (unmapped_channel & 0x07);
++        if ((conn->chanmap[unmapped_channel >> 3] & bitpos) != 0) {
++            return unmapped_channel;
++        }
++        
++        /* Use CSA2 remapping */
++        num_used_chans = conn->num_used_chans;
++        remap_index = (counter + channel_id) % num_used_chans;
++        
++        /* Find remapped channel from channel map */
++        chan = 0;
++        cntr = 0;
++        for (i = 0; i < BLE_LL_CONN_CHMAP_LEN; i++) {
++            usable_chans = conn->chanmap[i];
++            if (usable_chans != 0) {
++                mask = 0x01;
++                for (j = 0; j < 8; j++) {
++                    if (usable_chans & mask) {
++                        if (cntr == remap_index) {
++                            return (chan + j);
++                        }
++                        ++cntr;
++                    }
++                    mask <<= 1;
++                }
++            }
++            chan += 8;
++        }
++        /* Should never reach here */
++        return unmapped_channel;
++    }
++#endif
++
++    /* Use CSA1 (original algorithm) */
+     /* Get next unmapped channel */
+     curchan = conn->last_unmapped_chan + conn->hop_inc;
+     if (curchan > BLE_PHY_NUM_DATA_CHANS) {
+@@ -626,6 +690,8 @@ ble_ll_conn_calc_dci(struct ble_ll_conn_sm *conn)
+     return curchan;
+ }
+ 
++
++
+ /**
+  * Called when we are in the connection state and the wait for response timer
+  * fires off.
+@@ -1490,6 +1556,9 @@ ble_ll_conn_master_init(struct ble_ll_conn_sm *connsm,
+ 
+     /*  Calculate random access address and crc initialization value */
+     connsm->access_addr = ble_ll_conn_calc_access_addr();
++    /* Calculate channel identifier for CSA2 */
++    connsm->channel_id = (connsm->access_addr ^ (connsm->access_addr >> 16)) & 0xFFFF;
++    connsm->csmflags.cfbit.csa2_supp = MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_CSA2);
+     connsm->crcinit = rand() & 0xffffff;
+ 
+     /* Set initial schedule callback */
+@@ -1536,7 +1605,7 @@ ble_ll_conn_sm_new(struct ble_ll_conn_sm *connsm)
+ 
+     /* Calculate the next data channel */
+     connsm->last_unmapped_chan = 0;
+-    connsm->data_chan_index = ble_ll_conn_calc_dci(connsm);
++    connsm->data_chan_index = ble_ll_conn_calc_dci(connsm, 0);
+ 
+     /* Connection end event */
+     connsm->conn_ev_end.ev_arg = connsm;
+@@ -1858,13 +1927,13 @@ ble_ll_conn_next_event(struct ble_ll_conn_sm *connsm)
+     }
+ 
+     /* Calculate data channel index of next connection event */
++    uint16_t event_offset = latency;
+     while (latency > 0) {
+         connsm->last_unmapped_chan = connsm->unmapped_chan;
+-        connsm->data_chan_index = ble_ll_conn_calc_dci(connsm);
++        connsm->data_chan_index = ble_ll_conn_calc_dci(connsm, event_offset);
+         --latency;
++        --event_offset;
+     }
+-
+-    /*
+      * If we are trying to terminate connection, check if next wake time is
+      * passed the termination timeout. If so, no need to continue with
+      * connection as we will time out anyway.
+diff --git a/net/nimble/controller/syscfg.yml b/net/nimble/controller/syscfg.yml
+index fd4f48a..5c11ea9 100644
+--- a/net/nimble/controller/syscfg.yml
++++ b/net/nimble/controller/syscfg.yml
+@@ -184,6 +184,12 @@ syscfg.defs:
+             turning it on or off has no effect.
+         value: 'MYNEWT_VAL_BLE_LL_CFG_FEAT_LE_ENCRYPTION'
+ 
++    BLE_LL_CFG_FEAT_LE_CSA2:
++        description: >
++            This option enables/disables CSA2 (Channel Selection Algorithm #2)
++            support in the controller.
++        value: '1'
++
+     BLE_LL_CFG_FEAT_DATA_LEN_EXT:
+         description: >
+             This option enables/disables the data length update procedure in

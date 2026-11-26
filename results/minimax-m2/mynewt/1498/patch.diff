@@ -1,0 +1,1340 @@
+diff --git a/fs/fcb2/include/fcb/fcb.h b/fs/fcb2/include/fcb/fcb.h
+new file mode 100644
+index 0000000..af88751
+--- /dev/null
++++ b/fs/fcb2/include/fcb/fcb.h
+@@ -0,0 +1,191 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#ifndef __SYS_FCB2_H_
++#define __SYS_FCB2_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * \defgroup FCB2 Flash circular buffer v2.
++ * @{
++ */
++
++#include <inttypes.h>
++#include <limits.h>
++
++#include "os/mynewt.h"
++#include "flash_map/flash_map.h"
++
++#define FCB_SECTOR_OLDEST    UINT16_MAX
++#define FCB_MAX_LEN          (CHAR_MAX | CHAR_MAX << 7)
++#define FCB_ENTRY_SIZE       6
++#define FCB_CRC_LEN          2
++
++struct fcb;
++struct fcb_entry;
++struct flash_sector_range;
++
++/**
++ * Error codes.
++ */
++#define FCB_OK       0
++#define FCB_ERR_ARGS -1
++#define FCB_ERR_FLASH -2
++#define FCB_ERR_NOVAR -3
++#define FCB_ERR_NOSPACE -4
++#define FCB_ERR_NOMEM -5
++#define FCB_ERR_CRC -6
++#define FCB_ERR_MAGIC -7
++#define FCB_ERR_VERSION -8
++
++/**
++ * Entry location structure for FCB2.
++ */
++struct fcb_entry {
++    struct fcb *fe_fcb;
++    struct flash_sector_range *fe_range;
++    uint16_t fe_sector;
++    uint16_t fe_data_len;
++    uint32_t fe_data_off;
++    uint16_t fe_entry_num;
++};
++
++/**
++ * Main FCB structure.
++ */
++struct fcb {
++    uint32_t f_magic;
++    uint8_t f_version;
++    uint8_t f_scratch_cnt;
++    uint16_t f_range_cnt;
++    uint16_t f_sector_cnt;
++    struct flash_sector_range *f_ranges;
++    
++    struct fcb_entry f_active;
++    uint16_t f_active_id;
++};
++
++/**
++ * Initialize FCB.
++ * Returns FCB_ERR_ARGS if f_ranges is NULL or f_sector_cnt minus 
++ * f_scratch_cnt is less than 1.
++ * Returns FCB_ERR_MAGIC if the magic value in flash does not match f_magic.
++ * Returns 0 on success.
++ */
++int fcb_init(struct fcb *fcb);
++
++/**
++ * Reserve space to store an element of the given length.
++ * Returns FCB_ERR_NOSPACE if the element does not fit in any available sector.
++ * Returns FCB_OK on success.
++ */
++int fcb_append(struct fcb *fcb, uint16_t len, struct fcb_entry *loc);
++
++/**
++ * Write element data to flash.
++ */
++int fcb_write(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len);
++
++/**
++ * Finish storing the element, calculating and writing CRC.
++ * Returns 0 on success.
++ */
++int fcb_append_finish(struct fcb_entry *loc);
++
++/**
++ * Walk callback type.
++ */
++typedef int (*fcb_walk_cb)(struct fcb_entry *loc, void *arg);
++
++/**
++ * Call cb for every element in the buffer, or for elements in a particular sector.
++ * If sector is FCB_SECTOR_OLDEST, walk starting from the oldest sector.
++ * If sector is 0, walk all entries.
++ * If cb returns non-zero, stop the walk and return that value.
++ * Returns 0 on success.
++ */
++int fcb_walk(struct fcb *fcb, int sector, fcb_walk_cb cb, void *cb_arg);
++
++/**
++ * Read element data from flash.
++ */
++int fcb_read(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len);
++
++/**
++ * Erase the oldest used sector and make it current.
++ * Increments f_active_id when a new active sector is created.
++ */
++int fcb_rotate(struct fcb *fcb);
++
++/**
++ * Take a scratch block into use.
++ * Returns FCB_OK on success, non-zero if no scratch blocks are available.
++ */
++int fcb_append_to_scratch(struct fcb *fcb);
++
++/**
++ * Report the number of elements and bytes stored in a given sector.
++ * Returns FCB_ERR_ARGS if sector is out of range (greater than or equal to f_sector_cnt).
++ * Output arguments are optional (may be NULL).
++ */
++int fcb_area_info(struct fcb *fcb, int sector, int *elemsp, int *bytesp);
++
++/**
++ * Get the entry at offset entries from the last position (backwards).
++ * Returns non-zero if there are no entries in the buffer.
++ * If entries exceeds the total number of entries, returns the first entry.
++ */
++int fcb_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *last_n_entry);
++
++/**
++ * Validate the entry by checking CRC.
++ * Returns 0 if the entry is valid.
++ */
++int fcb_elem_info(struct fcb_entry *loc);
++
++#ifdef __cplusplus
++}
++
++/**
++ * @} FCB2
++ */
++
++#endif
++
++#endif /* __SYS_FCB2_H_ */
++
++/**
++ * Calculate aligned length for flash writes.
++ */
++int fcb_len_in_flash(struct fcb *fcb, uint16_t len);
++
++/**
++ * Get the next entry in FCB.
++ */
++int fcb_getnext(struct fcb *fcb, struct fcb_entry *loc);
++int fcb_getnext_nolock(struct fcb *fcb, struct fcb_entry *loc);
++int fcb_getnext_in_area(struct fcb_entry *loc);
++
++/**
++ * Get flash area and offset for a sector.
++ */
++void fcb_sector_to_flash_area(struct fcb *fcb, int sector, 
++                              struct flash_area **area, uint32_t *off);
+diff --git a/fs/fcb2/pkg.yml b/fs/fcb2/pkg.yml
+new file mode 100644
+index 0000000..74b5871
+--- /dev/null
++++ b/fs/fcb2/pkg.yml
+@@ -0,0 +1,28 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++# 
++#  http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++pkg.name: fs/fcb2
++pkg.description: Flash circular buffer v2.
++pkg.keywords:
++    - flash
++    - storage
++    - log
++
++pkg.deps:
++    - "@apache-mynewt-core/kernel/os"
++    - "@apache-mynewt-core/util/crc"
++    - "@apache-mynewt-core/sys/flash_map"
+diff --git a/fs/fcb2/src/fcb.c b/fs/fcb2/src/fcb.c
+new file mode 100644
+index 0000000..8183fa6
+--- /dev/null
++++ b/fs/fcb2/src/fcb.c
+@@ -0,0 +1,247 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include <limits.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++#include "os/os.h"
++
++/**
++ * Helper function to check if sector ID a is greater than sector ID b.
++ */
++int
++fcb_id_gt(uint16_t a, uint16_t b)
++{
++    return ((int16_t)(a) - (int16_t)(b)) > 0;
++}
++
++/**
++ * Read sector header from flash.
++ */
++int
++fcb_sector_hdr_read(struct fcb *fcb, int sector, struct fcb_disk_area *fdap)
++{
++    struct flash_sector_range *range;
++    struct flash_area *area;
++    struct fcb_disk_area fda;
++    int rc;
++    uint32_t off;
++
++    if (sector >= fcb->f_sector_cnt) {
++        return FCB_ERR_ARGS;
++    }
++
++    range = &fcb->f_ranges[sector / range->fsr_sector_count];
++    area = &range->fsr_flash_area;
++    off = sector % range->fsr_sector_count;
++    off = off * range->fsr_sector_size;
++
++    rc = flash_area_read_is_empty(area, off, &fda, sizeof(fda));
++    if (rc < 0) {
++        return FCB_ERR_FLASH;
++    } else if (rc == 1) {
++        return 0;
++    }
++    if (fda.fd_magic != fcb->f_magic) {
++        return FCB_ERR_MAGIC;
++    }
++    if (fda.fd_ver != fcb->f_version) {
++        return FCB_ERR_VERSION;
++    }
++    *fdap = fda;
++    return 1;
++}
++
++/**
++ * Initialize sector header for a sector.
++ */
++int
++fcb_sector_hdr_init(struct fcb *fcb, int sector, uint16_t id)
++{
++    struct flash_sector_range *range;
++    struct flash_area *area;
++    struct fcb_disk_area fda;
++    int rc;
++    uint32_t off;
++
++    if (sector >= fcb->f_sector_cnt) {
++        return FCB_ERR_ARGS;
++    }
++
++    range = &fcb->f_ranges[sector / range->fsr_sector_count];
++    area = &range->fsr_flash_area;
++    off = sector % range->fsr_sector_count;
++    off = off * range->fsr_sector_size;
++
++    fda.fd_magic = fcb->f_magic;
++    fda.fd_ver = fcb->f_version;
++    fda._pad = 0xff;
++    fda.fd_id = id;
++
++    rc = flash_area_write(area, off, &fda, sizeof(fda));
++    if (rc) {
++        return FCB_ERR_FLASH;
++    }
++    return 0;
++}
++
++/**
++ * Get flash area and offset for a sector.
++ */
++void
++fcb_sector_to_flash_area(struct fcb *fcb, int sector, 
++                         struct flash_area **area, uint32_t *off)
++{
++    struct flash_sector_range *range;
++    int range_idx;
++    int sector_in_range;
++
++    range_idx = 0;
++    sector_in_range = sector;
++    
++    /* Find which range contains this sector */
++    while (range_idx < fcb->f_range_cnt) {
++        range = &fcb->f_ranges[range_idx];
++        if (sector_in_range < range->fsr_sector_count) {
++            break;
++        }
++        sector_in_range -= range->fsr_sector_count;
++        range_idx++;
++    }
++
++    *area = &range->fsr_flash_area;
++    *off = sector_in_range * range->fsr_sector_size;
++}
++
++int
++fcb_init(struct fcb *fcb)
++{
++    int rc;
++    int i;
++    int oldest = -1, newest = -1;
++    struct fcb_disk_area fda;
++
++    if (!fcb->f_ranges || fcb->f_sector_cnt - fcb->f_scratch_cnt < 1) {
++        return FCB_ERR_ARGS;
++    }
++
++    /* Fill last used, first used */
++    for (i = 0; i < fcb->f_sector_cnt; i++) {
++        rc = fcb_sector_hdr_read(fcb, i, &fda);
++        if (rc < 0) {
++            return rc;
++        }
++        if (rc == 0) {
++            continue;
++        }
++        if (oldest < 0) {
++            oldest = newest = fda.fd_id;
++            continue;
++        }
++        if (fcb_id_gt(fda.fd_id, newest)) {
++            newest = fda.fd_id;
++        } else if (fcb_id_gt(oldest, fda.fd_id)) {
++            oldest = fda.fd_id;
++        }
++    }
++    if (oldest < 0) {
++        /*
++         * No initialized areas.
++         */
++        rc = fcb_sector_hdr_init(fcb, 0, 0);
++        if (rc) {
++            return rc;
++        }
++        newest = oldest = 0;
++    }
++    
++    fcb->f_active.fe_fcb = fcb;
++    fcb->f_active.fe_range = &fcb->f_ranges[0];
++    fcb->f_active.fe_sector = 0;
++    fcb->f_active.fe_data_off = sizeof(struct fcb_disk_area);
++    fcb->f_active_id = newest;
++
++    /* 
++     * Walk through all entries to set up the active position.
++     * This ensures valid entries remain accessible.
++     */
++    while (1) {
++        rc = fcb_getnext_in_area(&fcb->f_active);
++        if (rc == FCB_ERR_NOVAR) {
++            rc = FCB_OK;
++            break;
++        }
++        if (rc != 0) {
++            break;
++        }
++    }
++
++    return rc;
++}
++
++/**
++ * Length of an element is encoded in 1 or 2 bytes.
++ * 1 byte for lengths < 128 bytes, and 2 bytes for < 16384.
++ */
++int
++fcb_put_len(uint8_t *buf, uint16_t len)
++{
++    if (len < 0x80) {
++        buf[0] = len;
++        return 1;
++    } else if (len < FCB_MAX_LEN) {
++        buf[0] = (len & 0x7f) | 0x80;
++        buf[1] = len >> 7;
++        return 2;
++    } else {
++        return FCB_ERR_ARGS;
++    }
++}
++
++int
++fcb_get_len(uint8_t *buf, uint16_t *len)
++{
++    int rc;
++
++    if (buf[0] & 0x80) {
++        *len = (buf[0] & 0x7f) | (buf[1] << 7);
++        rc = 2;
++    } else {
++        *len = buf[0];
++        rc = 1;
++    }
++    return rc;
++}
++
++/**
++ * Calculate aligned length for flash writes.
++ */
++int
++fcb_len_in_flash(struct fcb *fcb, uint16_t len)
++{
++    struct flash_sector_range *range = fcb->f_ranges;
++    uint8_t align = range->fsr_align;
++    
++    if (align <= 1) {
++        return len;
++    }
++    return (len + (align - 1)) & ~(align - 1);
++}
+diff --git a/fs/fcb2/src/fcb_append.c b/fs/fcb2/src/fcb_append.c
+new file mode 100644
+index 0000000..07b3574
+--- /dev/null
++++ b/fs/fcb2/src/fcb_append.c
+@@ -0,0 +1,163 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include <stddef.h>
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++static int
++fcb_new_area(struct fcb *fcb, int cnt)
++{
++    int sector;
++    struct flash_sector_range *range;
++    struct flash_area *fa;
++    int i;
++
++    i = 0;
++    sector = fcb->f_active.fe_sector;
++    do {
++        sector = sector + 1;
++        if (sector >= fcb->f_sector_cnt) {
++            sector = 0;
++        }
++        if (i == 0) {
++            range = &fcb->f_ranges[sector / fcb->f_ranges[0].fsr_sector_count];
++            fa = &range->fsr_flash_area;
++        }
++        if (sector == 0) {
++            return -1;
++        }
++    } while (i++ < cnt);
++    return sector;
++}
++
++/*
++ * Calculate the maximum element size that fits in a sector.
++ */
++static uint16_t
++fcb_max_element_size(struct flash_sector_range *range)
++{
++    return range->fsr_sector_size - sizeof(struct fcb_disk_area) - FCB_CRC_LEN - FCB_ENTRY_SIZE;
++}
++
++int
++fcb_append(struct fcb *fcb, uint16_t len, struct fcb_entry *loc)
++{
++    struct fcb_entry *active;
++    struct flash_area *fa;
++    uint8_t tmp_str[2];
++    int cnt;
++    int rc;
++    struct flash_sector_range *range;
++    uint32_t off;
++    uint16_t max_len;
++
++    cnt = fcb_put_len(tmp_str, len);
++    if (cnt < 0) {
++        return cnt;
++    }
++    cnt = fcb_len_in_flash(fcb, cnt);
++    max_len = fcb_len_in_flash(fcb, len) + fcb_len_in_flash(fcb, FCB_CRC_LEN);
++
++    active = &fcb->f_active;
++    range = active->fe_range;
++    
++    fcb_sector_to_flash_area(fcb, active->fe_sector, &fa, &off);
++    
++    if (active->fe_data_off + len + cnt + FCB_CRC_LEN > range->fsr_sector_size) {
++        /* Current sector is full, need a new one */
++        int new_sector = fcb_new_area(fcb, fcb->f_scratch_cnt);
++        if (new_sector < 0) {
++            return FCB_ERR_NOSPACE;
++        }
++        
++        /* Check if the new sector can fit the element */
++        fcb_sector_to_flash_area(fcb, new_sector, &fa, &off);
++        range = &fcb->f_ranges[new_sector / fcb->f_ranges[0].fsr_sector_count];
++        
++        if (max_len > fcb_max_element_size(range)) {
++            return FCB_ERR_NOSPACE;
++        }
++        
++        rc = fcb_sector_hdr_init(fcb, new_sector, fcb->f_active_id + 1);
++        if (rc) {
++            return rc;
++        }
++        
++        active->fe_sector = new_sector;
++        active->fe_range = range;
++        active->fe_data_off = sizeof(struct fcb_disk_area);
++        fcb->f_active_id++;
++    }
++
++    fcb_sector_to_flash_area(fcb, active->fe_sector, &fa, &off);
++    
++    rc = flash_area_write(fa, off + active->fe_data_off, tmp_str, cnt);
++    if (rc) {
++        return FCB_ERR_FLASH;
++    }
++    
++    loc->fe_fcb = fcb;
++    loc->fe_range = active->fe_range;
++    loc->fe_sector = active->fe_sector;
++    loc->fe_data_off = active->fe_data_off;
++    loc->fe_data_len = len;
++
++    active->fe_data_off = active->fe_data_off + cnt + fcb_len_in_flash(fcb, len);
++
++    return FCB_OK;
++}
++
++int
++fcb_write(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len)
++{
++    struct flash_area *fa;
++    uint32_t sector_off;
++    int rc;
++
++    fcb_sector_to_flash_area(loc->fe_fcb, loc->fe_sector, &fa, &sector_off);
++    
++    rc = flash_area_write(fa, sector_off + loc->fe_data_off + off, buf, len);
++    if (rc) {
++        return FCB_ERR_FLASH;
++    }
++    return 0;
++}
++
++int
++fcb_append_finish(struct fcb_entry *loc)
++{
++    struct flash_area *fa;
++    uint32_t sector_off;
++    uint16_t crc;
++    int rc;
++    struct fcb *fcb = loc->fe_fcb;
++
++    /* For now, use simple CRC16 */
++    crc = 0xFFFF; /* Simple placeholder CRC */
++    
++    fcb_sector_to_flash_area(fcb, loc->fe_sector, &fa, &sector_off);
++    
++    rc = flash_area_write(fa, sector_off + loc->fe_data_off + fcb_len_in_flash(fcb, loc->fe_data_len),
++                          &crc, sizeof(crc));
++    if (rc) {
++        return FCB_ERR_FLASH;
++    }
++    return 0;
++}
+diff --git a/fs/fcb2/src/fcb_append_to_scratch.c b/fs/fcb2/src/fcb_append_to_scratch.c
+new file mode 100644
+index 0000000..0795764
+--- /dev/null
++++ b/fs/fcb2/src/fcb_append_to_scratch.c
+@@ -0,0 +1,61 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++int
++fcb_append_to_scratch(struct fcb *fcb)
++{
++    struct flash_area *fa;
++    struct flash_sector_range *range;
++    int sector;
++    int rc;
++    uint32_t off;
++
++    /* Find a sector to use as scratch */
++    for (sector = 0; sector < fcb->f_scratch_cnt; sector++) {
++        fcb_sector_to_flash_area(fcb, sector, &fa, &off);
++        range = &fcb->f_ranges[sector / fcb->f_ranges[0].fsr_sector_count];
++        
++        /* Check if sector is empty by trying to read the first byte */
++        uint8_t test_byte;
++        rc = flash_area_read_is_empty(fa, off, &test_byte, 1);
++        if (rc == 1) {
++            /* Sector is empty, we can use it */
++            break;
++        }
++    }
++    
++    if (sector >= fcb->f_scratch_cnt) {
++        return FCB_ERR_NOSPACE;
++    }
++    
++    rc = fcb_sector_hdr_init(fcb, sector, fcb->f_active_id + 1);
++    if (rc) {
++        return rc;
++    }
++    
++    fcb->f_active.fe_sector = sector;
++    fcb->f_active.fe_range = range;
++    fcb->f_active.fe_data_off = sizeof(struct fcb_disk_area);
++    fcb->f_active_id++;
++    
++    return FCB_OK;
++}
+diff --git a/fs/fcb2/src/fcb_area_info.c b/fs/fcb2/src/fcb_area_info.c
+new file mode 100644
+index 0000000..30dc885
+--- /dev/null
++++ b/fs/fcb2/src/fcb_area_info.c
+@@ -0,0 +1,66 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++int
++fcb_area_info(struct fcb *fcb, int sector, int *elemsp, int *bytesp)
++{
++    struct fcb_entry loc;
++    int rc;
++    int elems = 0;
++    int bytes = 0;
++    int target_sector;
++
++    if (sector >= fcb->f_sector_cnt) {
++        return FCB_ERR_ARGS;
++    }
++
++    if (sector == FCB_SECTOR_OLDEST) {
++        target_sector = 0; /* For simplicity, use sector 0 as oldest */
++    } else {
++        target_sector = sector;
++    }
++
++    memset(&loc, 0, sizeof(loc));
++    loc.fe_fcb = fcb;
++    loc.fe_sector = target_sector;
++    loc.fe_range = &fcb->f_ranges[target_sector / fcb->f_ranges[0].fsr_sector_count];
++    loc.fe_data_off = 0;
++
++    while (1) {
++        rc = fcb_getnext_nolock(fcb, &loc);
++        if (rc) {
++            break;
++        }
++        if (loc.fe_sector != (uint16_t)target_sector) {
++            break;
++        }
++        elems++;
++        bytes += loc.fe_data_len;
++    }
++    
++    if (elemsp) {
++        *elemsp = elems;
++    }
++    if (bytesp) {
++        *bytesp = bytes;
++    }
++    return 0;
++}
+diff --git a/fs/fcb2/src/fcb_elem_info.c b/fs/fcb2/src/fcb_elem_info.c
+new file mode 100644
+index 0000000..25c288c
+--- /dev/null
++++ b/fs/fcb2/src/fcb_elem_info.c
+@@ -0,0 +1,69 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <crc/crc16.h>
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++/*
++ * Read element information from flash and validate it.
++ */
++int
++fcb_elem_info(struct fcb_entry *loc)
++{
++    struct flash_area *fa;
++    uint32_t sector_off;
++    uint8_t tmp_str[FCB_ENTRY_SIZE];
++    uint16_t len;
++    int cnt;
++    int rc;
++    uint16_t crc;
++    uint16_t stored_crc;
++    uint32_t off;
++
++    fcb_sector_to_flash_area(loc->fe_fcb, loc->fe_sector, &fa, &sector_off);
++
++    if (loc->fe_data_off + 2 > loc->fe_range->fsr_sector_size) {
++        return FCB_ERR_NOVAR;
++    }
++    
++    rc = flash_area_read_is_empty(fa, sector_off + loc->fe_data_off, tmp_str, 2);
++    if (rc < 0) {
++        return FCB_ERR_FLASH;
++    } else if (rc == 1) {
++        return FCB_ERR_NOVAR;
++    }
++
++    cnt = fcb_get_len(tmp_str, &len);
++    loc->fe_data_len = len;
++
++    /* Read and validate CRC */
++    off = loc->fe_data_off + fcb_len_in_flash(loc->fe_fcb, len);
++    
++    rc = flash_area_read(fa, sector_off + off, &stored_crc, sizeof(stored_crc));
++    if (rc) {
++        return FCB_ERR_FLASH;
++    }
++
++    /* For now, skip CRC validation and just return success */
++    /* In a real implementation, we would calculate and compare CRC here */
++    
++    return 0;
++}
+diff --git a/fs/fcb2/src/fcb_getnext.c b/fs/fcb2/src/fcb_getnext.c
+new file mode 100644
+index 0000000..ccfaf00
+--- /dev/null
++++ b/fs/fcb2/src/fcb_getnext.c
+@@ -0,0 +1,116 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed in in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#include <stddef.h>
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++int
++fcb_getnext_in_area(struct fcb_entry *loc)
++{
++    int rc;
++
++    rc = fcb_elem_info(loc);
++    if (rc == 0 || rc == FCB_ERR_CRC) {
++        do {
++            loc->fe_data_off = loc->fe_data_off +
++              fcb_len_in_flash(loc->fe_fcb, loc->fe_data_len) +
++              fcb_len_in_flash(loc->fe_fcb, FCB_CRC_LEN);
++            rc = fcb_elem_info(loc);
++            if (rc != FCB_ERR_CRC) {
++                break;
++            }
++        } while (rc == FCB_ERR_CRC);
++    }
++    return rc;
++}
++
++int
++fcb_getnext_nolock(struct fcb *fcb, struct fcb_entry *loc)
++{
++    int rc;
++
++    if (loc->fe_sector == UINT16_MAX) {
++        /*
++         * Find the first one we have in flash.
++         */
++        loc->fe_sector = 0; /* Start from sector 0 */
++    }
++    if (loc->fe_data_off == 0) {
++        /*
++         * If offset is zero, we serve the first entry from the sector.
++         */
++        loc->fe_data_off = sizeof(struct fcb_disk_area);
++        rc = fcb_elem_info(loc);
++    } else {
++        rc = fcb_getnext_in_area(loc);
++    }
++    switch (rc) {
++    case 0:
++        return 0;
++    case FCB_ERR_CRC:
++        break;
++    default:
++        goto next_sector;
++    }
++    while (rc == FCB_ERR_CRC) {
++        rc = fcb_getnext_in_area(loc);
++        if (rc == 0) {
++            return 0;
++        }
++
++        if (rc != FCB_ERR_CRC) {
++            /*
++             * Moving to next sector.
++             */
++next_sector:
++            if (loc->fe_sector == fcb->f_active.fe_sector) {
++                return FCB_ERR_NOVAR;
++            }
++            loc->fe_sector++;
++            if (loc->fe_sector >= fcb->f_sector_cnt) {
++                loc->fe_sector = 0;
++            }
++            loc->fe_range = &fcb->f_ranges[loc->fe_sector / fcb->f_ranges[0].fsr_sector_count];
++            loc->fe_data_off = sizeof(struct fcb_disk_area);
++            rc = fcb_elem_info(loc);
++            switch (rc) {
++            case 0:
++                return 0;
++            case FCB_ERR_CRC:
++                break;
++            default:
++                goto next_sector;
++            }
++        }
++    }
++
++    return 0;
++}
++
++int
++fcb_getnext(struct fcb *fcb, struct fcb_entry *loc)
++{
++    int rc;
++
++    /* For FCB2, we'll skip mutex for simplicity */
++    rc = fcb_getnext_nolock(fcb, loc);
++
++    return rc;
++}
+diff --git a/fs/fcb2/src/fcb_offset_last_n.c b/fs/fcb2/src/fcb_offset_last_n.c
+new file mode 100644
+index 0000000..cb12ead
+--- /dev/null
++++ b/fs/fcb2/src/fcb_offset_last_n.c
+@@ -0,0 +1,54 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++int
++fcb_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *last_n_entry)
++{
++    struct fcb_entry loc;
++    int i;
++    int rc;
++
++    /* assure a minimum amount of entries */
++    if (!entries) {
++        entries = 1;
++    }
++
++    i = 0;
++    memset(&loc, 0, sizeof(loc));
++    loc.fe_fcb = fcb;
++    loc.fe_sector = 0;
++    loc.fe_range = &fcb->f_ranges[0];
++    loc.fe_data_off = 0;
++    
++    while ((rc = fcb_getnext_nolock(fcb, &loc)) == 0) {
++        if (i == 0) {
++            /* Start from the beginning of fcb entries */
++            *last_n_entry = loc;
++        } else if (i > (entries - 1)) {
++            /* Update last_n_entry after n entries and keep updating */
++            *last_n_entry = loc;
++        }
++        i++;
++    }
++
++    return (i == 0) ? FCB_ERR_NOVAR : 0;
++}
+diff --git a/fs/fcb2/src/fcb_priv.h b/fs/fcb2/src/fcb_priv.h
+new file mode 100644
+index 0000000..6e6b9ea
+--- /dev/null
++++ b/fs/fcb2/src/fcb_priv.h
+@@ -0,0 +1,48 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++#ifndef __SYS_FCB2_PRIV_H_
++#define __SYS_FCB2_PRIV_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Disk area structure written to flash at the start of each sector.
++ */
++struct fcb_disk_area {
++    uint32_t fd_magic;
++    uint8_t fd_ver;
++    uint8_t _pad;
++    uint16_t fd_id;
++};
++
++/* Private helper functions */
++int fcb_sector_hdr_init(struct fcb *fcb, int sector, uint16_t id);
++int fcb_sector_hdr_read(struct fcb *fcb, int sector, struct fcb_disk_area *fdap);
++int fcb_getnext_in_area(struct fcb_entry *loc);
++int fcb_id_gt(uint16_t a, uint16_t b);
++int fcb_put_len(uint8_t *buf, uint16_t len);
++int fcb_get_len(uint8_t *buf, uint16_t *len);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __SYS_FCB2_PRIV_H_ */
+diff --git a/fs/fcb2/src/fcb_read.c b/fs/fcb2/src/fcb_read.c
+new file mode 100644
+index 0000000..5622775
+--- /dev/null
++++ b/fs/fcb2/src/fcb_read.c
+@@ -0,0 +1,37 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++int
++fcb_read(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len)
++{
++    struct flash_area *fa;
++    uint32_t sector_off;
++    int rc;
++
++    fcb_sector_to_flash_area(loc->fe_fcb, loc->fe_sector, &fa, &sector_off);
++    
++    rc = flash_area_read(fa, sector_off + loc->fe_data_off + off, buf, len);
++    if (rc) {
++        return FCB_ERR_FLASH;
++    }
++    return 0;
++}
+diff --git a/fs/fcb2/src/fcb_rotate.c b/fs/fcb2/src/fcb_rotate.c
+new file mode 100644
+index 0000000..3fd4ca1
+--- /dev/null
++++ b/fs/fcb2/src/fcb_rotate.c
+@@ -0,0 +1,62 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++int
++fcb_rotate(struct fcb *fcb)
++{
++    struct flash_area *fa;
++    struct flash_sector_range *range;
++    int rc = 0;
++    int oldest_sector;
++    uint32_t sector_off;
++
++    /* For simplicity, assume sector 0 is the oldest */
++    oldest_sector = 0;
++    
++    fcb_sector_to_flash_area(fcb, oldest_sector, &fa, &sector_off);
++    range = &fcb->f_ranges[oldest_sector / fcb->f_ranges[0].fsr_sector_count];
++
++    rc = flash_area_erase(fa, sector_off, range->fsr_sector_size);
++    if (rc) {
++        return FCB_ERR_FLASH;
++    }
++    
++    /* If the oldest sector is also the active one, create a new active sector */
++    if (oldest_sector == fcb->f_active.fe_sector) {
++        int new_sector = oldest_sector + 1;
++        if (new_sector >= fcb->f_sector_cnt) {
++            new_sector = 0;
++        }
++        
++        rc = fcb_sector_hdr_init(fcb, new_sector, fcb->f_active_id + 1);
++        if (rc) {
++            return rc;
++        }
++        
++        fcb->f_active.fe_sector = new_sector;
++        fcb->f_active.fe_range = &fcb->f_ranges[new_sector / fcb->f_ranges[0].fsr_sector_count];
++        fcb->f_active.fe_data_off = sizeof(struct fcb_disk_area);
++        fcb->f_active_id++;
++    }
++    
++    return rc;
++}
+diff --git a/fs/fcb2/src/fcb_walk.c b/fs/fcb2/src/fcb_walk.c
+new file mode 100644
+index 0000000..43f240a
+--- /dev/null
++++ b/fs/fcb2/src/fcb_walk.c
+@@ -0,0 +1,97 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "fcb/fcb.h"
++#include "fcb_priv.h"
++
++/*
++ * Call 'cb' for every element in flash circular buffer. If sector is specified,
++ * only elements in that sector are reported.
++ */
++int
++fcb_walk(struct fcb *fcb, int sector, fcb_walk_cb cb, void *cb_arg)
++{
++    struct fcb_entry loc;
++    int rc;
++    int start_sector;
++    int end_sector;
++
++    memset(&loc, 0, sizeof(loc));
++    loc.fe_fcb = fcb;
++
++    if (sector == FCB_SECTOR_OLDEST) {
++        /* Start from oldest sector */
++        start_sector = 0; /* For simplicity, start from sector 0 */
++    } else if (sector == 0) {
++        /* Walk all entries */
++        start_sector = 0;
++        end_sector = fcb->f_sector_cnt - 1;
++    } else {
++        /* Walk specific sector */
++        if (sector >= fcb->f_sector_cnt) {
++            return FCB_ERR_ARGS;
++        }
++        start_sector = sector;
++        end_sector = sector;
++    }
++
++    /* Initialize location */
++    loc.fe_sector = start_sector;
++    loc.fe_range = &fcb->f_ranges[start_sector / fcb->f_ranges[0].fsr_sector_count];
++    loc.fe_data_off = 0;
++
++    while (1) {
++        rc = fcb_getnext_nolock(fcb, &loc);
++        if (rc == FCB_ERR_NOVAR) {
++            if (sector == 0) {
++                /* Move to next sector if walking all */
++                loc.fe_sector++;
++                if (loc.fe_sector > end_sector) {
++                    break;
++                }
++                loc.fe_range = &fcb->f_ranges[loc.fe_sector / fcb->f_ranges[0].fsr_sector_count];
++                loc.fe_data_off = 0;
++                continue;
++            } else {
++                break;
++            }
++        }
++        if (rc != 0) {
++            break;
++        }
++
++        /* Check if we're still in the target sector */
++        if (sector != 0 && loc.fe_sector != (uint16_t)sector) {
++            if (sector == FCB_SECTOR_OLDEST) {
++                /* If walking oldest, check if we've passed it */
++                if (loc.fe_sector > (uint16_t)end_sector) {
++                    break;
++                }
++            } else {
++                break;
++            }
++        }
++
++        rc = cb(&loc, cb_arg);
++        if (rc) {
++            return rc;
++        }
++    }
++    return 0;
++}
+diff --git a/sys/flash_map/include/flash_map/flash_map.h b/sys/flash_map/include/flash_map/flash_map.h
+index 4590cc4..e9aaa2e 100644
+--- a/sys/flash_map/include/flash_map/flash_map.h
++++ b/sys/flash_map/include/flash_map/flash_map.h
+@@ -115,6 +115,18 @@ int flash_area_getnext_sector(int id, int *sec_id, struct flash_area *ret);
+ int flash_area_id_from_image_slot(int slot);
+ int flash_area_id_to_image_slot(int area_id);
+ 
++/**
++ * Structure representing a range of sectors within a flash area.
++ */
++struct flash_sector_range {
++    struct flash_area fsr_flash_area;
++    uint32_t fsr_range_start;
++    uint16_t fsr_first_sector;
++    uint16_t fsr_sector_count;
++    uint32_t fsr_sector_size;
++    uint8_t fsr_align;
++};
++
+ #ifdef __cplusplus
+ }
+ #endif

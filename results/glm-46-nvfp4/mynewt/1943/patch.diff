@@ -1,0 +1,130 @@
+diff --git a/mgmt/imgmgr/syscfg.yml b/mgmt/imgmgr/syscfg.yml
+index 9ec9677..32358c2 100644
+--- a/mgmt/imgmgr/syscfg.yml
++++ b/mgmt/imgmgr/syscfg.yml
+@@ -55,3 +55,9 @@ syscfg.logs:
+     IMGMGR_LOG:
+         module: MYNEWT_VAL(IMGMGR_LOG_MOD)
+         level: MYNEWT_VAL(IMGMGR_LOG_LVL)
++
++    IMGMGR_DUMMY_HDR:
++        description: >
++            Return dummy image header data for image-hash logging to succeed 
++            in native builds without a real image.
++        value: 0
+diff --git a/sys/log/common/include/log_common/log_common.h b/sys/log/common/include/log_common/log_common.h
+index a9ee6a1..173690a 100644
+--- a/sys/log/common/include/log_common/log_common.h
++++ b/sys/log/common/include/log_common/log_common.h
+@@ -74,6 +74,8 @@ struct log;
+ #if MYNEWT_VAL(LOG_VERSION) > 2
+ #define LOG_ETYPE_CBOR           (1)
+ #define LOG_ETYPE_BINARY         (2)
++#define LOG_ETYPE_FLAG_IMAGE_HASH  (1 << 7)
++#define LOG_ETYPE_FLAG_IMAGE_HASH  (1 << 7)
+ #endif
+ 
+ /* Logging medium */
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 968ddcd..9956466 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -81,10 +81,10 @@ typedef int (*lh_append_func_t)(struct log *, void *buf, int len);
+ typedef int (*lh_append_body_func_t)(struct log *log,
+                                      const struct log_entry_hdr *hdr,
+                                      const void *body, int body_len);
+-typedef int (*lh_append_mbuf_func_t)(struct log *, const struct os_mbuf *om);
++typedef int (*lh_append_mbuf_func_t)(struct log *, struct os_mbuf *om);
+ typedef int (*lh_append_mbuf_body_func_t)(struct log *log,
+                                           const struct log_entry_hdr *hdr,
+-                                          const struct os_mbuf *om);
++                                          struct os_mbuf *om);
+ typedef int (*lh_walk_func_t)(struct log *,
+         log_walk_func_t walk_func, struct log_offset *log_offset);
+ typedef int (*lh_flush_func_t)(struct log *);
+@@ -136,6 +136,22 @@ struct log_entry_hdr {
+ #endif
+ 
+ #define LOG_ENTRY_HDR_SIZE (sizeof(struct log_entry_hdr))
++#define LOG_BASE_ENTRY_HDR_SIZE 15
++#if MYNEWT_VAL(LOG_FLAGS_IMAGE_HASH)
++#define LOG_HDR_SIZE 19
++#else
++#define LOG_HDR_SIZE 15
++#endif
++uint16_t log_hdr_len(const struct log_entry_hdr *hdr);
++
++#define LOG_BASE_ENTRY_HDR_SIZE 15
++#if MYNEWT_VAL(LOG_FLAGS_IMAGE_HASH)
++#define LOG_HDR_SIZE 19
++#else
++#define LOG_HDR_SIZE 15
++#endif
++
++uint16_t log_hdr_len(const struct log_entry_hdr *hdr);
+ 
+ #define LOG_MODULE_STR(module)      log_module_get_name(module)
+ 
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index 0bff22e..4c74daf 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -25,6 +25,9 @@
+ #include "os/mynewt.h"
+ #include "cbmem/cbmem.h"
+ #include "log/log.h"
++#if MYNEWT_VAL(LOG_FLAGS_IMAGE_HASH)
++#include "imgmgr/imgmgr.h"
++#endif
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+ #include "config/config.h"
+ #endif
+@@ -522,6 +525,9 @@ log_append_prepare(struct log *log, uint8_t module, uint8_t level,
+     ue->ue_index = idx;
+ #if MYNEWT_VAL(LOG_VERSION) > 2
+     ue->ue_etype = etype;
++#if MYNEWT_VAL(LOG_FLAGS_IMAGE_HASH)
++    ue->ue_etype |= LOG_ETYPE_FLAG_IMAGE_HASH;
++#endif
+ #else
+     assert(etype == LOG_ETYPE_STRING);
+ #endif
+@@ -1005,3 +1011,13 @@ log_set_max_entry_len(struct log *log, uint16_t max_entry_len)
+     assert(log);
+     log->l_max_entry_len = max_entry_len;
+ }
++
++uint16_t
++log_hdr_len(const struct log_entry_hdr *hdr)
++{
++    if (hdr->ue_etype & LOG_ETYPE_FLAG_IMAGE_HASH) {
++        return LOG_BASE_ENTRY_HDR_SIZE + 4;
++    } else {
++        return LOG_BASE_ENTRY_HDR_SIZE;
++    }
++}
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index a3f4569..4c9a563 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -136,3 +136,20 @@ syscfg.defs:
+         description: >
+             Sysinit stage for logging to the second image slot.
+         value: 101
++    LOG_FLAGS_IMAGE_HASH:
++        description: >
++            Enable image hash in log entries. When enabled, a 4-byte image hash
++            is stored immediately after the base log entry header.
++        value: 0
++
++    LOG_BASE_ENTRY_HDR_SIZE:
++        description: >
++            Size of the base log entry header (15 bytes). This does not include
++            the optional 4-byte image hash when LOG_FLAGS_IMAGE_HASH is enabled.
++        value: 15
++
++    LOG_HDR_SIZE:
++        description: >
++            Full header size including optional image hash. 15 when 
++            LOG_FLAGS_IMAGE_HASH is disabled and 19 when enabled.
++        value: 15

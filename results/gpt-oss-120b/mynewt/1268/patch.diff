@@ -1,0 +1,220 @@
+diff --git a/util/debounce/include/debounce/debounce.h b/util/debounce/include/debounce/debounce.h
+new file mode 100644
+index 0000000..5dd8d57
+--- /dev/null
++++ b/util/debounce/include/debounce/debounce.h
+@@ -0,0 +1,90 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#ifndef H_DEBOUNCE_H
++#define H_DEBOUNCE_H
++
++#include <inttypes.h>
++
++/**
++ * Debouncer structure.
++ *
++ * The counter is kept in the range [0, max].  The debouncer has two
++ * logical states: low (0) and high (1).  State transitions occur only when
++ * the counter crosses the configured thresholds.
++ */
++struct debouncer {
++    uint16_t counter;      /** Current counter value */
++    uint16_t thresh_low;   /** Low threshold */
++    uint16_t thresh_high;  /** High threshold */
++    uint16_t max;          /** Maximum counter value */
++    uint8_t state;         /** 0 = low, 1 = high */
++};
++
++/**
++ * Initialise a debouncer instance.
++ *
++ * @param debouncer   Pointer to the debouncer structure to initialise.
++ * @param thresh_low  Low threshold value.
++ * @param thresh_high High threshold value.
++ * @param max         Maximum counter value.
++ *
++ * @return SYS_EOK on success, SYS_EINVAL if thresholds are invalid.
++ */
++int debouncer_init(struct debouncer *debouncer,
++                   uint16_t thresh_low,
++                   uint16_t thresh_high,
++                   uint16_t max);
++
++/**
++ * Adjust the debouncer counter by a signed delta.
++ *
++ * The counter is saturated to the range [0, max] and the state is updated
++ * according to the threshold rules.
++ *
++ * @param debouncer Pointer to the debouncer.
++ * @param delta     Signed adjustment to apply.
++ *
++ * @return SYS_EOK on success.
++ */
++int debouncer_adjust(struct debouncer *debouncer, int32_t delta);
++
++/**
++ * Set the debouncer counter to an absolute value.
++ *
++ * The state is recomputed based on the new counter value.
++ *
++ * @param debouncer Pointer to the debouncer.
++ * @param val       New counter value.
++ */
++void debouncer_set(struct debouncer *debouncer, uint16_t val);
++
++/**
++ * Get the current logical state of the debouncer.
++ *
++ * @return 1 for high state, 0 for low state.
++ */
++int debouncer_state(const struct debouncer *debouncer);
++
++/**
++ * Get the current counter value of the debouncer.
++ */
++uint16_t debouncer_val(const struct debouncer *debouncer);
++
++#endif /* H_DEBOUNCE_H */
+diff --git a/util/debounce/pkg.yml b/util/debounce/pkg.yml
+new file mode 100644
+index 0000000..ec67a60
+--- /dev/null
++++ b/util/debounce/pkg.yml
+@@ -0,0 +1,24 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++
++pkg.name: util/debounce
++pkg.description: Utility debouncer implementation.
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++
++pkg.deps:
++    - kernel/os
+diff --git a/util/debounce/src/debounce.c b/util/debounce/src/debounce.c
+new file mode 100644
+index 0000000..0c851c0
+--- /dev/null
++++ b/util/debounce/src/debounce.c
+@@ -0,0 +1,88 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include "os/mynewt.h"
++#include "debounce/debounce.h"
++
++static void
++debouncer_update_state(struct debouncer *d)
++{
++    if (d->state == 0) {
++        if (d->counter >= d->thresh_high) {
++            d->state = 1;
++        }
++    } else {
++        if (d->counter <= d->thresh_low) {
++            d->state = 0;
++        }
++    }
++}
++
++int
++debouncer_init(struct debouncer *d, uint16_t low, uint16_t high, uint16_t max)
++{
++    if (low > high || high > max) {
++        return SYS_EINVAL;
++    }
++
++    d->thresh_low = low;
++    d->thresh_high = high;
++    d->max = max;
++    d->counter = 0;
++    d->state = 0; /* low state */
++    return 0;
++}
++
++int
++debouncer_adjust(struct debouncer *d, int32_t delta)
++{
++    int32_t new_val = (int32_t)d->counter + delta;
++    if (new_val < 0) {
++        new_val = 0;
++    } else if (new_val > d->max) {
++        new_val = d->max;
++    }
++    d->counter = (uint16_t)new_val;
++    debouncer_update_state(d);
++    return 0;
++}
++
++void
++debouncer_set(struct debouncer *d, uint16_t val)
++{
++    if (val > d->max) {
++        d->counter = d->max;
++    } else {
++        d->counter = val;
++    }
++    debouncer_update_state(d);
++}
++
++int
++debouncer_state(const struct debouncer *d)
++{
++    return d->state;
++}
++
++uint16_t
++debouncer_val(const struct debouncer *d)
++{
++    return d->counter;
++}
++

@@ -1,0 +1,219 @@
+diff --git a/fs/fcb/include/fcb/fcb.h b/fs/fcb/include/fcb/fcb.h
+index e9a6e85..b1715b2 100644
+--- a/fs/fcb/include/fcb/fcb.h
++++ b/fs/fcb/include/fcb/fcb.h
+@@ -81,10 +81,25 @@ int fcb_init(struct fcb *fcb);
+ /**
+  * fcb_log is needed as the number of entries in a log
+  */
++/*
++ * Structure for FCB log bookmarks.
++ */
++struct fcb_log_bmark {
++    struct fcb_entry bm_entry;    /*< FCB entry location */
++    uint32_t bm_index;            /*< Log entry index */
++};
++
+ struct fcb_log {
+     struct fcb fl_fcb;
+     uint8_t fl_entries;
+ 
++
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++    /* Bookmark support */
++    struct fcb_log_bmark *fl_bmarks;
++    int fl_bmark_count;
++    int fl_bmark_idx;
++#endif
+ #if MYNEWT_VAL(LOG_STORAGE_WATERMARK)
+     /* Internal - tracking storage use */
+     uint32_t fl_watermark_off;
+@@ -160,4 +175,8 @@ int fcb_area_info(struct fcb *fcb, struct flash_area *fa, int *elemsp,
+ 
+ #endif
+ 
++void fcb_log_init_bmarks(struct fcb_log *fcb_log, 
++                         struct fcb_log_bmark *buf,
++                         int bmark_count);
++
+ #endif /* __SYS_FLASHVAR_H_ */
+diff --git a/fs/fcb/src/fcb_bookmarks.c b/fs/fcb/src/fcb_bookmarks.c
+new file mode 100644
+index 0000000..d613a33
+--- /dev/null
++++ b/fs/fcb/src/fcb_bookmarks.c
+@@ -0,0 +1,36 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <string.h>
++#include "fcb/fcb.h"
++
++void
++fcb_log_init_bmarks(struct fcb_log *fcb_log, struct fcb_log_bmark *buf,
++                    int bmark_count)
++{
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++    fcb_log->fl_bmarks = buf;
++    fcb_log->fl_bmark_count = bmark_count;
++    fcb_log->fl_bmark_idx = 0;
++#else
++    (void)fcb_log;
++    (void)buf;
++    (void)bmark_count;
++#endif
++}
+diff --git a/sys/log/full/src/log_fcb.c b/sys/log/full/src/log_fcb.c
+index e6b39ad..c0c51d1 100644
+--- a/sys/log/full/src/log_fcb.c
++++ b/sys/log/full/src/log_fcb.c
+@@ -77,6 +77,18 @@ log_fcb_start_append(struct log *log, int len, struct fcb_entry *loc)
+ #endif
+         rc = fcb_rotate(fcb);
+         if (rc) {
++
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++        /* Invalidate bookmarks after rotation */
++        if (fcb_log->fl_bmarks) {
++            int i;
++            for (i = 0; i < fcb_log->fl_bmark_count; i++) {
++                fcb_log->fl_bmarks[i].bm_index = 0;
++            }
++            fcb_log->fl_bmark_idx = 0;
++        }
++#endif
++
+             goto err;
+         }
+ 
+@@ -390,6 +402,40 @@ log_fcb_walk(struct log *log, log_walk_func_t walk_func,
+ 
+     memset(&loc, 0, sizeof(loc));
+ 
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++    /* Bookmark optimization */
++    struct fcb_log *fl = (struct fcb_log *)log->l_arg;
++    struct fcb_entry *start_loc = &loc;
++    uint32_t start_index = 0;
++    int use_bookmark = 0;
++    
++    /* Try to find a suitable bookmark */
++    if (fl->fl_bmarks && fl->fl_bmark_count > 0 && log_offset->lo_index > 0) {
++        int i;
++        uint32_t best_diff = UINT32_MAX;
++        int best_idx = -1;
++        
++        for (i = 0; i < fl->fl_bmark_count; i++) {
++            if (fl->fl_bmarks[i].bm_index > 0 && 
++                fl->fl_bmarks[i].bm_index <= log_offset->lo_index) {
++                uint32_t diff = log_offset->lo_index - fl->fl_bmarks[i].bm_index;
++                if (diff < best_diff) {
++                    best_diff = diff;
++                    best_idx = i;
++                }
++            }
++        }
++        
++        if (best_idx >= 0) {
++            /* Use bookmark as starting point */
++            memcpy(&loc, &fl->fl_bmarks[best_idx].bm_entry, sizeof(loc));
++            start_index = fl->fl_bmarks[best_idx].bm_index;
++            use_bookmark = 1;
++        }
++    }
++#endif
++
++
+     /*
+      * if timestamp for request is < 0, return last log entry
+      */
+@@ -397,11 +443,54 @@ log_fcb_walk(struct log *log, log_walk_func_t walk_func,
+         locp = &fcb->f_active;
+         rc = walk_func(log, log_offset, (void *)locp, locp->fe_data_len);
+     } else {
+-        while (fcb_getnext(fcb, &loc) == 0) {
+-            rc = walk_func(log, log_offset, (void *) &loc, loc.fe_data_len);
+-            if (rc) {
++        struct fcb_entry curr_loc;
++        struct log_entry_hdr hdr;
++        uint32_t curr_index;
++        
++        memset(&curr_loc, 0, sizeof(curr_loc));
++        
++        /* Start from the appropriate location */
++        if (use_bookmark) {
++            memcpy(&curr_loc, &loc, sizeof(curr_loc));
++        }
++        
++        while (1) {
++            if (!use_bookmark) {
++                if (fcb_getnext(fcb, &curr_loc) != 0) {
++                    break;
++                }
++            }
++            use_bookmark = 0; /* Only use bookmark for first iteration */
++            
++            /* Read the header to get the index */
++            rc = flash_area_read(curr_loc.fe_area, curr_loc.fe_data_off,
++                                 &hdr, sizeof(hdr));
++            if (rc != sizeof(hdr)) {
+                 break;
+             }
++            
++            curr_index = hdr.ue_index;
++            
++#if MYNEWT_VAL(LOG_FCB_BOOKMARKS)
++            /* Update bookmark if this is a good position */
++            if (fl->fl_bmarks && fl->fl_bmark_count > 0 && curr_index > start_index) {
++                if (++fl->fl_bmark_idx % 10 == 0) { /* Update every 10 entries */
++                    int idx = (fl->fl_bmark_idx / 10) % fl->fl_bmark_count;
++                    memcpy(&fl->fl_bmarks[idx].bm_entry, &curr_loc, sizeof(curr_loc));
++                    fl->fl_bmarks[idx].bm_index = curr_index;
++                }
++            }
++#endif
++            
++            /* Check if we should process this entry */
++            if (curr_index >= log_offset->lo_index) {
++                rc = walk_func(log, log_offset, (void *)&curr_loc, curr_loc.fe_data_len);
++                if (rc != 0) {
++                    break;
++                }
++            }
++            
++            start_index = curr_index;
+         }
+     }
+     return (rc);
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index 9e530fd..7eb3298 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -100,3 +100,11 @@ syscfg.defs:
+         description: >
+             Sysinit stage for logging to the second image slot.
+         value: 101
++
++    LOG_FCB_BOOKMARKS:
++        description: >
++            Enable bookmark optimization for FCB-backed log lookups.
++            When enabled, log walks use bookmarks to speed up lookups.
++        value: 0
++        restrictions:
++            - "LOG_FCB"

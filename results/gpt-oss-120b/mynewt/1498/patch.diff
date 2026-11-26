@@ -1,0 +1,116 @@
+diff --git a/fs/fcb2/include/fcb2/fcb2.h b/fs/fcb2/include/fcb2/fcb2.h
+new file mode 100644
+index 0000000..bc4c393
+--- /dev/null
++++ b/fs/fcb2/include/fcb2/fcb2.h
+@@ -0,0 +1,37 @@
++#ifndef __FCB2_H_
++#define __FCB2_H_
++
++#include <inttypes.h>
++#include <limits.h>
++
++#include "os/mynewt.h"
++#include "flash_map/flash_map.h"
++#include "fcb/fcb.h"
++
++/* New API constants */
++#define FCB_SECTOR_OLDEST UINT16_MAX
++#define FCB_ENTRY_SIZE 6
++#define FCB_CRC_LEN 2
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Wrapper functions matching the new specification. */
++int fcb2_init(struct fcb *fcb);
++int fcb2_append(struct fcb *fcb, uint16_t len, struct fcb_entry *loc);
++int fcb2_write(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len);
++int fcb2_append_finish(struct fcb *fcb, struct fcb_entry *loc);
++int fcb2_walk(struct fcb *fcb, int sector, fcb_walk_cb cb, void *cb_arg);
++int fcb2_read(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len);
++int fcb2_rotate(struct fcb *fcb);
++int fcb2_append_to_scratch(struct fcb *fcb);
++int fcb2_area_info(struct fcb *fcb, int sector, int *elemsp, int *bytesp);
++int fcb2_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *last_n_entry);
++int fcb2_elem_info(struct fcb_entry *loc);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __FCB2_H_ */
+diff --git a/fs/fcb2/pkg.yml b/fs/fcb2/pkg.yml
+new file mode 100644
+index 0000000..728affa
+--- /dev/null
++++ b/fs/fcb2/pkg.yml
+@@ -0,0 +1,14 @@
++pkg.name: fs/fcb2
++pkg.description: Flash circular buffer version 2.
++
++pkg.deps:
++  - "@apache-mynewt-core/kernel/os"
++  - "@apache-mynewt-core/util/crc"
++  - "@apache-mynewt-core/sys/flash_map"
++  - "@apache-mynewt-core/fs/fcb"
++
++pkg.incdirs:
++  - include
++
++pkg.cflags:
++  - -Iinclude
+diff --git a/fs/fcb2/src/fcb2.c b/fs/fcb2/src/fcb2.c
+new file mode 100644
+index 0000000..4334a8a
+--- /dev/null
++++ b/fs/fcb2/src/fcb2.c
+@@ -0,0 +1,47 @@
++#include "fcb2/fcb2.h"
++#include "fcb/fcb.h"
++
++int fcb2_init(struct fcb *fcb) { return fcb_init(fcb); }
++int fcb2_append(struct fcb *fcb, uint16_t len, struct fcb_entry *loc) { return fcb_append(fcb, len, loc); }
++int fcb2_write(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len) { return flash_area_write(loc->fe_area, loc->fe_data_off + off, buf, len); }
++int fcb2_append_finish(struct fcb *fcb, struct fcb_entry *loc) { return fcb_append_finish(fcb, loc); }
++
++static struct flash_area * sector_to_fa(struct fcb *fcb, int sector) {
++    if (sector == FCB_SECTOR_OLDEST) return fcb->f_oldest;
++    if (sector < 0 || sector >= fcb->f_sector_cnt) return NULL;
++    return &fcb->f_sectors[sector];
++}
++
++int fcb2_walk(struct fcb *fcb, int sector, fcb_walk_cb cb, void *cb_arg) {
++    struct flash_area *target = NULL;
++    if (sector != 0) {
++        target = sector_to_fa(fcb, sector);
++        if (!target) return FCB_ERR_ARGS;
++    }
++    struct fcb_entry loc = { .fe_area = target, .fe_elem_off = 0 };
++    int rc = os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    if (rc && rc != OS_NOT_STARTED) return FCB_ERR_ARGS;
++    while ((rc = fcb_getnext_nolock(fcb, &loc)) != FCB_ERR_NOVAR) {
++        os_mutex_release(&fcb->f_mtx);
++        if (target && loc.fe_area != target) {
++            os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++            continue;
++        }
++        rc = cb(&loc, cb_arg);
++        if (rc) return rc;
++        os_mutex_pend(&fcb->f_mtx, OS_WAIT_FOREVER);
++    }
++    os_mutex_release(&fcb->f_mtx);
++    return 0;
++}
++
++int fcb2_read(struct fcb_entry *loc, uint16_t off, void *buf, uint16_t len) { return flash_area_read(loc->fe_area, loc->fe_data_off + off, buf, len); }
++int fcb2_rotate(struct fcb *fcb) { return fcb_rotate(fcb); }
++int fcb2_append_to_scratch(struct fcb *fcb) { return fcb_append_to_scratch(fcb); }
++int fcb2_area_info(struct fcb *fcb, int sector, int *elemsp, int *bytesp) {
++    struct flash_area *fa = sector_to_fa(fcb, sector);
++    if (!fa && sector != 0 && sector != FCB_SECTOR_OLDEST) return FCB_ERR_ARGS;
++    return fcb_area_info(fcb, fa, elemsp, bytesp);
++}
++int fcb2_offset_last_n(struct fcb *fcb, uint8_t entries, struct fcb_entry *last) { return fcb_offset_last_n(fcb, entries, last); }
++int fcb2_elem_info(struct fcb_entry *loc) { return fcb_elem_info(loc); }

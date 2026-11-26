@@ -1,0 +1,199 @@
+diff --git a/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h b/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h
+new file mode 100644
+index 0000000..2521fdf
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/include/trng_sw/trng_sw.h
+@@ -0,0 +1,67 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++/**
++ * @file trng_sw.h
++ * @brief Software based TRNG driver.
++ */
++
++#ifndef __TRNG_SW_H__
++#define __TRNG_SW_H__
++
++#include <stddef.h>
++#include <stdint.h>
++#include "trng/trng.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Software TRNG device structure.  It embeds the generic @ref trng_dev
++ * structure so that a pointer to this struct can be used wherever a
++ * struct trng_dev * is expected (e.g. via os_dev_lookup).
++ */
++struct trng_sw_dev {
++    struct trng_dev trng_dev;   /**< Embedded generic TRNG device */
++    uint64_t state;             /**< Internal PRNG state */
++};
++
++/**
++ * Add external entropy to the software TRNG.  The function mixes the
++ * supplied bytes into the internal state using a simple XOR.  It always
++ * returns 0, even for zero‑length additions.
++ */
++int trng_sw_dev_add_entropy(struct trng_sw_dev *tsd, void *entr, int entr_len);
++
++/**
++ * Initialise the device – set up the interface callbacks.
++ */
++int trng_sw_dev_init(struct os_dev *dev, void *arg);
++
++/**
++ * Package initialisation – responsible for creating the OS device instance.
++ */
++void trng_sw_pkg_init(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __TRNG_SW_H__ */
+diff --git a/hw/drivers/trng/trng_sw/pkg.yml b/hw/drivers/trng/trng_sw/pkg.yml
+new file mode 100644
+index 0000000..da5da6e
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/pkg.yml
+@@ -0,0 +1,32 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++#
++
++pkg.name: "hw/drivers/trng/trng_sw"
++pkg.description: "Software TRNG driver for native simulator"
++pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
++pkg.homepage: "http://mynewt.apache.org/"
++
++pkg.deps:
++    - "@apache-mynewt-core/hw/drivers/trng"
++
++pkg.apis:
++    - TRNG_HW_IMPL
++
++pkg.init:
++    trng_sw_pkg_init: 'MYNEWT_VAL(TRNG_SW_SYSINIT_STAGE)'
+diff --git a/hw/drivers/trng/trng_sw/src/trng_sw.c b/hw/drivers/trng/trng_sw/src/trng_sw.c
+new file mode 100644
+index 0000000..c19757e
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/src/trng_sw.c
+@@ -0,0 +1,69 @@
++/* ... same header ... */
++
++#include <assert.h>
++#include <string.h>
++#include <stdio.h>
++#include "trng_sw/trng_sw.h"
++
++#define LCG_MULT 6364136223846793005ULL
++#define LCG_INC  1ULL
++
++static struct trng_sw_dev sw_dev;
++
++static uint32_t
++trng_sw_get_u32(struct trng_dev *trng)
++{
++    struct trng_sw_dev *tsd = (struct trng_sw_dev *)trng;
++    tsd->state = tsd->state * LCG_MULT + LCG_INC;
++    return (uint32_t)(tsd->state >> 32);
++}
++
++static size_t
++trng_sw_read(struct trng_dev *trng, void *ptr, size_t size)
++{
++    uint8_t *buf = (uint8_t *)ptr;
++    size_t i;
++    for (i = 0; i < size; ++i) {
++        uint32_t v = trng_sw_get_u32(trng);
++        buf[i] = (uint8_t)v;
++    }
++    return size;
++}
++
++int
++trng_sw_dev_add_entropy(struct trng_sw_dev *tsd, void *entr, int entr_len)
++{
++    uint8_t *e = (uint8_t *)entr;
++    int i;
++    for (i = 0; i < entr_len; ++i) {
++        tsd->state ^= ((uint64_t)e[i] << ((i % 8) * 8));
++    }
++    return 0;
++}
++
++int
++trng_sw_dev_init(struct os_dev *dev, void *arg)
++{
++    struct trng_sw_dev *tsd = (struct trng_sw_dev *)dev;
++    struct trng_dev *trng = &tsd->trng_dev;
++    (void)arg;
++    tsd->state = (uint64_t)(uintptr_t)tsd ^ 0x12345678abcdefULL;
++    OS_DEV_SETHANDLERS(dev, NULL, NULL);
++    trng->interface.get_u32 = trng_sw_get_u32;
++    trng->interface.read = trng_sw_read;
++    return 0;
++}
++
++void
++trng_sw_pkg_init(void)
++{
++    int rc;
++    rc = os_dev_create(&sw_dev.trng_dev.dev, "trng",
++                       OS_DEV_INIT_KERNEL, OS_DEV_INIT_PRIO_DEFAULT,
++                       trng_sw_dev_init, NULL);
++    assert(rc == 0);
++    /* Initialize and mark ready */
++    trng_sw_dev_init(&sw_dev.trng_dev.dev, NULL);
++    sw_dev.trng_dev.dev.od_flags |= OS_DEV_F_STATUS_READY;
++}
++
+diff --git a/hw/drivers/trng/trng_sw/syscfg.yml b/hw/drivers/trng/trng_sw/syscfg.yml
+new file mode 100644
+index 0000000..5acc255
+--- /dev/null
++++ b/hw/drivers/trng/trng_sw/syscfg.yml
+@@ -0,0 +1,7 @@
++syscfg.defs:
++    TRNG_SW_SYSINIT_STAGE:
++        description: 'Sysinit stage for software TRNG driver'
++        value: 0
++
++syscfg.vals:
++    TRNG_SW_SYSINIT_STAGE: 1

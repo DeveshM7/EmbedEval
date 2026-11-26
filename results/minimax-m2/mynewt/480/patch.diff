@@ -1,0 +1,97 @@
+diff --git a/net/nimble/host/include/host/ble_gatt.h b/net/nimble/host/include/host/ble_gatt.h
+index db68b35..ef13f62 100644
+--- a/net/nimble/host/include/host/ble_gatt.h
++++ b/net/nimble/host/include/host/ble_gatt.h
+@@ -426,6 +426,9 @@ int ble_gatts_find_chr(const ble_uuid_t *svc_uuid, const ble_uuid_t *chr_uuid,
+ int ble_gatts_find_dsc(const ble_uuid_t *svc_uuid, const ble_uuid_t *chr_uuid,
+                        const ble_uuid_t *dsc_uuid, uint16_t *out_dsc_handle);
+ 
++int ble_gatts_reset(void);
++int ble_gatts_start(void);
++
+ typedef void (*ble_gatt_svc_foreach_fn)(const struct ble_gatt_svc_def *svc,
+                                         uint16_t handle,
+                                         uint16_t end_group_handle);
+diff --git a/net/nimble/host/src/ble_att_priv.h b/net/nimble/host/src/ble_att_priv.h
+index 8e72fba..aec6d97 100644
+--- a/net/nimble/host/src/ble_att_priv.h
++++ b/net/nimble/host/src/ble_att_priv.h
+@@ -179,6 +179,8 @@ int ble_att_init(void);
+ 
+ int ble_att_svr_start(void);
+ 
++void ble_att_svr_clear(void);
++
+ struct ble_att_svr_entry *
+ ble_att_svr_find_by_uuid(struct ble_att_svr_entry *start_at,
+                          const ble_uuid_t *uuid,
+diff --git a/net/nimble/host/src/ble_att_svr.c b/net/nimble/host/src/ble_att_svr.c
+index 08c8b03..a9bd2b4 100644
+--- a/net/nimble/host/src/ble_att_svr.c
++++ b/net/nimble/host/src/ble_att_svr.c
+@@ -2709,3 +2709,16 @@ ble_att_svr_init(void)
+ 
+     return 0;
+ }
++
++void
++ble_att_svr_clear(void)
++{
++    struct ble_att_svr_entry *entry;
++
++    while ((entry = STAILQ_FIRST(&ble_att_svr_list)) != NULL) {
++        STAILQ_REMOVE_HEAD(&ble_att_svr_list, ha_next);
++        free(entry);
++    }
++
++    ble_att_svr_id = 0;
++}
+diff --git a/net/nimble/host/src/ble_gatts.c b/net/nimble/host/src/ble_gatts.c
+index b8ecbda..d16aac5 100644
+--- a/net/nimble/host/src/ble_gatts.c
++++ b/net/nimble/host/src/ble_gatts.c
+@@ -1142,6 +1142,11 @@ ble_gatts_free_mem(void)
+ int
+ ble_gatts_start(void)
+ {
++    /* Check if busy with active connections or GAP procedures. */
++    if (ble_gap_conn_active() || ble_gap_adv_active() || ble_gap_disc_active()) {
++        return BLE_HS_EBUSY;
++    }
++
+     struct ble_att_svr_entry *ha;
+     struct ble_gatt_chr_def *chr;
+     uint16_t allowed_flags;
+@@ -1231,6 +1236,32 @@ err:
+     return rc;
+ }
+ 
++int
++ble_gatts_reset(void)
++{
++    /* Check if busy with active connections or GAP procedures. */
++    if (ble_gap_conn_active() || ble_gap_adv_active() || ble_gap_disc_active()) {
++        return BLE_HS_EBUSY;
++    }
++
++    /* Clear all ATT server entries (services, characteristics, descriptors). */
++    ble_att_svr_clear();
++
++    /* Reset GATT server state. */
++    ble_gatts_free_mem();
++    ble_gatts_free_svc_defs();
++
++    /* Reset service entry tracking. */
++    ble_gatts_num_svc_entries = 0;
++
++    /* Reset configurable characteristics tracking. */
++    ble_gatts_num_cfgable_chrs = 0;
++    ble_gatts_clt_cfgs = NULL;
++
++    return 0;
++}
++
++
+ int
+ ble_gatts_conn_can_alloc(void)
+ {

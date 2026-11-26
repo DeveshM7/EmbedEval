@@ -1,0 +1,83 @@
+diff --git a/sys/config/include/config/config_fcb.h b/sys/config/include/config/config_fcb.h
+index 918093f..68482dc 100644
+--- a/sys/config/include/config/config_fcb.h
++++ b/sys/config/include/config/config_fcb.h
+@@ -32,6 +32,7 @@ struct conf_fcb {
+ 
+ extern int conf_fcb_src(struct conf_fcb *cf);
+ extern int conf_fcb_dst(struct conf_fcb *cf);
++extern void conf_fcb_compress(struct conf_fcb *cf, int (*filter)(const char *name, const char *val, void *arg), void *arg);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/sys/config/src/config_fcb.c b/sys/config/src/config_fcb.c
+index abd878c..bb3b2fb 100644
+--- a/sys/config/src/config_fcb.c
++++ b/sys/config/src/config_fcb.c
+@@ -38,6 +38,7 @@ struct conf_fcb_load_cb_arg {
+ static int conf_fcb_load(struct conf_store *, load_cb cb, void *cb_arg);
+ static int conf_fcb_save(struct conf_store *, const char *name,
+   const char *value);
++static void conf_fcb_compress_with_filter(struct conf_fcb *cf, int (*filter)(const char *name, const char *val, void *arg), void *arg);
+ 
+ static struct conf_store_itf conf_fcb_itf = {
+     .csi_load = conf_fcb_load,
+@@ -151,7 +152,7 @@ conf_fcb_var_read(struct fcb_entry *loc, char *buf, char **name, char **val)
+ }
+ 
+ static void
+-conf_fcb_compress(struct conf_fcb *cf)
++conf_fcb_compress_with_filter(struct conf_fcb *cf, int (*filter)(const char *name, const char *val, void *arg), void *arg)
+ {
+     int rc;
+     char buf1[CONF_MAX_NAME_LEN + CONF_MAX_VAL_LEN + 32];
+@@ -161,6 +162,7 @@ conf_fcb_compress(struct conf_fcb *cf)
+     char *name1, *val1;
+     char *name2, *val2;
+     int copy;
++    int skip;
+ 
+     rc = fcb_append_to_scratch(&cf->cf_fcb);
+     if (rc) {
+@@ -198,7 +200,19 @@ conf_fcb_compress(struct conf_fcb *cf)
+ 
+         /*
+          * Can't find one. Must copy.
++         * Call the filter to determine if this entry should be copied.
+          */
++        skip = 0;
++        if (filter != NULL) {
++            if (filter(name1, val1, arg) != 0) {
++                skip = 1;
++            }
++        }
++        
++        if (skip) {
++            continue;
++        }
++
+         rc = flash_area_read(loc1.fe_area, loc1.fe_data_off, buf1,
+           loc1.fe_data_len);
+         if (rc) {
+@@ -222,6 +236,12 @@ conf_fcb_compress(struct conf_fcb *cf)
+     }
+ }
+ 
++void
++conf_fcb_compress(struct conf_fcb *cf, int (*filter)(const char *name, const char *val, void *arg), void *arg)
++{
++    conf_fcb_compress_with_filter(cf, filter, arg);
++}
++
+ static int
+ conf_fcb_append(struct conf_fcb *cf, char *buf, int len)
+ {
+@@ -237,7 +257,7 @@ conf_fcb_append(struct conf_fcb *cf, char *buf, int len)
+         if (cf->cf_fcb.f_scratch_cnt == 0) {
+             return OS_ENOMEM;
+         }
+-        conf_fcb_compress(cf);
++        conf_fcb_compress_with_filter(cf, NULL, NULL);
+     }
+     if (rc) {
+         return OS_EINVAL;

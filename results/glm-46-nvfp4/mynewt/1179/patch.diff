@@ -1,0 +1,79 @@
+diff --git a/sys/log/full/include/log/log.h b/sys/log/full/include/log/log.h
+index 6e118aa..d2c8b52 100644
+--- a/sys/log/full/include/log/log.h
++++ b/sys/log/full/include/log/log.h
+@@ -280,6 +280,11 @@ int log_walk(struct log *log, log_walk_func_t walk_func,
+         struct log_offset *log_offset);
+ int log_flush(struct log *log);
+ 
++/* Per-module log level support */
++uint8_t log_level_get(uint8_t module);
++int log_level_set(uint8_t module, uint8_t level);
++
++
+ /* Handler exports */
+ #if MYNEWT_VAL(LOG_CONSOLE)
+ extern const struct log_handler log_console_handler;
+diff --git a/sys/log/full/src/log.c b/sys/log/full/src/log.c
+index b6f1aa1..431e2f2 100644
+--- a/sys/log/full/src/log.c
++++ b/sys/log/full/src/log.c
+@@ -37,6 +37,9 @@ static const char *g_log_module_list[ MYNEWT_VAL(LOG_MAX_USER_MODULES) ];
+ static uint8_t log_inited;
+ static uint8_t log_written;
+ 
++/* Global map of per-module minimum log levels */
++static uint8_t g_module_log_levels[256];
++
+ #if MYNEWT_VAL(LOG_CLI)
+ int shell_log_dump_all_cmd(int, char **);
+ struct shell_cmd g_shell_log_cmd = {
+@@ -69,6 +72,10 @@ log_init(void)
+     log_inited = 1;
+     log_written = 0;
+ 
++    /* Initialize all module levels to 0 (LOG_LEVEL_DEBUG) */
++    memset(g_module_log_levels, 0, sizeof(g_module_log_levels));
++    log_written = 0;
++
+     g_log_info.li_version = MYNEWT_VAL(LOG_VERSION);
+     g_log_info.li_next_index = 0;
+ 
+@@ -475,3 +482,23 @@ log_flush(struct log *log)
+ err:
+     return (rc);
+ }
++
++/* Per-module log level support */
++uint8_t
++log_level_get(uint8_t module)
++{
++    if (module >= 256) {
++        return 0; /* LOG_LEVEL_DEBUG */
++    }
++    return g_module_log_levels[module];
++}
++
++int
++log_level_set(uint8_t module, uint8_t level)
++{
++    if (module >= 256 || level > 15) {
++        return SYS_EINVAL;
++    }
++    g_module_log_levels[module] = level;
++    return 0;
++}
+diff --git a/sys/log/full/syscfg.yml b/sys/log/full/syscfg.yml
+index 306ec9d..eb20a47 100644
+--- a/sys/log/full/syscfg.yml
++++ b/sys/log/full/syscfg.yml
+@@ -57,4 +57,7 @@ syscfg.defs:
+ 
+     LOG_MAX_USER_MODULES:
+         description: 'Maximum number of user modules to register'
+-        value: 1
+\ No newline at end of file
++        value: 1
++    LOG_PERMODULE_LEVEL:
++        description: 'Enable per-module minimum log level support.'
++        value: 1
