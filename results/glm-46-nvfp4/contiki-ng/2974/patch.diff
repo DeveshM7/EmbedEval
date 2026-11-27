@@ -1,0 +1,187 @@
+diff --git a/os/sys/process-mutex.c b/os/sys/process-mutex.c
+new file mode 100644
+index 0000000..a08709f
+--- /dev/null
++++ b/os/sys/process-mutex.c
+@@ -0,0 +1,70 @@
++/*
++ * Copyright (c) 2023, Contiki-NG
++ *
++ * All rights reserved.
++ */
++
++#include <stddef.h>
++#include "sys/process-mutex.h"
++
++/* Forward declarations to avoid including process.h */
++struct process;
++
++typedef uint8_t process_event_t;
++typedef void * process_data_t;
++
++extern struct process *process_current;
++extern process_event_t process_alloc_event(void);
++extern int process_post(struct process *p, process_event_t ev, process_data_t data);
++
++void
++process_mutex_init(process_mutex_t *mutex)
++{
++  mutex->owner = NULL;
++  mutex->num_waiters = 0;
++  mutex->unlock_event = process_alloc_event();
++}
++
++bool
++process_mutex_try_lock(process_mutex_t *mutex)
++{
++  struct process *current = process_current;
++  
++  if(mutex->owner == NULL) {
++    mutex->owner = current;
++    return true;
++  }
++  
++  if(mutex->owner == current) {
++    return false;
++  }
++  
++  if(mutex->num_waiters < PROCESS_MUTEX_MAX_WAITERS) {
++    for(uint8_t i = 0; i < mutex->num_waiters; i++) {
++      if(mutex->waiters[i] == current) {
++        return false;
++      }
++    }
++    mutex->waiters[mutex->num_waiters++] = current;
++  }
++  
++  return false;
++}
++
++void
++process_mutex_unlock(process_mutex_t *mutex)
++{
++  struct process *current = process_current;
++  
++  if(mutex->owner != current) {
++    return;
++  }
++  
++  mutex->owner = NULL;
++  
++  for(uint8_t i = 0; i < mutex->num_waiters; i++) {
++    process_post(mutex->waiters[i], mutex->unlock_event, NULL);
++  }
++  
++  mutex->num_waiters = 0;
++}
+diff --git a/os/sys/process-mutex.h b/os/sys/process-mutex.h
+new file mode 100644
+index 0000000..59cde4f
+--- /dev/null
++++ b/os/sys/process-mutex.h
+@@ -0,0 +1,105 @@
++/*
++ * Copyright (c) 2023, Contiki-NG
++ *
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/**
++ * \addtogroup sys
++ * @{
++ *
++ * \defgroup process-mutex Process-level Mutexes
++ *
++ * This library provides process-level mutexes for Contiki-NG processes.
++ * Unlike the low-level mutex.h which protects from interrupts, these
++ * mutexes provide exclusive access to shared resources between processes.
++ *
++ * When a mutex is already held by another process, try_lock will fail
++ * and the current process will be recorded as a waiter. When the mutex
++ * is unlocked, all waiting processes are woken so they can retry.
++ *
++ * @{
++ */
++
++#ifndef PROCESS_MUTEX_H_
++#define PROCESS_MUTEX_H_
++
++#include <stdint.h>
++#include <stdbool.h>
++
++/* Forward declaration */
++struct process;
++
++/* Maximum number of waiting processes per mutex */
++#define PROCESS_MUTEX_MAX_WAITERS 8
++
++/**
++ * \brief Process mutex data structure
++ */
++typedef struct {
++  struct process *owner;               /**< Process currently holding the mutex */
++  struct process *waiters[PROCESS_MUTEX_MAX_WAITERS]; /**< Array of waiting processes */
++  uint8_t num_waiters;                 /**< Number of processes currently waiting */
++  unsigned int unlock_event;            /**< Event posted when mutex is unlocked */
++} process_mutex_t;
++
++/**
++ * \brief Initialize a process mutex
++ * \param mutex Pointer to the mutex to initialize
++ *
++ * This function must be called before using a mutex. It initializes
++ * the mutex to the unlocked state and allocates the unlock event.
++ */
++void process_mutex_init(process_mutex_t *mutex);
++
++/**
++ * \brief Try to acquire a mutex
++ * \param mutex Pointer to the mutex
++ * \retval true The mutex was successfully acquired
++ * \retval false The mutex is already held, current process added to waiters
++ *
++ * If the mutex is free, this function acquires it and returns true.
++ * If the mutex is already held, the current process is recorded as a
++ * waiter and the function returns false.
++ */
++bool process_mutex_try_lock(process_mutex_t *mutex);
++
++/**
++ * \brief Release a mutex
++ * \param mutex Pointer to the mutex to release
++ *
++ * If the current process is the owner, this function releases the mutex
++ * and wakes all waiting processes by posting the unlock event to them.
++ */
++void process_mutex_unlock(process_mutex_t *mutex);
++
++#endif /* PROCESS_MUTEX_H_ */
++/** @} */
++/** @} */

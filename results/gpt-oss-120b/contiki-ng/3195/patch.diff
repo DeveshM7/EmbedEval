@@ -1,0 +1,153 @@
+diff --git a/os/lib/cbor.h b/os/lib/cbor.h
+index a3fe9e6..8b1e9c3 100644
+--- a/os/lib/cbor.h
++++ b/os/lib/cbor.h
+@@ -362,8 +362,20 @@ size_t cbor_read_array(cbor_reader_state_t *state);
+  * \return      Number of entries or \c SIZE_MAX on error.
+  */
+ size_t cbor_read_map(cbor_reader_state_t *state);
++/**
++ * Returns the current read position inside the CBOR buffer.
++ */
++const uint8_t *cbor_get_position(cbor_reader_state_t *state);
+ 
+-/** @} */
++/**
++ * Returns the number of unread bytes remaining in the CBOR buffer.
++ */
++size_t cbor_get_remaining(cbor_reader_state_t *state);
++
++/**
++ * Skips the next complete CBOR data item.
++ */
++bool cbor_skip_next(cbor_reader_state_t *state);
+ /** @} */
+ 
+ #endif /* CBOR_H_ */
+diff --git a/os/lib/cbor_extra.c b/os/lib/cbor_extra.c
+new file mode 100644
+index 0000000..32f39e5
+--- /dev/null
++++ b/os/lib/cbor_extra.c
+@@ -0,0 +1,121 @@
++/* Additional CBOR reader helper functions */
++#include "lib/cbor.h"
++
++/* Duplicate of the internal helper from cbor.c to read an unsigned length */
++static cbor_size_t read_uint_len(cbor_reader_state_t *state, uint64_t *value)
++{
++  size_t bytes_to_read;
++  if(!state->cbor_size) {
++    return CBOR_SIZE_NONE;
++  }
++  cbor_size_t size = *state->cbor & ~0xE0;
++  state->cbor++;
++  state->cbor_size--;
++  if(size < CBOR_SIZE_1) {
++    *value = size;
++    return CBOR_SIZE_1;
++  }
++  switch(size) {
++  case CBOR_SIZE_1: bytes_to_read = 1; break;
++  case CBOR_SIZE_2: bytes_to_read = 2; break;
++  case CBOR_SIZE_4: bytes_to_read = 4; break;
++  case CBOR_SIZE_8: bytes_to_read = 8; break;
++  default: return CBOR_SIZE_NONE;
++  }
++  if(bytes_to_read > state->cbor_size) {
++    return CBOR_SIZE_NONE;
++  }
++  state->cbor_size -= bytes_to_read;
++  *value = 0;
++  while(bytes_to_read--) {
++    *value <<= 8;
++    *value += *state->cbor++;
++  }
++  return size;
++}
++
++const uint8_t *cbor_get_position(cbor_reader_state_t *state)
++{
++  return state->cbor;
++}
++
++size_t cbor_get_remaining(cbor_reader_state_t *state)
++{
++  return state->cbor_size;
++}
++
++bool cbor_skip_next(cbor_reader_state_t *state)
++{
++  if(state->cbor_size == 0) {
++    return false;
++  }
++  cbor_reader_state_t tmp = *state;
++  uint8_t initial = *tmp.cbor;
++  uint8_t major = initial & 0xE0;
++  uint8_t additional = initial & 0x1F;
++  if(initial == 0xFF) {
++    return false;
++  }
++  if(major != CBOR_MAJOR_TYPE_SIMPLE && additional >= 0x1C && additional <= 0x1F) {
++    return false;
++  }
++  switch(major) {
++  case CBOR_MAJOR_TYPE_UNSIGNED:
++  case CBOR_MAJOR_TYPE_SIGNED:
++    {
++      uint64_t dummy;
++      if(read_uint_len(&tmp, &dummy) == CBOR_SIZE_NONE) return false;
++      break;
++    }
++  case CBOR_MAJOR_TYPE_BYTE_STRING:
++  case CBOR_MAJOR_TYPE_TEXT_STRING:
++    {
++      uint64_t len;
++      if(read_uint_len(&tmp, &len) == CBOR_SIZE_NONE) return false;
++      if(len > tmp.cbor_size) return false;
++      tmp.cbor += len;
++      tmp.cbor_size -= len;
++      break;
++    }
++  case CBOR_MAJOR_TYPE_ARRAY:
++    {
++      uint64_t count;
++      if(read_uint_len(&tmp, &count) == CBOR_SIZE_NONE) return false;
++      for(uint64_t i = 0; i < count; ++i) {
++        if(!cbor_skip_next(&tmp)) return false;
++      }
++      break;
++    }
++  case CBOR_MAJOR_TYPE_MAP:
++    {
++      uint64_t entries;
++      if(read_uint_len(&tmp, &entries) == CBOR_SIZE_NONE) return false;
++      for(uint64_t i = 0; i < entries * 2; ++i) {
++        if(!cbor_skip_next(&tmp)) return false;
++      }
++      break;
++    }
++  case CBOR_MAJOR_TYPE_SIMPLE:
++    {
++      if(additional <= 23) {
++        tmp.cbor++;
++        tmp.cbor_size--;
++        break;
++      }
++      size_t extra = 0;
++      if(additional == 24) extra = 1;
++      else if(additional == 25) extra = 2;
++      else if(additional == 26) extra = 4;
++      else if(additional == 27) extra = 8;
++      else return false;
++      if(tmp.cbor_size < 1 + extra) return false;
++      tmp.cbor += 1 + extra;
++      tmp.cbor_size -= 1 + extra;
++      break;
++    }
++  default:
++    return false;
++  }
++  *state = tmp;
++  return true;
++}

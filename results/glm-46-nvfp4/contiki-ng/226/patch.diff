@@ -1,0 +1,1947 @@
+diff --git a/os/lib/circular-list.h b/os/lib/circular-list.h
+new file mode 100644
+index 0000000..8b0520a
+--- /dev/null
++++ b/os/lib/circular-list.h
+@@ -0,0 +1,257 @@
++/*
++ * Copyright (c) 2024, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/** \addtogroup data
++    @{ */
++/**
++ * \defgroup circular_list Circular singly-linked list library
++ *
++ * The circular list library provides circular singly-linked list operations.
++ * Elements must be structs where the first element is a pointer used for
++ * linking and the second element (optional) is not used for compatibility.
++ *
++ * @{
++ */
++
++#ifndef CIRCULAR_LIST_H_
++#define CIRCULAR_LIST_H_
++
++#include <stddef.h>
++#include "lib/list.h"
++
++#define CIRCULAR_LIST_CONCAT2(s1, s2) s1##s2
++#define CIRCULAR_LIST_CONCAT(s1, s2) CIRCULAR_LIST_CONCAT2(s1, s2)
++
++/**
++ * Declare a circular list.
++ *
++ * This macro declares a circular list with the specified \c name. Elements
++ * must be structs where the first element is a pointer used for linking.
++ *
++ * \param name The name of the circular list.
++ */
++#define CIRCULAR_LIST(name) \
++         static void *CIRCULAR_LIST_CONCAT(name,_list) = NULL; \
++         static void **name = (void **)&CIRCULAR_LIST_CONCAT(name,_list)
++
++/**
++ * The circular list type. Compatible with list_t for mutual compatibility.
++ */
++typedef void ** circular_list_t;
++
++/* Forward declaration */
++static inline void circular_list_remove(circular_list_t list, void *item);
++
++/* Internal structure for elements */
++struct circular_item {
++  struct circular_item *next;
++};
++
++/**
++ * Initialize a circular list.
++ *
++ * This function initializes a circular list. The list will be empty after this
++ * function has been called.
++ *
++ * \param list The circular list to be initialized.
++ */
++static inline void
++circular_list_init(circular_list_t list)
++{
++  *list = NULL;
++}
++
++/**
++ * Check if the circular list is empty.
++ *
++ * \param list The circular list.
++ * \return true if empty, false otherwise.
++ */
++static inline int
++circular_list_is_empty(circular_list_t list)
++{
++  return *list == NULL;
++}
++
++/**
++ * Get the length of a circular list.
++ *
++ * \param list The circular list.
++ * \return The length of the list.
++ */
++static inline unsigned long
++circular_list_length(circular_list_t list)
++{
++  struct circular_item *item;
++  unsigned long n = 0;
++
++  if(*list == NULL) {
++    return 0;
++  }
++
++  item = *list;
++  do {
++    n++;
++    item = item->next;
++  } while(item != *list);
++
++  return n;
++}
++
++/**
++ * Get the head element of a circular list.
++ *
++ * \param list The circular list.
++ * \return Pointer to the head element, or NULL if empty.
++ */
++static inline void *
++circular_list_head(circular_list_t list)
++{
++  return *list;
++}
++
++/**
++ * Get the tail element of a circular list.
++ *
++ * \param list The circular list.
++ * \return Pointer to the tail element, or NULL if empty.
++ */
++static inline void *
++circular_list_tail(circular_list_t list)
++{
++  struct circular_item *item;
++
++  if(*list == NULL) {
++    return NULL;
++  }
++
++  /* Find the element that points to head */
++  item = *list;
++  while(item->next != *list) {
++    item = item->next;
++  }
++
++  return item;
++}
++
++/**
++ * Add an element to the head of a circular list.
++ *
++ * This function inserts the new element at the head so it becomes the new head.
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The circular list.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++circular_list_add(circular_list_t list, void *item)
++{
++  struct circular_item *new_item = item;
++  struct circular_item *tail;
++
++  /* Remove if already in list */
++  circular_list_remove(list, item);
++
++  if(*list == NULL) {
++    /* First element - points to itself */
++    new_item->next = new_item;
++    *list = new_item;
++  } else {
++    tail = circular_list_tail(list);
++    new_item->next = *list;
++    tail->next = new_item;
++    *list = new_item;
++  }
++}
++
++/**
++ * Remove an element from a circular list.
++ *
++ * \param list The circular list.
++ * \param item The item to be removed.
++ */
++static inline void
++circular_list_remove(circular_list_t list, void *item)
++{
++  struct circular_item *current;
++  struct circular_item *prev;
++  struct circular_item *remove_item = item;
++
++  if(*list == NULL || remove_item == NULL) {
++    return;
++  }
++
++  /* Special case: only one element */
++  if(*list == remove_item && remove_item->next == remove_item) {
++    *list = NULL;
++    remove_item->next = NULL;
++    return;
++  }
++
++  /* Find the element and its predecessor */
++  current = *list;
++  prev = NULL;
++
++  do {
++    if(current == remove_item) {
++      break;
++    }
++    prev = current;
++    current = current->next;
++  } while(current != *list);
++
++  /* If not found, do nothing */
++  if(current != remove_item) {
++    return;
++  }
++
++  /* Remove the element */
++  if(prev == NULL) {
++    /* Removing head - need to find tail to update */
++    struct circular_item *tail = *list;
++    while(tail->next != *list) {
++      tail = tail->next;
++    }
++    tail->next = current->next;
++    *list = current->next;
++  } else {
++    prev->next = current->next;
++  }
++
++  remove_item->next = NULL;
++}
++
++#endif /* CIRCULAR_LIST_H_ */
++
++/** @} */
++/** @} */
+diff --git a/os/lib/dbl-circ-list.h b/os/lib/dbl-circ-list.h
+new file mode 100644
+index 0000000..8eeb424
+--- /dev/null
++++ b/os/lib/dbl-circ-list.h
+@@ -0,0 +1,367 @@
++/*
++ * Copyright (c) 2024, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/** \addtogroup data
++    @{ */
++/**
++ * \defgroup dbl_circ_list Circular doubly-linked list library
++ *
++ * The circular doubly-linked list library provides circular doubly-linked
++ * list operations. Elements must be structs where the first element is a
++ * 'next' pointer and the second element is a 'previous' pointer.
++ *
++ * @{
++ */
++
++#ifndef DBL_CIRC_LIST_H_
++#define DBL_CIRC_LIST_H_
++
++#include <stddef.h>
++#include <stdbool.h>
++#include "lib/list.h"
++
++#define DBL_CIRC_LIST_CONCAT2(s1, s2) s1##s2
++#define DBL_CIRC_LIST_CONCAT(s1, s2) DBL_CIRC_LIST_CONCAT2(s1, s2)
++
++/**
++ * Declare a circular doubly-linked list.
++ *
++ * This macro declares a circular doubly-linked list with the specified \c name.
++ * Elements must be structs where the first element is a 'next' pointer and the
++ * second element is a 'previous' pointer.
++ *
++ * \param name The name of the circular doubly-linked list.
++ */
++#define DBL_CIRC_LIST(name) \
++         static void *DBL_CIRC_LIST_CONCAT(name,_head) = NULL; \
++         static void **name = (void **)&DBL_CIRC_LIST_CONCAT(name,_head)
++
++/**
++ * The circular doubly-linked list type. Compatible with list_t for mutual compatibility.
++ */
++typedef void ** dbl_circ_list_t;
++
++/* Forward declarations */
++static inline void dbl_circ_list_add_after(dbl_circ_list_t list, void *existing, void *item);
++
++/* Internal structure for elements */
++struct dbl_circ_item {
++  struct dbl_circ_item *next;
++  struct dbl_circ_item *previous;
++};
++
++/**
++ * Initialize a circular doubly-linked list.
++ *
++ * This function initializes a circular doubly-linked list. The list will be empty after this
++ * function has been called.
++ *
++ * \param list The circular doubly-linked list to be initialized.
++ */
++static inline void
++dbl_circ_list_init(dbl_circ_list_t list)
++{
++  *list = NULL;
++}
++
++/**
++ * Check if the circular doubly-linked list is empty.
++ *
++ * \param list The circular doubly-linked list.
++ * \return true if empty, false otherwise.
++ */
++static inline bool
++dbl_circ_list_is_empty(dbl_circ_list_t list)
++{
++  return *list == NULL;
++}
++
++/**
++ * Get the length of a circular doubly-linked list.
++ *
++ * \param list The circular doubly-linked list.
++ * \return The length of the list.
++ */
++static inline unsigned long
++dbl_circ_list_length(dbl_circ_list_t list)
++{
++  struct dbl_circ_item *item;
++  unsigned long n = 0;
++
++  if(*list == NULL) {
++    return 0;
++  }
++
++  item = *list;
++  do {
++    n++;
++    item = item->next;
++  } while(item != *list);
++
++  return n;
++}
++
++/**
++ * Get the head element of a circular doubly-linked list.
++ *
++ * \param list The circular doubly-linked list.
++ * \return Pointer to the head element, or NULL if empty.
++ */
++static inline void *
++dbl_circ_list_head(dbl_circ_list_t list)
++{
++  return *list;
++}
++
++/**
++ * Get the tail element of a circular doubly-linked list.
++ *
++ * \param list The circular doubly-linked list.
++ * \return Pointer to the tail element, or NULL if empty.
++ */
++static inline void *
++dbl_circ_list_tail(dbl_circ_list_t list)
++{
++  struct dbl_circ_item *item;
++
++  if(*list == NULL) {
++    return NULL;
++  }
++
++  /* Tail is the element before head */
++  item = *list;
++  while(item->next != *list) {
++    item = item->next;
++  }
++
++  return item;
++}
++
++/**
++ * Internal helper to check if an item is in the list.
++ */
++static inline bool
++dbl_circ_list_contains(dbl_circ_list_t list, void *item)
++{
++  struct dbl_circ_item *current;
++  struct dbl_circ_item *check_item = item;
++
++  if(*list == NULL || check_item == NULL) {
++    return false;
++  }
++
++  current = *list;
++  do {
++    if(current == check_item) {
++      return true;
++    }
++    current = current->next;
++  } while(current != *list);
++
++  return false;
++}
++
++/**
++ * Internal helper to remove an element if it exists in the list.
++ */
++static inline void
++dbl_circ_list_remove_if_exists(dbl_circ_list_t list, void *item)
++{
++  struct dbl_circ_item *remove_item = item;
++
++  if(!dbl_circ_list_contains(list, item)) {
++    return;
++  }
++
++  if(remove_item->next == remove_item) {
++    /* Only element in list */
++    *list = NULL;
++  } else {
++    /* Multiple elements */
++    remove_item->previous->next = remove_item->next;
++    remove_item->next->previous = remove_item->previous;
++    if(*list == remove_item) {
++      *list = remove_item->next;
++    }
++  }
++
++  remove_item->next = NULL;
++  remove_item->previous = NULL;
++}
++
++/**
++ * Add an element to the head of a circular doubly-linked list.
++ *
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The circular doubly-linked list.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++dbl_circ_list_add_head(dbl_circ_list_t list, void *item)
++{
++  struct dbl_circ_item *new_item = item;
++  struct dbl_circ_item *tail;
++
++  /* Remove if already in list */
++  dbl_circ_list_remove_if_exists(list, item);
++
++  if(*list == NULL) {
++    /* First element - points to itself */
++    new_item->next = new_item;
++    new_item->previous = new_item;
++    *list = new_item;
++  } else {
++    tail = dbl_circ_list_tail(list);
++    new_item->next = *list;
++    new_item->previous = tail;
++    
++    struct dbl_circ_item *head = *list;
++    head->previous = new_item;
++    tail->next = new_item;
++    *list = new_item;
++  }
++}
++
++/**
++ * Add an element to the tail of a circular doubly-linked list.
++ *
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The circular doubly-linked list.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++dbl_circ_list_add_tail(dbl_circ_list_t list, void *item)
++{
++  struct dbl_circ_item *tail;
++
++  if(*list == NULL) {
++    /* Empty list, add to head */
++    dbl_circ_list_add_head(list, item);
++    return;
++  }
++
++  /* Get current tail and add after it */
++  tail = dbl_circ_list_tail(list);
++  dbl_circ_list_add_after(list, tail, item);
++}
++
++/**
++ * Add an element after an existing element in a circular doubly-linked list.
++ *
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The circular doubly-linked list.
++ * \param existing A pointer to the existing element.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++dbl_circ_list_add_after(dbl_circ_list_t list, void *existing, void *item)
++{
++  struct dbl_circ_item *exist_item = existing;
++  struct dbl_circ_item *new_item = item;
++  struct dbl_circ_item *current;
++
++  /* Remove if already in list */
++  dbl_circ_list_remove_if_exists(list, item);
++
++  if(*list == NULL || exist_item == NULL) {
++    /* Empty list or NULL existing, add to head */
++    dbl_circ_list_add_head(list, item);
++    return;
++  }
++
++  /* Find the existing element */
++  current = *list;
++  do {
++    if(current == exist_item) {
++      /* Found it, insert after */
++      new_item->next = exist_item->next;
++      new_item->previous = exist_item;
++      
++      struct dbl_circ_item *next_item = exist_item->next;
++      next_item->previous = new_item;
++      exist_item->next = new_item;
++      return;
++    }
++    current = current->next;
++  } while(current != *list);
++  
++  /* Existing not found, add to head */
++  dbl_circ_list_add_head(list, item);
++}
++
++/**
++ * Add an element before an existing element in a circular doubly-linked list.
++ *
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The circular doubly-linked list.
++ * \param existing A pointer to the existing element.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++dbl_circ_list_add_before(dbl_circ_list_t list, void *existing, void *item)
++{
++  struct dbl_circ_item *exist_item = existing;
++
++  if(*list == NULL || exist_item == NULL) {
++    /* Empty list or NULL existing, add to head */
++    dbl_circ_list_add_head(list, item);
++    return;
++  }
++
++  /* Add after the previous of existing (which is before existing) */
++  dbl_circ_list_add_after(list, exist_item->previous, item);
++}
++
++/**
++ * Remove an element from a circular doubly-linked list.
++ *
++ * \param list The circular doubly-linked list.
++ * \param item The item to be removed.
++ */
++static inline void
++dbl_circ_list_remove(dbl_circ_list_t list, void *item)
++{
++  dbl_circ_list_remove_if_exists(list, item);
++}
++
++#endif /* DBL_CIRC_LIST_H_ */
++
++/** @} */
++/** @} */
+diff --git a/os/lib/dbl-list.h b/os/lib/dbl-list.h
+new file mode 100644
+index 0000000..49b0594
+--- /dev/null
++++ b/os/lib/dbl-list.h
+@@ -0,0 +1,360 @@
++/*
++ * Copyright (c) 2024, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/** \addtogroup data
++    @{ */
++/**
++ * \defgroup dbl_list Doubly-linked list library
++ *
++ * The doubly-linked list library provides doubly-linked list operations.
++ * Elements must be structs where the first element is a 'next' pointer and
++ * the second element is a 'previous' pointer.
++ *
++ * @{
++ */
++
++#ifndef DBL_LIST_H_
++#define DBL_LIST_H_
++
++#include <stddef.h>
++#include <stdbool.h>
++#include "lib/list.h"
++
++#define DBL_LIST_CONCAT2(s1, s2) s1##s2
++#define DBL_LIST_CONCAT(s1, s2) DBL_LIST_CONCAT2(s1, s2)
++
++/**
++ * Declare a doubly-linked list.
++ *
++ * This macro declares a doubly-linked list with the specified \c name. Elements
++ * must be structs where the first element is a 'next' pointer and the second
++ * element is a 'previous' pointer.
++ *
++ * \param name The name of the doubly-linked list.
++ */
++#define DBL_LIST(name) \
++         static void *DBL_LIST_CONCAT(name,_head) = NULL; \
++         static void **name = (void **)&DBL_LIST_CONCAT(name,_head)
++
++/**
++ * The doubly-linked list type. Compatible with list_t for mutual compatibility.
++ */
++typedef void ** dbl_list_t;
++
++/* Internal structure for elements */
++struct dbl_item {
++  struct dbl_item *next;
++  struct dbl_item *previous;
++};
++
++/**
++ * Initialize a doubly-linked list.
++ *
++ * This function initializes a doubly-linked list. The list will be empty after this
++ * function has been called.
++ *
++ * \param list The doubly-linked list to be initialized.
++ */
++static inline void
++dbl_list_init(dbl_list_t list)
++{
++  *list = NULL;
++}
++
++/**
++ * Check if the doubly-linked list is empty.
++ *
++ * \param list The doubly-linked list.
++ * \return true if empty, false otherwise.
++ */
++static inline bool
++dbl_list_is_empty(dbl_list_t list)
++{
++  return *list == NULL;
++}
++
++/**
++ * Get the length of a doubly-linked list.
++ *
++ * \param list The doubly-linked list.
++ * \return The length of the list.
++ */
++static inline unsigned long
++dbl_list_length(dbl_list_t list)
++{
++  struct dbl_item *item;
++  unsigned long n = 0;
++
++  for(item = *list; item != NULL; item = item->next) {
++    n++;
++  }
++
++  return n;
++}
++
++/**
++ * Get the head element of a doubly-linked list.
++ *
++ * \param list The doubly-linked list.
++ * \return Pointer to the head element, or NULL if empty.
++ */
++static inline void *
++dbl_list_head(dbl_list_t list)
++{
++  return *list;
++}
++
++/**
++ * Get the tail element of a doubly-linked list.
++ *
++ * \param list The doubly-linked list.
++ * \return Pointer to the tail element, or NULL if empty.
++ */
++static inline void *
++dbl_list_tail(dbl_list_t list)
++{
++  struct dbl_item *item;
++
++  if(*list == NULL) {
++    return NULL;
++  }
++
++  item = *list;
++  while(item->next != NULL) {
++    item = item->next;
++  }
++
++  return item;
++}
++
++/**
++ * Internal helper to remove an element if it exists in the list.
++ */
++static inline void
++dbl_list_remove_if_exists(dbl_list_t list, void *item)
++{
++  struct dbl_item *remove_item = item;
++  struct dbl_item *current;
++
++  if(remove_item == NULL || *list == NULL) {
++    return;
++  }
++
++  /* Check if item is in the list */
++  for(current = *list; current != NULL; current = current->next) {
++    if(current == remove_item) {
++      /* Found it, remove it */
++      if(remove_item->previous != NULL) {
++        remove_item->previous->next = remove_item->next;
++      } else {
++        /* Removing head */
++        *list = remove_item->next;
++      }
++      if(remove_item->next != NULL) {
++        remove_item->next->previous = remove_item->previous;
++      }
++      
++      remove_item->next = NULL;
++      remove_item->previous = NULL;
++      return;
++    }
++  }
++}
++
++/**
++ * Add an element to the head of a doubly-linked list.
++ *
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The doubly-linked list.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++dbl_list_add_head(dbl_list_t list, void *item)
++{
++  struct dbl_item *new_item = item;
++
++  /* Remove if already in list */
++  dbl_list_remove_if_exists(list, item);
++
++  new_item->next = *list;
++  new_item->previous = NULL;
++  
++  if(*list != NULL) {
++    struct dbl_item *head = *list;
++    head->previous = new_item;
++  }
++  
++  *list = new_item;
++}
++
++/**
++ * Add an element to the tail of a doubly-linked list.
++ *
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The doubly-linked list.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++dbl_list_add_tail(dbl_list_t list, void *item)
++{
++  struct dbl_item *new_item = item;
++  struct dbl_item *tail;
++
++  /* Remove if already in list */
++  dbl_list_remove_if_exists(list, item);
++
++  if(*list == NULL) {
++    /* First element */
++    new_item->next = NULL;
++    new_item->previous = NULL;
++    *list = new_item;
++  } else {
++    tail = dbl_list_tail(list);
++    new_item->next = NULL;
++    new_item->previous = tail;
++    tail->next = new_item;
++  }
++}
++
++/**
++ * Add an element before an existing element in a doubly-linked list.
++ *
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The doubly-linked list.
++ * \param existing A pointer to the existing element.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++dbl_list_add_before(dbl_list_t list, void *existing, void *item)
++{
++  struct dbl_item *exist_item = existing;
++  struct dbl_item *new_item = item;
++  struct dbl_item *current;
++
++  /* Remove if already in list */
++  dbl_list_remove_if_exists(list, item);
++
++  if(*list == NULL || exist_item == NULL) {
++    /* Empty list or NULL existing, add to head */
++    dbl_list_add_head(list, item);
++    return;
++  }
++
++  /* Find the existing element */
++  for(current = *list; current != NULL; current = current->next) {
++    if(current == exist_item) {
++      /* Found it, insert before */
++      new_item->next = exist_item;
++      new_item->previous = exist_item->previous;
++      
++      if(exist_item->previous != NULL) {
++        exist_item->previous->next = new_item;
++      } else {
++        /* Inserting before head */
++        *list = new_item;
++      }
++      exist_item->previous = new_item;
++      return;
++    }
++  }
++  
++  /* Existing not found, add to head */
++  dbl_list_add_head(list, item);
++}
++
++/**
++ * Add an element after an existing element in a doubly-linked list.
++ *
++ * If the element is already in the list, it is first removed before being
++ * re-inserted.
++ *
++ * \param list The doubly-linked list.
++ * \param existing A pointer to the existing element.
++ * \param item A pointer to the item to be added.
++ */
++static inline void
++dbl_list_add_after(dbl_list_t list, void *existing, void *item)
++{
++  struct dbl_item *exist_item = existing;
++  struct dbl_item *new_item = item;
++  struct dbl_item *current;
++
++  /* Remove if already in list */
++  dbl_list_remove_if_exists(list, item);
++
++  if(*list == NULL || exist_item == NULL) {
++    /* Empty list or NULL existing, add to head */
++    dbl_list_add_head(list, item);
++    return;
++  }
++
++  /* Find the existing element */
++  for(current = *list; current != NULL; current = current->next) {
++    if(current == exist_item) {
++      /* Found it, insert after */
++      new_item->next = exist_item->next;
++      new_item->previous = exist_item;
++      
++      if(exist_item->next != NULL) {
++        exist_item->next->previous = new_item;
++      }
++      exist_item->next = new_item;
++      return;
++    }
++  }
++  
++  /* Existing not found, add to head */
++  dbl_list_add_head(list, item);
++}
++
++/**
++ * Remove an element from a doubly-linked list.
++ *
++ * \param list The doubly-linked list.
++ * \param item The item to be removed.
++ */
++static inline void
++dbl_list_remove(dbl_list_t list, void *item)
++{
++  dbl_list_remove_if_exists(list, item);
++}
++
++#endif /* DBL_LIST_H_ */
++
++/** @} */
++/** @} */
+diff --git a/os/lib/queue.h b/os/lib/queue.h
+new file mode 100644
+index 0000000..92b1910
+--- /dev/null
++++ b/os/lib/queue.h
+@@ -0,0 +1,139 @@
++/*
++ * Copyright (c) 2024, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/** \addtogroup data
++    @{ */
++/**
++ * \defgroup queue Queue library
++ *
++ * The queue library provides FIFO queue operations built on top of
++ * the linked list library.
++ *
++ * @{
++ */
++
++#ifndef QUEUE_H_
++#define QUEUE_H_
++
++#include "lib/list.h"
++
++#define QUEUE_CONCAT2(s1, s2) s1##s2
++#define QUEUE_CONCAT(s1, s2) QUEUE_CONCAT2(s1, s2)
++
++/**
++ * Declare a queue.
++ *
++ * This macro declares a queue with the specified \c name. The queue
++ * is implemented using the existing list primitives. Elements must be
++ * structs where the first element is a pointer used for linking.
++ *
++ * \param name The name of the queue.
++ */
++#define QUEUE(name) \
++         static void *QUEUE_CONCAT(name,_list) = NULL; \
++         static list_t name = (list_t)&QUEUE_CONCAT(name,_list)
++
++/**
++ * The queue type. Compatible with list_t for mutual compatibility.
++ */
++typedef void ** queue_t;
++
++/**
++ * Initialize a queue.
++ *
++ * This function initializes a queue. The queue will be empty after this
++ * function has been called.
++ *
++ * \param queue The queue to be initialized.
++ */
++static inline void
++queue_init(queue_t queue)
++{
++  list_init(queue);
++}
++
++/**
++ * Check if the queue is empty.
++ *
++ * \param queue The queue.
++ * \return true if empty, false otherwise.
++ */
++static inline int
++queue_is_empty(queue_t queue)
++{
++  return list_head(queue) == NULL;
++}
++
++/**
++ * Peek at the front element without removing it.
++ *
++ * \param queue The queue.
++ * \return Pointer to the front element, or NULL if empty.
++ */
++static inline void *
++queue_peek(queue_t queue)
++{
++  return list_head(queue);
++}
++
++/**
++ * Enqueue an element at the tail of the queue.
++ *
++ * This function adds an element to the tail of the queue.
++ *
++ * \param queue The queue.
++ * \param item A pointer to the item to be enqueued.
++ */
++static inline void
++queue_enqueue(queue_t queue, void *item)
++{
++  list_add(queue, item);
++}
++
++/**
++ * Dequeue the front element from the queue.
++ *
++ * This function removes and returns the front element from the queue.
++ *
++ * \param queue The queue.
++ * \return Pointer to the dequeued element, or NULL if empty.
++ */
++static inline void *
++queue_dequeue(queue_t queue)
++{
++  return list_pop(queue);
++}
++
++#endif /* QUEUE_H_ */
++
++/** @} */
++/** @} */
+diff --git a/os/lib/stack.h b/os/lib/stack.h
+new file mode 100644
+index 0000000..d0a91d3
+--- /dev/null
++++ b/os/lib/stack.h
+@@ -0,0 +1,139 @@
++/*
++ * Copyright (c) 2024, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/** \addtogroup data
++    @{ */
++/**
++ * \defgroup stack Stack library
++ *
++ * The stack library provides LIFO stack operations built on top of
++ * the linked list library.
++ *
++ * @{
++ */
++
++#ifndef STACK_H_
++#define STACK_H_
++
++#include "lib/list.h"
++
++#define STACK_CONCAT2(s1, s2) s1##s2
++#define STACK_CONCAT(s1, s2) STACK_CONCAT2(s1, s2)
++
++/**
++ * Declare a stack.
++ *
++ * This macro declares a stack with the specified \c name. The stack
++ * is implemented using the existing list primitives. Elements must be
++ * structs where the first element is a pointer used for linking.
++ *
++ * \param name The name of the stack.
++ */
++#define STACK(name) \
++         static void *STACK_CONCAT(name,_list) = NULL; \
++         static list_t name = (list_t)&STACK_CONCAT(name,_list)
++
++/**
++ * The stack type. Compatible with list_t for mutual compatibility.
++ */
++typedef void ** stack_t;
++
++/**
++ * Initialize a stack.
++ *
++ * This function initializes a stack. The stack will be empty after this
++ * function has been called.
++ *
++ * \param stack The stack to be initialized.
++ */
++static inline void
++stack_init(stack_t stack)
++{
++  list_init(stack);
++}
++
++/**
++ * Check if the stack is empty.
++ *
++ * \param stack The stack.
++ * \return true if empty, false otherwise.
++ */
++static inline int
++stack_is_empty(stack_t stack)
++{
++  return list_head(stack) == NULL;
++}
++
++/**
++ * Peek at the top element without removing it.
++ *
++ * \param stack The stack.
++ * \return Pointer to the top element, or NULL if empty.
++ */
++static inline void *
++stack_peek(stack_t stack)
++{
++  return list_head(stack);
++}
++
++/**
++ * Push an element onto the stack.
++ *
++ * This function adds an element to the top of the stack.
++ *
++ * \param stack The stack.
++ * \param item A pointer to the item to be pushed.
++ */
++static inline void
++stack_push(stack_t stack, void *item)
++{
++  list_push(stack, item);
++}
++
++/**
++ * Pop the top element from the stack.
++ *
++ * This function removes and returns the top element from the stack.
++ *
++ * \param stack The stack.
++ * \return Pointer to the popped element, or NULL if empty.
++ */
++static inline void *
++stack_pop(stack_t stack)
++{
++  return list_pop(stack);
++}
++
++#endif /* STACK_H_ */
++
++/** @} */
++/** @} */
+diff --git a/test-data-structures b/test-data-structures
+new file mode 100755
+index 0000000000000000000000000000000000000000..9a73813cd4e926c71889a73da6c2fb320bf3c93d
+GIT binary patch
+literal 31248
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test-data-structures.c b/test-data-structures.c
+new file mode 100644
+index 0000000..92ba522
+--- /dev/null
++++ b/test-data-structures.c
+@@ -0,0 +1,477 @@
++#include <stdio.h>
++#include <string.h>
++#include <stdbool.h>
++
++/* Include all our new data structure libraries */
++#include "lib/stack.h"
++#include "lib/queue.h"
++#include "lib/circular-list.h"
++#include "lib/dbl-list.h"
++#include "lib/dbl-circ-list.h"
++
++/* Test element structures for each data structure type */
++
++/* For stack and queue - singly linked elements */
++struct elem {
++  struct elem *next;
++  int value;
++};
++
++/* For doubly linked lists */
++struct dbl_elem {
++  struct dbl_elem *next;
++  struct dbl_elem *previous;
++  int value;
++};
++
++/* For circular singly linked list */
++struct circ_elem {
++  struct circ_elem *next;
++  int value;
++};
++
++static void test_stack(void);
++static void test_queue(void);
++static void test_circular_list(void);
++static void test_dbl_list(void);
++static void test_dbl_circ_list(void);
++static void test_compatibility(void);
++
++int main(void)
++{
++  printf("Starting data structures test...\n");
++  
++  test_stack();
++  test_queue();
++  test_circular_list();
++  test_dbl_list();
++  test_dbl_circ_list();
++  test_compatibility();
++  
++  printf("All tests passed!\n");
++  return 0;
++}
++
++static void test_stack(void)
++{
++  printf("Testing stack...\n");
++  
++  STACK(my_stack);
++  stack_init(my_stack);
++  
++  if(!stack_is_empty(my_stack)) {
++    printf("ERROR: stack should be empty initially\n");
++    return;
++  }
++  
++  if(stack_peek(my_stack) != NULL) {
++    printf("ERROR: peek on empty stack should return NULL\n");
++    return;
++  }
++  
++  struct elem e1 = { .value = 1 };
++  struct elem e2 = { .value = 2 };
++  struct elem e3 = { .value = 3 };
++  
++  stack_push(my_stack, &e1);
++  stack_push(my_stack, &e2);
++  stack_push(my_stack, &e3);
++  
++  if(stack_is_empty(my_stack)) {
++    printf("ERROR: stack should not be empty after pushes\n");
++    return;
++  }
++  
++  struct elem *item = stack_peek(my_stack);
++  if(item == NULL || item->value != 3) {
++    printf("ERROR: peek should return 3, got %d\n", item ? item->value : -1);
++    return;
++  }
++  
++  item = stack_pop(my_stack);
++  if(item == NULL || item->value != 3) {
++    printf("ERROR: first pop should return 3, got %d\n", item ? item->value : -1);
++    return;
++  }
++  
++  item = stack_pop(my_stack);
++  if(item == NULL || item->value != 2) {
++    printf("ERROR: second pop should return 2, got %d\n", item ? item->value : -1);
++    return;
++  }
++  
++  item = stack_pop(my_stack);
++  if(item == NULL || item->value != 1) {
++    printf("ERROR: third pop should return 1, got %d\n", item ? item->value : -1);
++    return;
++  }
++  
++  item = stack_pop(my_stack);
++  if(item != NULL) {
++    printf("ERROR: pop on empty stack should return NULL\n");
++    return;
++  }
++  
++  printf("Stack test passed!\n");
++}
++
++static void test_queue(void)
++{
++  printf("Testing queue...\n");
++  
++  QUEUE(my_queue);
++  queue_init(my_queue);
++  
++  if(!queue_is_empty(my_queue)) {
++    printf("ERROR: queue should be empty initially\n");
++    return;
++  }
++  
++  struct elem e1 = { .value = 1 };
++  struct elem e2 = { .value = 2 };
++  struct elem e3 = { .value = 3 };
++  
++  queue_enqueue(my_queue, &e1);
++  queue_enqueue(my_queue, &e2);
++  queue_enqueue(my_queue, &e3);
++  
++  struct elem *item = queue_peek(my_queue);
++  if(item == NULL || item->value != 1) {
++    printf("ERROR: peek should return 1, got %d\n", item ? item->value : -1);
++    return;
++  }
++  
++  item = queue_dequeue(my_queue);
++  if(item == NULL || item->value != 1) {
++    printf("ERROR: first dequeue should return 1, got %d\n", item ? item->value : -1);
++    return;
++  }
++  
++  item = queue_dequeue(my_queue);
++  if(item == NULL || item->value != 2) {
++    printf("ERROR: second dequeue should return 2, got %d\n", item ? item->value : -1);
++    return;
++  }
++  
++  item = queue_dequeue(my_queue);
++  if(item == NULL || item->value != 3) {
++    printf("ERROR: third dequeue should return 3, got %d\n", item ? item->value : -1);
++    return;
++  }
++  
++  printf("Queue test passed!\n");
++}
++
++static void test_circular_list(void)
++{
++  printf("Testing circular list...\n");
++  
++  CIRCULAR_LIST(my_clist);
++  circular_list_init(my_clist);
++  
++  if(!circular_list_is_empty(my_clist)) {
++    printf("ERROR: circular list should be empty initially\n");
++    return;
++  }
++  
++  if(circular_list_head(my_clist) != NULL || circular_list_tail(my_clist) != NULL) {
++    printf("ERROR: head/tail on empty circular list should return NULL\n");
++    return;
++  }
++  
++  if(circular_list_length(my_clist) != 0) {
++    printf("ERROR: empty circular list should have length 0\n");
++    return;
++  }
++  
++  struct circ_elem e1 = { .value = 1 };
++  struct circ_elem e2 = { .value = 2 };
++  struct circ_elem e3 = { .value = 3 };
++  
++  circular_list_add(my_clist, &e1);
++  
++  if(circular_list_length(my_clist) != 1) {
++    printf("ERROR: circular list should have length 1 after adding one element\n");
++    return;
++  }
++  
++  /* Test single element circular nature */
++  if(e1.next != &e1) {
++    printf("ERROR: single element should point to itself\n");
++    return;
++  }
++  
++  circular_list_add(my_clist, &e2);
++  circular_list_add(my_clist, &e3);
++  
++  if(circular_list_length(my_clist) != 3) {
++    printf("ERROR: circular list should have length 3\n");
++    return;
++  }
++  
++  struct circ_elem *head = circular_list_head(my_clist);
++  struct circ_elem *tail = circular_list_tail(my_clist);
++  
++  if(head == NULL || head->value != 3) {
++    printf("ERROR: head should be 3\n");
++    return;
++  }
++  
++  if(tail == NULL || tail->value != 1) {
++    printf("ERROR: tail should be 1\n");
++    return;
++  }
++  
++  /* Test removal */
++  circular_list_remove(my_clist, &e2);
++  
++  if(circular_list_length(my_clist) != 2) {
++    printf("ERROR: circular list should have length 2 after removal\n");
++    return;
++  }
++  
++  /* Test circular order after removal */
++  struct circ_elem *current = circular_list_head(my_clist);
++  int values[2] = {0};
++  int i = 0;
++  
++  do {
++    values[i++] = current->value;
++    current = current->next;
++  } while(current != circular_list_head(my_clist) && i < 2);
++  
++  if(values[0] != 3 || values[1] != 1) {
++    printf("ERROR: wrong order after removal: %d, %d\n", values[0], values[1]);
++    return;
++  }
++  
++  printf("Circular list test passed!\n");
++}
++
++static void test_dbl_list(void)
++{
++  printf("Testing doubly-linked list...\n");
++  
++  DBL_LIST(my_dlist);
++  dbl_list_init(my_dlist);
++  
++  if(!dbl_list_is_empty(my_dlist)) {
++    printf("ERROR: doubly-linked list should be empty initially\n");
++    return;
++  }
++  
++  if(dbl_list_head(my_dlist) != NULL || dbl_list_tail(my_dlist) != NULL) {
++    printf("ERROR: head/tail on empty doubly-linked list should return NULL\n");
++    return;
++  }
++  
++  struct dbl_elem e1 = { .value = 1 };
++  struct dbl_elem e2 = { .value = 2 };
++  struct dbl_elem e3 = { .value = 3 };
++  
++  dbl_list_add_head(my_dlist, &e1);
++  dbl_list_add_head(my_dlist, &e2);  /* 2, 1 */
++  dbl_list_add_tail(my_dlist, &e3);  /* 2, 1, 3 */
++  
++  if(dbl_list_length(my_dlist) != 3) {
++    printf("ERROR: doubly-linked list should have length 3\n");
++    return;
++  }
++  
++  struct dbl_elem *head = dbl_list_head(my_dlist);
++  struct dbl_elem *tail = dbl_list_tail(my_dlist);
++  
++  if(head == NULL || head->value != 2) {
++    printf("ERROR: head should be 2\n");
++    return;
++  }
++  
++  if(tail == NULL || tail->value != 3) {
++    printf("ERROR: tail should be 3\n");
++    return;
++  }
++  
++  if(head->previous != NULL) {
++    printf("ERROR: head's previous should be NULL\n");
++    return;
++  }
++  
++  if(tail->next != NULL) {
++    printf("ERROR: tail's next should be NULL\n");
++    return;
++  }
++  
++  /* Test add before */
++  struct dbl_elem e4 = { .value = 4 };
++  dbl_list_add_before(my_dlist, &e3, &e4);  /* 2, 1, 4, 3 */
++  
++  head = dbl_list_head(my_dlist);
++  struct dbl_elem *third = head->next->next;
++  
++  if(third == NULL || third->value != 4) {
++    printf("ERROR: third element should be 4\n");
++    return;
++  }
++  
++  /* Test add after */
++  struct dbl_elem e5 = { .value = 5 };
++  dbl_list_add_after(my_dlist, &e1, &e5);  /* 2, 1, 5, 4, 3 */
++  
++  struct dbl_elem *second = head->next;
++  if(second == NULL || second->value != 1) {
++    printf("ERROR: second element should be 1\n");
++    return;
++  }
++  
++  if(second->next == NULL || second->next->value != 5) {
++    printf("ERROR: element after 1 should be 5\n");
++    return;
++  }
++  
++  /* Test removal */
++  dbl_list_remove(my_dlist, &e5);  /* 2, 1, 4, 3 */
++  
++  if(dbl_list_length(my_dlist) != 4) {
++    printf("ERROR: doubly-linked list should have length 4 after removal\n");
++    return;
++  }
++  
++  /* Test re-adding (should remove first then add) */
++  dbl_list_add_head(my_dlist, &e5);  /* 5, 2, 1, 4, 3 */
++  
++  head = dbl_list_head(my_dlist);
++  if(head == NULL || head->value != 5) {
++    printf("ERROR: head should be 5 after re-adding to head\n");
++    return;
++  }
++  
++  printf("Doubly-linked list test passed!\n");
++}
++
++static void test_dbl_circ_list(void)
++{
++  printf("Testing circular doubly-linked list...\n");
++  
++  DBL_CIRC_LIST(my_cdlist);
++  dbl_circ_list_init(my_cdlist);
++  
++  if(!dbl_circ_list_is_empty(my_cdlist)) {
++    printf("ERROR: circular doubly-linked list should be empty initially\n");
++    return;
++  }
++  
++  if(dbl_circ_list_head(my_cdlist) != NULL || dbl_circ_list_tail(my_cdlist) != NULL) {
++    printf("ERROR: head/tail on empty circular doubly-linked list should return NULL\n");
++    return;
++  }
++  
++  struct dbl_elem e1 = { .value = 1 };
++  struct dbl_elem e2 = { .value = 2 };
++  struct dbl_elem e3 = { .value = 3 };
++  
++  dbl_circ_list_add_head(my_cdlist, &e1);
++  
++  if(dbl_circ_list_length(my_cdlist) != 1) {
++    printf("ERROR: circular doubly-linked list should have length 1 after adding one element\n");
++    return;
++  }
++  
++  /* Test single element circular nature */
++  if(e1.next != &e1 || e1.previous != &e1) {
++    printf("ERROR: single element should point to itself in both directions\n");
++    return;
++  }
++  
++  dbl_circ_list_add_head(my_cdlist, &e2);  /* 2, 1 */
++  dbl_circ_list_add_tail(my_cdlist, &e3);  /* 2, 1, 3 */
++  
++  if(dbl_circ_list_length(my_cdlist) != 3) {
++    printf("ERROR: circular doubly-linked list should have length 3\n");
++    return;
++  }
++  
++  struct dbl_elem *head = dbl_circ_list_head(my_cdlist);
++  struct dbl_elem *tail = dbl_circ_list_tail(my_cdlist);
++  
++  if(head == NULL || head->value != 2) {
++    printf("ERROR: head should be 2\n");
++    return;
++  }
++  
++  if(tail == NULL || tail->value != 3) {
++    printf("ERROR: tail should be 3\n");
++    return;
++  }
++  
++  /* Test circular linkage */
++  if(tail->next != head) {
++    printf("ERROR: tail's next should point to head\n");
++    return;
++  }
++  
++  if(head->previous != tail) {
++    printf("ERROR: head's previous should point to tail\n");
++    return;
++  }
++  
++  /* Test add before */
++  struct dbl_elem e4 = { .value = 4 };
++  dbl_circ_list_add_before(my_cdlist, &e1, &e4);  /* 2, 4, 1, 3 */
++  
++  head = dbl_circ_list_head(my_cdlist);
++  struct dbl_elem *second = head->next;
++  
++  if(second == NULL || second->value != 4) {
++    printf("ERROR: second element should be 4 after add_before\n");
++    return;
++  }
++  
++  /* Test removal */
++  dbl_circ_list_remove(my_cdlist, &e4);  /* 2, 1, 3 */
++  
++  if(dbl_circ_list_length(my_cdlist) != 3) {
++    printf("ERROR: circular doubly-linked list should have length 3 after removal\n");
++    return;
++  }
++  
++  /* Test re-adding */
++  dbl_circ_list_add_tail(my_cdlist, &e4);  /* 2, 1, 3, 4 */
++  
++  tail = dbl_circ_list_tail(my_cdlist);
++  if(tail == NULL || tail->value != 4) {
++    printf("ERROR: tail should be 4 after re-adding to tail\n");
++    return;
++  }
++  
++  printf("Circular doubly-linked list test passed!\n");
++}
++
++static void test_compatibility(void)
++{
++  printf("Testing type compatibility...\n");
++  
++  /* Test that stack_t and queue_t are compatible with list operations */
++  STACK(my_stack);
++  QUEUE(my_queue);
++  
++  stack_init(my_stack);
++  queue_init(my_queue);
++  
++  struct elem e1 = { .value = 1 };
++  struct elem e2 = { .value = 2 };
++  
++  /* Test that we can use stack as a list (conceptually) */
++  stack_push(my_stack, &e1);
++  stack_push(my_stack, &e2);
++  
++  /* Test that queue and stack have the same type layout */
++  {
++    stack_t s = my_stack;
++    queue_t q = my_queue;
++    
++    /* This assignment should work if types are compatible */
++    s = q; /* Just for compilation test */
++    
++    printf("Type compatibility test passed!\n");
++  }
++}

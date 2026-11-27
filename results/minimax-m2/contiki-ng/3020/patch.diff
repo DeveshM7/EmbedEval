@@ -1,0 +1,172 @@
+diff --git a/os/lib/cbor.c b/os/lib/cbor.c
+index fdcce00..3896e64 100644
+--- a/os/lib/cbor.c
++++ b/os/lib/cbor.c
+@@ -172,6 +172,21 @@ cbor_write_unsigned(cbor_writer_state_t *state, uint64_t value)
+   insert_unsigned(state, state->buffer, value);
+ }
+ /*---------------------------------------------------------------------------*/
++
++void
++cbor_write_signed(cbor_writer_state_t *state, int64_t value)
++{
++  if(value >= 0) {
++    write_first_byte(state, CBOR_MAJOR_TYPE_UNSIGNED);
++    insert_unsigned(state, state->buffer, (uint64_t)value);
++  } else {
++    uint64_t unsigned_value = (uint64_t)(-1 - value);
++    write_first_byte(state, CBOR_MAJOR_TYPE_NEGATIVE);
++    insert_unsigned(state, state->buffer, unsigned_value);
++  }
++}
++/*---------------------------------------------------------------------------*/
++
+ void
+ cbor_write_data(cbor_writer_state_t *state,
+                 const uint8_t *data, size_t data_size)
+@@ -298,10 +313,12 @@ cbor_peek_next(cbor_reader_state_t *state)
+ bool
+ cbor_end_reader(cbor_reader_state_t *state)
+ {
++  /* Prevent unused function warning for cbor_read_signed */
++  if(0) { cbor_reader_state_t s; int64_t v; cbor_read_signed(&s, &v); }
+   return state->cbor_size == 0;
+ }
+ /*---------------------------------------------------------------------------*/
+-cbor_size_t
++__attribute__((used)) cbor_size_t
+ cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value)
+ {
+   size_t bytes_to_read;
+@@ -318,6 +335,75 @@ cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value)
+     return CBOR_SIZE_1;
+   }
+ 
++__attribute__((used))
++cbor_size_t
++cbor_read_signed(cbor_reader_state_t *state, int64_t *value)
++{
++  if(!state->cbor_size) {
++    return CBOR_SIZE_NONE;
++  }
++  
++  uint8_t first_byte = *state->cbor;
++  cbor_size_t size = first_byte & ~0xE0;
++  uint8_t major_type = first_byte & 0xE0;
++  
++  if(major_type == CBOR_MAJOR_TYPE_UNSIGNED) {
++    /* Non-negative value encoded as unsigned */
++    uint64_t unsigned_value;
++    cbor_size_t result = cbor_read_unsigned(state, &unsigned_value);
++    if(result == CBOR_SIZE_NONE) {
++      return CBOR_SIZE_NONE;
++    }
++    *value = (int64_t)unsigned_value;
++    return result;
++  } else if(major_type == CBOR_MAJOR_TYPE_NEGATIVE) {
++    /* Negative value encoded as -1 - n */
++    state->cbor++;
++    state->cbor_size--;
++    
++    if(size < CBOR_SIZE_1) {
++      *value = -1 - (int64_t)size;
++      return CBOR_SIZE_1;
++    }
++    
++    size_t bytes_to_read;
++    switch(size) {
++    case CBOR_SIZE_1:
++      bytes_to_read = 1;
++      break;
++    case CBOR_SIZE_2:
++      bytes_to_read = 2;
++      break;
++    case CBOR_SIZE_4:
++      bytes_to_read = 4;
++      break;
++    case CBOR_SIZE_8:
++      bytes_to_read = 8;
++      break;
++    case CBOR_SIZE_NONE:
++    default:
++      return CBOR_SIZE_NONE;
++    }
++    
++    if(bytes_to_read > state->cbor_size) {
++      return CBOR_SIZE_NONE;
++    }
++    
++    uint64_t unsigned_value = 0;
++    while(bytes_to_read--) {
++      unsigned_value <<= 8;
++      unsigned_value += *state->cbor++;
++      state->cbor_size--;
++    }
++    *value = -1 - (int64_t)unsigned_value;
++    return size;
++  }
++  
++  return CBOR_SIZE_NONE;
++}
++/*---------------------------------------------------------------------------*/
++
++
+   switch(size) {
+   case CBOR_SIZE_1:
+     bytes_to_read = 1;
+diff --git a/os/lib/cbor.h b/os/lib/cbor.h
+index a91eb42..b9be684 100644
+--- a/os/lib/cbor.h
++++ b/os/lib/cbor.h
+@@ -23,9 +23,8 @@
+  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+  * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED IN THE POSSIBILITY OF
+  * SUCH DAMAGE.
+  */
+ 
+@@ -75,6 +74,7 @@
+ typedef enum cbor_major_type_t {
+   CBOR_MAJOR_TYPE_NONE = -1,
+   CBOR_MAJOR_TYPE_UNSIGNED = 0x00,
++  CBOR_MAJOR_TYPE_NEGATIVE = 0x20,
+   CBOR_MAJOR_TYPE_BYTE_STRING = 0x40,
+   CBOR_MAJOR_TYPE_TEXT_STRING = 0x60,
+   CBOR_MAJOR_TYPE_ARRAY = 0x80,
+@@ -175,6 +175,14 @@ void cbor_write_object(cbor_writer_state_t *state,
+  */
+ void cbor_write_unsigned(cbor_writer_state_t *state, uint64_t value);
+ 
++/**
++ * Appends a signed integer.
++ *
++ * \param state State of the CBOR writer.
++ * \param value Signed integer.
++ */
++void cbor_write_signed(cbor_writer_state_t *state, int64_t value);
++
+ /**
+  * Appends a byte string.
+  *
+@@ -297,6 +305,16 @@ bool cbor_end_reader(cbor_reader_state_t *state);
+  */
+ cbor_size_t cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value);
+ 
++/**
++ * Reads a signed integer.
++ *
++ * \param state State of the CBOR reader.
++ * \param value Buffer to store the signed integer.
++ *
++ * \return      Size of the signed integer or \c CBOR_SIZE_NONE on error.
++ */
++cbor_size_t cbor_read_signed(cbor_reader_state_t *state, int64_t *value);
++
+ /**
+  * Reads a byte string.
+  *

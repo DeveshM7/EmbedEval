@@ -1,0 +1,1498 @@
+diff --git a/os/net/mac/framer/frame802154.c b/os/net/mac/framer/frame802154.c
+index 1fc9839..01e1a02 100644
+--- a/os/net/mac/framer/frame802154.c
++++ b/os/net/mac/framer/frame802154.c
+@@ -566,7 +566,15 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+   /* decode the FCF */
+   p += frame802154_parse_fcf(p, &pf->fcf);
+ 
++  /* Check if we have at least enough bytes read so far */
++  if((int)(p - data) > len) {
++    return 0;
++  }
++
+   if(pf->fcf.sequence_number_suppression == 0) {
++    if((int)(p - data) >= len) {
++      return 0;
++    }
+     pf->seq = p[0];
+     p++;
+   }
+@@ -576,6 +584,9 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+   /* Destination address, if any */
+   if(pf->fcf.dest_addr_mode) {
+     if(has_dest_panid) {
++      if((p + 2 - data) > len) {
++        return 0;
++      }
+       /* Destination PAN */
+       pf->dest_pid = p[0] + (p[1] << 8);
+       p += 2;
+@@ -585,11 +596,17 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+ 
+     /* Destination address */
+     if(pf->fcf.dest_addr_mode == FRAME802154_SHORTADDRMODE) {
++      if((p + 2 - data) > len) {
++        return 0;
++      }
+       linkaddr_copy((linkaddr_t *)&(pf->dest_addr), &linkaddr_null);
+       pf->dest_addr[0] = p[1];
+       pf->dest_addr[1] = p[0];
+       p += 2;
+     } else if(pf->fcf.dest_addr_mode == FRAME802154_LONGADDRMODE) {
++      if((int)(p + 8 - data) > len) {
++        return 0;
++      }
+       for(c = 0; c < 8; c++) {
+         pf->dest_addr[c] = p[7 - c];
+       }
+@@ -602,8 +619,11 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+ 
+   /* Source address, if any */
+   if(pf->fcf.src_addr_mode) {
+-    /* Source PAN */
+     if(has_src_panid) {
++      if((p + 2 - data) > len) {
++        return 0;
++      }
++      /* Source PAN */
+       pf->src_pid = p[0] + (p[1] << 8);
+       p += 2;
+       if(!has_dest_panid) {
+@@ -615,11 +635,17 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+ 
+     /* Source address */
+     if(pf->fcf.src_addr_mode == FRAME802154_SHORTADDRMODE) {
++      if((p + 2 - data) > len) {
++        return 0;
++      }
+       linkaddr_copy((linkaddr_t *)&(pf->src_addr), &linkaddr_null);
+       pf->src_addr[0] = p[1];
+       pf->src_addr[1] = p[0];
+       p += 2;
+     } else if(pf->fcf.src_addr_mode == FRAME802154_LONGADDRMODE) {
++      if((int)(p + 8 - data) > len) {
++        return 0;
++      }
+       for(c = 0; c < 8; c++) {
+         pf->src_addr[c] = p[7 - c];
+       }
+@@ -632,6 +658,9 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+ 
+ #if LLSEC802154_USES_AUX_HEADER
+   if(pf->fcf.security_enabled) {
++    if(p + 1 - data > len) {
++      return 0;
++    }
+     pf->aux_hdr.security_control.security_level = p[0] & 7;
+ #if LLSEC802154_USES_EXPLICIT_KEYS
+     pf->aux_hdr.security_control.key_id_mode = (p[0] >> 3) & 3;
+@@ -641,9 +670,15 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+     p += 1;
+ 
+     if(pf->aux_hdr.security_control.frame_counter_suppression == 0) {
++      if(p + 4 - data > len) {
++        return 0;
++      }
+       memcpy(pf->aux_hdr.frame_counter.u8, p, 4);
+       p += 4;
+       if(pf->aux_hdr.security_control.frame_counter_size == 1) {
++        if((int)(p - data) >= len) {
++          return 0;
++        }
+         p ++;
+       }
+     }
+@@ -652,6 +687,9 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+     key_id_mode = pf->aux_hdr.security_control.key_id_mode;
+     if(key_id_mode) {
+       c = (key_id_mode - 1) * 4;
++      if(p + c + 1 - data > len) {
++        return 0;
++      }
+       memcpy(pf->aux_hdr.key_source.u8, p, c);
+       p += c;
+       pf->aux_hdr.key_index = p[0];
+@@ -672,3 +710,4 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+   return c > len ? 0 : c;
+ }
+ /** \}   */
++/** \}   */
+diff --git a/os/net/mac/framer/frame802154.c.backup b/os/net/mac/framer/frame802154.c.backup
+new file mode 100644
+index 0000000..1fc9839
+--- /dev/null
++++ b/os/net/mac/framer/frame802154.c.backup
+@@ -0,0 +1,674 @@
++/*
++ *
++ *  Copyright (c) 2008, Swedish Institute of Computer Science
++ *  All rights reserved.
++ *
++ *  Additional fixes for AVR contributed by:
++ *
++ *      Colin O'Flynn coflynn@newae.com
++ *      Eric Gnoske egnoske@gmail.com
++ *      Blake Leverett bleverett@gmail.com
++ *      Mike Vidales mavida404@gmail.com
++ *      Kevin Brown kbrown3@uccs.edu
++ *      Nate Bohlmann nate@elfwerks.com
++ *
++ *  Additional fixes for MSP430 contributed by:
++ *        Joakim Eriksson
++ *        Niclas Finne
++ *        Nicolas Tsiftes
++ *
++ *   All rights reserved.
++ *
++ *   Redistribution and use in source and binary forms, with or without
++ *   modification, are permitted provided that the following conditions are met:
++ *
++ *   * Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ *   * Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in
++ *     the documentation and/or other materials provided with the
++ *     distribution.
++ *   * Neither the name of the copyright holders nor the names of
++ *     contributors may be used to endorse or promote products derived
++ *     from this software without specific prior written permission.
++ *
++ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ *  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ *  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ *  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++ *  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ *  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ *  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ *  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ *  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ *  POSSIBILITY OF SUCH DAMAGE.
++ *
++ */
++/*
++ *  \brief This file is where the main functions that relate to frame
++ *  manipulation will reside.
++ */
++
++/**
++ *  \file
++ *  \brief 802.15.4 frame creation and parsing functions
++ *
++ *  This file converts to and from a structure to a packed 802.15.4
++ *  frame.
++ */
++
++/**
++ *   \addtogroup frame802154
++ *   @{
++ */
++
++#include "sys/cc.h"
++#include "net/mac/framer/frame802154.h"
++#include "net/mac/llsec802154.h"
++#include "net/linkaddr.h"
++#include <string.h>
++
++/**  \brief The 16-bit identifier of the PAN on which the device is
++ *   operating.  If this value is 0xffff, the device is not
++ *   associated.
++ */
++static uint16_t mac_pan_id = IEEE802154_PANID;
++
++/**
++ *  \brief Structure that contains the lengths of the various addressing and security fields
++ *  in the 802.15.4 header.  This structure is used in \ref frame802154_create()
++ */
++typedef struct {
++  uint8_t frame_ctrl_len;  /**<  Length (in bytes) of the frame control field */
++  uint8_t seqno_len;       /**<  Length (in bytes) of sequence number field */
++  uint8_t dest_pid_len;    /**<  Length (in bytes) of destination PAN ID field */
++  uint8_t dest_addr_len;   /**<  Length (in bytes) of destination address field */
++  uint8_t src_pid_len;     /**<  Length (in bytes) of source PAN ID field */
++  uint8_t src_addr_len;    /**<  Length (in bytes) of source address field */
++  uint8_t aux_sec_len;     /**<  Length (in bytes) of aux security header field */
++} field_length_t;
++
++/*----------------------------------------------------------------------------*/
++static inline uint8_t
++addr_len(uint8_t mode)
++{
++  switch(mode) {
++  case FRAME802154_SHORTADDRMODE:  /* 16-bit address */
++    return 2;
++  case FRAME802154_LONGADDRMODE:   /* 64-bit address */
++    return 8;
++  default:
++    return 0;
++  }
++}
++/*----------------------------------------------------------------------------*/
++#if LLSEC802154_USES_AUX_HEADER && LLSEC802154_USES_EXPLICIT_KEYS
++static uint8_t
++get_key_id_len(uint8_t key_id_mode)
++{
++  switch(key_id_mode) {
++  case FRAME802154_1_BYTE_KEY_ID_MODE:
++    return 1;
++  case FRAME802154_5_BYTE_KEY_ID_MODE:
++    return 5;
++  case FRAME802154_9_BYTE_KEY_ID_MODE:
++    return 9;
++  default:
++    return 0;
++  }
++}
++#endif /* LLSEC802154_USES_AUX_HEADER && LLSEC802154_USES_EXPLICIT_KEYS */
++/*---------------------------------------------------------------------------*/
++/* Get current PAN ID */
++uint16_t
++frame802154_get_pan_id(void)
++{
++  return mac_pan_id;
++}
++/*---------------------------------------------------------------------------*/
++/* Set current PAN ID */
++void
++frame802154_set_pan_id(uint16_t pan_id)
++{
++  mac_pan_id = pan_id;
++}
++/*----------------------------------------------------------------------------*/
++/* Tells whether a given Frame Control Field indicates a frame with
++ * source PANID and/or destination PANID */
++void
++frame802154_has_panid(frame802154_fcf_t *fcf, int *has_src_pan_id, int *has_dest_pan_id)
++{
++  int src_pan_id = 0;
++  int dest_pan_id = 0;
++
++  if(fcf == NULL) {
++    return;
++  }
++
++  if(fcf->frame_version == FRAME802154_IEEE802154_2015) {
++    if(fcf->frame_type == FRAME802154_MPFRAME) {
++      *has_src_pan_id = 0;
++      *has_dest_pan_id = !fcf->panid_compression;
++      return;
++    }
++
++    /*
++     * IEEE 802.15.4-2015
++     * Table 7-2, PAN ID Compression value for frame version 0b10
++     */
++    if((fcf->dest_addr_mode == FRAME802154_NOADDR &&
++        fcf->src_addr_mode == FRAME802154_NOADDR &&
++        fcf->panid_compression == 1) ||
++       (fcf->dest_addr_mode != FRAME802154_NOADDR &&
++        fcf->src_addr_mode == FRAME802154_NOADDR &&
++        fcf->panid_compression == 0) ||
++       (fcf->dest_addr_mode == FRAME802154_LONGADDRMODE &&
++        fcf->src_addr_mode == FRAME802154_LONGADDRMODE &&
++        fcf->panid_compression == 0) ||
++       ((fcf->dest_addr_mode == FRAME802154_SHORTADDRMODE &&
++         fcf->src_addr_mode != FRAME802154_NOADDR) ||
++        (fcf->dest_addr_mode != FRAME802154_NOADDR &&
++         fcf->src_addr_mode == FRAME802154_SHORTADDRMODE)) ){
++      dest_pan_id = 1;
++    }
++
++    if(fcf->panid_compression == 0 &&
++       ((fcf->dest_addr_mode == FRAME802154_NOADDR &&
++         fcf->src_addr_mode == FRAME802154_LONGADDRMODE) ||
++        (fcf->dest_addr_mode == FRAME802154_NOADDR &&
++         fcf->src_addr_mode == FRAME802154_SHORTADDRMODE) ||
++        (fcf->dest_addr_mode == FRAME802154_SHORTADDRMODE &&
++         fcf->src_addr_mode == FRAME802154_SHORTADDRMODE) ||
++        (fcf->dest_addr_mode == FRAME802154_SHORTADDRMODE &&
++         fcf->src_addr_mode == FRAME802154_LONGADDRMODE) ||
++        (fcf->dest_addr_mode == FRAME802154_LONGADDRMODE &&
++         fcf->src_addr_mode == FRAME802154_SHORTADDRMODE))) {
++      src_pan_id = 1;
++    }
++
++  } else {
++    /* No PAN ID in ACK */
++    if(fcf->frame_type != FRAME802154_ACKFRAME) {
++      if(!fcf->panid_compression && (fcf->src_addr_mode & 3)) {
++        /* If compressed, don't include source PAN ID */
++        src_pan_id = 1;
++      }
++      if(fcf->dest_addr_mode & 3) {
++        dest_pan_id = 1;
++      }
++    }
++  }
++
++  if(has_src_pan_id != NULL) {
++    *has_src_pan_id = src_pan_id;
++  }
++  if(has_dest_pan_id != NULL) {
++    *has_dest_pan_id = dest_pan_id;
++  }
++}
++/*---------------------------------------------------------------------------*/
++/* Check if the destination PAN ID, if any, matches ours */
++int
++frame802154_check_dest_panid(frame802154_t *frame)
++{
++  int has_dest_panid = 0;
++
++  if(frame == NULL) {
++    return 0;
++  }
++  frame802154_has_panid(&frame->fcf, NULL, &has_dest_panid);
++  if(!has_dest_panid ||
++     (frame->dest_pid != frame802154_get_pan_id()
++     && frame->dest_pid != FRAME802154_BROADCASTPANDID)) {
++    /* Packet to another PAN */
++    return 0;
++  }
++  return 1;
++}
++/*---------------------------------------------------------------------------*/
++/* Check is the address is a broadcast address, whatever its size */
++bool
++frame802154_is_broadcast_addr(uint8_t mode, const uint8_t *addr)
++{
++  int i = mode == FRAME802154_SHORTADDRMODE ? 2 : 8;
++  while(i-- > 0) {
++    if(addr[i] != 0xff) {
++      return false;
++    }
++  }
++  return true;
++}
++/*---------------------------------------------------------------------------*/
++/* Check and extract source and destination linkaddr from frame */
++int
++frame802154_extract_linkaddr(frame802154_t *frame,
++                             linkaddr_t *source_address, linkaddr_t *dest_address)
++{
++  int src_addr_len;
++  int dest_addr_len;
++
++  if(frame == NULL) {
++    return 0;
++  }
++  /* Check and extract source address */
++  src_addr_len = frame->fcf.src_addr_mode ?
++    ((frame->fcf.src_addr_mode == FRAME802154_SHORTADDRMODE) ? 2 : 8) : 0;
++  if(src_addr_len == 0 || frame802154_is_broadcast_addr(frame->fcf.src_addr_mode, frame->src_addr)) {
++    /* Broadcast address */
++    if(source_address != NULL) {
++      linkaddr_copy(source_address, &linkaddr_null);
++    }
++  } else {
++    /* Unicast address */
++    if(src_addr_len != LINKADDR_SIZE) {
++      /* Destination address has a size we can not handle */
++      return 0;
++    }
++    if(source_address != NULL) {
++      linkaddr_copy(source_address, (linkaddr_t *)frame->src_addr);
++    }
++  }
++
++  /* Check and extract destination address */
++  dest_addr_len = frame->fcf.dest_addr_mode ?
++    ((frame->fcf.dest_addr_mode == FRAME802154_SHORTADDRMODE) ? 2 : 8) : 0;
++  if(dest_addr_len == 0 || frame802154_is_broadcast_addr(frame->fcf.dest_addr_mode, frame->dest_addr)) {
++    /* Broadcast address */
++    if(dest_address != NULL) {
++      linkaddr_copy(dest_address, &linkaddr_null);
++    }
++  } else {
++    /* Unicast address */
++    if(dest_addr_len != LINKADDR_SIZE) {
++      /* Destination address has a size we can not handle */
++      return 0;
++    }
++    if(dest_address != NULL) {
++      linkaddr_copy(dest_address, (linkaddr_t *)frame->dest_addr);
++    }
++  }
++
++  return 1;
++}
++/*----------------------------------------------------------------------------*/
++static void
++field_len(frame802154_t *p, field_length_t *flen)
++{
++  int has_src_panid;
++  int has_dest_panid;
++
++  /* init flen to zeros */
++  memset(flen, 0, sizeof(field_length_t));
++
++  flen->frame_ctrl_len =
++      (p->fcf.frame_type == FRAME802154_MPFRAME) && !p->fcf.long_frame_control
++      ? 1
++      : 2;
++
++  /* Determine lengths of each field based on fcf and other args */
++  if((p->fcf.sequence_number_suppression & 1) == 0) {
++    flen->seqno_len = 1;
++  }
++
++  /* IEEE802.15.4e changes the meaning of PAN ID Compression (see Table 2a).
++   * In this case, we leave the decision whether to compress PAN ID or not
++   * up to the caller. */
++  if(p->fcf.frame_version < FRAME802154_IEEE802154_2015) {
++    /* Set PAN ID compression bit if src pan id matches dest pan id. */
++    p->fcf.panid_compression = (p->fcf.dest_addr_mode & 3) &&
++      (p->fcf.src_addr_mode & 3) && p->src_pid == p->dest_pid;
++  }
++
++  frame802154_has_panid(&p->fcf, &has_src_panid, &has_dest_panid);
++
++  if(has_src_panid) {
++    flen->src_pid_len = 2;
++  }
++
++  if(has_dest_panid) {
++    flen->dest_pid_len = 2;
++  }
++
++  /* determine address lengths */
++  flen->dest_addr_len = addr_len(p->fcf.dest_addr_mode & 3);
++  flen->src_addr_len = addr_len(p->fcf.src_addr_mode & 3);
++
++#if LLSEC802154_USES_AUX_HEADER
++  /* Aux security header */
++  if(p->fcf.security_enabled & 1) {
++    flen->aux_sec_len = 1; /* FCF + possibly frame counter and key ID */
++    if(p->aux_hdr.security_control.frame_counter_suppression == 0) {
++      if(p->aux_hdr.security_control.frame_counter_size == 1) {
++        flen->aux_sec_len += 5;
++      } else {
++        flen->aux_sec_len += 4;
++      }
++    }
++#if LLSEC802154_USES_EXPLICIT_KEYS
++    flen->aux_sec_len += get_key_id_len(p->aux_hdr.security_control.key_id_mode);
++#endif /* LLSEC802154_USES_EXPLICIT_KEYS */
++  }
++#endif /* LLSEC802154_USES_AUX_HEADER */
++}
++/*----------------------------------------------------------------------------*/
++/**
++ *   \brief Calculates the length of the frame header.  This function is
++ *   meant to be called by a higher level function, that interfaces to a MAC.
++ *
++ *   \param p Pointer to frame802154_t_t struct, which specifies the
++ *   frame to send.
++ *
++ *   \return The length of the frame header.
++ */
++int
++frame802154_hdrlen(frame802154_t *p)
++{
++  field_length_t flen;
++  field_len(p, &flen);
++  return flen.frame_ctrl_len
++         + flen.seqno_len
++         + flen.dest_pid_len
++         + flen.dest_addr_len
++         + flen.src_pid_len
++         + flen.src_addr_len
++         + flen.aux_sec_len;
++}
++/*----------------------------------------------------------------------------*/
++int
++frame802154_create_fcf(frame802154_fcf_t *fcf, uint8_t *buf)
++{
++#if FRAME802154_VERSION == FRAME802154_IEEE802154_2015
++  if(fcf->frame_type == FRAME802154_MPFRAME) {
++    /* create MP Frame Control field */
++    buf[0] = FRAME802154_MPFRAME
++             | ((fcf->long_frame_control) << 3)
++             | ((fcf->dest_addr_mode & 3) << 4)
++             | ((fcf->src_addr_mode & 3) << 6);
++    if(!fcf->long_frame_control) {
++      return 1;
++    }
++    buf[1] = ((!fcf->panid_compression) & 1)
++             | ((fcf->security_enabled & 1) << 1)
++             | ((fcf->sequence_number_suppression & 1) << 2)
++             | ((fcf->frame_pending & 1) << 3)
++             | ((fcf->ack_required & 1) << 6)
++             | ((fcf->ie_list_present & 1) << 7);
++    return 2;
++  }
++#endif /* FRAME802154_VERSION == FRAME802154_IEEE802154_2015 */
++  /* create Frame Control field */
++  buf[0] = (fcf->frame_type & 7) |
++    ((fcf->security_enabled & 1) << 3) |
++    ((fcf->frame_pending & 1) << 4) |
++    ((fcf->ack_required & 1) << 5) |
++    ((fcf->panid_compression & 1) << 6);
++  buf[1] = ((fcf->sequence_number_suppression & 1)) |
++    ((fcf->ie_list_present & 1)) << 1 |
++    ((fcf->dest_addr_mode & 3) << 2) |
++    ((fcf->frame_version & 3) << 4) |
++    ((fcf->src_addr_mode & 3) << 6);
++  return 2;
++}
++/*----------------------------------------------------------------------------*/
++/**
++ *   \brief Creates a frame for transmission over the air.  This function is
++ *   meant to be called by a higher level function, that interfaces to a MAC.
++ *
++ *   \param p Pointer to frame802154_t struct, which specifies the
++ *   frame to send.
++ *
++ *   \param buf Pointer to the buffer to use for the frame.
++ *
++ *   \return The length of the frame header
++ */
++int
++frame802154_create(frame802154_t *p, uint8_t *buf)
++{
++  int c;
++  field_length_t flen;
++#if LLSEC802154_USES_EXPLICIT_KEYS
++  uint8_t key_id_mode;
++#endif /* LLSEC802154_USES_EXPLICIT_KEYS */
++
++  field_len(p, &flen);
++
++  /* OK, now we have field lengths.  Time to actually construct */
++  /* the outgoing frame, and store it in buf */
++  unsigned int pos = frame802154_create_fcf(&p->fcf, buf);
++
++  /* Sequence number */
++  if(flen.seqno_len == 1) {
++    buf[pos++] = p->seq;
++  }
++
++  /* Destination PAN ID */
++  if(flen.dest_pid_len == 2) {
++    buf[pos++] = p->dest_pid & 0xff;
++    buf[pos++] = (p->dest_pid >> 8) & 0xff;
++  }
++
++  /* Destination address */
++  for(c = flen.dest_addr_len; c > 0; c--) {
++    buf[pos++] = p->dest_addr[c - 1];
++  }
++
++  /* Source PAN ID */
++  if(flen.src_pid_len == 2) {
++    buf[pos++] = p->src_pid & 0xff;
++    buf[pos++] = (p->src_pid >> 8) & 0xff;
++  }
++
++  /* Source address */
++  for(c = flen.src_addr_len; c > 0; c--) {
++    buf[pos++] = p->src_addr[c - 1];
++  }
++#if LLSEC802154_USES_AUX_HEADER
++  /* Aux header */
++  if(flen.aux_sec_len) {
++    buf[pos++] = p->aux_hdr.security_control.security_level
++#if LLSEC802154_USES_EXPLICIT_KEYS
++      | (p->aux_hdr.security_control.key_id_mode << 3)
++#endif /* LLSEC802154_USES_EXPLICIT_KEYS */
++      | (p->aux_hdr.security_control.frame_counter_suppression << 5)
++      | (p->aux_hdr.security_control.frame_counter_size << 6)
++    ;
++    if(p->aux_hdr.security_control.frame_counter_suppression == 0) {
++      /* We support only 4-byte counters */
++      memcpy(buf + pos, p->aux_hdr.frame_counter.u8, 4);
++      pos += 4;
++      if(p->aux_hdr.security_control.frame_counter_size == 1) {
++        pos++;
++      }
++    }
++
++#if LLSEC802154_USES_EXPLICIT_KEYS
++    key_id_mode = p->aux_hdr.security_control.key_id_mode;
++    if(key_id_mode) {
++      c = (key_id_mode - 1) * 4;
++      memcpy(buf + pos, p->aux_hdr.key_source.u8, c);
++      pos += c;
++      buf[pos++] = p->aux_hdr.key_index;
++    }
++#endif /* LLSEC802154_USES_EXPLICIT_KEYS */
++  }
++#endif /* LLSEC802154_USES_AUX_HEADER */
++
++  return (int)pos;
++}
++/*----------------------------------------------------------------------------*/
++int
++frame802154_parse_fcf(const uint8_t *data, frame802154_fcf_t *pfcf)
++{
++  /* parse Frame Type field */
++  pfcf->frame_type = data[0] & 7;
++
++  switch(pfcf->frame_type) {
++  case FRAME802154_MPFRAME:
++    /* parse MP Frame Control field */
++    pfcf->long_frame_control = (data[0] >> 3) & 1;
++    pfcf->dest_addr_mode = (data[0] >> 4) & 3;
++    pfcf->src_addr_mode = (data[0] >> 6) & 3;
++
++    if(!pfcf->long_frame_control) {
++      return 1;
++    }
++    pfcf->panid_compression = !(data[1] & 1);
++    pfcf->security_enabled = (data[1] >> 1) & 1;
++    pfcf->sequence_number_suppression = (data[1] >> 2) & 1;
++    pfcf->frame_pending = (data[1] >> 3) & 1;
++    pfcf->frame_version = (data[1] >> 4) & 3;
++    pfcf->ack_required = (data[1] >> 6) & 1;
++    pfcf->ie_list_present = (data[1] >> 7) & 1;
++    return 2;
++  default:
++    /* parse Frame Control field */
++    pfcf->security_enabled = (data[0] >> 3) & 1;
++    pfcf->frame_pending = (data[0] >> 4) & 1;
++    pfcf->ack_required = (data[0] >> 5) & 1;
++    pfcf->panid_compression = (data[0] >> 6) & 1;
++
++    pfcf->sequence_number_suppression = data[1] & 1;
++    pfcf->ie_list_present = (data[1] >> 1) & 1;
++    pfcf->dest_addr_mode = (data[1] >> 2) & 3;
++    pfcf->frame_version = (data[1] >> 4) & 3;
++    pfcf->src_addr_mode = (data[1] >> 6) & 3;
++    return 2;
++  }
++}
++/*----------------------------------------------------------------------------*/
++/**
++ *   \brief Parses an input frame.  Scans the input frame to find each
++ *   section, and stores the information of each section in a
++ *   frame802154_t structure.
++ *
++ *   \param data The input data from the radio chip.
++ *   \param len The size of the input data
++ *   \param pf The frame802154_t struct to store the parsed frame information.
++ */
++int
++frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
++{
++  uint8_t *p;
++  int c;
++  int has_src_panid;
++  int has_dest_panid;
++#if LLSEC802154_USES_EXPLICIT_KEYS
++  uint8_t key_id_mode;
++#endif /* LLSEC802154_USES_EXPLICIT_KEYS */
++
++  if(len < 2) {
++    return 0;
++  }
++
++  p = data;
++
++  /* decode the FCF */
++  p += frame802154_parse_fcf(p, &pf->fcf);
++
++  if(pf->fcf.sequence_number_suppression == 0) {
++    pf->seq = p[0];
++    p++;
++  }
++
++  frame802154_has_panid(&pf->fcf, &has_src_panid, &has_dest_panid);
++
++  /* Destination address, if any */
++  if(pf->fcf.dest_addr_mode) {
++    if(has_dest_panid) {
++      /* Destination PAN */
++      pf->dest_pid = p[0] + (p[1] << 8);
++      p += 2;
++    } else {
++      pf->dest_pid = 0;
++    }
++
++    /* Destination address */
++    if(pf->fcf.dest_addr_mode == FRAME802154_SHORTADDRMODE) {
++      linkaddr_copy((linkaddr_t *)&(pf->dest_addr), &linkaddr_null);
++      pf->dest_addr[0] = p[1];
++      pf->dest_addr[1] = p[0];
++      p += 2;
++    } else if(pf->fcf.dest_addr_mode == FRAME802154_LONGADDRMODE) {
++      for(c = 0; c < 8; c++) {
++        pf->dest_addr[c] = p[7 - c];
++      }
++      p += 8;
++    }
++  } else {
++    linkaddr_copy((linkaddr_t *)&(pf->dest_addr), &linkaddr_null);
++    pf->dest_pid = 0;
++  }
++
++  /* Source address, if any */
++  if(pf->fcf.src_addr_mode) {
++    /* Source PAN */
++    if(has_src_panid) {
++      pf->src_pid = p[0] + (p[1] << 8);
++      p += 2;
++      if(!has_dest_panid) {
++        pf->dest_pid = pf->src_pid;
++      }
++    } else {
++      pf->src_pid = pf->dest_pid;
++    }
++
++    /* Source address */
++    if(pf->fcf.src_addr_mode == FRAME802154_SHORTADDRMODE) {
++      linkaddr_copy((linkaddr_t *)&(pf->src_addr), &linkaddr_null);
++      pf->src_addr[0] = p[1];
++      pf->src_addr[1] = p[0];
++      p += 2;
++    } else if(pf->fcf.src_addr_mode == FRAME802154_LONGADDRMODE) {
++      for(c = 0; c < 8; c++) {
++        pf->src_addr[c] = p[7 - c];
++      }
++      p += 8;
++    }
++  } else {
++    linkaddr_copy((linkaddr_t *)&(pf->src_addr), &linkaddr_null);
++    pf->src_pid = 0;
++  }
++
++#if LLSEC802154_USES_AUX_HEADER
++  if(pf->fcf.security_enabled) {
++    pf->aux_hdr.security_control.security_level = p[0] & 7;
++#if LLSEC802154_USES_EXPLICIT_KEYS
++    pf->aux_hdr.security_control.key_id_mode = (p[0] >> 3) & 3;
++#endif /* LLSEC802154_USES_EXPLICIT_KEYS */
++    pf->aux_hdr.security_control.frame_counter_suppression = p[0] >> 5;
++    pf->aux_hdr.security_control.frame_counter_size = p[0] >> 6;
++    p += 1;
++
++    if(pf->aux_hdr.security_control.frame_counter_suppression == 0) {
++      memcpy(pf->aux_hdr.frame_counter.u8, p, 4);
++      p += 4;
++      if(pf->aux_hdr.security_control.frame_counter_size == 1) {
++        p ++;
++      }
++    }
++
++#if LLSEC802154_USES_EXPLICIT_KEYS
++    key_id_mode = pf->aux_hdr.security_control.key_id_mode;
++    if(key_id_mode) {
++      c = (key_id_mode - 1) * 4;
++      memcpy(pf->aux_hdr.key_source.u8, p, c);
++      p += c;
++      pf->aux_hdr.key_index = p[0];
++      p += 1;
++    }
++#endif /* LLSEC802154_USES_EXPLICIT_KEYS */
++  }
++#endif /* LLSEC802154_USES_AUX_HEADER */
++
++  /* header length */
++  c = p - data;
++  /* payload length */
++  pf->payload_len = (len - c);
++  /* payload */
++  pf->payload = p;
++
++  /* return header length if successful */
++  return c > len ? 0 : c;
++}
++/** \}   */
+diff --git a/os/net/mac/framer/frame802154e-ie.c b/os/net/mac/framer/frame802154e-ie.c
+index 344260a..a719ea4 100644
+--- a/os/net/mac/framer/frame802154e-ie.c
++++ b/os/net/mac/framer/frame802154e-ie.c
+@@ -490,7 +490,10 @@ frame802154e_parse_mlme_long_ie(const uint8_t *buf, int len,
+ {
+   switch(sub_id) {
+     case MLME_LONG_IE_TSCH_CHANNEL_HOPPING_SEQUENCE:
+-      if(len > 0) {
++      if(len < 12) {
++        return -1;
++      }
++      if(ies != NULL) {
+         if(ies != NULL) {
+           ies->ie_channel_hopping_sequence_id = buf[0];
+           if(len > 1) {
+diff --git a/os/net/mac/framer/frame802154e-ie.c.backup b/os/net/mac/framer/frame802154e-ie.c.backup
+new file mode 100644
+index 0000000..344260a
+--- /dev/null
++++ b/os/net/mac/framer/frame802154e-ie.c.backup
+@@ -0,0 +1,676 @@
++/*
++ * Copyright (c) 2015, SICS Swedish ICT.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/**
++ * \file
++ *         IEEE 802.15.4e Information Element (IE) creation and parsing.
++ * \author
++ *         Simon Duquennoy <simonduq@sics.se>
++ */
++
++#include <string.h>
++#include "net/mac/framer/frame802154e-ie.h"
++
++/* Log configuration */
++#include "sys/log.h"
++#define LOG_MODULE "Frame 15.4"
++#define LOG_LEVEL LOG_LEVEL_FRAMER
++
++/* c.f. IEEE 802.15.4e Table 4b */
++enum ieee802154e_header_ie_id {
++  HEADER_IE_LE_CSL = 0x1a,
++  HEADER_IE_LE_RIT,
++  HEADER_IE_DSME_PAN_DESCRIPTOR,
++  HEADER_IE_RZ_TIME,
++  HEADER_IE_ACK_NACK_TIME_CORRECTION,
++  HEADER_IE_GACK,
++  HEADER_IE_LOW_LATENCY_NETWORK_INFO,
++  HEADER_IE_LIST_TERMINATION_1 = 0x7e,
++  HEADER_IE_LIST_TERMINATION_2 = 0x7f,
++};
++
++/* c.f. IEEE 802.15.4e Table 4c */
++enum ieee802154e_payload_ie_id {
++  PAYLOAD_IE_ESDU = 0,
++  PAYLOAD_IE_MLME,
++  PAYLOAD_IE_IETF = 0x5,
++  PAYLOAD_IE_LIST_TERMINATION = 0xf,
++};
++
++/* c.f. IEEE 802.15.4e Table 4d */
++enum ieee802154e_mlme_short_subie_id {
++  MLME_SHORT_IE_TSCH_SYNCHRONIZATION = 0x1a,
++  MLME_SHORT_IE_TSCH_SLOFTRAME_AND_LINK,
++  MLME_SHORT_IE_TSCH_TIMESLOT,
++  MLME_SHORT_IE_TSCH_HOPPING_TIMING,
++  MLME_SHORT_IE_TSCH_EB_FILTER,
++  MLME_SHORT_IE_TSCH_MAC_METRICS_1,
++  MLME_SHORT_IE_TSCH_MAC_METRICS_2,
++};
++
++/* c.f. IEEE 802.15.4e Table 4e */
++enum ieee802154e_mlme_long_subie_id {
++  MLME_LONG_IE_TSCH_CHANNEL_HOPPING_SEQUENCE = 0x9,
++};
++
++#include <net/mac/tsch/sixtop/sixtop.h>
++enum ieee802154e_ietf_subie_id {
++  IETF_IE_6TOP = SIXTOP_SUBIE_ID,
++};
++
++#define WRITE16(buf, val) \
++  do { ((uint8_t *)(buf))[0] = (val) & 0xff; \
++       ((uint8_t *)(buf))[1] = ((val) >> 8) & 0xff; } while(0);
++
++#define READ16(buf, var) \
++  (var) = ((uint8_t *)(buf))[0] | ((uint8_t *)(buf))[1] << 8
++
++/* Create a header IE 2-byte descriptor */
++static void
++create_header_ie_descriptor(uint8_t *buf, uint8_t element_id, int ie_len)
++{
++  uint16_t ie_desc;
++  /* Header IE descriptor: b0-6: len, b7-14: element id:, b15: type: 0 */
++  ie_desc = (ie_len & 0x7f) + ((element_id & 0xff) << 7);
++  WRITE16(buf, ie_desc);
++}
++
++/* Create a payload IE 2-byte descriptor */
++static void
++create_payload_ie_descriptor(uint8_t *buf, uint8_t group_id, int ie_len)
++{
++  uint16_t ie_desc;
++  /* MLME Long IE descriptor: b0-10: len, b11-14: group id:, b15: type: 1 */
++  ie_desc = (ie_len & 0x07ff) + ((group_id & 0x0f) << 11) + (1 << 15);
++  WRITE16(buf, ie_desc);
++}
++
++/* Create a MLME short IE 2-byte descriptor */
++static void
++create_mlme_short_ie_descriptor(uint8_t *buf, uint8_t sub_id, int ie_len)
++{
++  uint16_t ie_desc;
++  /* MLME Short IE descriptor: b0-7: len, b8-14: sub id:, b15: type: 0 */
++  ie_desc = (ie_len & 0xff) + ((sub_id & 0x7f) << 8);
++  WRITE16(buf, ie_desc);
++}
++
++/* Create a MLME long IE 2-byte descriptor */
++static void
++create_mlme_long_ie_descriptor(uint8_t *buf, uint8_t sub_id, int ie_len)
++{
++  uint16_t ie_desc;
++  /* MLME Long IE descriptor: b0-10: len, b11-14: sub id:, b15: type: 1 */
++  ie_desc = (ie_len & 0x07ff) + ((sub_id & 0x0f) << 11) + (1 << 15);
++  WRITE16(buf, ie_desc);
++}
++
++#if MAC_CONF_WITH_CSL
++int
++frame802154e_create_ie_rendezvous_time(uint8_t *buf, int len,
++                                       const struct ieee802154_ies *ies)
++{
++  if(!ies || (len < 4)) {
++    return -1;
++  }
++
++  WRITE16(buf + 2, ies->rendezvous_time);
++  create_header_ie_descriptor(buf, HEADER_IE_RZ_TIME, 2);
++  return 4;
++}
++
++int
++frame802154e_create_ie_csl(uint8_t *buf, int len,
++                           const struct ieee802154_ies *ies)
++{
++  if(!ies || (len < 6)) {
++    return -1;
++  }
++
++  WRITE16(buf + 2, ies->csl_phase);
++  WRITE16(buf + 4, ies->csl_period);
++  create_header_ie_descriptor(buf, HEADER_IE_LE_CSL, 4);
++  return 6;
++}
++#endif /* MAC_CONF_WITH_CSL */
++
++/* Header IE. ACK/NACK time correction. Used in enhanced ACKs */
++int
++frame80215e_create_ie_header_ack_nack_time_correction(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  int ie_len = 2;
++  if(len >= 2 + ie_len && ies != NULL) {
++    int16_t drift_us;
++    uint16_t time_sync_field;
++    drift_us = ies->ie_time_correction;
++    time_sync_field = drift_us & 0x0fff;
++    if(ies->ie_is_nack) {
++      time_sync_field |= 0x8000;
++    }
++    WRITE16(buf+2, time_sync_field);
++    create_header_ie_descriptor(buf, HEADER_IE_ACK_NACK_TIME_CORRECTION, ie_len);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++/* Header IE. List termination 1 (Signals the end of the Header IEs when
++ * followed by payload IEs) */
++int
++frame80215e_create_ie_header_list_termination_1(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  int ie_len = 0;
++  if(len >= 2 + ie_len && ies != NULL) {
++    create_header_ie_descriptor(buf, HEADER_IE_LIST_TERMINATION_1, 0);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++/* Header IE. List termination 2 (Signals the end of the Header IEs when
++ * followed by an unformatted payload) */
++int
++frame80215e_create_ie_header_list_termination_2(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  int ie_len = 0;
++  if(len >= 2 + ie_len && ies != NULL) {
++    create_header_ie_descriptor(buf, HEADER_IE_LIST_TERMINATION_2, 0);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++/* Payload IE. List termination */
++int
++frame80215e_create_ie_payload_list_termination(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  int ie_len = 0;
++  if(len >= 2 + ie_len && ies != NULL) {
++    create_payload_ie_descriptor(buf, PAYLOAD_IE_LIST_TERMINATION, 0);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++#if TSCH_WITH_SIXTOP
++/* Payload IE. 6top. Used to nest sub-IEs */
++int
++frame80215e_create_ie_ietf(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  if(len >= 2 && ies != NULL) {
++    create_payload_ie_descriptor(buf,
++                                 PAYLOAD_IE_IETF,
++                                 ies->sixtop_ie_content_len);
++    return 2 + ies->sixtop_ie_content_len;
++  }
++  return -1;
++}
++#endif /* TSCH_WITH_SIXTOP */
++
++/* Payload IE. MLME. Used to nest sub-IEs */
++int
++frame80215e_create_ie_mlme(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  int ie_len = 0;
++  if(len >= 2 + ie_len && ies != NULL) {
++    /* The length of the outer MLME IE is the total length of sub-IEs */
++    create_payload_ie_descriptor(buf, PAYLOAD_IE_MLME, ies->ie_mlme_len);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++/* MLME sub-IE. TSCH synchronization. Used in EBs: ASN and join priority */
++int
++frame80215e_create_ie_tsch_synchronization(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  int ie_len = 6;
++  if(len >= 2 + ie_len && ies != NULL) {
++    buf[2] = ies->ie_asn.ls4b;
++    buf[3] = ies->ie_asn.ls4b >> 8;
++    buf[4] = ies->ie_asn.ls4b >> 16;
++    buf[5] = ies->ie_asn.ls4b >> 24;
++    buf[6] = ies->ie_asn.ms1b;
++    buf[7] = ies->ie_join_priority;
++    create_mlme_short_ie_descriptor(buf, MLME_SHORT_IE_TSCH_SYNCHRONIZATION, ie_len);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++/* MLME sub-IE. TSCH slotframe and link. Used in EBs: initial schedule */
++int
++frame80215e_create_ie_tsch_slotframe_and_link(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  if(ies != NULL) {
++    int i;
++    int num_slotframes = ies->ie_tsch_slotframe_and_link.num_slotframes;
++    int num_links = ies->ie_tsch_slotframe_and_link.num_links;
++    int ie_len = 1 + num_slotframes * (4 + 5 * num_links);
++    if(num_slotframes > 1 || num_links > FRAME802154E_IE_MAX_LINKS
++       || len < 2 + ie_len) {
++      /* We support only 0 or 1 slotframe in this IE and a predefined maximum number of links */
++      return -1;
++    }
++    /* Insert IE */
++    buf[2] = num_slotframes;
++    /* Insert slotframe */
++    if(num_slotframes == 1) {
++      buf[2 + 1] = ies->ie_tsch_slotframe_and_link.slotframe_handle;
++      WRITE16(buf + 2 + 2, ies->ie_tsch_slotframe_and_link.slotframe_size);
++      buf[2 + 4] = num_links;
++      /* Loop over links */
++      for(i = 0; i < num_links; i++) {
++        /* Insert links */
++        WRITE16(buf + 2 + 5 + i * 5, ies->ie_tsch_slotframe_and_link.links[i].timeslot);
++        WRITE16(buf + 2 + 5 + i * 5 + 2, ies->ie_tsch_slotframe_and_link.links[i].channel_offset);
++        buf[2 + 5 + i * 5 + 4] = ies->ie_tsch_slotframe_and_link.links[i].link_options;
++      }
++    }
++    create_mlme_short_ie_descriptor(buf, MLME_SHORT_IE_TSCH_SLOFTRAME_AND_LINK, ie_len);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++/* MLME sub-IE. TSCH timeslot. Used in EBs: timeslot template (timing) */
++int
++frame80215e_create_ie_tsch_timeslot(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  int ie_len;
++  if(ies == NULL) {
++    return -1;
++  }
++  /* Only ID if ID == 0, else full timing description */
++  ie_len = ies->ie_tsch_timeslot_id == 0 ? 1 : 25;
++  if(len >= 2 + ie_len) {
++    buf[2] = ies->ie_tsch_timeslot_id;
++    if(ies->ie_tsch_timeslot_id != 0) {
++      int i;
++      for(i = 0; i < tsch_ts_elements_count; i++) {
++        WRITE16(buf + 3 + 2 * i, ies->ie_tsch_timeslot[i]);
++      }
++    }
++    create_mlme_short_ie_descriptor(buf, MLME_SHORT_IE_TSCH_TIMESLOT, ie_len);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++/* MLME sub-IE. TSCH channel hopping sequence. Used in EBs: hopping sequence */
++int
++frame80215e_create_ie_tsch_channel_hopping_sequence(uint8_t *buf, int len,
++    const struct ieee802154_ies *ies)
++{
++  int ie_len;
++  if(ies == NULL || ies->ie_hopping_sequence_len > sizeof(ies->ie_hopping_sequence_list)) {
++    return -1;
++  }
++  ie_len = ies->ie_channel_hopping_sequence_id == 0 ? 1 : 12 + ies->ie_hopping_sequence_len;
++  if(len >= 2 + ie_len && ies != NULL) {
++    buf[2] = ies->ie_channel_hopping_sequence_id;
++    buf[3] = 0; /* channel page */
++    WRITE16(buf + 4, 0); /* number of channels */
++    WRITE16(buf + 6, 0); /* phy configuration */
++    WRITE16(buf + 8, 0);
++    /* Extended bitmap. Size: 0 */
++    WRITE16(buf + 10, ies->ie_hopping_sequence_len); /* sequence len */
++    memcpy(buf + 12, ies->ie_hopping_sequence_list, ies->ie_hopping_sequence_len); /* sequence list */
++    WRITE16(buf + 12 + ies->ie_hopping_sequence_len, 0); /* current hop */
++    create_mlme_long_ie_descriptor(buf, MLME_LONG_IE_TSCH_CHANNEL_HOPPING_SEQUENCE, ie_len);
++    return 2 + ie_len;
++  } else {
++    return -1;
++  }
++}
++
++/* Parse a header IE */
++static int
++frame802154e_parse_header_ie(const uint8_t *buf, int len,
++    uint8_t element_id, struct ieee802154_ies *ies)
++{
++  switch(element_id) {
++    case HEADER_IE_ACK_NACK_TIME_CORRECTION:
++      if(len == 2) {
++        if(ies != NULL) {
++          /* If the originator was a time source neighbor, the receiver adjust
++           * its own clock by incorporating the received drift correction */
++          uint16_t time_sync_field = 0;
++          int16_t drift_us = 0;
++          /* Extract drift correction from Sync-IE, cast from 12 to 16-bit,
++           * and convert it to RTIMER ticks.
++           * See page 88 in IEEE Std 802.15.4e-2012. */
++          READ16(buf, time_sync_field);
++          /* First extract NACK */
++          ies->ie_is_nack = (time_sync_field & (uint16_t)0x8000) ? 1 : 0;
++          /* Then cast from 12 to 16 bit signed */
++          if(time_sync_field & 0x0800) { /* Negative integer */
++            drift_us = time_sync_field | 0xf000;
++          } else { /* Positive integer */
++            drift_us = time_sync_field & 0x0fff;
++          }
++          /* Convert to RTIMER ticks */
++          ies->ie_time_correction = drift_us;
++        }
++        return len;
++      }
++      break;
++#if MAC_CONF_WITH_CSL
++    case HEADER_IE_RZ_TIME:
++      if((len == 2) && ies) {
++        READ16(buf, ies->rendezvous_time);
++        return len;
++      }
++      break;
++    case HEADER_IE_LE_CSL:
++      if(ies && (len == 4)) {
++        READ16(buf, ies->csl_phase);
++        READ16(buf + 2, ies->csl_period);
++        return len;
++      }
++      break;
++#endif /* MAC_CONF_WITH_CSL */
++  }
++  return -1;
++}
++
++/* Parse a MLME short IE */
++static int
++frame802154e_parse_mlme_short_ie(const uint8_t *buf, int len,
++    uint8_t sub_id, struct ieee802154_ies *ies)
++{
++  switch(sub_id) {
++    case MLME_SHORT_IE_TSCH_SLOFTRAME_AND_LINK:
++      if(len >= 1) {
++        int i;
++        int num_slotframes = buf[0];
++        int num_links = buf[4];
++        if(num_slotframes == 0) {
++          return len;
++        }
++        if(num_slotframes <= 1 && num_links <= FRAME802154E_IE_MAX_LINKS
++            && len == 1 + num_slotframes * (4 + 5 * num_links)) {
++          if(ies != NULL) {
++            /* We support only 0 or 1 slotframe in this IE and a predefined maximum number of links */
++            ies->ie_tsch_slotframe_and_link.num_slotframes = buf[0];
++            ies->ie_tsch_slotframe_and_link.slotframe_handle = buf[1];
++            READ16(buf + 2, ies->ie_tsch_slotframe_and_link.slotframe_size);
++            ies->ie_tsch_slotframe_and_link.num_links = buf[4];
++            for(i = 0; i < num_links; i++) {
++              READ16(buf + 5 + i * 5, ies->ie_tsch_slotframe_and_link.links[i].timeslot);
++              READ16(buf + 5 + i * 5 + 2, ies->ie_tsch_slotframe_and_link.links[i].channel_offset);
++              ies->ie_tsch_slotframe_and_link.links[i].link_options = buf[5 + i * 5 + 4];
++            }
++          }
++          return len;
++        }
++      }
++      break;
++    case MLME_SHORT_IE_TSCH_SYNCHRONIZATION:
++      if(len == 6) {
++        if(ies != NULL) {
++          ies->ie_asn.ls4b = (uint32_t)buf[0];
++          ies->ie_asn.ls4b |= (uint32_t)buf[1] << 8;
++          ies->ie_asn.ls4b |= (uint32_t)buf[2] << 16;
++          ies->ie_asn.ls4b |= (uint32_t)buf[3] << 24;
++          ies->ie_asn.ms1b = (uint8_t)buf[4];
++          ies->ie_join_priority = (uint8_t)buf[5];
++        }
++        return len;
++      }
++      break;
++    case MLME_SHORT_IE_TSCH_TIMESLOT:
++      if(len == 1 || len == 25) {
++        if(ies != NULL) {
++          ies->ie_tsch_timeslot_id = buf[0];
++          if(len == 25) {
++            int i;
++            for(i = 0; i < tsch_ts_elements_count; i++) {
++              READ16(buf+1+2*i, ies->ie_tsch_timeslot[i]);
++            }
++          }
++        }
++        return len;
++      }
++      break;
++  }
++  return -1;
++}
++
++/* Parse a MLME long IE */
++static int
++frame802154e_parse_mlme_long_ie(const uint8_t *buf, int len,
++    uint8_t sub_id, struct ieee802154_ies *ies)
++{
++  switch(sub_id) {
++    case MLME_LONG_IE_TSCH_CHANNEL_HOPPING_SEQUENCE:
++      if(len > 0) {
++        if(ies != NULL) {
++          ies->ie_channel_hopping_sequence_id = buf[0];
++          if(len > 1) {
++            READ16(buf+8, ies->ie_hopping_sequence_len); /* sequence len */
++            if(ies->ie_hopping_sequence_len <= sizeof(ies->ie_hopping_sequence_list)
++                && len == 12 + ies->ie_hopping_sequence_len) {
++              memcpy(ies->ie_hopping_sequence_list, buf+10, ies->ie_hopping_sequence_len); /* sequence list */
++            }
++          }
++        }
++        return len;
++      }
++      break;
++  }
++  return -1;
++}
++
++/* Parse all IEEE 802.15.4e Information Elements (IE) from a frame */
++int
++frame802154e_parse_information_elements(const uint8_t *buf, uint8_t buf_size,
++    struct ieee802154_ies *ies)
++{
++  const uint8_t *start = buf;
++  uint16_t ie_desc;
++  uint8_t type;
++  uint8_t id;
++  uint16_t len = 0;
++  int nested_mlme_len = 0;
++  enum {PARSING_HEADER_IE, PARSING_PAYLOAD_IE, PARSING_MLME_SUBIE} parsing_state;
++
++  if(ies == NULL) {
++    return -1;
++  }
++
++  /* Always look for a header IE first (at least "list termination 1") */
++  parsing_state = PARSING_HEADER_IE;
++  ies->ie_payload_ie_offset = 0;
++
++  /* Loop over all IEs */
++  while(buf_size > 0) {
++    if(buf_size < 2) { /* Not enough space for IE descriptor */
++      return -1;
++    }
++    READ16(buf, ie_desc);
++    buf_size -= 2;
++    buf += 2;
++    type = ie_desc & 0x8000 ? 1 : 0; /* b15 */
++    LOG_DBG("ie type %u, current state %u\n", type, parsing_state);
++
++    switch(parsing_state) {
++      case PARSING_HEADER_IE:
++        if(type != 0) {
++          LOG_ERR("header ie: wrong type %04x\n", ie_desc);
++          return -1;
++        }
++        /* Header IE: 2 bytes descriptor, c.f. fig 48n in IEEE 802.15.4e */
++        len = ie_desc & 0x007f; /* b0-b6 */
++        id = (ie_desc & 0x7f80) >> 7; /* b7-b14 */
++        LOG_DBG("header ie: len %u id %x\n", len, id);
++        switch(id) {
++          case HEADER_IE_LIST_TERMINATION_1:
++            if(len == 0) {
++              /* End of payload IE list, now expect payload IEs */
++              parsing_state = PARSING_PAYLOAD_IE;
++              ies->ie_payload_ie_offset = buf - start; /* Save IE header len */
++              LOG_DBG("list termination 1, look for payload IEs\n");
++            } else {
++              LOG_ERR("list termination 1, wrong len %u\n", len);
++              return -1;
++            }
++            break;
++          case HEADER_IE_LIST_TERMINATION_2:
++            /* End of IE parsing */
++            if(len == 0) {
++              ies->ie_payload_ie_offset = buf - start; /* Save IE header len */
++              LOG_DBG("list termination 2\n");
++              return buf + len - start;
++            } else {
++              LOG_ERR("list termination 2, wrong len %u\n", len);
++              return -1;
++            }
++          default:
++            if(len > buf_size || frame802154e_parse_header_ie(buf, len, id, ies) == -1) {
++              LOG_ERR("failed to parse\n");
++              return -1;
++            }
++            break;
++        }
++        break;
++      case PARSING_PAYLOAD_IE:
++        if(type != 1) {
++          LOG_ERR("payload ie: wrong type %04x\n", ie_desc);
++          return -1;
++        }
++        /* Payload IE: 2 bytes descriptor, c.f. fig 48o in IEEE 802.15.4e */
++        len = ie_desc & 0x7ff; /* b0-b10 */
++        id = (ie_desc & 0x7800) >> 11; /* b11-b14 */
++        LOG_DBG("payload ie: len %u id %x\n", len, id);
++        switch(id) {
++          case PAYLOAD_IE_MLME:
++            /* Now expect 'len' bytes of MLME sub-IEs */
++            parsing_state = PARSING_MLME_SUBIE;
++            nested_mlme_len = len;
++            len = 0; /* Reset len as we want to read subIEs and not jump over them */
++            LOG_DBG("entering MLME ie with len %u\n", nested_mlme_len);
++            break;
++#if TSCH_WITH_SIXTOP
++          case PAYLOAD_IE_IETF:
++            switch(*buf) {
++              case IETF_IE_6TOP:
++                /*
++                 * buf points to the Sub-ID field, a one-octet field, now;
++                 * advance it by one and use the result as the head pointer of
++                 * 6top IE Content.
++                 */
++                ies->sixtop_ie_content_ptr = buf + 1;
++                /*
++                 * Similarly as above, subtract 1 (one octet) from len, which
++                 * includes the length of Sub-ID field, and use the result as
++                 * the length of 6top IE Content.
++                 */
++                ies->sixtop_ie_content_len = len - 1;
++                break;
++              default:
++                LOG_ERR("frame802154e: unsupported IETF sub-IE %u\n", *buf);
++                break;
++            }
++            break;
++#endif /* TSCH_WITH_SIXTOP */
++          case PAYLOAD_IE_LIST_TERMINATION:
++            LOG_DBG("payload ie list termination %u\n", len);
++            return (len == 0) ? buf + len - start : -1;
++          default:
++            LOG_ERR("non-supported payload ie\n");
++            return -1;
++        }
++        break;
++      case PARSING_MLME_SUBIE:
++        /* MLME sub-IE: 2 bytes descriptor, c.f. fig 48q in IEEE 802.15.4e */
++        /* type == 0 means short sub-IE, type == 1 means long sub-IE */
++        if(type == 0) {
++          /* Short sub-IE, c.f. fig 48r in IEEE 802.15.4e */
++          len = ie_desc & 0x00ff; /* b0-b7 */
++          id = (ie_desc & 0x7f00) >> 8; /* b8-b14 */
++          LOG_DBG("short mlme ie len %u id %x\n", len, id);
++          if(len > buf_size || frame802154e_parse_mlme_short_ie(buf, len, id, ies) == -1) {
++            LOG_ERR("failed to parse ie\n");
++            return -1;
++          }
++        } else {
++          /* Long sub-IE, c.f. fig 48s in IEEE 802.15.4e */
++          len = ie_desc & 0x7ff; /* b0-b10 */
++          id = (ie_desc & 0x7800) >> 11; /* b11-b14 */
++          LOG_DBG("long mlme ie len %u id %x\n", len, id);
++          if(len > buf_size || frame802154e_parse_mlme_long_ie(buf, len, id, ies) == -1) {
++            LOG_ERR("failed to parse ie\n");
++            return -1;
++          }
++        }
++        /* Update remaining nested MLME len */
++        nested_mlme_len -= 2 + len;
++        if(nested_mlme_len < 0) {
++          LOG_ERR("found more sub-IEs than initially advertised\n");
++          /* We found more sub-IEs than initially advertised */
++          return -1;
++        }
++        if(nested_mlme_len == 0) {
++          LOG_DBG("end of MLME IE parsing\n");
++          /* End of IE parsing, look for another payload IE */
++          parsing_state = PARSING_PAYLOAD_IE;
++        }
++        break;
++    }
++    buf += len;
++    buf_size -= len;
++  }
++
++  if(parsing_state == PARSING_HEADER_IE) {
++    ies->ie_payload_ie_offset = buf - start; /* Save IE header len */
++  }
++
++  return buf - start;
++}

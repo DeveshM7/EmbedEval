@@ -1,0 +1,396 @@
+diff --git a/examples/6tisch/simple-node/Makefile b/examples/6tisch/simple-node/Makefile
+index 0446ed4..63fc554 100644
+--- a/examples/6tisch/simple-node/Makefile
++++ b/examples/6tisch/simple-node/Makefile
+@@ -11,6 +11,10 @@ MAKE_WITH_ORCHESTRA ?= 0
+ MAKE_WITH_SECURITY ?= 0
+  # print #routes periodically, used for regression tests
+ MAKE_WITH_PERIODIC_ROUTES_PRINT ?= 0
++# enable storing mode routing
++MAKE_WITH_STORING_ROUTING ?= 0
++# enable link-based Orchestra unicast rule (requires storing mode and Orchestra)
++MAKE_WITH_LINK_BASED_ORCHESTRA ?= 0
+ 
+ MAKE_MAC = MAKE_MAC_TSCH
+ 
+@@ -29,4 +33,12 @@ ifeq ($(MAKE_WITH_PERIODIC_ROUTES_PRINT),1)
+ CFLAGS += -DWITH_PERIODIC_ROUTES_PRINT=1
+ endif
+ 
++ifeq ($(MAKE_WITH_STORING_ROUTING),1)
++CFLAGS += -DRPL_CONF_MOP=RPL_MOP_STORING_NO_MULTICAST
++endif
++
++ifeq ($(MAKE_WITH_LINK_BASED_ORCHESTRA),1)
++CFLAGS += -DMAKE_WITH_LINK_BASED_ORCHESTRA=1
++endif
++
+ include $(CONTIKI)/Makefile.include
+diff --git a/examples/6tisch/simple-node/Makefile.bak b/examples/6tisch/simple-node/Makefile.bak
+new file mode 100644
+index 0000000..0446ed4
+--- /dev/null
++++ b/examples/6tisch/simple-node/Makefile.bak
+@@ -0,0 +1,32 @@
++CONTIKI_PROJECT = node
++all: $(CONTIKI_PROJECT)
++
++PLATFORMS_EXCLUDE = sky nrf52dk native simplelink
++
++CONTIKI=../../..
++
++ # force Orchestra from command line
++MAKE_WITH_ORCHESTRA ?= 0
++# force Security from command line
++MAKE_WITH_SECURITY ?= 0
++ # print #routes periodically, used for regression tests
++MAKE_WITH_PERIODIC_ROUTES_PRINT ?= 0
++
++MAKE_MAC = MAKE_MAC_TSCH
++
++include $(CONTIKI)/Makefile.dir-variables
++MODULES += $(CONTIKI_NG_SERVICES_DIR)/shell
++
++ifeq ($(MAKE_WITH_ORCHESTRA),1)
++MODULES += $(CONTIKI_NG_SERVICES_DIR)/orchestra
++endif
++
++ifeq ($(MAKE_WITH_SECURITY),1)
++CFLAGS += -DWITH_SECURITY=1
++endif
++
++ifeq ($(MAKE_WITH_PERIODIC_ROUTES_PRINT),1)
++CFLAGS += -DWITH_PERIODIC_ROUTES_PRINT=1
++endif
++
++include $(CONTIKI)/Makefile.include
+diff --git a/examples/6tisch/simple-node/project-conf.h b/examples/6tisch/simple-node/project-conf.h
+index 3771fb5..c927898 100644
+--- a/examples/6tisch/simple-node/project-conf.h
++++ b/examples/6tisch/simple-node/project-conf.h
+@@ -78,4 +78,31 @@
+ #define LOG_CONF_LEVEL_FRAMER                      LOG_LEVEL_DBG
+ #define TSCH_LOG_CONF_PER_SLOT                     1
+ 
++/* RPL Configuration - Enable DAO-ACK for reliable route establishment */
++#define RPL_CONF_WITH_DAO_ACK 1
++
++/* Orchestra Configuration */
++#if MAKE_WITH_LINK_BASED_ORCHESTRA
++
++/* Use link-based unicast rule */
++#define ORCHESTRA_CONF_RULES { &eb_per_time_source, &unicast_link_based, &default_common }
++#define ORCHESTRA_CONF_UNICAST_SENDER_BASED 0
++
++#else /* MAKE_WITH_LINK_BASED_ORCHESTRA */
++
++#if MAKE_WITH_STORING_ROUTING
++
++/* Use storing mode rule */
++#define ORCHESTRA_CONF_RULES { &eb_per_time_source, &unicast_per_neighbor_rpl_storing, &default_common }
++#define ORCHESTRA_CONF_UNICAST_SENDER_BASED 1
++
++#else /* MAKE_WITH_STORING_ROUTING */
++
++/* Default to non-storing mode */
++#define ORCHESTRA_CONF_RULES { &eb_per_time_source, &unicast_per_neighbor_rpl_ns, &default_common }
++#define ORCHESTRA_CONF_UNICAST_SENDER_BASED 0
++
++#endif /* MAKE_WITH_STORING_ROUTING */
++#endif /* MAKE_WITH_LINK_BASED_ORCHESTRA */
++
+ #endif /* PROJECT_CONF_H_ */
+diff --git a/examples/6tisch/simple-node/test_scenario.csc b/examples/6tisch/simple-node/test_scenario.csc
+new file mode 100644
+index 0000000..2fe2244
+--- /dev/null
++++ b/examples/6tisch/simple-node/test_scenario.csc
+@@ -0,0 +1,50 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<simconf>
++  <project EXPORT="discard">[APPS_DIR]/mrm</project>
++  <project EXPORT="discard">[APPS_DIR]/mspsim</project>
++  <project EXPORT="discard">[APPS_DIR]/avrora</project>
++  <project EXPORT="discard">[APPS_DIR]/serial_socket</project>
++  <project EXPORT="discard">[APPS_DIR]/powertracker</project>
++  <project EXPORT="discard">[APPS_DIR]/radiologger-headless</project>
++  <simulation>
++    <title>RPL+TSCH</title>
++    <randomseed>123456</randomseed>
++    <motedelay_us>1000000</motedelay_us>
++    <radiomedium>
++      org.contikios.cooja.radiomediums.UDGM
++      <transmitting_range>50.0</transmitting_range>
++      <interference_range>100.0</interference_range>
++      <success_ratio_tx>1.0</success_ratio_tx>
++      <success_ratio_rx>1.0</success_ratio_rx>
++    </radiomedium>
++    <events>
++      <logoutput>40000</logoutput>
++    </events>
++    <motetype>
++      org.contikios.cooja.contikimote.ContikiMoteType
++      <identifier>mtype660</identifier>
++      <description>RPL/TSCH Node</description>
++      <source>[CONTIKI_DIR]/examples/6tisch/simple-node/node.c</source>
++      <commands>make TARGET=cooja clean
++      make TARGET=cooja node.cooja</commands>
++      <moteinterface>org.contikios.cooja.interfaces.Position</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.Battery</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiVib</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiMoteID</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiRS232</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiBeeper</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.RimeAddress</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiIPAddress</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiRadio</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiButton</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiPIR</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiClock</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiLED</moteinterface>
++      <moteinterface>org.contikios.cooja.contikimote.interfaces.ContikiCFS</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.Mote2MoteRelations</moteinterface>
++      <moteinterface>org.contikios.cooja.interfaces.MoteAttributes</moteinterface>
++      <symbols>false</symbols>
++    </motetype>
++    <mote>
++      <interface_config>
++        org.contikios.cooja.interfaces.Position
+diff --git a/os/services/orchestra/orchestra-rule-unicast-link-based.c b/os/services/orchestra/orchestra-rule-unicast-link-based.c
+new file mode 100644
+index 0000000..ad66733
+--- /dev/null
++++ b/os/services/orchestra/orchestra-rule-unicast-link-based.c
+@@ -0,0 +1,232 @@
++/*
++ * Copyright (c) 2015, Swedish Institute of Computer Science.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ */
++/**
++ * \file
++ *         Orchestra: a link-based slotframe dedicated to unicast data transmission.
++ *         This rule uses a link-based allocation strategy where each link is assigned
++ *         a unique timeslot based on both source and destination addresses.
++ *
++ * \author Based on orchestra-rule-unicast-per-neighbor-rpl-storing.c
++ */
++
++#include "contiki.h"
++#include "orchestra.h"
++#include "net/ipv6/uip-ds6-route.h"
++#include "net/packetbuf.h"
++#include "net/routing/routing.h"
++
++#if UIP_MAX_ROUTES != 0
++
++static uint16_t slotframe_handle = 0;
++static uint16_t local_channel_offset;
++static struct tsch_slotframe *sf_unicast;
++
++/*---------------------------------------------------------------------------*/
++static uint16_t
++get_link_timeslot(const linkaddr_t *src, const linkaddr_t *dst)
++{
++  if(src != NULL && dst != NULL && ORCHESTRA_UNICAST_PERIOD > 0) {
++    /* Create hash based on both source and destination */
++    uint32_t hash = (src->u8[LINKADDR_SIZE - 1] << 8) | dst->u8[LINKADDR_SIZE - 1];
++    return hash % ORCHESTRA_UNICAST_PERIOD;
++  } else {
++    return 0xffff;
++  }
++}
++/*---------------------------------------------------------------------------*/
++static uint16_t
++get_node_channel_offset(const linkaddr_t *addr)
++{
++  if(addr != NULL && ORCHESTRA_UNICAST_MAX_CHANNEL_OFFSET >= ORCHESTRA_UNICAST_MIN_CHANNEL_OFFSET) {
++    return ORCHESTRA_LINKADDR_HASH(addr) % (ORCHESTRA_UNICAST_MAX_CHANNEL_OFFSET - ORCHESTRA_UNICAST_MIN_CHANNEL_OFFSET + 1)
++        + ORCHESTRA_UNICAST_MIN_CHANNEL_OFFSET;
++  } else {
++    return 0xffff;
++  }
++}
++/*---------------------------------------------------------------------------*/
++static int
++neighbor_has_uc_link(const linkaddr_t *linkaddr)
++{
++  if(linkaddr != NULL && !linkaddr_cmp(linkaddr, &linkaddr_null)) {
++    if((orchestra_parent_knows_us || !ORCHESTRA_UNICAST_SENDER_BASED)
++       && linkaddr_cmp(&orchestra_parent_linkaddr, linkaddr)) {
++      return 1;
++    }
++    if(nbr_table_get_from_lladdr(nbr_routes, (linkaddr_t *)linkaddr) != NULL) {
++      return 1;
++    }
++  }
++  return 0;
++}
++/*---------------------------------------------------------------------------*/
++static void
++add_uc_link(const linkaddr_t *linkaddr)
++{
++  if(linkaddr != NULL) {
++    uint16_t timeslot = get_link_timeslot(&linkaddr_node_addr, linkaddr);
++    uint8_t link_options = ORCHESTRA_UNICAST_SENDER_BASED ? LINK_OPTION_RX : LINK_OPTION_TX | LINK_OPTION_SHARED;
++
++    if(timeslot == get_link_timeslot(&linkaddr_node_addr, &linkaddr_node_addr)) {
++      /* This is also our timeslot, add necessary flags */
++      link_options |= ORCHESTRA_UNICAST_SENDER_BASED ? LINK_OPTION_TX | LINK_OPTION_SHARED: LINK_OPTION_RX;
++    }
++
++    /* Add/update link.
++     * Always configure the link with the local node's channel offset.
++     * If this is an Rx link, that is what the node needs to use.
++     * If this is a Tx link, packet's channel offset will override the link's channel offset.
++     */
++    tsch_schedule_add_link(sf_unicast, link_options, LINK_TYPE_NORMAL, &tsch_broadcast_address,
++          timeslot, local_channel_offset);
++  }
++}
++/*---------------------------------------------------------------------------*/
++static void
++remove_uc_link(const linkaddr_t *linkaddr)
++{
++  uint16_t timeslot;
++  struct tsch_link *l;
++
++  if(linkaddr == NULL) {
++    return;
++  }
++
++  timeslot = get_link_timeslot(&linkaddr_node_addr, linkaddr);
++  l = tsch_schedule_get_link_by_timeslot(sf_unicast, timeslot, local_channel_offset);
++  if(l == NULL) {
++    return;
++  }
++  /* Does our current parent need this timeslot? */
++  if(timeslot == get_link_timeslot(&linkaddr_node_addr, &orchestra_parent_linkaddr)) {
++    /* Yes, this timeslot is being used, return */
++    return;
++  }
++  /* Does any other child need this timeslot?
++   * (lookup all route next hops) */
++  nbr_table_item_t *item = nbr_table_head(nbr_routes);
++  while(item != NULL) {
++    linkaddr_t *addr = nbr_table_get_lladdr(nbr_routes, item);
++    if(timeslot == get_link_timeslot(&linkaddr_node_addr, addr)) {
++      /* Yes, this timeslot is being used, return */
++      return;
++    }
++    item = nbr_table_next(nbr_routes, item);
++  }
++
++  /* Do we need this timeslot? */
++  if(timeslot == get_link_timeslot(&linkaddr_node_addr, &linkaddr_node_addr)) {
++    /* This is our link, keep it but update the link options */
++    uint8_t link_options = ORCHESTRA_UNICAST_SENDER_BASED ? LINK_OPTION_TX | LINK_OPTION_SHARED: LINK_OPTION_RX;
++    tsch_schedule_add_link(sf_unicast, link_options, LINK_TYPE_NORMAL, &tsch_broadcast_address,
++              timeslot, local_channel_offset);
++  } else {
++    /* Remove link */
++    tsch_schedule_remove_link(sf_unicast, l);
++  }
++}
++/*---------------------------------------------------------------------------*/
++static void
++child_added(const linkaddr_t *linkaddr)
++{
++  add_uc_link(linkaddr);
++}
++/*---------------------------------------------------------------------------*/
++static void
++child_removed(const linkaddr_t *linkaddr)
++{
++  remove_uc_link(linkaddr);
++}
++/*---------------------------------------------------------------------------*/
++static int
++select_packet(uint16_t *slotframe, uint16_t *timeslot, uint16_t *channel_offset)
++{
++  /* Select data packets we have a unicast link to */
++  const linkaddr_t *dest = packetbuf_addr(PACKETBUF_ADDR_RECEIVER);
++  if(packetbuf_attr(PACKETBUF_ATTR_FRAME_TYPE) == FRAME802154_DATAFRAME
++     && neighbor_has_uc_link(dest)) {
++    if(slotframe != NULL) {
++      *slotframe = slotframe_handle;
++    }
++    if(timeslot != NULL) {
++      *timeslot = get_link_timeslot(&linkaddr_node_addr, dest);
++    }
++    /* set per-packet channel offset */
++    if(channel_offset != NULL) {
++      *channel_offset = get_node_channel_offset(dest);
++    }
++    return 1;
++  }
++  return 0;
++}
++/*---------------------------------------------------------------------------*/
++static void
++new_time_source(const struct tsch_neighbor *old, const struct tsch_neighbor *new)
++{
++  if(new != old) {
++    const linkaddr_t *old_addr = old != NULL ? &old->addr : NULL;
++    const linkaddr_t *new_addr = new != NULL ? &new->addr : NULL;
++    if(new_addr != NULL) {
++      linkaddr_copy(&orchestra_parent_linkaddr, new_addr);
++    } else {
++      linkaddr_copy(&orchestra_parent_linkaddr, &linkaddr_null);
++    }
++    remove_uc_link(old_addr);
++    add_uc_link(new_addr);
++  }
++}
++/*---------------------------------------------------------------------------*/
++static void
++init(uint16_t sf_handle)
++{
++  uint16_t timeslot;
++  linkaddr_t *local_addr = &linkaddr_node_addr;
++
++  slotframe_handle = sf_handle;
++  local_channel_offset = get_node_channel_offset(local_addr);
++  /* Slotframe for unicast transmissions */
++  sf_unicast = tsch_schedule_add_slotframe(slotframe_handle, ORCHESTRA_UNICAST_PERIOD);
++  timeslot = get_link_timeslot(local_addr, local_addr);
++  tsch_schedule_add_link(sf_unicast,
++            ORCHESTRA_UNICAST_SENDER_BASED ? LINK_OPTION_TX | LINK_OPTION_SHARED: LINK_OPTION_RX,
++            LINK_TYPE_NORMAL, &tsch_broadcast_address,
++            timeslot, local_channel_offset);
++}
++/*---------------------------------------------------------------------------*/
++struct orchestra_rule unicast_link_based = {
++  init,
++  new_time_source,
++  select_packet,
++  child_added,
++  child_removed,
++  "unicast link-based",
++};
++
++#endif /* UIP_MAX_ROUTES */

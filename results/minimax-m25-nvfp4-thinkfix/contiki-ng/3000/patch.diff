@@ -1,0 +1,591 @@
+diff --git a/os/lib/cbor.c b/os/lib/cbor.c
+new file mode 100644
+index 0000000..3aca18d
+--- /dev/null
++++ b/os/lib/cbor.c
+@@ -0,0 +1,367 @@
++/*
++ * Copyright (c) 2023, RISE Research Institutes of Sweden.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ */
++
++#include "cbor.h"
++#include <string.h>
++
++/* ------------------------------------------------------------------ */
++/* Helper macros                                                     */
++/* ------------------------------------------------------------------ */
++
++/* CBOR major type shifts and masks */
++#define CBOR_MAJOR_TYPE_MASK 0xe0
++#define CBOR_ADDITIONAL_MASK 0x1f
++
++/* CBOR major type values */
++#define CBOR_MAJOR_TYPE_UNSIGNED   0
++#define CBOR_MAJOR_TYPE_NEGATIVE   1
++#define CBOR_MAJOR_TYPE_BYTE_STR   2
++#define CBOR_MAJOR_TYPE_TEXT_STR   3
++#define CBOR_MAJOR_TYPE_ARRAY      4
++#define CBOR_MAJOR_TYPE_MAP        5
++#define CBOR_MAJOR_TYPE_TAG        6
++#define CBOR_MAJOR_TYPE_SIMPLE     7
++
++/* CBOR additional information values for length encoding */
++#define CBOR_ADDITIONAL_LEN_1   24
++#define CBOR_ADDITIONAL_LEN_2   25
++#define CBOR_ADDITIONAL_LEN_4   26
++#define CBOR_ADDITIONAL_LEN_8   27
++
++/* ------------------------------------------------------------------ */
++/* Writer implementation                                              */
++/* ------------------------------------------------------------------ */
++
++void
++cbor_init_writer(cbor_writer_state_t *state, uint8_t *buffer,
++                 size_t buffer_size)
++{
++  memset(state, 0, sizeof(*state));
++  state->buffer = buffer;
++  state->buffer_size = buffer_size;
++}
++
++/* Helper: write a byte to the buffer */
++static bool
++write_byte(cbor_writer_state_t *state, uint8_t byte)
++{
++  if (state->offset >= state->buffer_size) {
++    return false;
++  }
++  state->buffer[state->offset++] = byte;
++  return true;
++}
++
++/* Helper: write bytes to the buffer */
++static bool
++write_bytes(cbor_writer_state_t *state, const uint8_t *data, size_t data_size)
++{
++  size_t i;
++  for (i = 0; i < data_size; i++) {
++    if (!write_byte(state, data[i])) {
++      return false;
++    }
++  }
++  return true;
++}
++
++/* Helper: write a variable-length unsigned integer */
++static bool
++write_unsigned_internal(cbor_writer_state_t *state, uint64_t value,
++                        uint8_t major_type)
++{
++  if (value < 24) {
++    /* Single byte encoding */
++    return write_byte(state, (uint8_t)((major_type << 5) | value));
++  } else if (value <= 0xff) {
++    /* 1-byte length */
++    if (!write_byte(state, (major_type << 5) | CBOR_ADDITIONAL_LEN_1)) {
++      return false;
++    }
++    return write_byte(state, (uint8_t)value);
++  } else if (value <= 0xffff) {
++    /* 2-byte length */
++    if (!write_byte(state, (major_type << 5) | CBOR_ADDITIONAL_LEN_2)) {
++      return false;
++    }
++    if (!write_byte(state, (uint8_t)(value >> 8))) {
++      return false;
++    }
++    return write_byte(state, (uint8_t)(value & 0xff));
++  } else if (value <= 0xffffffff) {
++    /* 4-byte length */
++    if (!write_byte(state, (major_type << 5) | CBOR_ADDITIONAL_LEN_4)) {
++      return false;
++    }
++    if (!write_bytes(state, (const uint8_t *)&value, 4)) {
++      return false;
++    }
++    return true;
++  } else {
++    /* 8-byte length */
++    if (!write_byte(state, (major_type << 5) | CBOR_ADDITIONAL_LEN_8)) {
++      return false;
++    }
++    if (!write_bytes(state, (const uint8_t *)&value, 8)) {
++      return false;
++    }
++    return true;
++  }
++}
++
++void
++cbor_open_array(cbor_writer_state_t *state)
++{
++  /* Reserve space for the array header - we'll fill in the count when closing */
++  /* Write a placeholder that we'll update later */
++  state->array_depth++;
++  state->array_count[state->array_depth - 1] = 0;
++  /* Save position where we need to write the count */
++  state->array_start[state->array_depth - 1] = state->offset;
++  /* Write placeholder - will be updated when we know the count */
++  write_byte(state, 0);
++}
++
++void
++cbor_write_data(cbor_writer_state_t *state, const uint8_t *data,
++                size_t data_size)
++{
++  /* Track element count for current array */
++  if (state->array_depth > 0) {
++    state->array_count[state->array_depth - 1]++;
++  }
++
++  write_unsigned_internal(state, data_size, CBOR_MAJOR_TYPE_BYTE_STR);
++  write_bytes(state, data, data_size);
++}
++
++void
++cbor_write_unsigned(cbor_writer_state_t *state, uint64_t value)
++{
++  /* Track element count for current array */
++  if (state->array_depth > 0) {
++    state->array_count[state->array_depth - 1]++;
++  }
++
++  write_unsigned_internal(state, value, CBOR_MAJOR_TYPE_UNSIGNED);
++}
++
++void
++cbor_close_array(cbor_writer_state_t *state)
++{
++  if (state->array_depth > 0) {
++    uint8_t count = state->array_count[state->array_depth - 1];
++    size_t start = state->array_start[state->array_depth - 1];
++
++    /* Update the array header with the actual count */
++    state->buffer[start] = (CBOR_MAJOR_TYPE_ARRAY << 5) | count;
++
++    state->array_depth--;
++  }
++}
++
++size_t
++cbor_end_writer(cbor_writer_state_t *state)
++{
++  if (state->array_depth != 0) {
++    /* Array not properly closed */
++    return 0;
++  }
++  return state->offset;
++}
++
++/* ------------------------------------------------------------------ */
++/* Reader implementation                                              */
++/* ------------------------------------------------------------------ */
++
++void
++cbor_init_reader(cbor_reader_state_t *state, const uint8_t *cbor,
++                 size_t cbor_size)
++{
++  memset(state, 0, sizeof(*state));
++  state->cbor = cbor;
++  state->cbor_size = cbor_size;
++}
++
++/* Helper: check if we have enough bytes left */
++static bool
++has_bytes(const cbor_reader_state_t *state, size_t count)
++{
++  return state->offset + count <= state->cbor_size;
++}
++
++/* Helper: read a byte from the CBOR data */
++static bool
++read_byte(cbor_reader_state_t *state, uint8_t *byte)
++{
++  if (!has_bytes(state, 1)) {
++    return false;
++  }
++  *byte = state->cbor[state->offset++];
++  return true;
++}
++
++/* Helper: read bytes from the CBOR data */
++static bool
++read_bytes(cbor_reader_state_t *state, uint8_t *data, size_t count)
++{
++  size_t i;
++  for (i = 0; i < count; i++) {
++    if (!read_byte(state, &data[i])) {
++      return false;
++    }
++  }
++  return true;
++}
++
++/* Helper: read a variable-length unsigned integer, return -1 on error */
++static int64_t
++read_unsigned_internal(cbor_reader_state_t *state, uint8_t *major_type)
++{
++  uint8_t header;
++  uint64_t value;
++
++  if (!read_byte(state, &header)) {
++    return -1;
++  }
++
++  *major_type = (header & CBOR_MAJOR_TYPE_MASK) >> 5;
++  uint8_t additional = header & CBOR_ADDITIONAL_MASK;
++
++  if (additional < 24) {
++    /* Single byte encoding */
++    value = additional;
++  } else if (additional == CBOR_ADDITIONAL_LEN_1) {
++    uint8_t len;
++    if (!read_byte(state, &len)) {
++      return -1;
++    }
++    value = len;
++  } else if (additional == CBOR_ADDITIONAL_LEN_2) {
++    uint8_t bytes[2];
++    if (!read_bytes(state, bytes, 2)) {
++      return -1;
++    }
++    value = ((uint16_t)bytes[0] << 8) | bytes[1];
++  } else if (additional == CBOR_ADDITIONAL_LEN_4) {
++    uint8_t bytes[4];
++    if (!read_bytes(state, bytes, 4)) {
++      return -1;
++    }
++    value = ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
++            ((uint32_t)bytes[2] << 8) | bytes[3];
++  } else if (additional == CBOR_ADDITIONAL_LEN_8) {
++    uint8_t bytes[8];
++    if (!read_bytes(state, bytes, 8)) {
++      return -1;
++    }
++    value = ((uint64_t)bytes[0] << 56) | ((uint64_t)bytes[1] << 48) |
++            ((uint64_t)bytes[2] << 40) | ((uint64_t)bytes[3] << 32) |
++            ((uint64_t)bytes[4] << 24) | ((uint64_t)bytes[5] << 16) |
++            ((uint64_t)bytes[6] << 8) | bytes[7];
++  } else {
++    /* Indefinite length not supported for now */
++    return -1;
++  }
++
++  return (int64_t)value;
++}
++
++cbor_major_type_t
++cbor_peek_next(cbor_reader_state_t *state)
++{
++  size_t saved_offset = state->offset;
++  uint8_t major_type;
++  int64_t result = read_unsigned_internal(state, &major_type);
++  state->offset = saved_offset;
++
++  if (result < 0) {
++    return -1;
++  }
++
++  return (cbor_major_type_t)major_type;
++}
++
++size_t
++cbor_read_array(cbor_reader_state_t *state)
++{
++  uint8_t major_type;
++  int64_t count = read_unsigned_internal(state, &major_type);
++
++  if (count < 0 || major_type != CBOR_MAJOR_TYPE_ARRAY) {
++    return CBOR_SIZE_NONE;
++  }
++
++  state->array_depth++;
++  return (size_t)count;
++}
++
++const uint8_t *
++cbor_read_data(cbor_reader_state_t *state, size_t *data_size)
++{
++  uint8_t major_type;
++  int64_t len = read_unsigned_internal(state, &major_type);
++
++  if (len < 0 || major_type != CBOR_MAJOR_TYPE_BYTE_STR) {
++    *data_size = 0;
++    return NULL;
++  }
++
++  if (!has_bytes(state, (size_t)len)) {
++    *data_size = 0;
++    return NULL;
++  }
++
++  *data_size = (size_t)len;
++  const uint8_t *data = &state->cbor[state->offset];
++  state->offset += (size_t)len;
++  return data;
++}
++
++cbor_size_t
++cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value)
++{
++  uint8_t major_type;
++  int64_t result = read_unsigned_internal(state, &major_type);
++
++  if (result < 0 || major_type != CBOR_MAJOR_TYPE_UNSIGNED) {
++    return CBOR_SIZE_NONE;
++  }
++
++  *value = (uint64_t)result;
++  return 0;
++}
++
++bool
++cbor_end_reader(cbor_reader_state_t *state)
++{
++  return state->offset >= state->cbor_size;
++}
+diff --git a/os/lib/cbor.h b/os/lib/cbor.h
+new file mode 100644
+index 0000000..24e0ca4
+--- /dev/null
++++ b/os/lib/cbor.h
+@@ -0,0 +1,212 @@
++/*
++ * Copyright (c) 2023, RISE Research Institutes of Sweden.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ */
++
++/**
++ * \file
++ *         CBOR encoding and decoding library.
++ * \author
++ *         Adam Dunkels <adam@sics.se>
++ */
++
++#ifndef CBOR_H_
++#define CBOR_H_
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stddef.h>
++
++/**
++ * \brief CBOR major type enumeration
++ */
++typedef enum {
++  CBOR_MAJOR_TYPE_ARRAY = 4,  /**< Array type */
++  /* Additional major types can be added as needed */
++} cbor_major_type_t;
++
++/**
++ * \brief CBOR size return type for functions that may fail
++ */
++typedef enum {
++  CBOR_SIZE_NONE = (size_t)-1  /**< Indicates no valid size / failure */
++} cbor_size_t;
++
++/**
++ * \brief Maximum nesting depth for CBOR arrays
++ */
++#define CBOR_MAX_ARRAY_DEPTH 8
++
++/**
++ * \brief CBOR writer state
++ *
++ * This structure holds the state for CBOR encoding.
++ */
++typedef struct cbor_writer_state {
++  uint8_t *buffer;           /**< Output buffer */
++  size_t buffer_size;        /**< Size of output buffer */
++  size_t offset;              /**< Current write position */
++  int array_depth;            /**< Depth of nested arrays */
++  uint8_t array_count[CBOR_MAX_ARRAY_DEPTH];  /**< Element count per array level */
++  size_t array_start[CBOR_MAX_ARRAY_DEPTH];   /**< Position of array header per level */
++} cbor_writer_state_t;
++
++/**
++ * \brief CBOR reader state
++ *
++ * This structure holds the state for CBOR decoding.
++ */
++typedef struct cbor_reader_state {
++  const uint8_t *cbor;   /**< Input CBOR data */
++  size_t cbor_size;      /**< Size of input CBOR data */
++  size_t offset;         /**< Current read position */
++  int array_depth;       /**< Depth of nested arrays */
++} cbor_reader_state_t;
++
++/* ------------------------------------------------------------------ */
++/* Writer API                                                         */
++/* ------------------------------------------------------------------ */
++
++/**
++ * \brief Initialize a CBOR writer
++ * \param state Writer state to initialize
++ * \param buffer Buffer to write CBOR data to
++ * \param buffer_size Size of the buffer
++ *
++ * This function initializes the writer state. The caller does not need
++ * to pre-zero the state.
++ */
++void cbor_init_writer(cbor_writer_state_t *state, uint8_t *buffer,
++                       size_t buffer_size);
++
++/**
++ * \brief Open a CBOR array
++ * \param state Writer state
++ *
++ * This function opens a new array. Arrays can be nested.
++ */
++void cbor_open_array(cbor_writer_state_t *state);
++
++/**
++ * \brief Write a byte string to the CBOR buffer
++ * \param state Writer state
++ * \param data Pointer to byte string data
++ * \param data_size Size of the byte string
++ */
++void cbor_write_data(cbor_writer_state_t *state, const uint8_t *data,
++                      size_t data_size);
++
++/**
++ * \brief Write an unsigned integer to the CBOR buffer
++ * \param state Writer state
++ * \param value Unsigned integer value to write
++ */
++void cbor_write_unsigned(cbor_writer_state_t *state, uint64_t value);
++
++/**
++ * \brief Close a CBOR array
++ * \param state Writer state
++ *
++ * This function closes an array that was previously opened with
++ * cbor_open_array().
++ */
++void cbor_close_array(cbor_writer_state_t *state);
++
++/**
++ * \brief Finish writing CBOR data
++ * \param state Writer state
++ * \return Number of bytes written, or 0 on failure
++ *
++ * This function finalizes the writing process and returns the number
++ * of bytes written to the buffer.
++ */
++size_t cbor_end_writer(cbor_writer_state_t *state);
++
++/* ------------------------------------------------------------------ */
++/* Reader API                                                         */
++/* ------------------------------------------------------------------ */
++
++/**
++ * \brief Initialize a CBOR reader
++ * \param state Reader state to initialize
++ * \param cbor Pointer to CBOR data
++ * \param cbor_size Size of CBOR data
++ *
++ * This function initializes the reader state. The caller does not need
++ * to pre-zero the state.
++ */
++void cbor_init_reader(cbor_reader_state_t *state, const uint8_t *cbor,
++                       size_t cbor_size);
++
++/**
++ * \brief Peek at the next major type in the CBOR data
++ * \param state Reader state
++ * \return The next CBOR major type, or -1 on error
++ *
++ * This function looks at the next item without consuming it.
++ */
++cbor_major_type_t cbor_peek_next(cbor_reader_state_t *state);
++
++/**
++ * \brief Read an array header from CBOR data
++ * \param state Reader state
++ * \return Number of elements in the array, or CBOR_SIZE_NONE on error
++ *
++ * This function reads and consumes an array header. It returns the
++ * number of elements in the array.
++ */
++size_t cbor_read_array(cbor_reader_state_t *state);
++
++/**
++ * \brief Read a byte string from CBOR data
++ * \param state Reader state
++ * \param data_size Pointer to store the size of the byte string
++ * \return Pointer to the byte string data, or NULL on error
++ *
++ * This function reads a byte string and returns a pointer to it.
++ * The data is valid until the reader state is modified.
++ */
++const uint8_t *cbor_read_data(cbor_reader_state_t *state, size_t *data_size);
++
++/**
++ * \brief Read an unsigned integer from CBOR data
++ * \param state Reader state
++ * \param value Pointer to store the unsigned integer value
++ * \return CBOR_SIZE_NONE on error, otherwise a valid size
++ */
++cbor_size_t cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value);
++
++/**
++ * \brief Check if the CBOR reader has reached the end
++ * \param state Reader state
++ * \return true if all bytes have been consumed, false otherwise
++ */
++bool cbor_end_reader(cbor_reader_state_t *state);
++
++#endif /* CBOR_H_ */

@@ -1,0 +1,161 @@
+diff --git a/os/sys/process-mutex.h b/os/sys/process-mutex.h
+new file mode 100644
+index 0000000..d854de3
+--- /dev/null
++++ b/os/sys/process-mutex.h
+@@ -0,0 +1,155 @@
++/*
++ * Copyright (c) 2024, OpenAI Contributors
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the copyright holder nor the names of its
++ *    contributors may be used to endorse or promote products derived from
++ *    this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * @file
++ * @brief Process‑level mutex for protothreads.
++ *
++ * This header provides a lightweight mutex that works with Contiki processes
++ * (protothreads).  It follows the contract required by the task description:
++ *   * ``process_mutex_init()`` – initialise a mutex (zeroed state).
++ *   * ``process_mutex_try_lock()`` – try to acquire the mutex; if it is already
++ *     held, record the current process as a waiter and return ``false``.
++ *   * ``process_mutex_unlock()`` – clear the lock, wake all waiting processes
++ *     (using ``process_poll``) and reset the waiter list.
++ *
++ * The implementation is header‑only, requires no additional module and can be
++ * used by simply including ``sys/process-mutex.h``.
++ */
++
++#ifndef PROCESS_MUTEX_H_
++#define PROCESS_MUTEX_H_
++
++#include "contiki.h"
++#include "sys/critical.h"
++#include <stdbool.h>
++
++/* -------------------------------------------------------------------------- */
++/**
++ * @brief Process‑level mutex type.
++ *
++ * ``locked`` holds the lock state (0 = unlocked, 1 = locked).
++ * ``waiters`` is a singly‑linked list of processes that tried to lock while it
++ * was already held.  The list is built using the ``next`` field of the native
++ * ``struct process`` objects – no extra allocation is required.
++ */
++typedef struct process_mutex {
++  volatile uint8_t locked;               /**< 0 = unlocked, 1 = locked */
++  volatile struct process *waiters;      /**< Head of waiting‑process list */
++} process_mutex_t;
++
++/* -------------------------------------------------------------------------- */
++/**
++ * @brief Initialise a mutex.
++ *
++ * The function clears the lock flag and any pending waiter list.  It is safe
++ * to call on a statically zeroed object as required by the specification.
++ */
++static inline void
++process_mutex_init(process_mutex_t *mutex)
++{
++  int_master_status_t status = critical_enter();
++  mutex->locked = 0;
++  mutex->waiters = NULL;
++  critical_exit(status);
++}
++
++/* -------------------------------------------------------------------------- */
++/**
++ * @brief Try to acquire the mutex.
++ *
++ * If the mutex is free it becomes locked and the function returns ``true``.
++ * If the mutex is already locked, the current process (``PROCESS_CURRENT``) is
++ * added to the waiter list (if not already present) and the function returns
++ * ``false``.
++ */
++static inline bool
++process_mutex_try_lock(process_mutex_t *mutex)
++{
++  bool success = false;
++  int_master_status_t status = critical_enter();
++
++  if(mutex->locked == 0) {
++    /* Acquire the lock */
++    mutex->locked = 1;
++    success = true;
++  } else {
++    /* Record the caller as a waiter – avoid duplicate entries */
++    struct process *cur = PROCESS_CURRENT();
++    struct process *p = (struct process *)mutex->waiters;
++    bool already = false;
++    while(p != NULL) {
++      if(p == cur) {
++        already = true;
++        break;
++      }
++      p = (struct process *)p->next;
++    }
++    if(!already) {
++      /* Insert at the head of the list (order does not matter). */
++      cur->next = (struct process *)mutex->waiters;
++      mutex->waiters = cur;
++    }
++    success = false;
++  }
++
++  critical_exit(status);
++  return success;
++}
++
++/* -------------------------------------------------------------------------- */
++/**
++ * @brief Release the mutex and wake all waiting processes.
++ *
++ * The lock is cleared first, then each process that was recorded as a waiter
++ * receives a poll event via ``process_poll()``.  After waking, the waiter list
++ * is cleared.
++ */
++static inline void
++process_mutex_unlock(process_mutex_t *mutex)
++{
++  struct process *waiters;
++  int_master_status_t status = critical_enter();
++  mutex->locked = 0;
++  waiters = (struct process *)mutex->waiters;
++  mutex->waiters = NULL;
++  critical_exit(status);
++
++  while(waiters != NULL) {
++    struct process *next = (struct process *)waiters->next;
++    process_poll(waiters);
++    /* Reset the temporary link to avoid dangling pointers; the process
++     * structure itself remains unchanged for normal operation. */
++    waiters->next = NULL;
++    waiters = next;
++  }
++}
++
++/* -------------------------------------------------------------------------- */
++#endif /* PROCESS_MUTEX_H_ */
++

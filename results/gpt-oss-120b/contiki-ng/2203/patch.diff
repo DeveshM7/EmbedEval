@@ -1,0 +1,219 @@
+diff --git a/heapmem_zone.patch b/heapmem_zone.patch
+new file mode 100644
+index 0000000..1de9ebd
+--- /dev/null
++++ b/heapmem_zone.patch
+@@ -0,0 +1,60 @@
++*** Begin Patch
++*** Update File: os/lib/heapmem.h
++@@
++ #include <stdlib.h>
++@@
++ typedef struct heapmem_stats {
++   size_t allocated;
++   size_t overhead;
++   size_t available;
++   size_t footprint;
++   size_t chunks;
++ } heapmem_stats_t;
+++
+++/* ---------------------------------------------------------------------------
+++ * Zone API
+++ * ---------------------------------------------------------------------------
+++ *
+++ * The original heapmem implementation only provides a single, shared heap.
+++ * For certain subsystems it is useful to reserve a portion of this heap so
+++ * that the subsystem cannot exhaust memory needed by the rest of the system.
+++ * The zone API adds lightweight bookkeeping on top of the existing allocator.
+++ *
+++ * A zone is identified by an unsigned integer type.  Zone 0 is the general
+++ * pool that behaves exactly like the original allocator.  Additional zones
+++ * can be registered at runtime (subject to HEAPMEM_CONF_MAX_ZONES).  The
+++ * allocator refuses allocations that would exceed the reserved size for a
+++ * zone, even if overall heap memory would still be available.
+++ *
+++ * The implementation tracks the amount of memory currently allocated from each
+++ * zone and adjusts the counters when memory is freed.  This is achieved by
+++ * storing the zone identifier in the internal chunk metadata.
+++ */
+++
+++/** Type used to identify a heap zone. */
+++typedef unsigned int heapmem_zone_t;
+++
+++/** Invalid zone identifier – returned on registration failure. */
+++#define HEAPMEM_ZONE_INVALID ((heapmem_zone_t)-1)
+++
+++/** Identifier for the general (unrestricted) zone. */
+++#define HEAPMEM_ZONE_GENERAL 0U
+++
+++/**
+++ * Register a named heap zone with a reserved allocation limit.
+++ *
+++ * @param name       Human‑readable name of the zone. Must be non‑NULL.
+++ * @param zone_size  Reserved size in bytes for the zone. Must be non‑zero.
+++ * @return           A zone identifier, or HEAPMEM_ZONE_INVALID on error.
+++ */
+++heapmem_zone_t heapmem_zone_register(const char *name, size_t zone_size);
+++
+++/**
+++ * Allocate memory from a specific zone.
+++ *
+++ * @param zone   Zone identifier, obtained from heapmem_zone_register().
+++ * @param size   Number of bytes to allocate.
+++ * @return       Pointer to allocated memory, or NULL on failure.
+++ */
+++void *heapmem_zone_alloc(heapmem_zone_t zone, size_t size);
++*** End Patch
+diff --git a/os/lib/heapmem.c b/os/lib/heapmem.c
+index 44eab9d..541c9a4 100644
+--- a/os/lib/heapmem.c
++++ b/os/lib/heapmem.c
+@@ -101,6 +101,21 @@
+ #else
+ #define HEAPMEM_ALIGNMENT HEAPMEM_DEFAULT_ALIGNMENT
+ #endif /* HEAPMEM_CONF_ALIGNMENT */
++/* Maximum number of zones (including the general zone). */
++#ifndef HEAPMEM_CONF_MAX_ZONES
++#define HEAPMEM_CONF_MAX_ZONES 1
++#endif
++
++/* Internal data structures for zone management */
++typedef struct {
++  const char *name;
++  size_t limit;
++  size_t used;
++  bool occupied;
++} heapmem_zone_info_t;
++
++static heapmem_zone_info_t zones[HEAPMEM_CONF_MAX_ZONES];
++static heapmem_zone_t next_zone_id = 1; /* 0 is general */
+ 
+ #define ALIGN(size)						\
+   (((size) + (HEAPMEM_ALIGNMENT - 1)) & ~(HEAPMEM_ALIGNMENT - 1))
+@@ -136,12 +151,12 @@ typedef struct chunk {
+   struct chunk *next;
+   size_t size;
+   uint8_t flags;
++  heapmem_zone_t zone;
+ #if HEAPMEM_DEBUG
+   const char *file;
+   unsigned line;
+ #endif
+ } chunk_t;
+-
+ /* All allocated space is located within an "heap", which is statically
+    allocated with a pre-configured size. */
+ static char heap_base[HEAPMEM_ARENA_SIZE] CC_ALIGN(HEAPMEM_ALIGNMENT);
+@@ -337,6 +352,7 @@ heapmem_alloc(size_t size)
+   chunk->flags = CHUNK_FLAG_ALLOCATED;
+ 
+ #if HEAPMEM_DEBUG
++  chunk->zone = HEAPMEM_ZONE_GENERAL;
+   chunk->file = file;
+   chunk->line = line;
+ #endif
+@@ -380,6 +396,12 @@ heapmem_free(void *ptr)
+   LOG_DBG("%s: ptr %p, allocated at %s:%u\n", __func__, ptr,
+          chunk->file, chunk->line);
+ #endif
++  /* Update zone usage if applicable */
++  if(chunk->zone != HEAPMEM_ZONE_GENERAL) {
++    if(chunk->zone < HEAPMEM_CONF_MAX_ZONES && zones[chunk->zone].occupied) {
++      zones[chunk->zone].used -= ALIGN(chunk->size);
++    }
++  }
+ 
+   free_chunk(chunk);
+   return true;
+@@ -528,3 +550,57 @@ heapmem_alignment(void)
+ {
+   return HEAPMEM_ALIGNMENT;
+ }
++
++/* --------------------------------------------------------------------------
++ * Zone management implementation
++ */
++
++/* Register a new zone. */
++heapmem_zone_t
++heapmem_zone_register(const char *name, size_t zone_size)
++{
++  if(name == NULL || zone_size == 0) {
++    return HEAPMEM_ZONE_INVALID;
++  }
++  /* Check for duplicate names. */
++  for(heapmem_zone_t i = 1; i < HEAPMEM_CONF_MAX_ZONES; i++) {
++    if(zones[i].occupied && zones[i].name != NULL && strcmp(zones[i].name, name) == 0) {
++      return HEAPMEM_ZONE_INVALID;
++    }
++  }
++  if(next_zone_id >= HEAPMEM_CONF_MAX_ZONES) {
++    return HEAPMEM_ZONE_INVALID;
++  }
++  heapmem_zone_t id = next_zone_id++;
++  zones[id].name = name;
++  zones[id].limit = zone_size;
++  zones[id].used = 0;
++  zones[id].occupied = true;
++  return id;
++}
++
++/* Allocate memory from a specific zone. */
++void *
++heapmem_zone_alloc(heapmem_zone_t zone, size_t size)
++{
++  if(zone == HEAPMEM_ZONE_GENERAL) {
++    return heapmem_alloc(size);
++  }
++  if(zone >= HEAPMEM_CONF_MAX_ZONES || !zones[zone].occupied) {
++    return NULL;
++  }
++  size_t aligned = ALIGN(size);
++  if(zones[zone].used + aligned > zones[zone].limit) {
++    return NULL;
++  }
++  void *ptr = heapmem_alloc(size);
++  if(ptr == NULL) {
++    return NULL;
++  }
++  /* Record zone in chunk metadata and update usage. */
++  chunk_t *ch = GET_CHUNK(ptr);
++  ch->zone = zone;
++  zones[zone].used += aligned;
++  return ptr;
++}
++
+diff --git a/os/lib/heapmem.h b/os/lib/heapmem.h
+index 17941d7..62aad3f 100644
+--- a/os/lib/heapmem.h
++++ b/os/lib/heapmem.h
+@@ -168,6 +168,9 @@ void heapmem_stats(heapmem_stats_t *stats);
+  */
+ 
+ size_t heapmem_alignment(void);
++/* Include the zone API extensions. */
++#include "heapmem_zone.h"
++#include "heapmem_zone.h"
+ 
+ #endif /* !HEAPMEM_H */
+ 
+diff --git a/os/lib/heapmem_zone.h b/os/lib/heapmem_zone.h
+new file mode 100644
+index 0000000..4c9d47f
+--- /dev/null
++++ b/os/lib/heapmem_zone.h
+@@ -0,0 +1,14 @@
++#ifndef HEAPMEM_ZONE_H
++#define HEAPMEM_ZONE_H
++
++#include <stddef.h>
++
++typedef unsigned int heapmem_zone_t;
++
++#define HEAPMEM_ZONE_INVALID ((heapmem_zone_t)-1)
++#define HEAPMEM_ZONE_GENERAL 0U
++
++heapmem_zone_t heapmem_zone_register(const char *name, size_t zone_size);
++void *heapmem_zone_alloc(heapmem_zone_t zone, size_t size);
++
++#endif /* HEAPMEM_ZONE_H */

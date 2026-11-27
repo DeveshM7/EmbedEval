@@ -1,0 +1,1851 @@
+diff --git a/os/lib/sha-256.c b/os/lib/sha-256.c
+new file mode 100644
+index 0000000..5d9199e
+--- /dev/null
++++ b/os/lib/sha-256.c
+@@ -0,0 +1,419 @@
++/*
++ * Copyright (c) 2023, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/**
++ * \file
++ *         SHA-256 hash algorithm implementation.
++ * \author
++ *         David H. Smith <david.h.smith@contiki-ng.org>
++ */
++
++#include "lib/sha-256.h"
++
++#include <string.h>
++
++/*---------------------------------------------------------------------------*/
++/* SHA-256 constants and functions */
++
++/* SHA-256 initial hash values (FIPS 180-4 section 5.3.4) */
++static const uint32_t SHA_256_H_INIT[8] = {
++  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
++};
++
++/* SHA-256 round constants (FIPS 180-4 section 4.2.2) */
++static const uint32_t SHA_256_K[64] = {
++  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
++};
++
++/* SHA-256 context structure */
++typedef struct {
++  uint64_t length;
++  uint32_t state[8];
++  uint32_t curlen;
++  uint8_t buf[64];
++} sha_256_context_t;
++
++/*---------------------------------------------------------------------------*/
++/* Function prototypes */
++
++static void sha_256_compress(sha_256_context_t *ctx, const uint8_t *block);
++
++/*---------------------------------------------------------------------------*/
++/* SHA-256 helper functions (FIPS 180-4 section 4.1.2) */
++
++#define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
++#define SHR(x, n) ((x) >> (n))
++
++#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
++#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++
++#define EP0(x) (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
++#define EP1(x) (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
++#define SIG0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ SHR(x, 3))
++#define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ SHR(x, 10))
++
++/*---------------------------------------------------------------------------*/
++/* SHA-256 compression function */
++
++static void
++sha_256_compress(sha_256_context_t *ctx, const uint8_t *block)
++{
++  uint32_t w[64];
++  uint32_t a, b, c, d, e, f, g, h;
++  uint32_t t1, t2;
++  int i;
++
++  /* Prepare the message schedule (FIPS 180-4 section 6.2.2) */
++  for(i = 0; i < 16; i++) {
++    w[i] = ((uint32_t)block[i * 4] << 24) |
++           ((uint32_t)block[i * 4 + 1] << 16) |
++           ((uint32_t)block[i * 4 + 2] << 8) |
++           ((uint32_t)block[i * 4 + 3]);
++  }
++  for(i = 16; i < 64; i++) {
++    w[i] = SIG1(w[i - 2]) + w[i - 7] + SIG0(w[i - 15]) + w[i - 16];
++  }
++
++  /* Initialize working variables (FIPS 180-4 section 6.2.2) */
++  a = ctx->state[0];
++  b = ctx->state[1];
++  c = ctx->state[2];
++  d = ctx->state[3];
++  e = ctx->state[4];
++  f = ctx->state[5];
++  g = ctx->state[6];
++  h = ctx->state[7];
++
++  /* Compression function main loop (FIPS 180-4 section 6.2.2) */
++  for(i = 0; i < 64; i++) {
++    t1 = h + EP1(e) + CH(e, f, g) + SHA_256_K[i] + w[i];
++    t2 = EP0(a) + MAJ(a, b, c);
++    h = g;
++    g = f;
++    f = e;
++    e = d + t1;
++    d = c;
++    c = b;
++    b = a;
++    a = t1 + t2;
++  }
++
++  /* Add the compressed chunk to the current hash value */
++  ctx->state[0] += a;
++  ctx->state[1] += b;
++  ctx->state[2] += c;
++  ctx->state[3] += d;
++  ctx->state[4] += e;
++  ctx->state[5] += f;
++  ctx->state[6] += g;
++  ctx->state[7] += h;
++}
++
++/*---------------------------------------------------------------------------*/
++/* SHA-256 context functions */
++
++static void
++sha_256_init_context(sha_256_context_t *ctx)
++{
++  int i;
++
++  ctx->length = 0;
++  ctx->curlen = 0;
++
++  for(i = 0; i < 8; i++) {
++    ctx->state[i] = SHA_256_H_INIT[i];
++  }
++}
++
++static void
++sha_256_update(sha_256_context_t *ctx, const uint8_t *data, size_t len)
++{
++  size_t n;
++
++  while(len > 0) {
++    /* Copy data to the internal buffer if there's room */
++    n = (len < (64 - ctx->curlen)) ? len : (64 - ctx->curlen);
++    memcpy(&ctx->buf[ctx->curlen], data, n);
++    ctx->curlen += n;
++    data += n;
++    len -= n;
++
++    /* If the buffer is full, compress it */
++    if(ctx->curlen == 64) {
++      sha_256_compress(ctx, ctx->buf);
++      ctx->length += 512;
++      ctx->curlen = 0;
++    }
++  }
++}
++
++static void
++sha_256_finalize(sha_256_context_t *ctx, uint8_t *digest)
++{
++  uint32_t i;
++  uint64_t total_bits;
++
++  /* Pad the message */
++  i = ctx->curlen;
++
++  /* Append the bit '1' to the message */
++  ctx->buf[i++] = 0x80;
++
++  /* Fill with zeros until the length fits in the last 16 bytes */
++  if(ctx->curlen < 56) {
++    memset(&ctx->buf[i], 0, 56 - i);
++  } else {
++    memset(&ctx->buf[i], 0, 64 - i);
++    sha_256_compress(ctx, ctx->buf);
++    memset(ctx->buf, 0, 56);
++  }
++
++  /* Append the length in bits as a 64-bit big-endian number */
++  total_bits = ctx->length + (ctx->curlen << 3);
++
++  ctx->buf[56] = (uint8_t)(total_bits >> 56);
++  ctx->buf[57] = (uint8_t)(total_bits >> 48);
++  ctx->buf[58] = (uint8_t)(total_bits >> 40);
++  ctx->buf[59] = (uint8_t)(total_bits >> 32);
++  ctx->buf[60] = (uint8_t)(total_bits >> 24);
++  ctx->buf[61] = (uint8_t)(total_bits >> 16);
++  ctx->buf[62] = (uint8_t)(total_bits >> 8);
++  ctx->buf[63] = (uint8_t)total_bits;
++
++  /* Final compression produces the digest */
++  sha_256_compress(ctx, ctx->buf);
++
++  /* Output the digest in big-endian */
++  for(i = 0; i < 8; i++) {
++    digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
++    digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
++    digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
++    digest[i * 4 + 3] = (uint8_t)ctx->state[i];
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++/* Static context for the SHA_256 driver */
++
++static sha_256_context_t sha_256_ctx;
++
++/*---------------------------------------------------------------------------*/
++/* SHA_256 driver implementation */
++
++static void
++sha_256_driver_init(void)
++{
++  sha_256_init_context(&sha_256_ctx);
++}
++
++static void
++sha_256_driver_update(const uint8_t *data, size_t len)
++{
++  sha_256_update(&sha_256_ctx, data, len);
++}
++
++static void
++sha_256_driver_finalize(uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  sha_256_finalize(&sha_256_ctx, digest);
++}
++
++static void
++sha_256_driver_create_checkpoint(sha_256_checkpoint_t *cp)
++{
++  cp->length = sha_256_ctx.length;
++  memcpy(cp->state, sha_256_ctx.state, sizeof(cp->state));
++  cp->curlen = sha_256_ctx.curlen;
++  memcpy(cp->buf, sha_256_ctx.buf, sizeof(cp->buf));
++}
++
++static void
++sha_256_driver_restore_checkpoint(const sha_256_checkpoint_t *cp)
++{
++  sha_256_ctx.length = cp->length;
++  memcpy(sha_256_ctx.state, cp->state, sizeof(sha_256_ctx.state));
++  sha_256_ctx.curlen = cp->curlen;
++  memcpy(sha_256_ctx.buf, cp->buf, sizeof(sha_256_ctx.buf));
++}
++
++static void
++sha_256_driver_hash(const uint8_t *data, size_t len,
++                    uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  sha_256_init_context(&sha_256_ctx);
++  sha_256_update(&sha_256_ctx, data, len);
++  sha_256_finalize(&sha_256_ctx, digest);
++}
++
++const struct sha_256_driver SHA_256 = {
++  sha_256_driver_init,
++  sha_256_driver_update,
++  sha_256_driver_finalize,
++  sha_256_driver_create_checkpoint,
++  sha_256_driver_restore_checkpoint,
++  sha_256_driver_hash
++};
++
++/*---------------------------------------------------------------------------*/
++/* One-shot hash function */
++
++void
++sha_256_hash(const uint8_t *data, size_t len,
++             uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  SHA_256.hash(data, len, digest);
++}
++
++/*---------------------------------------------------------------------------*/
++/* HMAC-SHA-256 (RFC 2104) */
++
++void
++sha_256_hmac(const uint8_t *key, size_t key_len,
++             const uint8_t *data, size_t data_len,
++             uint8_t hmac[static SHA_256_DIGEST_LENGTH])
++{
++  uint8_t k_ipad[64];
++  uint8_t k_opad[64];
++  uint8_t tk[32];
++  size_t i;
++
++  /* If key is longer than block size, hash it first to get L-byte key */
++  if(key_len > SHA_256_BLOCK_SIZE) {
++    sha_256_hash(key, key_len, tk);
++    key = tk;
++    key_len = SHA_256_DIGEST_LENGTH;
++  }
++
++  /* Prepare the inner and outer padding:
++   * First, fill with key bytes (padded with zeros if needed), then XOR with pad values */
++  memset(k_ipad, 0, 64);
++  memset(k_opad, 0, 64);
++  memcpy(k_ipad, key, key_len);
++  memcpy(k_opad, key, key_len);
++
++  for(i = 0; i < 64; i++) {
++    k_ipad[i] ^= 0x36;
++    k_opad[i] ^= 0x5c;
++  }
++
++  /* Inner hash: H(K xor ipad, data) */
++  SHA_256.init();
++  SHA_256.update(k_ipad, 64);
++  SHA_256.update(data, data_len);
++  SHA_256.finalize(hmac);
++
++  /* Outer hash: H(K xor opad, inner hash) */
++  SHA_256.init();
++  SHA_256.update(k_opad, 64);
++  SHA_256.update(hmac, SHA_256_DIGEST_LENGTH);
++  SHA_256.finalize(hmac);
++}
++
++/*---------------------------------------------------------------------------*/
++/* HKDF Extract (RFC 5869) */
++
++void
++sha_256_hkdf_extract(const uint8_t *salt, size_t salt_len,
++                     const uint8_t *ikm, size_t ikm_len,
++                     uint8_t prk[static SHA_256_DIGEST_LENGTH])
++{
++  /* If salt is not provided, use a string of zeros */
++  if(salt == NULL || salt_len == 0) {
++    uint8_t zeros[SHA_256_DIGEST_LENGTH] = { 0 };
++    sha_256_hmac(zeros, SHA_256_DIGEST_LENGTH, ikm, ikm_len, prk);
++  } else {
++    sha_256_hmac(salt, salt_len, ikm, ikm_len, prk);
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++/* HKDF Expand (RFC 5869) */
++
++void
++sha_256_hkdf_expand(const uint8_t *prk, size_t prk_len,
++                    const uint8_t *info, size_t info_len,
++                    uint8_t *okm, uint_fast16_t okm_len)
++{
++  uint8_t t[32];
++  uint8_t counter;
++  size_t offset;
++  uint_fast16_t n;
++
++  /* PRK must be at least HashLen (32) bytes */
++  if(prk_len < SHA_256_DIGEST_LENGTH) {
++    /* RFC 5869 specifies that inputs shorter than hash length are invalid */
++    return;
++  }
++
++  n = 0;
++  offset = 0;
++  counter = 0;
++
++  while(okm_len > 0) {
++    counter++;
++    /* T(0) = empty string */
++    /* T(1) = HMAC-Hash(PRK, T(0) | info | 0x01) */
++    SHA_256.init();
++    if(n > 0) {
++      SHA_256.update(t, SHA_256_DIGEST_LENGTH);
++    }
++    if(info_len > 0) {
++      SHA_256.update(info, info_len);
++    }
++    SHA_256.update(&counter, 1);
++    SHA_256.finalize(t);
++
++    n += SHA_256_DIGEST_LENGTH;
++
++    /* Copy bytes from T to OKM */
++    if(offset < n) {
++      size_t to_copy = (okm_len < (n - offset)) ? okm_len : (n - offset);
++      memcpy(okm, &t[offset - (n - SHA_256_DIGEST_LENGTH)], to_copy);
++      okm += to_copy;
++      okm_len -= to_copy;
++      offset = n;
++    }
++  }
++}
+diff --git a/os/lib/sha-256.h b/os/lib/sha-256.h
+new file mode 100644
+index 0000000..c7a615c
+--- /dev/null
++++ b/os/lib/sha-256.h
+@@ -0,0 +1,169 @@
++/*
++ * Copyright (c) 2023, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/**
++ * \file
++ *         SHA-256 hash algorithm.
++ * \author
++ *         David H. Smith <david.h.smith@contiki-ng.org>
++ */
++
++#ifndef SHA_256_H_
++#define SHA_256_H_
++
++#include "contiki.h"
++
++#include <stdint.h>
++#include <stddef.h>
++
++/**
++ * \brief Length of SHA-256 digests in bytes
++ */
++#define SHA_256_DIGEST_LENGTH 32
++
++/**
++ * \brief Block size of SHA-256 in bytes
++ */
++#define SHA_256_BLOCK_SIZE 64
++
++/**
++ * \brief SHA-256 checkpoint structure
++ *
++ * This structure is used to save and restore the state of an in-progress
++ * hash operation, enabling the hash to be paused and resumed, such as
++ * across a protothread yield.
++ */
++typedef struct {
++  uint64_t length;
++  uint32_t state[8];
++  uint32_t curlen;
++  uint8_t buf[64];
++} sha_256_checkpoint_t;
++
++/**
++ * \brief SHA-256 driver structure
++ *
++ * This structure defines the interface for SHA-256 hash operations.
++ * The driver provides both incremental hash operations (init, update,
++ * finalize) and a one-shot hash function.
++ */
++struct sha_256_driver {
++
++  /**
++   * \brief Initialize the hash state
++   */
++  void (*init)(void);
++
++  /**
++   * \brief Process data through the hash
++   * \param data Pointer to the data to hash
++   * \param len Length of the data to hash in bytes
++   */
++  void (*update)(const uint8_t *data, size_t len);
++
++  /**
++   * \brief Finalize the hash and produce the digest
++   * \param digest Destination for the hash digest (32 bytes)
++   */
++  void (*finalize)(uint8_t digest[static SHA_256_DIGEST_LENGTH]);
++
++  /**
++   * \brief Create a checkpoint of the current hash state
++   * \param cp Pointer to the checkpoint to save to
++   */
++  void (*create_checkpoint)(sha_256_checkpoint_t *cp);
++
++  /**
++   * \brief Restore a checkpoint of the hash state
++   * \param cp Pointer to the checkpoint to restore from
++   */
++  void (*restore_checkpoint)(const sha_256_checkpoint_t *cp);
++
++  /**
++   * \brief Compute SHA-256 hash in one shot
++   * \param data Pointer to the data to hash
++   * \param len Length of the data to hash in bytes
++   * \param digest Destination for the hash digest (32 bytes)
++   */
++  void (*hash)(const uint8_t *data, size_t len,
++               uint8_t digest[static SHA_256_DIGEST_LENGTH]);
++};
++
++/**
++ * \brief The SHA-256 driver instance
++ */
++extern const struct sha_256_driver SHA_256;
++
++/**
++ * \brief Compute SHA-256 hash (one-shot)
++ * \param data Pointer to the data to hash
++ * \param len Length of the data to hash in bytes
++ * \param digest Destination for the hash digest (32 bytes)
++ */
++void sha_256_hash(const uint8_t *data, size_t len,
++                  uint8_t digest[static SHA_256_DIGEST_LENGTH]);
++
++/**
++ * \brief Compute HMAC-SHA-256 (RFC 2104)
++ * \param key Pointer to the key
++ * \param key_len Length of the key in bytes
++ * \param data Pointer to the data to authenticate
++ * \param data_len Length of the data in bytes
++ * \param hmac Destination for the HMAC (32 bytes)
++ */
++void sha_256_hmac(const uint8_t *key, size_t key_len,
++                  const uint8_t *data, size_t data_len,
++                  uint8_t hmac[static SHA_256_DIGEST_LENGTH]);
++
++/**
++ * \brief HKDF Extract (RFC 5869)
++ * \param salt Pointer to the salt
++ * \param salt_len Length of the salt in bytes
++ * \param ikm Pointer to the input key material
++ * \param ikm_len Length of the input key material in bytes
++ * \param prk Destination for the pseudo-random key (32 bytes)
++ */
++void sha_256_hkdf_extract(const uint8_t *salt, size_t salt_len,
++                          const uint8_t *ikm, size_t ikm_len,
++                          uint8_t prk[static SHA_256_DIGEST_LENGTH]);
++
++/**
++ * \brief HKDF Expand (RFC 5869)
++ * \param prk Pointer to the pseudo-random key
++ * \param prk_len Length of the pseudo-random key in bytes
++ * \param info Pointer to the application-specific info
++ * \param info_len Length of the info in bytes
++ * \param okm Destination for the output key material
++ * \param okm_len Desired length of the output key material in bytes
++ */
++void sha_256_hkdf_expand(const uint8_t *prk, size_t prk_len,
++                          const uint8_t *info, size_t info_len,
++                          uint8_t *okm, uint_fast16_t okm_len);
++
++#endif /* SHA_256_H_ */
+diff --git a/test_hmac b/test_hmac
+new file mode 100755
+index 0000000000000000000000000000000000000000..c76d45883bfd52e41767dca0da9fed9d6aacc7f3
+GIT binary patch
+literal 16608
+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
+O{tE(LrkM;(Ec<WO@K4PE
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_hmac.c b/test_hmac.c
+new file mode 100644
+index 0000000..8d6c6da
+--- /dev/null
++++ b/test_hmac.c
+@@ -0,0 +1,190 @@
++#include <stdio.h>
++#include <stdint.h>
++#include <string.h>
++
++#define SHA_256_DIGEST_LENGTH 32
++#define SHA_256_BLOCK_SIZE 64
++
++/* SHA-256 initial hash values */
++static const uint32_t SHA_256_H_INIT[8] = {
++  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
++};
++
++/* SHA-256 round constants */
++static const uint32_t SHA_256_K[64] = {
++  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
++};
++
++typedef struct {
++  uint64_t length;
++  uint32_t state[8];
++  uint32_t curlen;
++  uint8_t buf[64];
++} sha_256_context_t;
++
++#define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
++#define SHR(x, n) ((x) >> (n))
++#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
++#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++#define EP0(x) (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
++#define EP1(x) (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
++#define SIG0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ SHR(x, 3))
++#define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ SHR(x, 10))
++
++static void sha_256_compress(sha_256_context_t *ctx, const uint8_t *block) {
++  uint32_t w[64];
++  uint32_t a, b, c, d, e, f, g, h, t1, t2;
++  int i;
++  for(i = 0; i < 16; i++) {
++    w[i] = ((uint32_t)block[i * 4] << 24) | ((uint32_t)block[i * 4 + 1] << 16) |
++           ((uint32_t)block[i * 4 + 2] << 8) | ((uint32_t)block[i * 4 + 3]);
++  }
++  for(i = 16; i < 64; i++) {
++    w[i] = SIG1(w[i - 2]) + w[i - 7] + SIG0(w[i - 15]) + w[i - 16];
++  }
++  a = ctx->state[0]; b = ctx->state[1]; c = ctx->state[2]; d = ctx->state[3];
++  e = ctx->state[4]; f = ctx->state[5]; g = ctx->state[6]; h = ctx->state[7];
++  for(i = 0; i < 64; i++) {
++    t1 = h + EP1(e) + CH(e, f, g) + SHA_256_K[i] + w[i];
++    t2 = EP0(a) + MAJ(a, b, c);
++    h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
++  }
++  ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
++  ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
++}
++
++static void sha_256_init(sha_256_context_t *ctx) {
++  int i;
++  ctx->length = 0; ctx->curlen = 0;
++  for(i = 0; i < 8; i++) ctx->state[i] = SHA_256_H_INIT[i];
++}
++
++static void sha_256_update(sha_256_context_t *ctx, const uint8_t *data, size_t len) {
++  size_t n;
++  while(len > 0) {
++    n = (len < (64 - ctx->curlen)) ? len : (64 - ctx->curlen);
++    memcpy(&ctx->buf[ctx->curlen], data, n);
++    ctx->curlen += n; data += n; len -= n;
++    if(ctx->curlen == 64) {
++      sha_256_compress(ctx, ctx->buf);
++      ctx->length += 512; ctx->curlen = 0;
++    }
++  }
++}
++
++static void sha_256_final(sha_256_context_t *ctx, uint8_t *digest) {
++  uint32_t i; uint64_t total_bits;
++  i = ctx->curlen;
++  ctx->buf[i++] = 0x80;
++  if(ctx->curlen < 56) {
++    memset(&ctx->buf[i], 0, 56 - i);
++  } else {
++    memset(&ctx->buf[i], 0, 64 - i);
++    sha_256_compress(ctx, ctx->buf);
++    memset(ctx->buf, 0, 56);
++  }
++  total_bits = ctx->length + (ctx->curlen << 3);
++  ctx->buf[56] = (uint8_t)(total_bits >> 56);
++  ctx->buf[57] = (uint8_t)(total_bits >> 48);
++  ctx->buf[58] = (uint8_t)(total_bits >> 40);
++  ctx->buf[59] = (uint8_t)(total_bits >> 32);
++  ctx->buf[60] = (uint8_t)(total_bits >> 24);
++  ctx->buf[61] = (uint8_t)(total_bits >> 16);
++  ctx->buf[62] = (uint8_t)(total_bits >> 8);
++  ctx->buf[63] = (uint8_t)total_bits;
++  sha_256_compress(ctx, ctx->buf);
++  for(i = 0; i < 8; i++) {
++    digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
++    digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
++    digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
++    digest[i * 4 + 3] = (uint8_t)ctx->state[i];
++  }
++}
++
++void sha_256_hash(const uint8_t *data, size_t len, uint8_t *digest) {
++  sha_256_context_t ctx;
++  sha_256_init(&ctx);
++  sha_256_update(&ctx, data, len);
++  sha_256_final(&ctx, digest);
++}
++
++/* HMAC test vector from RFC 2104: key="Jefe", data="what do ya want for nothing?" */
++static const uint8_t test_hmac_key[] = "Jefe";
++static const uint8_t test_hmac_data[] = "what do ya want for nothing?";
++static const uint8_t test_hmac_expected[32] = {
++  0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e,
++  0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
++  0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83,
++  0x9d, 0xec, 0x58, 0xb9, 0x21, 0xb7, 0x2c, 0x2f
++};
++
++void sha_256_hmac(const uint8_t *key, size_t key_len,
++                  const uint8_t *data, size_t data_len,
++                  uint8_t *hmac) {
++  uint8_t k_ipad[64];
++  uint8_t k_opad[64];
++  uint8_t tk[32];
++  size_t i;
++  sha_256_context_t ctx;
++
++  if(key_len > SHA_256_BLOCK_SIZE) {
++    sha_256_hash(key, key_len, tk);
++    key = tk;
++    key_len = SHA_256_DIGEST_LENGTH;
++  }
++
++  memset(k_ipad, 0x36, 64);
++  memset(k_opad, 0x5c, 64);
++
++  for(i = 0; i < key_len; i++) {
++    k_ipad[i] ^= key[i];
++    k_opad[i] ^= key[i];
++  }
++
++  /* Inner hash: H(K xor ipad, data) */
++  sha_256_init(&ctx);
++  sha_256_update(&ctx, k_ipad, 64);
++  sha_256_update(&ctx, data, data_len);
++  sha_256_final(&ctx, hmac);
++
++  /* Outer hash: H(K xor opad, inner hash) */
++  sha_256_init(&ctx);
++  sha_256_update(&ctx, k_opad, 64);
++  sha_256_update(&ctx, hmac, SHA_256_DIGEST_LENGTH);
++  sha_256_final(&ctx, hmac);
++}
++
++int main() {
++  uint8_t hmac[32];
++  int i;
++
++  sha_256_hmac(test_hmac_key, strlen((const char *)test_hmac_key),
++               test_hmac_data, strlen((const char *)test_hmac_data),
++               hmac);
++
++  printf("Got:      ");
++  for(i = 0; i < 32; i++) printf("%02x", hmac[i]);
++  printf("\n");
++  printf("Expected: ");
++  for(i = 0; i < 32; i++) printf("%02x", test_hmac_expected[i]);
++  printf("\n");
++  printf("Match: %s\n", memcmp(hmac, test_hmac_expected, 32) == 0 ? "YES" : "NO");
++
++  return 0;
++}
+diff --git a/test_hmac2 b/test_hmac2
+new file mode 100755
+index 0000000000000000000000000000000000000000..fc418cc172826cb6d2860ddebaf95db3cafad896
+GIT binary patch
+literal 16128
+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
+H_*C^z=s|3-
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_hmac2.c b/test_hmac2.c
+new file mode 100644
+index 0000000..a129694
+--- /dev/null
++++ b/test_hmac2.c
+@@ -0,0 +1,23 @@
++#include <stdio.h>
++#include <stdint.h>
++#include <string.h>
++
++/* Test vector from http://www.di-mgt.com.au/hmac.html */
++static const uint8_t test_hmac_key[] = "Jefe";
++static const uint8_t test_hmac_data[] = "what do ya want for nothing?";
++static const uint8_t test_hmac_expected[32] = {
++  0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e,
++  0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
++  0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83,
++  0x9d, 0xec, 0x58, 0xb9, 0x21, 0xb7, 0x2c, 0x2f
++};
++
++int main() {
++  int i;
++  printf("Key: '%s' (len=%zu)\n", test_hmac_key, strlen((const char *)test_hmac_key));
++  printf("Data: '%s' (len=%zu)\n", test_hmac_data, strlen((const char *)test_hmac_data));
++  printf("Expected: ");
++  for(i = 0; i < 32; i++) printf("%02x", test_hmac_expected[i]);
++  printf("\n");
++  return 0;
++}
+diff --git a/test_hmac_correct b/test_hmac_correct
+new file mode 100755
+index 0000000000000000000000000000000000000000..d170ce4e8a16717c093c7174107831a637a150c5
+GIT binary patch
+literal 16616
+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
+Oyje<Pl*7QmivI!gBCQet
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_hmac_correct.c b/test_hmac_correct.c
+new file mode 100644
+index 0000000..3dcdeda
+--- /dev/null
++++ b/test_hmac_correct.c
+@@ -0,0 +1,196 @@
++#include <stdio.h>
++#include <stdint.h>
++#include <string.h>
++
++/* HMAC test vector from RFC 2104 */
++static const uint8_t test_hmac_key[] = "Jefe";
++static const uint8_t test_hmac_data[] = "what do ya want for nothing?";
++static const uint8_t test_hmac_expected[32] = {
++  0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e,
++  0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
++  0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83,
++  0x9d, 0xec, 0x58, 0xb9, 0x21, 0xb7, 0x2c, 0x2f
++};
++
++#define SHA_256_DIGEST_LENGTH 32
++#define SHA_256_BLOCK_SIZE 64
++
++/* SHA-256 initial hash values */
++static const uint32_t SHA_256_H_INIT[8] = {
++  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
++};
++
++/* SHA-256 round constants */
++static const uint32_t SHA_256_K[64] = {
++  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
++};
++
++typedef struct {
++  uint64_t length;
++  uint32_t state[8];
++  uint32_t curlen;
++  uint8_t buf[64];
++} sha_256_context_t;
++
++#define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
++#define SHR(x, n) ((x) >> (n))
++#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
++#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++#define EP0(x) (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
++#define EP1(x) (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
++#define SIG0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ SHR(x, 3))
++#define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ SHR(x, 10))
++
++static void sha_256_compress(sha_256_context_t *ctx, const uint8_t *block) {
++  uint32_t w[64];
++  uint32_t a, b, c, d, e, f, g, h, t1, t2;
++  int i;
++  for(i = 0; i < 16; i++) {
++    w[i] = ((uint32_t)block[i * 4] << 24) | ((uint32_t)block[i * 4 + 1] << 16) |
++           ((uint32_t)block[i * 4 + 2] << 8) | ((uint32_t)block[i * 4 + 3]);
++  }
++  for(i = 16; i < 64; i++) {
++    w[i] = SIG1(w[i - 2]) + w[i - 7] + SIG0(w[i - 15]) + w[i - 16];
++  }
++  a = ctx->state[0]; b = ctx->state[1]; c = ctx->state[2]; d = ctx->state[3];
++  e = ctx->state[4]; f = ctx->state[5]; g = ctx->state[6]; h = ctx->state[7];
++  for(i = 0; i < 64; i++) {
++    t1 = h + EP1(e) + CH(e, f, g) + SHA_256_K[i] + w[i];
++    t2 = EP0(a) + MAJ(a, b, c);
++    h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
++  }
++  ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
++  ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
++}
++
++static void sha_256_init(sha_256_context_t *ctx) {
++  int i;
++  ctx->length = 0; ctx->curlen = 0;
++  for(i = 0; i < 8; i++) ctx->state[i] = SHA_256_H_INIT[i];
++}
++
++static void sha_256_update(sha_256_context_t *ctx, const uint8_t *data, size_t len) {
++  size_t n;
++  while(len > 0) {
++    n = (len < (64 - ctx->curlen)) ? len : (64 - ctx->curlen);
++    memcpy(&ctx->buf[ctx->curlen], data, n);
++    ctx->curlen += n; data += n; len -= n;
++    if(ctx->curlen == 64) {
++      sha_256_compress(ctx, ctx->buf);
++      ctx->length += 512; ctx->curlen = 0;
++    }
++  }
++}
++
++static void sha_256_final(sha_256_context_t *ctx, uint8_t *digest) {
++  uint32_t i; uint64_t total_bits;
++  i = ctx->curlen;
++  ctx->buf[i++] = 0x80;
++  if(ctx->curlen < 56) {
++    memset(&ctx->buf[i], 0, 56 - i);
++  } else {
++    memset(&ctx->buf[i], 0, 64 - i);
++    sha_256_compress(ctx, ctx->buf);
++    memset(ctx->buf, 0, 56);
++  }
++  total_bits = ctx->length + (ctx->curlen << 3);
++  ctx->buf[56] = (uint8_t)(total_bits >> 56);
++  ctx->buf[57] = (uint8_t)(total_bits >> 48);
++  ctx->buf[58] = (uint8_t)(total_bits >> 40);
++  ctx->buf[59] = (uint8_t)(total_bits >> 32);
++  ctx->buf[60] = (uint8_t)(total_bits >> 24);
++  ctx->buf[61] = (uint8_t)(total_bits >> 16);
++  ctx->buf[62] = (uint8_t)(total_bits >> 8);
++  ctx->buf[63] = (uint8_t)total_bits;
++  sha_256_compress(ctx, ctx->buf);
++  for(i = 0; i < 8; i++) {
++    digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
++    digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
++    digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
++    digest[i * 4 + 3] = (uint8_t)ctx->state[i];
++  }
++}
++
++void sha_256_hash(const uint8_t *data, size_t len, uint8_t *digest) {
++  sha_256_context_t ctx;
++  sha_256_init(&ctx);
++  sha_256_update(&ctx, data, len);
++  sha_256_final(&ctx, digest);
++}
++
++void sha_256_hmac(const uint8_t *key, size_t key_len,
++                  const uint8_t *data, size_t data_len,
++                  uint8_t *hmac) {
++  uint8_t k_ipad[64];
++  uint8_t k_opad[64];
++  uint8_t tk[32];
++  size_t i;
++  sha_256_context_t ctx;
++
++  printf("HMAC: key_len=%zu, data_len=%zu\n", key_len, data_len);
++
++  if(key_len > SHA_256_BLOCK_SIZE) {
++    sha_256_hash(key, key_len, tk);
++    key = tk;
++    key_len = SHA_256_DIGEST_LENGTH;
++  }
++
++  memset(k_ipad, 0x36, 64);
++  memset(k_opad, 0x5c, 64);
++
++  for(i = 0; i < key_len; i++) {
++    k_ipad[i] ^= key[i];
++    k_opad[i] ^= key[i];
++  }
++
++  /* Inner hash: H(K xor ipad, data) */
++  sha_256_init(&ctx);
++  sha_256_update(&ctx, k_ipad, 64);
++  sha_256_update(&ctx, data, data_len);
++  sha_256_final(&ctx, hmac);
++
++  printf("Inner hash: ");
++  for(i = 0; i < 32; i++) printf("%02x", hmac[i]);
++  printf("\n");
++
++  /* Outer hash: H(K xor opad, inner hash) */
++  sha_256_init(&ctx);
++  sha_256_update(&ctx, k_opad, 64);
++  sha_256_update(&ctx, hmac, SHA_256_DIGEST_LENGTH);
++  sha_256_final(&ctx, hmac);
++}
++
++int main() {
++  uint8_t hmac[32];
++  int i;
++
++  sha_256_hmac(test_hmac_key, strlen((const char *)test_hmac_key),
++               test_hmac_data, strlen((const char *)test_hmac_data),
++               hmac);
++
++  printf("Got:      ");
++  for(i = 0; i < 32; i++) printf("%02x", hmac[i]);
++  printf("\n");
++  printf("Expected: ");
++  for(i = 0; i < 32; i++) printf("%02x", test_hmac_expected[i]);
++  printf("\n");
++  printf("Match: %s\n", memcmp(hmac, test_hmac_expected, 32) == 0 ? "YES" : "NO");
++
++  return 0;
++}
+diff --git a/test_sha256_debug b/test_sha256_debug
+new file mode 100755
+index 0000000000000000000000000000000000000000..a3c3cc6da016367ff9dac4791352ea844d158b16
+GIT binary patch
+literal 16472
+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
+Q{p0h620kyEi-l$X1tnC}>;M1&
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_sha256_debug.c b/test_sha256_debug.c
+new file mode 100644
+index 0000000..5e5f808
+--- /dev/null
++++ b/test_sha256_debug.c
+@@ -0,0 +1,198 @@
++#include <stdio.h>
++#include <stdint.h>
++#include <string.h>
++
++/* Test and debug the SHA-256 implementation */
++
++#define SHA_256_DIGEST_LENGTH 32
++#define SHA_256_BLOCK_SIZE 64
++
++/* SHA-256 initial hash values (FIPS 180-4 section 5.3.4) */
++static const uint32_t SHA_256_H_INIT[8] = {
++  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
++};
++
++/* SHA-256 round constants (FIPS 180-4 section 4.2.2) */
++static const uint32_t SHA_256_K[64] = {
++  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
++};
++
++typedef struct {
++  uint64_t length;
++  uint32_t state[8];
++  uint32_t curlen;
++  uint8_t buf[64];
++} sha_256_context_t;
++
++#define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
++#define SHR(x, n) ((x) >> (n))
++
++#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
++#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++
++#define EP0(x) (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
++#define EP1(x) (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
++#define SIG0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ SHR(x, 3))
++#define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ SHR(x, 10))
++
++static void
++sha_256_compress(sha_256_context_t *ctx, const uint8_t *block)
++{
++  uint32_t w[64];
++  uint32_t a, b, c, d, e, f, g, h;
++  uint32_t t1, t2;
++  int i;
++
++  for(i = 0; i < 16; i++) {
++    w[i] = ((uint32_t)block[i * 4] << 24) |
++           ((uint32_t)block[i * 4 + 1] << 16) |
++           ((uint32_t)block[i * 4 + 2] << 8) |
++           ((uint32_t)block[i * 4 + 3]);
++  }
++  for(i = 16; i < 64; i++) {
++    w[i] = SIG1(w[i - 2]) + w[i - 7] + SIG0(w[i - 15]) + w[i - 16];
++  }
++
++  a = ctx->state[0];
++  b = ctx->state[1];
++  c = ctx->state[2];
++  d = ctx->state[3];
++  e = ctx->state[4];
++  f = ctx->state[5];
++  g = ctx->state[6];
++  h = ctx->state[7];
++
++  for(i = 0; i < 64; i++) {
++    t1 = h + EP1(e) + CH(e, f, g) + SHA_256_K[i] + w[i];
++    t2 = EP0(a) + MAJ(a, b, c);
++    h = g;
++    g = f;
++    f = e;
++    e = d + t1;
++    d = c;
++    c = b;
++    b = a;
++    a = t1 + t2;
++  }
++
++  ctx->state[0] += a;
++  ctx->state[1] += b;
++  ctx->state[2] += c;
++  ctx->state[3] += d;
++  ctx->state[4] += e;
++  ctx->state[5] += f;
++  ctx->state[6] += g;
++  ctx->state[7] += h;
++}
++
++static void
++sha_256_init_context(sha_256_context_t *ctx)
++{
++  int i;
++  ctx->length = 0;
++  ctx->curlen = 0;
++  for(i = 0; i < 8; i++) {
++    ctx->state[i] = SHA_256_H_INIT[i];
++  }
++}
++
++static void
++sha_256_update(sha_256_context_t *ctx, const uint8_t *data, size_t len)
++{
++  size_t n;
++  while(len > 0) {
++    n = (len < (64 - ctx->curlen)) ? len : (64 - ctx->curlen);
++    memcpy(&ctx->buf[ctx->curlen], data, n);
++    ctx->curlen += n;
++    data += n;
++    len -= n;
++    if(ctx->curlen == 64) {
++      sha_256_compress(ctx, ctx->buf);
++      ctx->length += 512;
++      ctx->curlen = 0;
++    }
++  }
++}
++
++static void
++sha_256_finalize(sha_256_context_t *ctx, uint8_t *digest)
++{
++  uint32_t i;
++  uint64_t total_bits;
++
++  i = ctx->curlen;
++  ctx->buf[i++] = 0x80;
++
++  if(ctx->curlen < 56) {
++    memset(&ctx->buf[i], 0, 56 - i);
++  } else {
++    memset(&ctx->buf[i], 0, 64 - i);
++    sha_256_compress(ctx, ctx->buf);
++    memset(ctx->buf, 0, 56);
++  }
++
++  total_bits = ctx->length + (ctx->curlen << 3);
++
++  ctx->buf[56] = (uint8_t)(total_bits >> 56);
++  ctx->buf[57] = (uint8_t)(total_bits >> 48);
++  ctx->buf[58] = (uint8_t)(total_bits >> 40);
++  ctx->buf[59] = (uint8_t)(total_bits >> 32);
++  ctx->buf[60] = (uint8_t)(total_bits >> 24);
++  ctx->buf[61] = (uint8_t)(total_bits >> 16);
++  ctx->buf[62] = (uint8_t)(total_bits >> 8);
++  ctx->buf[63] = (uint8_t)total_bits;
++
++  sha_256_compress(ctx, ctx->buf);
++
++  for(i = 0; i < 8; i++) {
++    digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
++    digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
++    digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
++    digest[i * 4 + 3] = (uint8_t)ctx->state[i];
++  }
++}
++
++void sha_256_hash(const uint8_t *data, size_t len, uint8_t *digest) {
++  sha_256_context_t ctx;
++  sha_256_init_context(&ctx);
++  sha_256_update(&ctx, data, len);
++  sha_256_finalize(&ctx, digest);
++}
++
++int main() {
++  uint8_t digest[32];
++  uint8_t expected[32] = {
++    0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
++    0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
++    0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
++    0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad
++  };
++
++  sha_256_hash((const uint8_t *)"abc", 3, digest);
++
++  printf("Result:   ");
++  for(int i = 0; i < 32; i++) printf("%02x", digest[i]);
++  printf("\n");
++  printf("Expected: ");
++  for(int i = 0; i < 32; i++) printf("%02x", expected[i]);
++  printf("\n");
++  printf("Match: %s\n", memcmp(digest, expected, 32) == 0 ? "YES" : "NO");
++
++  return 0;
++}
+diff --git a/test_sha256_long b/test_sha256_long
+new file mode 100755
+index 0000000000000000000000000000000000000000..25998fd5826419551178acc9bd737883e9ed3910
+GIT binary patch
+literal 16496
+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
+NWkO@B$-u<2{{aTs3T*%Y
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_sha256_long.c b/test_sha256_long.c
+new file mode 100644
+index 0000000..a9affdb
+--- /dev/null
++++ b/test_sha256_long.c
+@@ -0,0 +1,147 @@
++#include <stdio.h>
++#include <stdint.h>
++#include <string.h>
++
++#define SHA_256_DIGEST_LENGTH 32
++#define SHA_256_BLOCK_SIZE 64
++
++static const uint32_t SHA_256_H_INIT[8] = {
++  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
++};
++
++static const uint32_t SHA_256_K[64] = {
++  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
++};
++
++typedef struct {
++  uint64_t length;
++  uint32_t state[8];
++  uint32_t curlen;
++  uint8_t buf[64];
++} sha_256_context_t;
++
++#define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
++#define SHR(x, n) ((x) >> (n))
++#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
++#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++#define EP0(x) (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
++#define EP1(x) (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
++#define SIG0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ SHR(x, 3))
++#define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ SHR(x, 10))
++
++static void sha_256_compress(sha_256_context_t *ctx, const uint8_t *block) {
++  uint32_t w[64];
++  uint32_t a, b, c, d, e, f, g, h, t1, t2;
++  int i;
++  for(i = 0; i < 16; i++) {
++    w[i] = ((uint32_t)block[i * 4] << 24) | ((uint32_t)block[i * 4 + 1] << 16) |
++           ((uint32_t)block[i * 4 + 2] << 8) | ((uint32_t)block[i * 4 + 3]);
++  }
++  for(i = 16; i < 64; i++) {
++    w[i] = SIG1(w[i - 2]) + w[i - 7] + SIG0(w[i - 15]) + w[i - 16];
++  }
++  a = ctx->state[0]; b = ctx->state[1]; c = ctx->state[2]; d = ctx->state[3];
++  e = ctx->state[4]; f = ctx->state[5]; g = ctx->state[6]; h = ctx->state[7];
++  for(i = 0; i < 64; i++) {
++    t1 = h + EP1(e) + CH(e, f, g) + SHA_256_K[i] + w[i];
++    t2 = EP0(a) + MAJ(a, b, c);
++    h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
++  }
++  ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
++  ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
++}
++
++static void sha_256_init(sha_256_context_t *ctx) {
++  int i;
++  ctx->length = 0; ctx->curlen = 0;
++  for(i = 0; i < 8; i++) ctx->state[i] = SHA_256_H_INIT[i];
++}
++
++static void sha_256_update(sha_256_context_t *ctx, const uint8_t *data, size_t len) {
++  size_t n;
++  while(len > 0) {
++    n = (len < (64 - ctx->curlen)) ? len : (64 - ctx->curlen);
++    memcpy(&ctx->buf[ctx->curlen], data, n);
++    ctx->curlen += n; data += n; len -= n;
++    if(ctx->curlen == 64) {
++      sha_256_compress(ctx, ctx->buf);
++      ctx->length += 512; ctx->curlen = 0;
++    }
++  }
++}
++
++static void sha_256_final(sha_256_context_t *ctx, uint8_t *digest) {
++  uint32_t i; uint64_t total_bits;
++  i = ctx->curlen;
++  ctx->buf[i++] = 0x80;
++  if(ctx->curlen < 56) {
++    memset(&ctx->buf[i], 0, 56 - i);
++  } else {
++    memset(&ctx->buf[i], 0, 64 - i);
++    sha_256_compress(ctx, ctx->buf);
++    memset(ctx->buf, 0, 56);
++  }
++  total_bits = ctx->length + (ctx->curlen << 3);
++  ctx->buf[56] = (uint8_t)(total_bits >> 56);
++  ctx->buf[57] = (uint8_t)(total_bits >> 48);
++  ctx->buf[58] = (uint8_t)(total_bits >> 40);
++  ctx->buf[59] = (uint8_t)(total_bits >> 32);
++  ctx->buf[60] = (uint8_t)(total_bits >> 24);
++  ctx->buf[61] = (uint8_t)(total_bits >> 16);
++  ctx->buf[62] = (uint8_t)(total_bits >> 8);
++  ctx->buf[63] = (uint8_t)total_bits;
++  sha_256_compress(ctx, ctx->buf);
++  for(i = 0; i < 8; i++) {
++    digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
++    digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
++    digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
++    digest[i * 4 + 3] = (uint8_t)ctx->state[i];
++  }
++}
++
++void sha_256_hash(const uint8_t *data, size_t len, uint8_t *digest) {
++  sha_256_context_t ctx;
++  sha_256_init(&ctx);
++  sha_256_update(&ctx, data, len);
++  sha_256_final(&ctx, digest);
++}
++
++int main() {
++  uint8_t digest[32];
++  const char *msg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
++  uint8_t expected[32] = {
++    0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8,
++    0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e, 0x60, 0x39,
++    0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67,
++    0xf6, 0xec, 0xed, 0xd4, 0x19, 0xdb, 0x06, 0xc1
++  };
++
++  sha_256_hash((const uint8_t *)msg, 64, digest);
++
++  printf("Message length: %zu\n", strlen(msg));
++  printf("Result:   ");
++  for(int i = 0; i < 32; i++) printf("%02x", digest[i]);
++  printf("\n");
++  printf("Expected: ");
++  for(int i = 0; i < 32; i++) printf("%02x", expected[i]);
++  printf("\n");
++  printf("Match: %s\n", memcmp(digest, expected, 32) == 0 ? "YES" : "NO");
++
++  return 0;
++}

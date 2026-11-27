@@ -1,0 +1,329 @@
+diff --git a/os/services/ip64/ip64-dns64.c b/os/services/ip64/ip64-dns64.c
+index 586f85e..e7e22f9 100644
+--- a/os/services/ip64/ip64-dns64.c
++++ b/os/services/ip64/ip64-dns64.c
+@@ -86,6 +86,23 @@ struct dns_answer {
+ #define DNS_CLASS_IN    1
+ #define DNS_CLASS_ANY 255
+ 
++/*---------------------------------------------------------------------------*/
++/* Check if there are at least 'len' bytes remaining in the input packet
++   starting at 'ptr'. Returns 1 if there are, 0 otherwise. */
++static int
++dns64_has_input_bytes(const uint8_t *ptr, const uint8_t *input_end, int len)
++{
++  return ptr + len <= input_end;
++}
++
++/* Check if there are at least 'len' bytes remaining in the output buffer
++   starting at 'ptr'. Returns 1 if there are, 0 otherwise. */
++static int
++dns64_has_output_bytes(const uint8_t *ptr, const uint8_t *output_end, int len)
++{
++  return ptr + len <= output_end;
++}
++
+ /*---------------------------------------------------------------------------*/
+ void
+ ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+@@ -96,6 +113,7 @@ ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+   uint8_t *qdata;
+   uint8_t *q;
+   struct dns_hdr *hdr;
++  const uint8_t *input_end;
+ 
+   hdr = (struct dns_hdr *)ipv4data;
+   LOG_DBG("dns64_6to4 id: %02x%02x\n", hdr->id[0], hdr->id[1]);
+@@ -110,6 +128,9 @@ ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+   LOG_DBG("dns64_6to4 numextrarr: 0x%02x\n",
+       ((hdr->numextrarr[0] << 8) + hdr->numextrarr[1]));
+ 
++  /* Set up bounds checking */
++  input_end = ipv4data + ipv4datalen;
++
+   /* Find the DNS question header by scanning through the question
+      labels. */
+   qdata = ipv4data + sizeof(struct dns_hdr);
+@@ -118,11 +139,11 @@ ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+       qlen = *qdata;
+       qdata++;
+       for(j = 0; j < qlen; j++) {
+-        qdata++;
+-        if(qdata > ipv4data + ipv4datalen) {
++        if(qdata > input_end) {
+           LOG_WARN("dns64_6to4: Packet ended while parsing\n");
+           return;
+         }
++        qdata++;
+       }
+     } while(qlen != 0);
+     q = qdata;
+@@ -143,9 +164,17 @@ ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+   int i, j;
+   int qlen, len;
+   const uint8_t *qdata, *adata;
++  const uint8_t *input_end;
+   uint8_t *qcopy, *acopy, *lenptr;
++  uint8_t *output_end;
+   uint8_t *q;
+   struct dns_hdr *hdr;
++  /* Track the current write position in the output buffer */
++  int out_pos;
++
++  /* Set up bounds checking */
++  input_end = ipv4data + ipv4datalen;
++  output_end = ipv6data + ipv6datalen;
+ 
+   hdr = (struct dns_hdr *)ipv4data;
+   LOG_DBG("dns64_4to6 id: %02x%02x\n", hdr->id[0], hdr->id[1]);
+@@ -160,25 +189,54 @@ ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+   LOG_DBG("dns64_4to6 numextrarr: 0x%02x\n",
+       ((hdr->numextrarr[0] << 8) + hdr->numextrarr[1]));
+ 
++  /* Check input has at least the header */
++  if(ipv4datalen < (int)sizeof(struct dns_hdr)) {
++    LOG_WARN("dns64_4to6: packet too short for DNS header\n");
++    return IP64_DNS64_DROP;
++  }
++
+   /* Find the DNS answer header by scanning through the question
+      labels. */
+   qdata = ipv4data + sizeof(struct dns_hdr);
+   qcopy = ipv6data + sizeof(struct dns_hdr);
++  out_pos = sizeof(struct dns_hdr);
+   for(i = 0; i < ((hdr->numquestions[0] << 8) + hdr->numquestions[1]); i++) {
+     do {
++      if(!dns64_has_input_bytes(qdata, input_end, 1)) {
++        LOG_WARN("dns64_4to6: packet ended while parsing\n");
++        return IP64_DNS64_DROP;
++      }
++      if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 1)) {
++        LOG_WARN("dns64_4to6: output buffer overflow while parsing question\n");
++        return IP64_DNS64_DROP;
++      }
+       qlen = *qdata;
+       qdata++;
+       qcopy++;
++      out_pos++;
+       for(j = 0; j < qlen; j++) {
+-        qdata++;
+-        qcopy++;
+-        if(qdata > ipv4data + ipv4datalen) {
++        if(!dns64_has_input_bytes(qdata, input_end, 1)) {
+           LOG_WARN("dns64_4to6: packet ended while parsing\n");
+-          return ipv6datalen;
++          return IP64_DNS64_DROP;
+         }
++        if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 1)) {
++          LOG_WARN("dns64_4to6: output buffer overflow while parsing question\n");
++          return IP64_DNS64_DROP;
++        }
++        qdata++;
++        qcopy++;
++        out_pos++;
+       }
+     } while(qlen != 0);
+     q = qcopy;
++    if(!dns64_has_input_bytes(qdata, input_end, DNS_QUESTION_SIZE)) {
++      LOG_WARN("dns64_4to6: packet ended while parsing question\n");
++      return IP64_DNS64_DROP;
++    }
++    if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, DNS_QUESTION_SIZE)) {
++      LOG_WARN("dns64_4to6: output buffer overflow while parsing question\n");
++      return IP64_DNS64_DROP;
++    }
+     if(q[DNS_QUESTION_CLASS0] == 0 && q[DNS_QUESTION_CLASS1] == DNS_CLASS_IN &&
+        q[DNS_QUESTION_TYPE0] == 0 && q[DNS_QUESTION_TYPE1] == DNS_TYPE_AAAA) {
+       q[DNS_QUESTION_TYPE1] = DNS_TYPE_AAAA;
+@@ -186,6 +244,7 @@ ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+ 
+     qdata += DNS_QUESTION_SIZE;
+     qcopy += DNS_QUESTION_SIZE;
++    out_pos += DNS_QUESTION_SIZE;
+   }
+ 
+   adata = qdata;
+@@ -194,71 +253,166 @@ ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+   /* Go through the answers section and update the answers. */
+   for(i = 0; i < ((hdr->numanswers[0] << 8) + hdr->numanswers[1]); i++) {
+ 
++    /* Read the name: either a pointer (2 bytes) or a full name */
++    if(!dns64_has_input_bytes(adata, input_end, 1)) {
++      LOG_WARN("dns64_4to6: packet ended while parsing answer name\n");
++      return IP64_DNS64_DROP;
++    }
++    if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 1)) {
++      LOG_WARN("dns64_4to6: output buffer overflow while parsing answer name\n");
++      return IP64_DNS64_DROP;
++    }
++
+     n = *adata;
+     if(n & 0xc0) {
+       /* Short-hand name format: 2 bytes */
++      if(!dns64_has_input_bytes(adata, input_end, 2)) {
++        LOG_WARN("dns64_4to6: packet ended while parsing answer name pointer\n");
++        return IP64_DNS64_DROP;
++      }
++      if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 2)) {
++        LOG_WARN("dns64_4to6: output buffer overflow while parsing answer name pointer\n");
++        return IP64_DNS64_DROP;
++      }
+       *acopy++ = *adata++;
+       *acopy++ = *adata++;
++      out_pos += 2;
+     } else {
+       /* Name spelled out */
+       do {
++        if(!dns64_has_input_bytes(adata, input_end, 1)) {
++          LOG_WARN("dns64_4to6: packet ended while parsing answer name\n");
++          return IP64_DNS64_DROP;
++        }
++        if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 1)) {
++          LOG_WARN("dns64_4to6: output buffer overflow while parsing answer name\n");
++          return IP64_DNS64_DROP;
++        }
+         n = *adata;
+         adata++;
+         acopy++;
++        out_pos++;
+         for(j = 0; j < n; j++) {
++          if(!dns64_has_input_bytes(adata, input_end, 1)) {
++            LOG_WARN("dns64_4to6: packet ended while parsing answer name\n");
++            return IP64_DNS64_DROP;
++          }
++          if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 1)) {
++            LOG_WARN("dns64_4to6: output buffer overflow while parsing answer name\n");
++            return IP64_DNS64_DROP;
++          }
+           *acopy++ = *adata++;
++          out_pos++;
+         }
+       } while(n != 0);
+     }
+ 
++    /* Check we have the type, class, ttl, len fields (10 bytes) */
++    if(!dns64_has_input_bytes(adata, input_end, 10)) {
++      LOG_WARN("dns64_4to6: packet ended while parsing answer header\n");
++      return IP64_DNS64_DROP;
++    }
++
+     if(adata[0] == 0 && adata[1] == DNS_TYPE_A) {
+       /* Update the type field from A to AAAA */
++      if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 2)) {
++        LOG_WARN("dns64_4to6: output buffer overflow while rewriting A to AAAA\n");
++        return IP64_DNS64_DROP;
++      }
+       *acopy = *adata;
+       acopy++;
+       adata++;
+       *acopy = DNS_TYPE_AAAA;
+       acopy++;
+       adata++;
++      out_pos += 2;
+ 
+       /* Get the length of the address record. Should be 4. */
+       lenptr = &acopy[6];
+       len = (adata[6] << 8) + adata[7];
+ 
++      /* Check that we have enough bytes for class, ttl, len (8 bytes) */
++      if(!dns64_has_input_bytes(adata, input_end, 8)) {
++        LOG_WARN("dns64_4to6: packet ended while parsing answer\n");
++        return IP64_DNS64_DROP;
++      }
++      /* Check that we can write class, ttl, len (8 bytes) */
++      if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 8)) {
++        LOG_WARN("dns64_4to6: output buffer overflow while rewriting answer\n");
++        return IP64_DNS64_DROP;
++      }
++
+       /* Copy the class, the TTL, and the data length */
+       memcpy(acopy, adata, 2 + 4 + 2);
+       acopy += 8;
+       adata += 8;
++      out_pos += 8;
+ 
+       if(len == 4) {
++        /* Check that we have the 4 bytes of IPv4 address */
++        if(!dns64_has_input_bytes(adata, input_end, 4)) {
++          LOG_WARN("dns64_4to6: packet ended while reading IPv4 address\n");
++          return IP64_DNS64_DROP;
++        }
++        /* Check that we can write 16 bytes of IPv6 address */
++        if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 16)) {
++          LOG_WARN("dns64_4to6: output buffer overflow while writing IPv6 address\n");
++          return IP64_DNS64_DROP;
++        }
++
+         uip_ip4addr_t addr;
+         uip_ipaddr(&addr, adata[0], adata[1], adata[2], adata[3]);
+         ip64_addr_4to6(&addr, (uip_ip6addr_t *)acopy);
+ 
+         adata += len;
+         acopy += 16;
++        out_pos += 16;
+         lenptr[0] = 0;
+         lenptr[1] = 16;
+-        ipv6datalen += 12;
+ 
+       } else {
++        /* Len field is not 4 - check if packet has enough data */
++        if(!dns64_has_input_bytes(adata, input_end, len)) {
++          LOG_WARN("dns64_4to6: packet ended while reading answer data\n");
++          return IP64_DNS64_DROP;
++        }
++        if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, len)) {
++          LOG_WARN("dns64_4to6: output buffer overflow while copying answer data\n");
++          return IP64_DNS64_DROP;
++        }
+         memcpy(acopy, adata, len);
+         acopy += len;
+         adata += len;
++        out_pos += len;
+       }
+     } else {
++      /* Not a Type A answer - just copy it */
+       len = (adata[8] << 8) + adata[9];
+ 
++      /* Check we have enough input for the answer data */
++      if(!dns64_has_input_bytes(adata, input_end, 10 + len)) {
++        LOG_WARN("dns64_4to6: packet ended while parsing answer\n");
++        return IP64_DNS64_DROP;
++      }
++      /* Check we have enough output space */
++      if(!dns64_has_output_bytes(ipv6data + out_pos, output_end, 10 + len)) {
++        LOG_WARN("dns64_4to6: output buffer overflow while copying answer\n");
++        return IP64_DNS64_DROP;
++      }
++
+       /* Copy the type, class, the TTL, and the data length */
+       memcpy(acopy, adata, 2 + 2 + 4 + 2);
+       acopy += 10;
+       adata += 10;
++      out_pos += 10;
+ 
+       /* Copy the data */
+       memcpy(acopy, adata, len);
+       acopy += len;
+       adata += len;
++      out_pos += len;
+     }
+   }
+-  return ipv6datalen;
++  return out_pos;
+ }
+ /*---------------------------------------------------------------------------*/
+diff --git a/os/services/ip64/ip64-dns64.h b/os/services/ip64/ip64-dns64.h
+index 27eb731..386c4dd 100644
+--- a/os/services/ip64/ip64-dns64.h
++++ b/os/services/ip64/ip64-dns64.h
+@@ -32,6 +32,10 @@
+ #ifndef IP64_DNS64_H_
+ #define IP64_DNS64_H_
+ 
++#include <stdint.h>
++
++#define IP64_DNS64_DROP (-1)
++
+ void ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+                      uint8_t *ipv4data, int ipv4datalen);
+ int ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,

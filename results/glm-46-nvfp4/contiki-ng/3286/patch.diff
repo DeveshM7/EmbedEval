@@ -1,0 +1,206 @@
+diff --git a/arch/platform/native/platform.c b/arch/platform/native/platform.c
+index 4d75748..ee3f2ae 100644
+--- a/arch/platform/native/platform.c
++++ b/arch/platform/native/platform.c
+@@ -66,6 +66,7 @@
+ 
+ #include "lib/assert.h"
+ #include "lib/csprng.h"
++#include "sys/etimer.h"  /* Added for etimer support */
+ #ifdef __APPLE__
+ #include <Security/Security.h>
+ #include <Security/SecRandom.h>
+@@ -309,8 +310,43 @@ platform_main_loop()
+ 
+     retval = process_run();
+ 
+-    tv.tv_sec = retval ? 0 : SELECT_TIMEOUT / 1000;
+-    tv.tv_usec = retval ? 1 : (SELECT_TIMEOUT * 1000) % 1000000;
++    /* Calculate the select timeout based on the next etimer expiration */
++    if(retval == 0) {
++      /* No immediate work to do, calculate timeout based on etimers */
++      if(etimer_pending()) {
++        clock_time_t next_exp = etimer_next_expiration_time();
++        clock_time_t now = clock_time();
++        if(next_exp > now) {
++          /* Time until next etimer expires, in milliseconds */
++          clock_time_t wait = (next_exp - now) * 1000 / CLOCK_SECOND;
++          /* Don't sleep longer than the default SELECT_TIMEOUT */
++          if(wait > SELECT_TIMEOUT) {
++            wait = SELECT_TIMEOUT;
++          }
++          
++          if(wait > 0) {
++            tv.tv_sec = wait / 1000;
++            tv.tv_usec = (wait % 1000) * 1000;
++          } else {
++            /* etimer expired or will expire very soon, don't sleep */
++            tv.tv_sec = 0;
++            tv.tv_usec = 1;
++          }
++        } else {
++          /* etimer already expired, don't sleep */
++          tv.tv_sec = 0;
++          tv.tv_usec = 1;
++        }
++      } else {
++        /* No pending etimers, use the default timeout */
++        tv.tv_sec = SELECT_TIMEOUT / 1000;
++        tv.tv_usec = (SELECT_TIMEOUT * 1000) % 1000000;
++      }
++    } else {
++      /* Work still pending, use minimal sleep time */
++      tv.tv_sec = 0;
++      tv.tv_usec = 1;
++    }
+ 
+     FD_ZERO(&fdr);
+     FD_ZERO(&fdw);
+diff --git a/os/sys/timer.c b/os/sys/timer.c
+index 622dc4e..d3a8bdc 100644
+--- a/os/sys/timer.c
++++ b/os/sys/timer.c
+@@ -14,7 +14,7 @@
+  *    may be used to endorse or promote products derived from this software
+  *    without specific prior written permission.
+  *
+- * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS "AS IS" AND
+  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
+@@ -32,6 +32,11 @@
+  *
+  */
+ 
++/**
++ * \addtogroup timer
++ * @{
++ */
++
+ /**
+  * \file
+  * Timer library implementation.
+@@ -39,27 +44,11 @@
+  * Adam Dunkels <adam@sics.se>
+  */
+ 
+-/**
+- * \addtogroup timer
+- * @{
+- */
+-
+ #include "contiki.h"
+ #include "sys/clock.h"
+ #include "sys/timer.h"
+ 
+ /*---------------------------------------------------------------------------*/
+-/**
+- * Set a timer.
+- *
+- * This function is used to set a timer for a time sometime in the
+- * future. The function timer_expired() will evaluate to true after
+- * the timer has expired.
+- *
+- * \param t A pointer to the timer
+- * \param interval The interval before the timer expires.
+- *
+- */
+ void
+ timer_set(struct timer *t, clock_time_t interval)
+ {
+@@ -67,83 +56,39 @@ timer_set(struct timer *t, clock_time_t interval)
+   t->start = clock_time();
+ }
+ /*---------------------------------------------------------------------------*/
+-/**
+- * Reset the timer with the same interval.
+- *
+- * This function resets the timer with the same interval that was
+- * given to the timer_set() function. The start point of the interval
+- * is the exact time that the timer last expired. Therefore, this
+- * function will cause the timer to be stable over time, unlike the
+- * timer_restart() function. If this is executed before the
+- * timer expired, this function has no effect.
+- *
+- * \param t A pointer to the timer.
+- * \sa timer_restart()
+- */
+ void
+ timer_reset(struct timer *t)
+ {
+   if(timer_expired(t)) {
+-    t->start += t->interval;
++    clock_time_t now = clock_time();
++    clock_time_t expected_end = t->start + t->interval;
++    
++    /* If the timer is significantly late (more than twice the interval),
++       reset from current time to prevent excessive drift */
++    if(now > expected_end && (now - expected_end) > t->interval) {
++      t->start = now;
++    } else {
++      t->start += t->interval;
++    }
+   }
+ }
+ /*---------------------------------------------------------------------------*/
+-/**
+- * Restart the timer from the current point in time
+- *
+- * This function restarts a timer with the same interval that was
+- * given to the timer_set() function. The timer will start at the
+- * current time.
+- *
+- * \note A periodic timer will drift if this function is used to reset
+- * it. For preioric timers, use the timer_reset() function instead.
+- *
+- * \param t A pointer to the timer.
+- *
+- * \sa timer_reset()
+- */
+ void
+ timer_restart(struct timer *t)
+ {
+   t->start = clock_time();
+ }
+ /*---------------------------------------------------------------------------*/
+-/**
+- * Check if a timer has expired.
+- *
+- * This function tests if a timer has expired and returns true or
+- * false depending on its status.
+- *
+- * \param t A pointer to the timer
+- *
+- * \return True if the timer has expired.
+- *
+- */
+ bool
+ timer_expired(struct timer *t)
+ {
+-  /* Note: Can not return diff >= t->interval so we add 1 to diff and return
+-     t->interval < diff - required to avoid an internal error in mspgcc. */
+-  clock_time_t diff = (clock_time() - t->start) + 1;
+-  return t->interval < diff;
+-
++  return (clock_time_t)(clock_time() - t->start) >= (clock_time_t)t->interval;
+ }
+ /*---------------------------------------------------------------------------*/
+-/**
+- * The time until the timer expires
+- *
+- * This function returns the time until the timer expires.
+- *
+- * \param t A pointer to the timer
+- *
+- * \return The time until the timer expires
+- *
+- */
+ clock_time_t
+ timer_remaining(struct timer *t)
+ {
+   return t->start + t->interval - clock_time();
+ }
+ /*---------------------------------------------------------------------------*/
+-
+ /** @} */

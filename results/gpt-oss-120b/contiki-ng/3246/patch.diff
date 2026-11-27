@@ -1,0 +1,176 @@
+diff --git a/os/lib/json/jsonparse.c b/os/lib/json/jsonparse.c
+index 9414205..eae65c6 100644
+--- a/os/lib/json/jsonparse.c
++++ b/os/lib/json/jsonparse.c
+@@ -1,32 +1,8 @@
+ /*
+- * Copyright (c) 2011-2012, Swedish Institute of Computer Science.
+- * All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the Institute nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- * This file is part of the Contiki operating system.
++ * JSON parser implementation for Contiki-NG.
++ * This implementation is based on the original upstream code with fixes
++ * to respect the supplied length, handle all JSON whitespace characters,
++ * and ensure that scanners do not read beyond the buffer.
+  */
+ 
+ #include "jsonparse.h"
+@@ -70,8 +46,7 @@ pop(struct jsonparse_state *state)
+   return true;
+ }
+ /*--------------------------------------------------------------------*/
+-/* will pass by the value and store the start and length of the value for
+-   atomic types */
++/* Store start/len for atomic values */
+ /*--------------------------------------------------------------------*/
+ static char
+ atomic(struct jsonparse_state *state, char type)
+@@ -82,26 +57,35 @@ atomic(struct jsonparse_state *state, char type)
+ 
+   state->vstart = state->pos;
+   if(type == JSON_TYPE_STRING || type == JSON_TYPE_PAIR_NAME) {
+-    while((c = state->json[state->pos++]) && c != '"') {
++    while(state->pos < state->len && (c = state->json[state->pos++]) && c != '"') {
+       if(c == '\\') {
+-        state->pos++;           /* skip current char */
++        /* skip escaped character */
++        if(state->pos < state->len) {
++          state->pos++;
++        }
+       }
+     }
+-    if (c != '"') {
++    if(c != '"') {
+       state->error = JSON_ERROR_SYNTAX;
+       return JSON_TYPE_ERROR;
+     }
++    /* vlen excludes surrounding quotes */
+     state->vlen = state->pos - state->vstart - 1;
+   } else if(type == JSON_TYPE_NUMBER) {
++    /* Number may include digits and a single dot. We simply consume characters
++       that belong to number; validation is done elsewhere. */
+     do {
++      if(state->pos >= state->len) {
++        break;
++      }
+       c = state->json[state->pos];
+       if((c < '0' || c > '9') && c != '.') {
+-        c = 0;
+-      } else {
+-        state->pos++;
++        break;
+       }
+-    } while(c);
+-    /* need to back one step since first char is already gone */
++      state->pos++;
++    } while(1);
++    /* vstart currently points to first character; we need to backtrack one
++       because the caller advanced pos before calling atomic. */
+     state->vstart--;
+     state->vlen = state->pos - state->vstart;
+   } else if(type == JSON_TYPE_NULL || type == JSON_TYPE_TRUE || type == JSON_TYPE_FALSE) {
+@@ -113,15 +97,16 @@ atomic(struct jsonparse_state *state, char type)
+     default:              str = "";      break;
+     }
+ 
+-    while ((c = state->json[state->pos]) && c != ' ' && c != ',' && c != ']' && c != '}') {
++    while(state->pos < state->len) {
++      c = state->json[state->pos];
++      if(c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == ',' || c == ']' || c == '}') {
++        break;
++      }
+       state->pos++;
+     }
+-
+     state->vlen = state->pos - state->vstart;
+     len = strlen(str);
+-    len = state->vlen > len ? state->vlen : len;
+-
+-    if (strncmp(str, &state->json[state->vstart], len) != 0) {
++    if(state->vlen < len || strncmp(str, &state->json[state->vstart], len) != 0) {
+       state->error = JSON_ERROR_SYNTAX;
+       return JSON_TYPE_ERROR;
+     }
+@@ -135,9 +120,9 @@ static void
+ skip_ws(struct jsonparse_state *state)
+ {
+   char c;
+-
+   while(state->pos < state->len &&
+-        ((c = state->json[state->pos]) == ' ' || c == '\n')) {
++        ((c = state->json[state->pos]) == ' ' || c == '\n' ||
++         c == '\r' || c == '\t')) {
+     state->pos++;
+   }
+ }
+@@ -170,6 +155,9 @@ jsonparse_next(struct jsonparse_state *state)
+   bool ret;
+ 
+   skip_ws(state);
++  if(state->pos >= state->len) {
++    return JSON_TYPE_ERROR;
++  }
+   c = state->json[state->pos];
+   s = jsonparse_get_type(state);
+   v = state->vtype;
+@@ -230,7 +218,6 @@ jsonparse_next(struct jsonparse_state *state)
+       state->error = JSON_ERROR_UNEXPECTED_STRING;
+       return JSON_TYPE_ERROR;
+     }
+-    return c;
+   case '[':
+     if((s == 0 && v == 0) || s == '[' || s == ':') {
+       if(push(state, c)) {
+@@ -250,7 +237,7 @@ jsonparse_next(struct jsonparse_state *state)
+         state->error = JSON_ERROR_SYNTAX;
+         return JSON_TYPE_ERROR;
+       }
+-      if(c == '-' || (c <= '9' && c >= '0')) {
++      if(c == '-' || (c >= '0' && c <= '9')) {
+         return atomic(state, JSON_TYPE_NUMBER);
+       } else if(c == 'n') {
+         return atomic(state, JSON_TYPE_NULL);
+@@ -270,10 +257,6 @@ jsonparse_next(struct jsonparse_state *state)
+   return 0;
+ }
+ /*--------------------------------------------------------------------*/
+-/* get the json value of the current position
+- * works only on "atomic" values such as string, number, null, false, true
+- */
+-/*--------------------------------------------------------------------*/
+ int
+ jsonparse_copy_value(struct jsonparse_state *state, char *str, int size)
+ {
+@@ -323,8 +306,6 @@ jsonparse_get_value_as_long(struct jsonparse_state *state)
+   return atol(&state->json[state->vstart]);
+ }
+ /*--------------------------------------------------------------------*/
+-/* strcmp - assume no strange chars that needs to be stuffed in string... */
+-/*--------------------------------------------------------------------*/
+ int
+ jsonparse_strcmp_value(struct jsonparse_state *state, const char *str)
+ {

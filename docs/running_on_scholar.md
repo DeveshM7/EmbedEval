@@ -965,7 +965,10 @@ time and steps; an instance with no grade yet is "to do".
 
 The [completed Mynewt evaluation](../results/README.md) includes all 244 final
 run records, grades, and patches. The [task list](../eval-sets/mynewt.txt)
-records the 61 instances evaluated for each model.
+records the 61 instances evaluated for each model. The
+[completed Contiki-NG evaluation](../results/README.md#contiki-ng-37-tasks)
+includes all 148 final run records, grades, and patches, and its
+[task list](../eval-sets/contiki-ng.txt) records the 37 instances.
 
 ### 13.3 Mynewt, NuttX and Contiki-NG: images built in the job
 

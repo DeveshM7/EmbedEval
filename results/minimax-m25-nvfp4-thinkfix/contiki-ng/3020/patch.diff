@@ -1,0 +1,123 @@
+diff --git a/os/lib/cbor.c b/os/lib/cbor.c
+index fdcce00..079cb42 100644
+--- a/os/lib/cbor.c
++++ b/os/lib/cbor.c
+@@ -171,6 +171,22 @@ cbor_write_unsigned(cbor_writer_state_t *state, uint64_t value)
+   write_first_byte(state, CBOR_MAJOR_TYPE_UNSIGNED);
+   insert_unsigned(state, state->buffer, value);
+ }
++
++/*---------------------------------------------------------------------------*/
++void
++cbor_write_signed(cbor_writer_state_t *state, int64_t value)
++{
++  if(value >= 0) {
++    /* non-negative: use unsigned encoding */
++    cbor_write_unsigned(state, (uint64_t)value);
++  } else {
++    /* negative: use signed integer major type (1) */
++    /* CBOR encodes negative integers as: -(n+1), so we need -(value + 1) */
++    write_first_byte(state, CBOR_MAJOR_TYPE_NEGATIVE);
++    insert_unsigned(state, state->buffer, (uint64_t)(-(value + 1)));
++  }
++}
++
+ /*---------------------------------------------------------------------------*/
+ void
+ cbor_write_data(cbor_writer_state_t *state,
+@@ -349,6 +365,51 @@ cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value)
+   return size;
+ }
+ /*---------------------------------------------------------------------------*/
++
++/*---------------------------------------------------------------------------*/
++cbor_size_t
++cbor_read_signed(cbor_reader_state_t *state, int64_t *value)
++{
++  uint64_t unsigned_value;
++  cbor_size_t result;
++
++  if(!state->cbor_size) {
++    return CBOR_SIZE_NONE;
++  }
++
++  /* check the major type */
++  uint8_t major_type = *state->cbor & 0xE0;
++
++  if(major_type == CBOR_MAJOR_TYPE_UNSIGNED) {
++    /* unsigned encoding: value is non-negative */
++    result = cbor_read_unsigned(state, &unsigned_value);
++    if(result == CBOR_SIZE_NONE) {
++      return CBOR_SIZE_NONE;
++    }
++    /* check if value fits in int64_t */
++    if(unsigned_value > INT64_MAX) {
++      return CBOR_SIZE_NONE;
++    }
++    *value = (int64_t)unsigned_value;
++    return result;
++  } else if(major_type == CBOR_MAJOR_TYPE_NEGATIVE) {
++    /* negative encoding: value is negative */
++    result = cbor_read_unsigned(state, &unsigned_value);
++    if(result == CBOR_SIZE_NONE) {
++      return CBOR_SIZE_NONE;
++    }
++    /* check if value fits in int64_t (INT64_MIN = -9223372036854775808)
++     * The encoding for negative integers is: -((int64_t)unsigned_value + 1)
++     * INT64_MIN encoded is: -(INT64_MIN + 1) = -(-9223372036854775808 + 1)
++     *                      = -(-9223372036854775807) = 9223372036854775807
++     * which fits in uint64_t */
++    *value = (int64_t)(-(unsigned_value + 1));
++    return result;
++  }
++
++  return CBOR_SIZE_NONE;
++}
++
+ static const uint8_t *
+ read_byte_or_text_string(cbor_reader_state_t *state, size_t *size)
+ {
+diff --git a/os/lib/cbor.h b/os/lib/cbor.h
+index a91eb42..65f041c 100644
+--- a/os/lib/cbor.h
++++ b/os/lib/cbor.h
+@@ -75,6 +75,7 @@
+ typedef enum cbor_major_type_t {
+   CBOR_MAJOR_TYPE_NONE = -1,
+   CBOR_MAJOR_TYPE_UNSIGNED = 0x00,
++  CBOR_MAJOR_TYPE_NEGATIVE = 0x20,
+   CBOR_MAJOR_TYPE_BYTE_STRING = 0x40,
+   CBOR_MAJOR_TYPE_TEXT_STRING = 0x60,
+   CBOR_MAJOR_TYPE_ARRAY = 0x80,
+@@ -175,6 +176,14 @@ void cbor_write_object(cbor_writer_state_t *state,
+  */
+ void cbor_write_unsigned(cbor_writer_state_t *state, uint64_t value);
+ 
++
++/**
++ * Appends a signed integer.
++ *
++ * \param state State of the CBOR writer.
++ * \param value Signed integer.
++ */
++void cbor_write_signed(cbor_writer_state_t *state, int64_t value);
+ /**
+  * Appends a byte string.
+  *
+@@ -297,6 +306,16 @@ bool cbor_end_reader(cbor_reader_state_t *state);
+  */
+ cbor_size_t cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value);
+ 
++
++/**
++ * Reads a signed integer.
++ *
++ * \param state State of the CBOR reader.
++ * \param value Buffer to store the signed integer.
++ *
++ * \return      Size of the signed integer or \c CBOR_SIZE_NONE on error.
++ */
++cbor_size_t cbor_read_signed(cbor_reader_state_t *state, int64_t *value);
+ /**
+  * Reads a byte string.
+  *

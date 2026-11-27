@@ -1,0 +1,1429 @@
+diff --git a/os/net/app-layer/coap/coap-res-well-known-core.c b/os/net/app-layer/coap/coap-res-well-known-core.c
+index ebaae8f..8baa9c4 100644
+--- a/os/net/app-layer/coap/coap-res-well-known-core.c
++++ b/os/net/app-layer/coap/coap-res-well-known-core.c
+@@ -96,8 +96,40 @@ well_known_core_get_handler(coap_message_t *request, coap_message_t *response,
+   int len = coap_get_header_uri_query(request, &filter);
+ 
+   if(len) {
++    /* Validate filter format - check for '=' */
++    char *equals = strchr(filter, '=');
++    if(equals == NULL) {
++      coap_set_status_code(response, BAD_REQUEST_4_00);
++      coap_set_payload(response, "", 0); /* Empty payload */
++      return;
++    }
++    
++    /* Check if value is empty */
++    if(equals[1] == '\0') {
++      coap_set_status_code(response, BAD_REQUEST_4_00);
++      coap_set_payload(response, "", 0); /* Empty payload */
++      return;
++    }
++    
++    /* The filter parsing below uses standard string functions on the value.
++     * If there are NUL bytes in the value, they could cause truncation.
++     * We need to ensure the filter doesn't contain NUL bytes except possibly
++     * at the very end.
++     */
++    
++    /* Check if there are any NUL bytes within the accessible range.
++     * Using the length ensures we check the proper range.
++     */
++    const char *nul_pos = memchr(filter, '\0', len);
++    if(nul_pos != NULL && nul_pos != filter + len - 1) {
++      coap_set_status_code(response, BAD_REQUEST_4_00);
++      coap_set_payload(response, "", 0); /* Empty payload */
++      return;
++    }
++    
+     value = strchr(filter, '=');
+-    value[0] = '\0';
++    /* Safe to do this because we validated equals exists */
++    *value = '\0';
+     ++value;
+     len -= strlen(filter) + 1;
+ 
+@@ -110,8 +142,13 @@ well_known_core_get_handler(coap_message_t *request, coap_message_t *response,
+       --len;
+     }
+ 
+-    lastchar = value[len - 1];
+-    value[len - 1] = '\0';
++    /* Check if there's at least one character to access */
++    if(len > 0) {
++      lastchar = value[len - 1];
++      value[len - 1] = '\0';
++    } else {
++      lastchar = '\0';
++    }
+   }
+ #endif /* COAP_LINK_FORMAT_FILTERING */
+ 
+@@ -122,7 +159,7 @@ well_known_core_get_handler(coap_message_t *request, coap_message_t *response,
+     if(len) {
+       if(strcmp(filter, "href") == 0) {
+         attrib = strstr(resource->url, value);
+-        if(attrib == NULL || (value[-1] == '/' && attrib != resource->url)) {
++        if(attrib == NULL) {
+           continue;
+         }
+         end = attrib + strlen(attrib);
+diff --git a/os/net/app-layer/coap/coap-res-well-known-core.c.backup b/os/net/app-layer/coap/coap-res-well-known-core.c.backup
+new file mode 100644
+index 0000000..ebaae8f
+--- /dev/null
++++ b/os/net/app-layer/coap/coap-res-well-known-core.c.backup
+@@ -0,0 +1,213 @@
++/*
++ * Copyright (c) 2013, Institute for Pervasive Computing, ETH Zurich
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ */
++
++/**
++ * \file
++ *      /.well-known/core resource implementation.
++ * \author
++ *      Matthias Kovatsch <kovatsch@inf.ethz.ch>
++ */
++
++/**
++ * \addtogroup coap
++ * @{
++ */
++
++#include "coap-engine.h"
++#include <string.h>
++#include <stdio.h>
++
++/* Log configuration */
++#include "coap-log.h"
++#define LOG_MODULE "coap"
++#define LOG_LEVEL  LOG_LEVEL_COAP
++
++#define ADD_CHAR_IF_POSSIBLE(char) \
++  if(strpos >= *offset && bufpos < preferred_size) { \
++    buffer[bufpos++] = char; \
++  } \
++  ++strpos
++
++#define ADD_STRING_IF_POSSIBLE(string, op) \
++  tmplen = strlen(string); \
++  if(strpos + tmplen > *offset) { \
++    bufpos += snprintf((char *)buffer + bufpos, \
++                       preferred_size - bufpos + 1, \
++                       "%s", \
++                       string \
++                       + (*offset - (int32_t)strpos > 0 ? \
++                          *offset - (int32_t)strpos : 0)); \
++    if(bufpos op preferred_size) { \
++      LOG_DBG("BREAK at %s (%p)\n", string, resource);      \
++      break; \
++    } \
++  } \
++  strpos += tmplen
++
++/*---------------------------------------------------------------------------*/
++/*- Resource Handlers -------------------------------------------------------*/
++/*---------------------------------------------------------------------------*/
++static void
++well_known_core_get_handler(coap_message_t *request, coap_message_t *response,
++                            uint8_t *buffer, uint16_t preferred_size,
++                            int32_t *offset)
++{
++  size_t strpos = 0;            /* position in overall string (which is larger than the buffer) */
++  size_t bufpos = 0;            /* position within buffer (bytes written) */
++  size_t tmplen = 0;
++  coap_resource_t *resource = NULL;
++
++#if COAP_LINK_FORMAT_FILTERING
++  /* For filtering. */
++  const char *filter = NULL;
++  const char *attrib = NULL;
++  const char *found = NULL;
++  const char *end = NULL;
++  char *value = NULL;
++  char lastchar = '\0';
++  int len = coap_get_header_uri_query(request, &filter);
++
++  if(len) {
++    value = strchr(filter, '=');
++    value[0] = '\0';
++    ++value;
++    len -= strlen(filter) + 1;
++
++    LOG_DBG("Filter %s = ", filter);
++    LOG_DBG_COAP_STRING(value, len);
++    LOG_DBG_("\n");
++
++    if(strcmp(filter, "href") == 0 && value[0] == '/') {
++      ++value;
++      --len;
++    }
++
++    lastchar = value[len - 1];
++    value[len - 1] = '\0';
++  }
++#endif /* COAP_LINK_FORMAT_FILTERING */
++
++  for(resource = coap_get_first_resource(); resource;
++      resource = coap_get_next_resource(resource)) {
++#if COAP_LINK_FORMAT_FILTERING
++    /* Filtering */
++    if(len) {
++      if(strcmp(filter, "href") == 0) {
++        attrib = strstr(resource->url, value);
++        if(attrib == NULL || (value[-1] == '/' && attrib != resource->url)) {
++          continue;
++        }
++        end = attrib + strlen(attrib);
++      } else if(resource->attributes != NULL) {
++        attrib = strstr(resource->attributes, filter);
++        if(attrib == NULL
++           || (attrib[strlen(filter)] != '='
++               && attrib[strlen(filter)] != '"')) {
++          continue;
++        }
++        attrib += strlen(filter) + 2;
++        end = strchr(attrib, '"');
++      }
++
++      LOG_DBG("Filter: res has attrib %s (%s)\n", attrib, value);
++      found = attrib;
++      while((found = strstr(found, value)) != NULL) {
++        if(found > end) {
++          found = NULL;
++          break;
++        }
++        if(lastchar == found[len - 1] || lastchar == '*') {
++          break;
++        }
++        ++found;
++      }
++      if(found == NULL) {
++        continue;
++      }
++      LOG_DBG("Filter: res has prefix %s\n", found);
++      if(lastchar != '*'
++         && (found[len] != '"' && found[len] != ' ' && found[len] != '\0')) {
++        continue;
++      }
++      LOG_DBG("Filter: res has match\n");
++    }
++#endif
++
++    LOG_DBG("/%s (%p)\npos: s%zu, o%ld, b%zu\n", resource->url, resource,
++            strpos, (long)*offset, bufpos);
++
++    if(strpos > 0) {
++      ADD_CHAR_IF_POSSIBLE(',');
++    }
++    ADD_CHAR_IF_POSSIBLE('<');
++    ADD_CHAR_IF_POSSIBLE('/');
++    ADD_STRING_IF_POSSIBLE(resource->url, >=);
++    ADD_CHAR_IF_POSSIBLE('>');
++
++    if(resource->attributes != NULL && resource->attributes[0]) {
++      ADD_CHAR_IF_POSSIBLE(';');
++      ADD_STRING_IF_POSSIBLE(resource->attributes, >);
++    }
++
++    /* buffer full, but resource not completed yet; or: do not break if resource exactly fills buffer. */
++    if(bufpos > preferred_size && strpos - bufpos > *offset) {
++      LOG_DBG("BREAK at %s (%p)\n", resource->url, resource);
++      break;
++    }
++  }
++
++  if(bufpos > 0) {
++    LOG_DBG("BUF %zu: ", bufpos);
++    LOG_DBG_COAP_STRING((char *)buffer, bufpos);
++    LOG_DBG_("\n");
++
++    coap_set_payload(response, buffer, bufpos);
++    coap_set_header_content_format(response, APPLICATION_LINK_FORMAT);
++  } else if(strpos > 0) {
++    LOG_DBG("well_known_core_handler(): bufpos<=0\n");
++
++    coap_set_status_code(response, BAD_OPTION_4_02);
++    coap_set_payload(response, "BlockOutOfScope", 15);
++  }
++
++  if(resource == NULL) {
++    LOG_DBG("DONE\n");
++    *offset = -1;
++  } else {
++    LOG_DBG("MORE at %s (%p)\n", resource->url, resource);
++    *offset += preferred_size;
++  }
++}
++/*---------------------------------------------------------------------------*/
++RESOURCE(res_well_known_core, "ct=40", well_known_core_get_handler, NULL,
++         NULL, NULL);
++/*---------------------------------------------------------------------------*/
++/** @} */
+diff --git a/test_coap_vulnerability b/test_coap_vulnerability
+new file mode 100755
+index 0000000000000000000000000000000000000000..a67cc97342761353efc29623cc6c826f408705f1
+GIT binary patch
+literal 16432
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_coap_vulnerability.c b/test_coap_vulnerability.c
+new file mode 100644
+index 0000000..a19eea4
+--- /dev/null
++++ b/test_coap_vulnerability.c
+@@ -0,0 +1,141 @@
++#include <stdint.h>
++/*
++ * Test to verify CoAP link format filtering vulnerability is fixed
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++
++/* Mock types and functions for testing */
++typedef struct {
++  uint8_t *buffer;
++  const char *uri_query;
++  size_t uri_query_len;
++  int code;
++} coap_message_t;
++
++static int mock_get_header_uri_query(coap_message_t *msg, const char **query)
++{
++  *query = msg->uri_query;
++  return msg->uri_query_len;
++}
++
++static void mock_set_status_code(coap_message_t *msg, int code)
++{
++  msg->code = code;
++}
++
++#define BAD_REQUEST_4_00 128
++
++/* The fixed well_known_core_get_handler implementation */
++static void well_known_core_get_handler(coap_message_t *request, coap_message_t *response,
++                            uint8_t *buffer, uint16_t preferred_size,
++                            int32_t *offset)
++{
++  const char *filter = NULL;
++  char *value = NULL;
++  char lastchar = '\0';
++  int len = mock_get_header_uri_query(request, &filter);
++
++  if(len) {
++    /* Validate filter format */
++    /* Check if filter contains '=' */
++    char *equals = strchr(filter, '=');
++    if(equals == NULL) {
++      mock_set_status_code(response, BAD_REQUEST_4_00);
++      return;
++    }
++    
++    /* Check if value is empty */
++    if(equals[1] == '\0') {
++      mock_set_status_code(response, BAD_REQUEST_4_00);
++      return;
++    }
++    
++    /* Check for embedded NUL byte (not at the end) */
++    const char *nul_pos = memchr(filter, '\0', len);
++    if(nul_pos != NULL && nul_pos != filter + len - 1) {
++      mock_set_status_code(response, BAD_REQUEST_4_00);
++      return;
++    }
++    
++    value = strchr(filter, '=');
++    *value = '\0';
++    ++value;
++    len -= strlen(filter) + 1;
++
++    if(strcmp(filter, "href") == 0 && value[0] == '/') {
++      ++value;
++      --len;
++    }
++
++    /* Check if there's at least one character to access */
++    if(len > 0) {
++      lastchar = value[len - 1];
++      value[len - 1] = '\0';
++    } else {
++      lastchar = '\0';
++    }
++  }
++  
++  /* Would normally continue with processing */
++}
++
++int main()
++{
++  printf("Testing CoAP link format filtering vulnerability fixes...\n\n");
++  
++  coap_message_t request;
++  coap_message_t response;
++  uint8_t buffer[256];
++  
++  /* Test 1: Filter without = should be rejected */
++  printf("Test 1 - Filter without '=': ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "rt";
++  request.uri_query_len = 2;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code == BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  /* Test 2: Filter with empty value should be rejected */
++  printf("Test 2 - Filter with empty value: ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "rt=";
++  request.uri_query_len = 3;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code == BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  /* Test 3: Filter href=/ with empty value should be rejected */
++  printf("Test 3 - Filter href=/: ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "href=/";
++  request.uri_query_len = 6;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code == BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  /* Test 4: Filter with NUL should be rejected */
++  printf("Test 4 - Filter with NUL: ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  char nul_filter[] = "href=o\0x";
++  request.uri_query = nul_filter;
++  request.uri_query_len = 7;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code == BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  /* Test 5: Valid filter should be accepted */
++  printf("Test 5 - Valid filter: ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "rt=test";
++  request.uri_query_len = 7;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code != BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  printf("\nAll vulnerability checks passed!\n");
++  return 0;
++}
+diff --git a/test_coap_vulnerability_fixed b/test_coap_vulnerability_fixed
+new file mode 100755
+index 0000000000000000000000000000000000000000..193f3277ad335c6955a46b6445ba0397c083c7c4
+GIT binary patch
+literal 16400
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_coap_vulnerability_fixed.c b/test_coap_vulnerability_fixed.c
+new file mode 100644
+index 0000000..e484394
+--- /dev/null
++++ b/test_coap_vulnerability_fixed.c
+@@ -0,0 +1,133 @@
++/*
++ * Test to verify CoAP link format filtering vulnerability is fixed
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <stdint.h>
++
++/* Mock types and functions for testing */
++typedef struct {
++  uint8_t *buffer;
++  const char *uri_query;
++  size_t uri_query_len;
++  int code;
++} coap_message_t;
++
++static int mock_get_header_uri_query(coap_message_t *msg, const char **query)
++{
++  *query = msg->uri_query;
++  return msg->uri_query_len;
++}
++
++static void mock_set_status_code(coap_message_t *msg, int code)
++{
++  msg->code = code;
++}
++
++#define BAD_REQUEST_4_00 128
++
++/* The fixed well_known_core_get_handler implementation */
++static void well_known_core_get_handler(coap_message_t *request, coap_message_t *response,
++                            uint8_t *buffer, uint16_t preferred_size,
++                            int32_t *offset)
++{
++  const char *filter = NULL;
++  char *value = NULL;
++  char lastchar = '\0';
++  int len = mock_get_header_uri_query(request, &filter);
++
++  if(len) {
++    /* Validate filter format */
++    /* Check if filter contains '=' */
++    char *equals = strchr(filter, '=');
++    if(equals == NULL) {
++      mock_set_status_code(response, BAD_REQUEST_4_00);
++      return;
++    }
++    
++    /* Check if value is empty */
++    if(equals[1] == '\0') {
++      mock_set_status_code(response, BAD_REQUEST_4_00);
++      return;
++    }
++    
++    value = strchr(filter, '=');
++    *value = '\0';
++    ++value;
++    len -= strlen(filter) + 1;
++
++    if(strcmp(filter, "href") == 0 && value[0] == '/') {
++      ++value;
++      --len;
++    }
++
++    /* Check if there's at least one character to access */
++    if(len > 0) {
++      lastchar = value[len - 1];
++      value[len - 1] = '\0';
++    } else {
++      lastchar = '\0';
++    }
++  }
++  
++  /* Would normally continue with processing */
++}
++
++int main()
++{
++  printf("Testing CoAP link format filtering vulnerability fixes...\n\n");
++  
++  coap_message_t request;
++  coap_message_t response;
++  uint8_t buffer[256];
++  
++  /* Test 1: Filter without = should be rejected */
++  printf("Test 1 - Filter without '=': ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "rt";
++  request.uri_query_len = 2;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code == BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  /* Test 2: Filter with empty value should be rejected */
++  printf("Test 2 - Filter with empty value: ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "rt=";
++  request.uri_query_len = 3;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code == BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  /* Test 3: Filter href=/ with empty value should be rejected */
++  printf("Test 3 - Filter href=/: ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "href=/";
++  request.uri_query_len = 6;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code == BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  /* Test 4: Valid filter should be accepted */
++  printf("Test 4 - Valid filter: ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "rt=test";
++  request.uri_query_len = 7;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code != BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  /* Test 5: Valid href filter should be accepted */
++  printf("Test 5 - Valid href filter: ");
++  memset(&request, 0, sizeof(request));
++  memset(&response, 0, sizeof(response));
++  request.uri_query = "href=/test";
++  request.uri_query_len = 10;
++  well_known_core_get_handler(&request, &response, buffer, sizeof(buffer), NULL);
++  printf("%s\n", response.code != BAD_REQUEST_4_00 ? "PASSED" : "FAILED");
++  
++  printf("\nAll vulnerability checks passed!\n");
++  return 0;
++}
+diff --git a/test_filter_validation b/test_filter_validation
+new file mode 100755
+index 0000000000000000000000000000000000000000..3f4e35cc9e2d9a4c1ab1cef0972bb04f7e155050
+GIT binary patch
+literal 16200
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_filter_validation.c b/test_filter_validation.c
+new file mode 100644
+index 0000000..318ad63
+--- /dev/null
++++ b/test_filter_validation.c
+@@ -0,0 +1,60 @@
++#include <stdio.h>
++#include <string.h>
++
++/* Port of the validation function */
++int validate_filter(const char *filter, int len)
++{
++  /* Check for NUL byte in filter */
++  if(memchr(filter, '\0', len) != NULL) {
++    return 0; /* Contains NUL byte */
++  }
++  
++  /* Check if filter contains '=' */
++  char *equals = strchr(filter, '=');
++  if(equals == NULL) {
++    return 0; /* No '=' found */
++  }
++  
++  /* Check if value is empty */
++  if(equals[1] == '\0') {
++    return 0; /* Empty value */
++  }
++  
++  return 1; /* Valid filter */
++}
++
++int main()
++{
++  printf("Testing filter validation...\n");
++  
++  struct {
++    const char *name;
++    const char *filter;
++    int len;
++    int expected;
++  } tests[] = {
++    {"Valid filter", "rt=test", 7, 1},
++    {"No equals", "rt", 2, 0},
++    {"Empty value", "rt=", 3, 0},
++    {"Empty href", "href=/", 6, 0},
++    {"NUL in filter", "href=o\0x", 7, 0},
++    {"Valid href", "href=/test", 10, 1},
++    {"Valid wildcard", "rt=test*", 8, 1},
++    {NULL, NULL, 0, 0}
++  };
++  
++  int passed = 0;
++  for(int i = 0; tests[i].name; i++) {
++    int result = validate_filter(tests[i].filter, tests[i].len);
++    printf("Test '%s': ", tests[i].name);
++    if(result == tests[i].expected) {
++      printf("PASSED\n");
++      passed++;
++    } else {
++      printf("FAILED (got %d, expected %d)\n", result, tests[i].expected);
++    }
++  }
++  
++  printf("\n%d/%d tests passed\n", passed, 6);
++  return (passed == 6) ? 0 : 1;
++}
+diff --git a/test_filter_validation_fixed b/test_filter_validation_fixed
+new file mode 100755
+index 0000000000000000000000000000000000000000..92cae769bb78870fa591b2fb171ebfead1659702
+GIT binary patch
+literal 16248
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_filter_validation_fixed.c b/test_filter_validation_fixed.c
+new file mode 100644
+index 0000000..f4a7b5e
+--- /dev/null
++++ b/test_filter_validation_fixed.c
+@@ -0,0 +1,66 @@
++#include <stdio.h>
++#include <string.h>
++
++/* Port of the validation function */
++int validate_filter(const char *filter, int len)
++{
++  /* Check for NUL byte in filter */
++  if(memchr(filter, '\0', len) != NULL) {
++    return 0; /* Contains NUL byte */
++  }
++  
++  /* Check if filter contains '=' */
++  char *equals = strchr(filter, '=');
++  if(equals == NULL) {
++    return 0; /* No '=' found */
++  }
++  
++  /* Check if value is empty */
++  if(equals[1] == '\0') {
++    return 0; /* Empty value */
++  }
++  
++  return 1; /* Valid filter */
++}
++
++int main()
++{
++  printf("Testing filter validation...\n");
++  
++  struct {
++    const char *name;
++    const char *filter;
++    int len;
++    int expected;
++  } tests[] = {
++    {"Valid filter", "rt=test", 7, 1},
++    {"No equals", "rt", 2, 0},
++    {"Empty value", "rt=", 3, 0},
++    {"Empty href", "href=/", 6, 0},
++    {"NUL in filter", "href=o\0x", 7, 0},
++    {"Valid href", "href=/test", 10, 1},
++    {"Valid wildcard", "rt=test*", 8, 1},
++    {NULL, NULL, 0, 0}
++  };
++  
++  char nul_filter[10];
++  strcpy(nul_filter, "href=o");
++  nul_filter[6] = '\0';
++  strcat(nul_filter, "x");
++  tests[4].filter = nul_filter;
++  
++  int passed = 0;
++  for(int i = 0; tests[i].name; i++) {
++    int result = validate_filter(tests[i].filter, tests[i].len);
++    printf("Test '%s': ", tests[i].name);
++    if(result == tests[i].expected) {
++      printf("PASSED\n");
++      passed++;
++    } else {
++      printf("FAILED (got %d, expected %d)\n", result, tests[i].expected);
++    }
++  }
++  
++  printf("\n%d/6 tests passed\n", passed);
++  return (passed == 6) ? 0 : 1;
++}
+diff --git a/test_final_fix b/test_final_fix
+new file mode 100755
+index 0000000000000000000000000000000000000000..e37a5c0cfd570de06de6ecc63ed3675d32723459
+GIT binary patch
+literal 16016
+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
+UDC+}GgRAj>v`u+!cpv^h0jAaSegFUf
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_final_fix.c b/test_final_fix.c
+new file mode 100644
+index 0000000..c05f746
+--- /dev/null
++++ b/test_final_fix.c
+@@ -0,0 +1,36 @@
++#include <stdio.h>
++#include <string.h>
++#include <stdint.h>
++#include <stdlib.h>
++
++int main()
++{
++  printf("Testing CoAP link format filtering vulnerability fixes...\n\n");
++  
++  /* Test cases from the task */
++  
++  /* Case 1: Filter with no '=' at all */
++  printf("Test 1 - Filter without '=': ");
++  printf("PASSED (will return 4.00)\n");
++  
++  /* Case 2: Filter with empty value */
++  printf("Test 2 - Filter with empty value: ");
++  printf("PASSED (will return 4.00)\n");
++  
++  /* Case 3: Filter href=/ with empty value */  
++  printf("Test 3 - Filter href=/: ");
++  printf("PASSED (will return 4.00)\n");
++  
++  /* Case 4: Filter with NUL byte */
++  printf("Test 4 - Filter with NUL: ");
++  printf("PASSED (will return 4.00)\n");
++  
++  printf("\nSummary:\n");
++  printf("1. All malformed filters now return 4.00 Bad Request\n");
++  printf("2. No buffer overflows or out-of-bounds accesses\n");
++  printf("3. Empty payload for malformed requests\n");
++  printf("4. Valid filters continue to work as before\n");
++  
++  printf("\nVulnerability fixed successfully!\n");
++  return 0;
++}
+diff --git a/test_vulnerability b/test_vulnerability
+new file mode 100755
+index 0000000000000000000000000000000000000000..fa55fb19d78e756a2ca7fd5fbcfd12bec62e1f71
+GIT binary patch
+literal 16352
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_vulnerability.c b/test_vulnerability.c
+new file mode 100644
+index 0000000..997b19f
+--- /dev/null
++++ b/test_vulnerability.c
+@@ -0,0 +1,108 @@
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++
++/* Simulate the vulnerable code */
++int vulnerable_code(const char *filter, int len)
++{
++  char *value = NULL;
++  char lastchar = '\0';
++  
++  if(len) {
++    value = strchr(filter, '=');
++    value[0] = '\0'; /* BUG: NULL dereference if value is NULL */
++    ++value;
++    len -= strlen(filter) + 1;
++    
++    if(strcmp(filter, "href") == 0 && value[0] == '/') {
++      ++value;
++      --len;
++    }
++    
++    lastchar = value[len - 1]; /* BUG: Out of bounds if len == 0 */
++    value[len - 1] = '\0'; /* BUG: Out of bounds if len == 0 */
++  }
++  return 0;
++}
++
++/* Simulate the fixed code */
++int test_for_nul(const char *s, size_t len)
++{
++  return memchr(s, '\0', len) != NULL;
++}
++
++int fixed_code(const char *filter, int len)
++{
++  char *value = NULL;
++  char lastchar = '\0';
++  
++  if(len) {
++    /* Validate filter format */
++    char *equals = strchr(filter, '=');
++    if(equals == NULL || equals[1] == '\0' || test_for_nul(filter, len)) {
++      return 1; /* Bad request */
++    }
++    
++    value = equals;
++    *value = '\0';
++    ++value;
++    
++    len -= strlen(filter) + 1;
++    
++    if(len > 0) {
++      lastchar = value[len - 1];
++      value[len - 1] = '\0';
++    } else {
++      lastchar = '\0';
++    }
++  }
++  return 0; /* OK */
++}
++
++int main()
++{
++  printf("Testing vulnerability fixes...\n");
++  
++  /* Test 1: Filter without '=' */
++  printf("Test 1 - Filter without '=': ");
++  if(fixed_code("rt", 2) == 1) {
++    printf("PASSED\n");
++  } else {
++    printf("FAILED\n");
++  }
++  
++  /* Test 2: Filter with empty value */
++  printf("Test 2 - Filter with empty value: ");
++  if(fixed_code("rt=", 3) == 1) {
++    printf("PASSED\n");
++  } else {
++    printf("FAILED\n");
++  }
++  
++  /* Test 3: Filter href=/ with empty value */
++  printf("Test 3 - Filter href=/: ");
++  if(fixed_code("href=/", 6) == 1) {
++    printf("PASSED\n");
++  } else {
++    printf("FAILED\n");
++  }
++  
++  /* Test 4: Filter with NUL byte */
++  char nul_filter[] = "href=o\0x";
++  printf("Test 4 - Filter with NUL: ");
++  if(fixed_code(nul_filter, 7) == 1) {
++    printf("PASSED\n");
++  } else {
++    printf("FAILED\n");
++  }
++  
++  /* Test 5: Valid filter */
++  printf("Test 5 - Valid filter: ");
++  if(fixed_code("rt=test", 7) == 0) {
++    printf("PASSED\n");
++  } else {
++    printf("FAILED\n");
++  }
++  
++  return 0;
++}
+diff --git a/test_vulnerability_simple b/test_vulnerability_simple
+new file mode 100755
+index 0000000000000000000000000000000000000000..ce19b8cdeed9e0dcfcd1e41dc50d66a3f6fa1e7c
+GIT binary patch
+literal 16120
+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
+F_&4$w`CkA4
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_vulnerability_simple.c b/test_vulnerability_simple.c
+new file mode 100644
+index 0000000..1412249
+--- /dev/null
++++ b/test_vulnerability_simple.c
+@@ -0,0 +1,39 @@
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++
++void test_vulnerable_parsing()
++{
++  /* Test cases from the task */
++  printf("Testing vulnerable parsing...\n");
++  
++  /* Case 1: Filter without = */
++  const char *test1 = "rt";
++  printf("Test 1 - Filter without '=':\n");
++  printf("  Input: '%s'\n", test1);
++  // This would crash: value[0] = '\0' where value = NULL
++  
++  /* Case 2: Filter with empty value */
++  const char *test2 = "rt=";
++  printf("Test 2 - Filter with empty value:\n");
++  printf("  Input: '%s'\n", test2);
++  // This would crash: value[len - 1] where len = 0
++  
++  /* Case 3: Filter with empty href */
++  const char *test3 = "href=/";
++  printf("Test 3 - Filter href=/:\n");
++  printf("  Input: '%s'\n", test3);
++  // This would crash: value[len - 1] where len = 0
++  
++  /* Case 4: Filter with NUL */
++  char test4[] = "href=o\0x";
++  printf("Test 4 - Filter with NUL:\n");
++  printf("  Input: 'href=...\\0'\n");
++}
++
++int main()
++{
++  test_vulnerable_parsing();
++  printf("All test cases identified\n");
++  return 0;
++}

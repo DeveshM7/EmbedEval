@@ -1,0 +1,240 @@
+diff --git a/os/sys/process-mutex.c b/os/sys/process-mutex.c
+new file mode 100644
+index 0000000..13a9ee6
+--- /dev/null
++++ b/os/sys/process-mutex.c
+@@ -0,0 +1,71 @@
++/*
++ * Copyright (c) 2024, Contiki-NG
++ * All rights reserved.
++ */
++
++#include "contiki.h"
++#include "sys/process-mutex.h"
++
++/*---------------------------------------------------------------------------*/
++bool
++process_mutex_try_lock(process_mutex_t *mutex)
++{
++  struct process *current = PROCESS_CURRENT();
++  
++  /* Check if mutex is unlocked */
++  if(mutex->holder == NULL) {
++    /* Lock is free, acquire it */
++    mutex->holder = current;
++    return true;
++  }
++  
++  /* Lock is held by someone else */
++  if(current != NULL) {
++    /* Add current process to waiters list if not already there */
++    struct process *p = mutex->waiters;
++    struct process *prev = NULL;
++    
++    while(p != NULL) {
++      if(p == current) {
++        /* Already in waiters list */
++        return false;
++      }
++      prev = p;
++      p = p->next;
++    }
++    
++    /* Add to end of waiters list */
++    if(prev == NULL) {
++      mutex->waiters = current;
++    } else {
++      prev->next = current;
++    }
++    current->next = NULL;
++  }
++  
++  return false;
++}
++
++/*---------------------------------------------------------------------------*/
++void
++process_mutex_unlock(process_mutex_t *mutex)
++{
++  struct process *current = PROCESS_CURRENT();
++  
++  /* Only the holder can unlock */
++  if(current == mutex->holder) {
++    /* Clear the lock */
++    mutex->holder = NULL;
++    
++    /* Notify all waiting processes */
++    struct process *waiters = mutex->waiters;
++    mutex->waiters = NULL;
++    
++    struct process *p = waiters;
++    while(p != NULL) {
++      struct process *next = p->next;
++      process_post(p, mutex->event, NULL);
++      p = next;
++    }
++  }
++}
+diff --git a/os/sys/process-mutex.h b/os/sys/process-mutex.h
+new file mode 100644
+index 0000000..8de3ce4
+--- /dev/null
++++ b/os/sys/process-mutex.h
+@@ -0,0 +1,157 @@
++/*
++ * Copyright (c) 2024, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/**
++ * \addtogroup sys
++ * @{
++ *
++ * \defgroup process-mutex Process mutexes
++ * @{
++ *
++ * This module implements mutexes for Contiki-NG processes.
++ *
++ * A process mutex provides exclusive access to a shared resource. Unlike
++ * low-level mutexes, process mutexes work with Contiki-NG processes and
++ * use the event system to notify waiting processes.
++ *
++ * A process mutex is initialized to an unlocked state. To acquire the
++ * mutex, a process calls process_mutex_try_lock(). If the mutex is free,
++ * the function returns true and the mutex is locked. If the mutex is
++ * already locked, the function returns false and the process is added to
++ * the wait queue. The process should then wait for the mutex event and
++ * retry the lock.
++ *
++ * When a process unlocks the mutex by calling process_mutex_unlock(),
++ * all waiting processes are notified via an event and can retry to
++ * acquire the mutex.
++ *
++ * Example usage:
++ * \code
++ * process_mutex_t mutex;
++ * 
++ * PROCESS_THREAD(my_process, ev, data)
++ * {
++ *   PROCESS_BEGIN();
++ *   
++ *   // Try to acquire the mutex (non-blocking)
++ *   while(!process_mutex_try_lock(&mutex)) {
++ *     // Wait for the mutex to be released
++ *     PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_NONE + 1);
++ *   }
++ *   
++ *   // Critical section - we have the mutex
++ *   // ...
++ *   
++ *   // Release the mutex
++ *   process_mutex_unlock(&mutex);
++ *   
++ *   PROCESS_END();
++ * }
++ * \endcode
++ */
++
++/**
++ * \file
++ * Header file for process mutexes
++ * \author
++ * Contiki-NG developers
++ */
++
++#ifndef PROCESS_MUTEX_H_
++#define PROCESS_MUTEX_H_
++
++#include <stdbool.h>
++#include "sys/process.h"
++
++/*---------------------------------------------------------------------------*/
++/**
++ * \brief Process mutex type
++ *
++ * This type represents a process mutex. It contains:
++ * - A pointer to the process currently holding the mutex (NULL if unlocked)
++ * - A linked list of processes waiting for the mutex
++ * - An event used to signal waiting processes
++ */
++typedef struct process_mutex {
++  struct process *holder;    /**< Process holding the mutex, or NULL if unlocked */
++  struct process *waiters;  /**< Linked list of waiting processes */
++  process_event_t event;     /**< Event to signal waiting processes */
++} process_mutex_t;
++/*---------------------------------------------------------------------------*/
++
++/**
++ * \brief Initialize a process mutex
++ * \param mutex A pointer to the mutex to initialize
++ *
++ * This function initializes a process mutex to the unlocked state.
++ * A mutex can also be initialized by simply zeroing it (e.g., declaring
++ * it as a static variable without explicit initialization).
++ *
++ * \hideinitializer
++ */
++#define process_mutex_init(mutex) \
++  do { \
++    (mutex)->holder = NULL; \
++    (mutex)->waiters = NULL; \
++    (mutex)->event = PROCESS_EVENT_NONE + 1; \
++  } while(0)
++
++/**
++ * \brief Try to lock a process mutex
++ * \param mutex A pointer to the mutex to lock
++ * \return true if the mutex was acquired, false if it is already locked
++ *
++ * This function attempts to acquire the mutex without blocking.
++ * If the mutex is unlocked, it is locked and the function returns true.
++ * If the mutex is already locked, the function returns false and the
++ * current process is added to the wait queue.
++ *
++ * The return value indicates whether the lock was acquired. If it returns
++ * false, the calling process has been registered as a waiter and should
++ * wait for the mutex event before retrying.
++ */
++bool process_mutex_try_lock(process_mutex_t *mutex);
++
++/**
++ * \brief Unlock a process mutex
++ * \param mutex A pointer to the mutex to unlock
++ *
++ * This function releases the mutex and notifies all waiting processes.
++ * It must only be called by the process that currently holds the mutex.
++ * After calling this function, waiting processes will receive the mutex
++ * event and can attempt to acquire the mutex again.
++ */
++void process_mutex_unlock(process_mutex_t *mutex);
++
++/*---------------------------------------------------------------------------*/
++
++#endif /* PROCESS_MUTEX_H_ */
++
++/** @} */
++/** @} */

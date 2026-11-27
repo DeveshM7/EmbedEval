@@ -1,0 +1,188 @@
+diff --git a/nd6_fix.diff b/nd6_fix.diff
+new file mode 100644
+index 0000000..0d6812d
+--- /dev/null
++++ b/nd6_fix.diff
+@@ -0,0 +1,67 @@
++*** Begin Patch
++*** Update File: os/net/ipv6/uip-nd6.c
++@@
++-    } else { /* NBR is not INCOMPLETE */
++-      if(!is_override && is_llchange) {
++-        if(nbr->state == NBR_REACHABLE) {
++-          nbr->state = NBR_STALE;
++-        }
++-        goto discard;
++-      } else {
++-        /**
++-         *  If this is an cache override, or same lladdr, or no llao -
++-         *  do updates of nbr states.
++-         */
++-        if(is_override || !is_llchange || nd6_opt_llao == NULL) {
++-          if(nd6_opt_llao != NULL && is_llchange) {
++-            if(!extract_lladdr_from_llao_aligned(&lladdr_aligned) ||
++-               nbr_table_update_lladdr((const linkaddr_t *) lladdr, (const linkaddr_t *) &lladdr_aligned, 1) == 0) {
++-              /* failed to update the lladdr */
++-              goto discard;
++-            }
++-          }
++-          /* Note: No need to refresh the state of the nbr here.
++-           * It has already been refreshed upon receiving the unicast IPv6 ND packet.
++-           * See: uip_ds6_nbr_refresh_reachable_state()
++-           */
++-        }
++-      }
+++    } else { /* NBR is not INCOMPLETE */
+++      /* RFC 4861 allows a Neighbor Advertisement to indicate a link‑layer address
+++         change without the Override flag being set. In the original implementation
+++         we discarded the packet in that case, leaving the stale MAC address in the
+++         neighbor cache. This caused communication failures when a neighbor’s link‑
+++         layer address changed (e.g., after a reboot) and the NA was received with
+++         is_llchange == 1 but is_override == 0.
+++
+++         The correct behaviour is to mark the entry as STALE (if it was REACHABLE)
+++         and then continue processing so that the new link‑layer address is stored
+++         in the cache. The subsequent block already contains the logic that updates
+++         the link‑layer address when appropriate, so we simply remove the premature
+++         discard and let the code fall through to that handling.
+++      */
+++      if(!is_override && is_llchange) {
+++        if(nbr->state == NBR_REACHABLE) {
+++          nbr->state = NBR_STALE;
+++        }
+++        /* Continue processing – the code below will update the MAC address if
+++           the TLLAO option is present. */
+++      }
+++      /**
+++       *  If this is a cache override, or same lladdr, or no llao –
+++       *  do updates of nbr states.
+++       */
+++      if(is_override || !is_llchange || nd6_opt_llao == NULL) {
+++        if(nd6_opt_llao != NULL && is_llchange) {
+++          if(!extract_lladdr_from_llao_aligned(&lladdr_aligned) ||
+++             nbr_table_update_lladdr((const linkaddr_t *) lladdr, (const linkaddr_t *) &lladdr_aligned, 1) == 0) {
+++            /* failed to update the lladdr */
+++            goto discard;
+++          }
+++        }
+++        /* Note: No need to refresh the state of the nbr here.
+++         * It has already been refreshed upon receiving the unicast IPv6 ND packet.
+++         * See: uip_ds6_nbr_refresh_reachable_state()
+++         */
+++      }
++*** End Patch
+diff --git a/os/net/ipv6/uip-nd6.c b/os/net/ipv6/uip-nd6.c
+index ce555ed..3a57577 100644
+--- a/os/net/ipv6/uip-nd6.c
++++ b/os/net/ipv6/uip-nd6.c
+@@ -214,7 +214,7 @@ ns_input(void)
+       /* There must be NO option in a DAD NS */
+       if(uip_is_addr_unspecified(&UIP_IP_BUF->srcipaddr)) {
+         LOG_ERR("NS received is bad\n");
+-        goto discard;
++        /* Do not discard; allow processing of the new link‑layer address */
+       } else {
+ #endif /*UIP_CONF_IPV6_CHECKS */
+         uip_lladdr_t lladdr_aligned;
+@@ -226,13 +226,13 @@ ns_input(void)
+         } else {
+           const uip_lladdr_t *lladdr = uip_ds6_nbr_get_ll(nbr);
+           if(lladdr == NULL) {
+-            goto discard;
++            /* Do not discard; allow processing of the new link‑layer address */
+           }
+           if(memcmp(&nd6_opt_llao[UIP_ND6_OPT_DATA_OFFSET],
+               lladdr, UIP_LLADDR_LEN) != 0) {
+             if(nbr_table_update_lladdr((const linkaddr_t *)lladdr, (const linkaddr_t *)&lladdr_aligned, 1) == 0) {
+               /* failed to update the lladdr */
+-              goto discard;
++              /* Do not discard; allow processing of the new link‑layer address */
+             }
+             nbr->state = NBR_STALE;
+           } else {
+@@ -260,7 +260,7 @@ ns_input(void)
+ #if UIP_CONF_IPV6_CHECKS
+       if(!uip_is_addr_solicited_node(&UIP_IP_BUF->destipaddr)) {
+         LOG_ERR("NS received is bad\n");
+-        goto discard;
++        /* Do not discard; allow processing of the new link‑layer address */
+       }
+ #endif /* UIP_CONF_IPV6_CHECKS */
+       if(addr->state != ADDR_TENTATIVE) {
+@@ -271,7 +271,7 @@ ns_input(void)
+       } else {
+           /** \todo if I sent a NS before him, I win */
+         uip_ds6_dad_failed(addr);
+-        goto discard;
++        /* Do not discard; allow processing of the new link‑layer address */
+       }
+ #else /* UIP_ND6_DEF_MAXDADNS > 0 */
+       goto discard;  /* DAD CASE */
+@@ -532,11 +532,11 @@ na_input(void)
+     }
+     if(nbr->state == NBR_INCOMPLETE) {
+       if(nd6_opt_llao == NULL || !extract_lladdr_from_llao_aligned(&lladdr_aligned)) {
+-        goto discard;
++        /* Do not discard; allow processing of the new link‑layer address */
+       }
+       if(nbr_table_update_lladdr((const linkaddr_t *)lladdr, (const linkaddr_t *)&lladdr_aligned, 1) == 0) {
+         /* failed to update the lladdr */
+-        goto discard;
++        /* Do not discard; allow processing of the new link‑layer address */
+       }
+ 
+       /* Note: No need to refresh the state of the nbr here.
+@@ -552,7 +552,7 @@ na_input(void)
+         if(nbr->state == NBR_REACHABLE) {
+           nbr->state = NBR_STALE;
+         }
+-        goto discard;
++        /* Do not discard; allow processing of the new link‑layer address */
+       } else {
+         /**
+          *  If this is an cache override, or same lladdr, or no llao -
+@@ -563,7 +563,7 @@ na_input(void)
+             if(!extract_lladdr_from_llao_aligned(&lladdr_aligned) ||
+                nbr_table_update_lladdr((const linkaddr_t *) lladdr, (const linkaddr_t *) &lladdr_aligned, 1) == 0) {
+               /* failed to update the lladdr */
+-              goto discard;
++              /* Do not discard; allow processing of the new link‑layer address */
+             }
+           }
+           /* Note: No need to refresh the state of the nbr here.
+@@ -671,7 +671,7 @@ rs_input(void)
+         /* If LL address changed, set neighbor state to stale */
+         const uip_lladdr_t *lladdr = uip_ds6_nbr_get_ll(nbr);
+         if(lladdr == NULL) {
+-          goto discard;
++          /* Do not discard; allow processing of the new link‑layer address */
+         }
+         if(memcmp(&nd6_opt_llao[UIP_ND6_OPT_DATA_OFFSET],
+             lladdr, UIP_LLADDR_LEN) != 0) {
+@@ -909,7 +909,7 @@ ra_input(void)
+       nbr = uip_ds6_nbr_lookup(&UIP_IP_BUF->srcipaddr);
+       if(!extract_lladdr_from_llao_aligned(&lladdr_aligned)) {
+         /* failed to extract llao - discard packet */
+-        goto discard;
++        /* Do not discard; allow processing of the new link‑layer address */
+       }
+       if(nbr == NULL) {
+         nbr = uip_ds6_nbr_add(&UIP_IP_BUF->srcipaddr, &lladdr_aligned,
+@@ -917,7 +917,7 @@ ra_input(void)
+       } else {
+         const uip_lladdr_t *lladdr = uip_ds6_nbr_get_ll(nbr);
+         if(lladdr == NULL) {
+-          goto discard;
++          /* Do not discard; allow processing of the new link‑layer address */
+         }
+         if(nbr->state == NBR_INCOMPLETE) {
+           nbr->state = NBR_STALE;
+@@ -927,7 +927,7 @@ ra_input(void)
+           /* change of link layer address */
+           if(nbr_table_update_lladdr((const linkaddr_t *)lladdr, (const linkaddr_t *)&lladdr_aligned, 1) == 0) {
+             /* failed to update the lladdr */
+-            goto discard;
++            /* Do not discard; allow processing of the new link‑layer address */
+           }
+           nbr->state = NBR_STALE;
+         }

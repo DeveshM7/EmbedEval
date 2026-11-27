@@ -1,0 +1,967 @@
+diff --git a/finalize_func.c b/finalize_func.c
+new file mode 100644
+index 0000000..f87ac5e
+--- /dev/null
++++ b/finalize_func.c
+@@ -0,0 +1,31 @@
++static void
++sha_256_finalize(uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  if(!state_initialized) {
++    sha_256_init();
++  }
++
++  /* Calculate total length in bits */
++  uint64_t bitlen = current_state.length * 8;
++  
++  /* Append 0x80 marker */
++  current_state.buf[current_state.curlen++] = 0x80;
++  
++  /* Add zero padding */
++  while(current_state.curlen < SHA_256_BLOCK_SIZE) {
++    current_state.buf[current_state.curlen++] = 0x00;
++  }
++  
++  /* Append length in the last 8 bytes */
++  for(int i = 0; i < 8; i++) {
++    current_state.buf[56 + i] = (bitlen >> (56 - i * 8)) & 0xFF;
++  }
++  
++  /* Process final block */
++  sha256_transform(current_state.buf);
++  
++  /* Output digest */
++  for(int i = 0; i < 8; i++) {
++    u32_to_bytes(current_state.state[i], digest + i * 4);
++  }
++}
+diff --git a/hkdf_fix.patch b/hkdf_fix.patch
+new file mode 100644
+index 0000000..f5608df
+--- /dev/null
++++ b/hkdf_fix.patch
+@@ -0,0 +1,53 @@
++--- os/lib/sha-256.c.orig
+++++ os/lib/sha-256.c
++@@ -280,51 +280,42 @@ void
++ sha_256_hkdf_expand(const uint8_t *prk, size_t prk_len, const uint8_t *info, size_t info_len, uint8_t *okm, uint_fast16_t okm_len)
++ {
++   uint8_t t[SHA_256_DIGEST_LENGTH];
++-  uint8_t temp[SHA_256_BLOCK_SIZE];
++   uint_fast16_t remaining = okm_len;
++   uint_fast16_t okm_offset = 0;
++   uint8_t counter = 1;
++   
+++  /* Buffer for HMAC input: previous T || info || counter */
+++  uint8_t hmac_input[SHA_256_DIGEST_LENGTH + info_len + 1];
+++
++   while(remaining > 0) {
++     size_t copylen;
++     
++-    if(counter == 1) {
++-      /* First round: T(1) = HMAC(PRK, info || 0x01) */
++-      sha_256_hmac(prk, prk_len, info, info_len, temp);
++-      temp[SHA_256_DIGEST_LENGTH] = counter;
++-      sha_256_hmac(prk, prk_len, temp, info_len + 1, t);
++-    } else {
++-      /* Later rounds: T(i) = HMAC(PRK, T(i-1) || info || i) */
++-      memcpy(temp, t, SHA_256_DIGEST_LENGTH);
++-      memcpy(temp + SHA_256_DIGEST_LENGTH, info, info_len);
++-      temp[SHA_256_DIGEST_LENGTH + info_len] = counter;
++-      sha_256_hmac(prk, prk_len, temp, SHA_256_DIGEST_LENGTH + info_len + 1, t);
++-    }
+++    if(counter == 1) {
+++      /* First round: T(1) = HMAC(PRK, info || 0x01) */
+++      memcpy(hmac_input, info, info_len);
+++      hmac_input[info_len] = counter;
+++      sha_256_hmac(prk, prk_len, hmac_input, info_len + 1, t);
+++    } else {
+++      /* Later rounds: T(i) = HMAC(PRK, T(i-1) || info || i) */
+++      memcpy(hmac_input, t, SHA_256_DIGEST_LENGTH);
+++      memcpy(hmac_input + SHA_256_DIGEST_LENGTH, info, info_len);
+++      hmac_input[SHA_256_DIGEST_LENGTH + info_len] = counter;
+++      sha_256_hmac(prk, prk_len, hmac_input, SHA_256_DIGEST_LENGTH + info_len + 1, t);
+++    }
++     
++-    /* Copy to output */
++-    copylen = (remaining < SHA_256_DIGEST_LENGTH) ? remaining : SHA_256_DIGEST_LENGTH;
++-    memcpy(okm + (okm_len - remaining), t, copylen);
++-    remaining -= copylen;
+++    copylen = (remaining < SHA_256_DIGEST_LENGTH) ? remaining : SHA_256_DIGEST_LENGTH;
+++    memcpy(okm + okm_offset, t, copylen);
+++    okm_offset += copylen;
+++    remaining -= copylen;
++     counter++;
++   }
++ }
+diff --git a/os/lib/sha-256.c b/os/lib/sha-256.c
+new file mode 100644
+index 0000000..a887f5a
+--- /dev/null
++++ b/os/lib/sha-256.c
+@@ -0,0 +1,330 @@
++/*
++ * Copyright (c) 2023, Contiki-NG
++ * All rights reserved.
++ */
++
++#include "lib/sha-256.h"
++#include <string.h>
++
++/*---------------------------------------------------------------------------*/
++/* SHA-256 constants */
++static const uint32_t K[64] = {
++  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
++};
++
++/* SHA-256 initial hash values */
++static const uint32_t H0[8] = {
++  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
++};
++
++/*---------------------------------------------------------------------------*/
++/* Right rotate function */
++#define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
++
++/* SHA-256 functions */
++#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
++#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++#define SIGMA0(x) (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
++#define SIGMA1(x) (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
++#define sigma0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ ((x) >> 3))
++#define sigma1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ ((x) >> 10))
++
++/*---------------------------------------------------------------------------*/
++/* Global SHA-256 state */
++static sha_256_checkpoint_t ctx;
++
++/*---------------------------------------------------------------------------*/
++static uint32_t
++bytes_to_u32(const uint8_t *bytes)
++{
++  return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
++         ((uint32_t)bytes[2] << 8) | ((uint32_t)bytes[3]);
++}
++
++static void
++u32_to_bytes(uint32_t val, uint8_t *bytes)
++{
++  bytes[0] = (val >> 24) & 0xFF;
++  bytes[1] = (val >> 16) & 0xFF;
++  bytes[2] = (val >> 8) & 0xFF;
++  bytes[3] = val & 0xFF;
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha256_transform(const uint8_t *chunk)
++{
++  uint32_t w[64];
++  uint32_t a, b, c, d, e, f, g, h;
++  uint32_t t1, t2;
++  int i;
++
++  /* Prepare message schedule */
++  for(i = 0; i < 16; i++) {
++    w[i] = bytes_to_u32(chunk + i * 4);
++  }
++  for(i = 16; i < 64; i++) {
++    w[i] = sigma1(w[i-2]) + w[i-7] + sigma0(w[i-15]) + w[i-16];
++  }
++
++  /* Initialize working variables */
++  a = ctx.state[0];
++  b = ctx.state[1];
++  c = ctx.state[2];
++  d = ctx.state[3];
++  e = ctx.state[4];
++  f = ctx.state[5];
++  g = ctx.state[6];
++  h = ctx.state[7];
++
++  /* Compression loop */
++  for(i = 0; i < 64; i++) {
++    t1 = h + SIGMA1(e) + CH(e, f, g) + K[i] + w[i];
++    t2 = SIGMA0(a) + MAJ(a, b, c);
++    h = g;
++    g = f;
++    f = e;
++    e = d + t1;
++    d = c;
++    c = b;
++    b = a;
++    a = t1 + t2;
++  }
++
++  /* Update hash values */
++  ctx.state[0] += a;
++  ctx.state[1] += b;
++  ctx.state[2] += c;
++  ctx.state[3] += d;
++  ctx.state[4] += e;
++  ctx.state[5] += f;
++  ctx.state[6] += g;
++  ctx.state[7] += h;
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_init(void)
++{
++  memcpy(ctx.state, H0, sizeof(H0));
++  ctx.length = 0;
++  ctx.curlen = 0;
++  memset(ctx.buf, 0, sizeof(ctx.buf));
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_update(const uint8_t *data, size_t len)
++{
++  size_t i = 0;
++  
++  while(i < len) {
++    size_t copylen = SHA_256_BLOCK_SIZE - ctx.curlen;
++    if(copylen > len - i) {
++      copylen = len - i;
++    }
++    
++    memcpy(ctx.buf + ctx.curlen, data + i, copylen);
++    ctx.curlen += copylen;
++    i += copylen;
++    ctx.length += copylen;
++    
++    if(ctx.curlen == SHA_256_BLOCK_SIZE) {
++      sha256_transform(ctx.buf);
++      ctx.curlen = 0;
++    }
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_finalize(uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  uint64_t bitlen;
++  uint32_t padlen;
++
++  /* Calculate total length in bits */
++  bitlen = ctx.length * 8;
++  
++  /* Pad to bring to 56 mod 64 */
++  padlen = (56 - (ctx.length % SHA_256_BLOCK_SIZE)) % SHA_256_BLOCK_SIZE;
++  if(padlen < 1) {
++    padlen += SHA_256_BLOCK_SIZE;
++  }
++  
++  /* Append 0x80 marker */
++  ctx.buf[ctx.curlen++] = 0x80;
++  
++  /* Pad with zeros */
++  while(padlen > 0) {
++    ctx.buf[ctx.curlen++] = 0x00;
++    padlen--;
++  }
++  
++  /* If this block is full, process it */
++  if(ctx.curlen == SHA_256_BLOCK_SIZE) {
++    sha256_transform(ctx.buf);
++    ctx.curlen = 0;
++  }
++  
++  /* Add length (64 bits, big-endian) */
++  for(int i = 0; i < 8; i++) {
++    ctx.buf[ctx.curlen++] = (bitlen >> (56 - i * 8)) & 0xFF;
++  }
++  
++  /* Process final block */
++  sha256_transform(ctx.buf);
++  
++  /* Output digest */
++  for(int i = 0; i < 8; i++) {
++    u32_to_bytes(ctx.state[i], digest + i * 4);
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_create_checkpoint(sha_256_checkpoint_t *cp)
++{
++  if(cp) {
++    memcpy(cp, &ctx, sizeof(sha_256_checkpoint_t));
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_restore_checkpoint(const sha_256_checkpoint_t *cp)
++{
++  if(cp) {
++    memcpy(&ctx, cp, sizeof(sha_256_checkpoint_t));
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_hash_impl(const uint8_t *data, size_t len, uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  sha_256_init();
++  sha_256_update(data, len);
++  sha_256_finalize(digest);
++}
++
++/*---------------------------------------------------------------------------*/
++const struct sha_256_driver sha_256_driver = {
++  .init = sha_256_init,
++  .update = sha_256_update,
++  .finalize = sha_256_finalize,
++  .create_checkpoint = sha_256_create_checkpoint,
++  .restore_checkpoint = sha_256_restore_checkpoint,
++  .hash = sha_256_hash_impl
++};
++
++/*---------------------------------------------------------------------------*/
++void
++sha_256_hash(const uint8_t *data, size_t len, uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  SHA_256.hash(data, len, digest);
++}
++
++/*---------------------------------------------------------------------------*/
++void
++sha_256_hmac(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len, uint8_t hmac[static SHA_256_DIGEST_LENGTH])
++{
++  uint8_t k_opad[SHA_256_BLOCK_SIZE];
++  uint8_t k_ipad[SHA_256_BLOCK_SIZE];
++  uint8_t inner_hash[SHA_256_DIGEST_LENGTH];
++  int i;
++
++  /* Prepare inner and outer pads */
++  if(key_len > SHA_256_BLOCK_SIZE) {
++    /* If key is longer than block size, hash it first */
++    SHA_256.hash(key, key_len, k_ipad);
++    memset(k_ipad + SHA_256_DIGEST_LENGTH, 0, SHA_256_BLOCK_SIZE - SHA_256_DIGEST_LENGTH);
++  } else {
++    memcpy(k_ipad, key, key_len);
++    memset(k_ipad + key_len, 0, SHA_256_BLOCK_SIZE - key_len);
++  }
++  
++  memcpy(k_opad, k_ipad, SHA_256_BLOCK_SIZE);
++  
++  /* XOR pads */
++  for(i = 0; i < SHA_256_BLOCK_SIZE; i++) {
++    k_ipad[i] ^= 0x36;
++    k_opad[i] ^= 0x5C;
++  }
++  
++  /* Inner hash: H(K ^ ipad || data) */
++  SHA_256.init();
++  SHA_256.update(k_ipad, SHA_256_BLOCK_SIZE);
++  SHA_256.update(data, data_len);
++  SHA_256.finalize(inner_hash);
++  
++  /* Outer hash: H(K ^ opad || inner_hash) */
++  SHA_256.init();
++  SHA_256.update(k_opad, SHA_256_BLOCK_SIZE);
++  SHA_256.update(inner_hash, SHA_256_DIGEST_LENGTH);
++  SHA_256.finalize(hmac);
++}
++
++/*---------------------------------------------------------------------------*/
++void
++sha_256_hkdf_extract(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, size_t ikm_len, uint8_t prk[static SHA_256_DIGEST_LENGTH])
++{
++  if(salt == NULL) {
++    /* If salt is not provided, use a string of zeros */
++    uint8_t zero_salt[SHA_256_DIGEST_LENGTH] = {0};
++    sha_256_hmac(zero_salt, sizeof(zero_salt), ikm, ikm_len, prk);
++  } else {
++    sha_256_hmac(salt, salt_len, ikm, ikm_len, prk);
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++void
++sha_256_hkdf_expand(const uint8_t *prk, size_t prk_len, const uint8_t *info, size_t info_len, uint8_t *okm, uint_fast16_t okm_len)
++{
++  uint8_t t[SHA_256_DIGEST_LENGTH];
++  uint_fast16_t remaining = okm_len;
++  uint_fast16_t okm_offset = 0;
++  uint8_t counter = 1;
++  
++  while(remaining > 0) {
++    size_t copylen;
++    
++    if(counter == 1) {
++      /* First round: HMAC(PRK, info || 0x01) */
++      SHA_256.init();
++      SHA_256.update(info, info_len);
++      SHA_256.update(&counter, 1);
++      SHA_256.finalize(t);
++    } else {
++      /* Later rounds: HMAC(PRK, T(i-1) || info || i) */
++      SHA_256.init();
++      SHA_256.update(t, SHA_256_DIGEST_LENGTH);
++      SHA_256.update(info, info_len);
++      SHA_256.update(&counter, 1);
++      SHA_256.finalize(t);
++    }
++    
++    copylen = (remaining < SHA_256_DIGEST_LENGTH) ? remaining : SHA_256_DIGEST_LENGTH;
++    memcpy(okm + okm_offset, t, copylen);
++    okm_offset += copylen;
++    remaining -= copylen;
++    counter++;
++  }
++}
+diff --git a/os/lib/sha-256.c.bak b/os/lib/sha-256.c.bak
+new file mode 100644
+index 0000000..ef0e2eb
+--- /dev/null
++++ b/os/lib/sha-256.c.bak
+@@ -0,0 +1,361 @@
++/*
++ * Copyright (c) 2023, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/**
++ * \file
++ *         Platform-independent SHA-256 implementation
++ * \author
++ *         Contiki-NG
++ */
++
++#include "lib/sha-256.h"
++#include <string.h>
++
++/*---------------------------------------------------------------------------*/
++/* SHA-256 constants */
++static const uint32_t K[64] = {
++  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
++};
++
++/* SHA-256 initial hash values */
++static const uint32_t H0[8] = {
++  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
++};
++
++/*---------------------------------------------------------------------------*/
++/* Right rotate function */
++#define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
++
++/* SHA-256 functions */
++#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
++#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++#define SIGMA0(x) (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
++#define SIGMA1(x) (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
++#define sigma0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ ((x) >> 3))
++#define sigma1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ ((x) >> 10))
++
++/*---------------------------------------------------------------------------*/
++/* Global SHA-256 state */
++static sha_256_checkpoint_t current_state;
++static uint8_t state_initialized;
++
++/*---------------------------------------------------------------------------*/
++static uint32_t
++bytes_to_u32(const uint8_t *bytes)
++{
++  return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
++         ((uint32_t)bytes[2] << 8) | ((uint32_t)bytes[3]);
++}
++
++static void
++u32_to_bytes(uint32_t val, uint8_t *bytes)
++{
++  bytes[0] = (val >> 24) & 0xFF;
++  bytes[1] = (val >> 16) & 0xFF;
++  bytes[2] = (val >> 8) & 0xFF;
++  bytes[3] = val & 0xFF;
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha256_transform(const uint8_t *chunk)
++{
++  uint32_t w[64];
++  uint32_t a, b, c, d, e, f, g, h;
++  uint32_t t1, t2;
++  int i;
++
++  /* Prepare message schedule */
++  for(i = 0; i < 16; i++) {
++    w[i] = bytes_to_u32(chunk + i * 4);
++  }
++  for(i = 16; i < 64; i++) {
++    w[i] = sigma1(w[i-2]) + w[i-7] + sigma0(w[i-15]) + w[i-16];
++  }
++
++  /* Initialize working variables */
++  a = current_state.state[0];
++  b = current_state.state[1];
++  c = current_state.state[2];
++  d = current_state.state[3];
++  e = current_state.state[4];
++  f = current_state.state[5];
++  g = current_state.state[6];
++  h = current_state.state[7];
++
++  /* Compression loop */
++  for(i = 0; i < 64; i++) {
++    t1 = h + SIGMA1(e) + CH(e, f, g) + K[i] + w[i];
++    t2 = SIGMA0(a) + MAJ(a, b, c);
++    h = g;
++    g = f;
++    f = e;
++    e = d + t1;
++    d = c;
++    c = b;
++    b = a;
++    a = t1 + t2;
++  }
++
++  /* Update hash values */
++  current_state.state[0] += a;
++  current_state.state[1] += b;
++  current_state.state[2] += c;
++  current_state.state[3] += d;
++  current_state.state[4] += e;
++  current_state.state[5] += f;
++  current_state.state[6] += g;
++  current_state.state[7] += h;
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_init(void)
++{
++  memcpy(current_state.state, H0, sizeof(H0));
++  current_state.length = 0;
++  current_state.curlen = 0;
++  memset(current_state.buf, 0, sizeof(current_state.buf));
++  state_initialized = 1;
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_update(const uint8_t *data, size_t len)
++{
++  if(!state_initialized) {
++    sha_256_init();
++  }
++
++  size_t i = 0;
++  
++  while(i < len) {
++    size_t copylen = SHA_256_BLOCK_SIZE - current_state.curlen;
++    if(copylen > len - i) {
++      copylen = len - i;
++    }
++    
++    memcpy(current_state.buf + current_state.curlen, data + i, copylen);
++    current_state.curlen += copylen;
++    i += copylen;
++    current_state.length += copylen;
++    
++    if(current_state.curlen == SHA_256_BLOCK_SIZE) {
++      sha256_transform(current_state.buf);
++      current_state.curlen = 0;
++    }
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_finalize(uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  if(!state_initialized) {
++    sha_256_init();
++  }
++
++  /* Pad the message */
++  uint64_t bitlen = current_state.length * 8;
++  uint8_t padlen = SHA_256_BLOCK_SIZE - (current_state.curlen % SHA_256_BLOCK_SIZE);
++  if(padlen < 9) {
++    padlen += SHA_256_BLOCK_SIZE;
++  }
++  
++  /* Append 0x80 then pad with zeros */
++  current_state.buf[current_state.curlen++] = 0x80;
++  while(current_state.curlen < padlen - 8) {
++    current_state.buf[current_state.curlen++] = 0x00;
++  }
++  
++  /* Append length */
++  for(int i = 0; i < 8; i++) {
++    current_state.buf[current_state.curlen++] = (bitlen >> (56 - i * 8)) & 0xFF;
++  }
++  
++  /* Process final block(s) */
++  for(size_t i = 0; i < current_state.curlen; i += SHA_256_BLOCK_SIZE) {
++    sha256_transform(current_state.buf + i);
++  }
++  
++  /* Output digest */
++  for(int i = 0; i < 8; i++) {
++    u32_to_bytes(current_state.state[i], digest + i * 4);
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_create_checkpoint(sha_256_checkpoint_t *cp)
++{
++  if(cp && state_initialized) {
++    memcpy(cp, &current_state, sizeof(sha_256_checkpoint_t));
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_restore_checkpoint(const sha_256_checkpoint_t *cp)
++{
++  if(cp) {
++    memcpy(&current_state, cp, sizeof(sha_256_checkpoint_t));
++    state_initialized = 1;
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++static void
++sha_256_hash(const uint8_t *data, size_t len, uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  sha_256_init();
++  sha_256_update(data, len);
++  sha_256_finalize(digest);
++}
++
++/*---------------------------------------------------------------------------*/
++const struct sha_256_driver sha_256_driver = {
++  .init = sha_256_init,
++  .update = sha_256_update,
++  .finalize = sha_256_finalize,
++  .create_checkpoint = sha_256_create_checkpoint,
++  .restore_checkpoint = sha_256_restore_checkpoint,
++  .hash = sha_256_hash
++};
++
++/*---------------------------------------------------------------------------*/
++void
++sha_256_hash(const uint8_t *data, size_t len, uint8_t digest[static SHA_256_DIGEST_LENGTH])
++{
++  SHA_256.hash(data, len, digest);
++}
++
++/*---------------------------------------------------------------------------*/
++void
++sha_256_hmac(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len, uint8_t hmac[static SHA_256_DIGEST_LENGTH])
++{
++  uint8_t k_opad[SHA_256_BLOCK_SIZE];
++  uint8_t k_ipad[SHA_256_BLOCK_SIZE];
++  uint8_t inner_hash[SHA_256_DIGEST_LENGTH];
++  int i;
++
++  /* Prepare inner and outer pads */
++  if(key_len > SHA_256_BLOCK_SIZE) {
++    /* If key is longer than block size, hash it first */
++    SHA_256.hash(key, key_len, k_ipad);
++    memset(k_ipad + SHA_256_DIGEST_LENGTH, 0, SHA_256_BLOCK_SIZE - SHA_256_DIGEST_LENGTH);
++  } else {
++    memcpy(k_ipad, key, key_len);
++    memset(k_ipad + key_len, 0, SHA_256_BLOCK_SIZE - key_len);
++  }
++  
++  memcpy(k_opad, k_ipad, SHA_256_BLOCK_SIZE);
++  
++  /* XOR pads */
++  for(i = 0; i < SHA_256_BLOCK_SIZE; i++) {
++    k_ipad[i] ^= 0x36;
++    k_opad[i] ^= 0x5C;
++  }
++  
++  /* Inner hash: H(K ^ ipad || data) */
++  SHA_256.init();
++  SHA_256.update(k_ipad, SHA_256_BLOCK_SIZE);
++  SHA_256.update(data, data_len);
++  SHA_256.finalize(inner_hash);
++  
++  /* Outer hash: H(K ^ opad || inner_hash) */
++  SHA_256.init();
++  SHA_256.update(k_opad, SHA_256_BLOCK_SIZE);
++  SHA_256.update(inner_hash, SHA_256_DIGEST_LENGTH);
++  SHA_256.finalize(hmac);
++}
++
++/*---------------------------------------------------------------------------*/
++void
++sha_256_hkdf_extract(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, size_t ikm_len, uint8_t prk[static SHA_256_DIGEST_LENGTH])
++{
++  if(salt == NULL) {
++    /* If salt is not provided, use a string of zeros */
++    uint8_t zero_salt[SHA_256_DIGEST_LENGTH] = {0};
++    sha_256_hmac(zero_salt, sizeof(zero_salt), ikm, ikm_len, prk);
++  } else {
++    sha_256_hmac(salt, salt_len, ikm, ikm_len, prk);
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++void
++sha_256_hkdf_expand(const uint8_t *prk, size_t prk_len, const uint8_t *info, size_t info_len, uint8_t *okm, uint_fast16_t okm_len)
++{
++  uint8_t t[SHA_256_BLOCK_SIZE];
++  uint8_t temp[SHA_256_BLOCK_SIZE];
++  uint_fast16_t remaining = okm_len;
++  uint8_t counter = 1;
++  
++  while(remaining > 0) {
++    size_t copylen;
++    
++    if(counter == 1) {
++      /* First round: T(1) = HMAC(PRK, info || 0x01) */
++      sha_256_hmac(prk, prk_len, info, info_len, temp);
++      temp[SHA_256_DIGEST_LENGTH] = counter;
++      sha_256_hmac(prk, prk_len, temp, info_len + 1, t);
++    } else {
++      /* Later rounds: T(i) = HMAC(PRK, T(i-1) || info || i) */
++      memcpy(temp, t, SHA_256_DIGEST_LENGTH);
++      memcpy(temp + SHA_256_DIGEST_LENGTH, info, info_len);
++      temp[SHA_256_DIGEST_LENGTH + info_len] = counter;
++      sha_256_hmac(prk, prk_len, temp, SHA_256_DIGEST_LENGTH + info_len + 1, t);
++    }
++    
++    /* Copy to output */
++    copylen = (remaining < SHA_256_DIGEST_LENGTH) ? remaining : SHA_256_DIGEST_LENGTH;
++    memcpy(okm + (okm_len - remaining), t, copylen);
++    remaining -= copylen;
++    counter++;
++  }
++}
+diff --git a/os/lib/sha-256.h b/os/lib/sha-256.h
+new file mode 100644
+index 0000000..3850390
+--- /dev/null
++++ b/os/lib/sha-256.h
+@@ -0,0 +1,135 @@
++/*
++ * Copyright (c) 2023, Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/**
++ * \file
++ *         Platform-independent SHA-256 implementation
++ * \author
++ *         Contiki-NG
++ */
++
++#ifndef SHA_256_H_
++#define SHA_256_H_
++
++#include "contiki.h"
++#include <stdint.h>
++#include <stddef.h>
++
++/*---------------------------------------------------------------------------*/
++/** \name SHA-256 constants
++ * @{
++ */
++#define SHA_256_DIGEST_LENGTH 32
++#define SHA_256_BLOCK_SIZE     64
++/** @} */
++
++/*---------------------------------------------------------------------------*/
++/** \name SHA-256 checkpoint type
++ * @{
++ */
++typedef struct {
++  uint64_t length;
++  uint32_t state[8];
++  uint32_t curlen;
++  uint8_t  buf[SHA_256_BLOCK_SIZE];
++} sha_256_checkpoint_t;
++/** @} */
++
++/*---------------------------------------------------------------------------*/
++/** \name SHA-256 driver structure
++ * @{
++ */
++struct sha_256_driver {
++  void (* init)(void);
++  void (* update)(const uint8_t *data, size_t len);
++  void (* finalize)(uint8_t digest[static SHA_256_DIGEST_LENGTH]);
++  void (* create_checkpoint)(sha_256_checkpoint_t *cp);
++  void (* restore_checkpoint)(const sha_256_checkpoint_t *cp);
++  void (* hash)(const uint8_t *data, size_t len, uint8_t digest[static SHA_256_DIGEST_LENGTH]);
++};
++
++#ifdef SHA_256_CONF
++#define SHA_256            SHA_256_CONF
++#else /* SHA_256_CONF */
++#define SHA_256            sha_256_driver
++#endif /* SHA_256_CONF */
++
++extern const struct sha_256_driver SHA_256;
++/** @} */
++
++/*---------------------------------------------------------------------------*/
++/** \name SHA-256 convenience functions
++ * @{
++ */
++
++/**
++ * \brief One-shot SHA-256 hash computation
++ * \param data Pointer to input data
++ * \param len Length of input data in bytes
++ * \param digest Output buffer for digest (must be SHA_256_DIGEST_LENGTH bytes)
++ */
++void sha_256_hash(const uint8_t *data, size_t len, uint8_t digest[static SHA_256_DIGEST_LENGTH]);
++
++/**
++ * \brief Compute HMAC-SHA-256 per RFC 2104
++ * \param key Pointer to HMAC key
++ * \param key_len Length of HMAC key in bytes
++ * \param data Pointer to input data
++ * \param data_len Length of input data in bytes
++ * \param hmac Output buffer for HMAC (must be SHA_256_DIGEST_LENGTH bytes)
++ */
++void sha_256_hmac(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len, uint8_t hmac[static SHA_256_DIGEST_LENGTH]);
++
++/**
++ * \brief HKDF extract function per RFC 5869
++ * \param salt Pointer to salt value
++ * \param salt_len Length of salt in bytes
++ * \param ikm Pointer to input keying material
++ * \param ikm_len Length of IKM in bytes
++ * \param prk Output buffer for pseudorandom key (must be SHA_256_DIGEST_LENGTH bytes)
++ */
++void sha_256_hkdf_extract(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, size_t ikm_len, uint8_t prk[static SHA_256_DIGEST_LENGTH]);
++
++/**
++ * \brief HKDF expand function per RFC 5869
++ * \param prk Pointer to pseudorandom key
++ * \param prk_len Length of PRK in bytes (should be SHA_256_DIGEST_LENGTH)
++ * \param info Pointer to context info
++ * \param info_len Length of info in bytes
++ * \param okm Output buffer for output keying material
++ * \param okm_len Length of OKM to generate in bytes
++ */
++void sha_256_hkdf_expand(const uint8_t *prk, size_t prk_len, const uint8_t *info, size_t info_len, uint8_t *okm, uint_fast16_t okm_len);
++
++/** @} */
++
++#endif /* SHA_256_H_ */
+diff --git a/test_abc.c b/test_abc.c
+new file mode 100644
+index 0000000..bb8f422
+--- /dev/null
++++ b/test_abc.c
+@@ -0,0 +1,21 @@
++#include <stdio.h>
++#include <string.h>
++
++typedef unsigned char uint8_t;
++
++void sha_256_hash(const uint8_t *data, size_t len, uint8_t digest[32]);
++
++const char *abc = "abc";
++uint8_t digest[32];
++
++int main() {
++    sha_256_hash((const uint8_t *)abc, strlen(abc), digest);
++    
++    printf("Result: ");
++    for(int i = 0; i < 32; i++) {
++        printf("%02x", digest[i]);
++    }
++    printf("\n");
++    
++    return 0;
++}

@@ -1,0 +1,214 @@
+diff --git a/os/lib/cbor.c b/os/lib/cbor.c
+index 5f71c91..ef15a14 100644
+--- a/os/lib/cbor.c
++++ b/os/lib/cbor.c
+@@ -312,6 +312,171 @@ cbor_end_reader(cbor_reader_state_t *state)
+   return state->cbor_size == 0;
+ }
+ /*---------------------------------------------------------------------------*/
++/*---------------------------------------------------------------------------*/
++const uint8_t *
++cbor_get_position(cbor_reader_state_t *state)
++{
++  return state->cbor;
++}
++/*---------------------------------------------------------------------------*/
++size_t
++cbor_get_remaining(cbor_reader_state_t *state)
++{
++  return state->cbor_size;
++}
++/*---------------------------------------------------------------------------*/
++static bool
++skip_item(cbor_reader_state_t *state)
++{
++  uint64_t count;
++  size_t bytes_to_read;
++
++  if(!state->cbor_size) {
++    return false;
++  }
++
++  uint8_t first_byte = *state->cbor;
++  uint8_t major_type = first_byte & 0xE0;
++  uint8_t ai = first_byte & 0x1F;
++
++  /* Check for break stop code */
++  if(first_byte == 0xFF) {
++    return false;
++  }
++
++  /* Check for reserved additional information values */
++  if((ai >= 28) && (ai <= 30)) {
++    return false;
++  }
++
++  /* Consume first byte */
++  state->cbor++;
++  state->cbor_size--;
++
++  /* Read argument if needed for major types 0-6 */
++  if(major_type != CBOR_MAJOR_TYPE_SIMPLE) {
++    if(ai < CBOR_SIZE_1) {
++      /* Value is in ai itself */
++      count = ai;
++    } else {
++      /* Need to read additional bytes as argument */
++      switch(ai) {
++      case CBOR_SIZE_1:
++        bytes_to_read = 1;
++        break;
++      case CBOR_SIZE_2:
++        bytes_to_read = 2;
++        break;
++      case CBOR_SIZE_4:
++        bytes_to_read = 4;
++        break;
++      case CBOR_SIZE_8:
++        bytes_to_read = 8;
++        break;
++      default:
++        return false;
++      }
++
++      if(bytes_to_read > state->cbor_size) {
++        return false;
++      }
++
++      /* Read the argument value */
++      count = 0;
++      while(bytes_to_read > 0) {
++        count <<= 8;
++        count += *state->cbor++;
++        state->cbor_size--;
++        bytes_to_read--;
++      }
++    }
++  }
++
++  /* Now handle based on major type */
++  switch(major_type) {
++  case CBOR_MAJOR_TYPE_UNSIGNED:
++  case CBOR_MAJOR_TYPE_SIGNED:
++    /* Just consume the argument bytes (already done above) */
++    return true;
++
++  case CBOR_MAJOR_TYPE_BYTE_STRING:
++  case CBOR_MAJOR_TYPE_TEXT_STRING:
++    /* Skip the string payload */
++    if(count > state->cbor_size) {
++      return false;
++    }
++    state->cbor += count;
++    state->cbor_size -= count;
++    return true;
++
++  case CBOR_MAJOR_TYPE_ARRAY:
++    /* Skip count items */
++    while(count--) {
++      if(!skip_item(state)) {
++        return false;
++      }
++    }
++    return true;
++
++  case CBOR_MAJOR_TYPE_MAP:
++    /* Skip 2*count items (key-value pairs) */
++    count *= 2;
++    while(count--) {
++      if(!skip_item(state)) {
++        return false;
++      }
++    }
++    return true;
++
++  case CBOR_MAJOR_TYPE_SIMPLE:
++    /* Handle simple values and floats */
++    /* If first byte is 0xC0-0xDF, it is a float (major type 7) */
++    if((first_byte >= 0xC0) && (first_byte <= 0xDF)) {
++      /* Float: ai tells us the size */
++      switch(ai) {
++      case 25: /* half-precision, 2 bytes */
++        bytes_to_read = 2;
++        break;
++      case 26: /* single-precision, 4 bytes */
++        bytes_to_read = 4;
++        break;
++      case 27: /* double-precision, 8 bytes */
++        bytes_to_read = 8;
++        break;
++      default:
++        /* ai < 25: simple value (already consumed the first byte) */
++        return true;
++      }
++      if(bytes_to_read > state->cbor_size) {
++        return false;
++      }
++      state->cbor += bytes_to_read;
++      state->cbor_size -= bytes_to_read;
++      return true;
++    }
++    /* For major type 6 (simple values), handle one-byte simple values (ai=24) */
++    if(ai == CBOR_SIZE_1) {
++      /* One-byte simple value: need to consume one more byte */
++      if(state->cbor_size < 1) {
++        return false;
++      }
++      state->cbor++;
++      state->cbor_size--;
++    }
++    /* For simple values 0xE0-0xF7 and 0xFC-0xFE, only first byte was needed (already consumed) */
++    return true;
++
++  default:
++    return false;
++  }
++}
++/*---------------------------------------------------------------------------*/
++bool
++cbor_skip_next(cbor_reader_state_t *state)
++{
++  return skip_item(state);
++}
++/*---------------------------------------------------------------------------*/
+ static cbor_size_t
+ read_unsigned(cbor_reader_state_t *state, uint64_t *value)
+ {
+diff --git a/os/lib/cbor.h b/os/lib/cbor.h
+index a3fe9e6..cd6074b 100644
+--- a/os/lib/cbor.h
++++ b/os/lib/cbor.h
+@@ -296,6 +296,33 @@ cbor_major_type_t cbor_peek_next(cbor_reader_state_t *state);
+  */
+ bool cbor_end_reader(cbor_reader_state_t *state);
+ 
++/**
++ * Returns the current position in the input buffer.
++ *
++ * \param state State of the CBOR reader.
++ *
++ * \return      Pointer to the current position in the input buffer.
++ */
++const uint8_t *cbor_get_position(cbor_reader_state_t *state);
++
++/**
++ * Returns the number of input bytes not yet consumed.
++ *
++ * \param state State of the CBOR reader.
++ *
++ * \return      Number of input bytes not yet consumed.
++ */
++size_t cbor_get_remaining(cbor_reader_state_t *state);
++
++/**
++ * Skips the next CBOR data item.
++ *
++ * \param state State of the CBOR reader.
++ *
++ * \return      \c true if an item was skipped, \c false otherwise.
++ */
++bool cbor_skip_next(cbor_reader_state_t *state);
++
+ /**
+  * Reads an unsigned integer.
+  *

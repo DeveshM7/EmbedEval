@@ -1,0 +1,274 @@
+diff --git a/examples/6tisch/simple-node/Makefile b/examples/6tisch/simple-node/Makefile
+index 0446ed4..9610baa 100644
+--- a/examples/6tisch/simple-node/Makefile
++++ b/examples/6tisch/simple-node/Makefile
+@@ -11,9 +11,23 @@ MAKE_WITH_ORCHESTRA ?= 0
+ MAKE_WITH_SECURITY ?= 0
+  # print #routes periodically, used for regression tests
+ MAKE_WITH_PERIODIC_ROUTES_PRINT ?= 0
++ # force RPL storing mode routing
++MAKE_WITH_STORING_ROUTING ?= 0
++ # force link-based Orchestra (only valid with MAKE_WITH_ORCHESTRA and storing mode)
++MAKE_WITH_LINK_BASED_ORCHESTRA ?= 0
+ 
+ MAKE_MAC = MAKE_MAC_TSCH
+ 
++# Validate link-based Orchestra configuration
++ifeq ($(MAKE_WITH_LINK_BASED_ORCHESTRA),1)
++ifneq ($(MAKE_WITH_ORCHESTRA),1)
++$(error MAKE_WITH_LINK_BASED_ORCHESTRA requires MAKE_WITH_ORCHESTRA=1)
++endif
++ifneq ($(MAKE_WITH_STORING_ROUTING),1)
++$(error MAKE_WITH_LINK_BASED_ORCHESTRA requires MAKE_WITH_STORING_ROUTING=1)
++endif
++endif
++
+ include $(CONTIKI)/Makefile.dir-variables
+ MODULES += $(CONTIKI_NG_SERVICES_DIR)/shell
+ 
+@@ -29,4 +43,14 @@ ifeq ($(MAKE_WITH_PERIODIC_ROUTES_PRINT),1)
+ CFLAGS += -DWITH_PERIODIC_ROUTES_PRINT=1
+ endif
+ 
++# RPL storing mode routing
++ifeq ($(MAKE_WITH_STORING_ROUTING),1)
++CFLAGS += -DRPL_CONF_MOP=2
++endif
++
++# Link-based Orchestra (requires Orchestra and storing mode)
++ifeq ($(MAKE_WITH_LINK_BASED_ORCHESTRA),1)
++CFLAGS += -DORCHESTRA_LINK_BASED=1
++endif
++
+ include $(CONTIKI)/Makefile.include
+diff --git a/os/services/orchestra/orchestra-conf.h b/os/services/orchestra/orchestra-conf.h
+index ac29122..3b777cf 100644
+--- a/os/services/orchestra/orchestra-conf.h
++++ b/os/services/orchestra/orchestra-conf.h
+@@ -38,6 +38,16 @@
+ #ifndef __ORCHESTRA_CONF_H__
+ #define __ORCHESTRA_CONF_H__
+ 
++/* Link-based Orchestra: uses a link-based approach similar to non-storing mode
++ * but works with storing mode. This allows the root to receive from all nodes. */
++#ifdef ORCHESTRA_CONF_LINK_BASED
++#define ORCHESTRA_LINK_BASED ORCHESTRA_CONF_LINK_BASED
++#elif defined(ORCHESTRA_LINK_BASED)
++/* ORCHESTRA_LINK_BASED already defined via command line, keep it */
++#else
++#define ORCHESTRA_LINK_BASED 0
++#endif
++
+ #ifdef ORCHESTRA_CONF_RULES
+ #define ORCHESTRA_RULES ORCHESTRA_CONF_RULES
+ #else /* ORCHESTRA_CONF_RULES */
+@@ -46,7 +56,17 @@
+  * - a sender-based or receiver-based slotframe for unicast to RPL parents and children
+  * - a common shared slotframe for any other traffic (mostly broadcast)
+  *  */
++#if ORCHESTRA_LINK_BASED
++/* Link-based rule for storing mode: allows root to receive from all nodes */
++#define ORCHESTRA_RULES { &eb_per_time_source, &unicast_per_neighbor_link_based, &default_common }
++#elif RPL_MOP_DEFAULT == 2 || RPL_MOP_DEFAULT == 3
++/* RPL storing mode: use the storing-specific unicast rule */
++#define ORCHESTRA_RULES { &eb_per_time_source, &unicast_per_neighbor_rpl_storing, &default_common }
++#else
++/* RPL non-storing mode (default): use the non-storing unicast rule */
+ #define ORCHESTRA_RULES { &eb_per_time_source, &unicast_per_neighbor_rpl_ns, &default_common }
++#endif
++
+ /* Example configuration for RPL non-storing mode: */
+ /* #define ORCHESTRA_RULES { &eb_per_time_source, &unicast_per_neighbor_rpl_ns, &default_common } */
+ 
+diff --git a/os/services/orchestra/orchestra-rule-unicast-per-neighbor-link-based.c b/os/services/orchestra/orchestra-rule-unicast-per-neighbor-link-based.c
+new file mode 100644
+index 0000000..dc43618
+--- /dev/null
++++ b/os/services/orchestra/orchestra-rule-unicast-per-neighbor-link-based.c
+@@ -0,0 +1,137 @@
++/*
++ * Copyright (c) 2015, Swedish Institute of Computer Science.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ */
++/**
++ * \file
++ *         Orchestra: a slotframe dedicated to unicast data transmission. Designed for
++ *         RPL storing mode with a link-based approach similar to non-storing mode.
++ *         This allows the root to receive from all nodes.
++ *           Nodes listen at a timeslot defined as hash(MAC) % ORCHESTRA_SB_UNICAST_PERIOD
++ *           Nodes transmit at: for any neighbor, hash(nbr.MAC) % ORCHESTRA_SB_UNICAST_PERIOD
++ *
++ * \author Simon Duquennoy <simonduq@sics.se>
++ */
++
++#include "contiki.h"
++#include "orchestra.h"
++#include "net/ipv6/uip-ds6-route.h"
++#include "net/packetbuf.h"
++
++static uint16_t slotframe_handle = 0;
++static struct tsch_slotframe *sf_unicast;
++
++/*---------------------------------------------------------------------------*/
++static uint16_t
++get_node_timeslot(const linkaddr_t *addr)
++{
++  if(addr != NULL && ORCHESTRA_UNICAST_PERIOD > 0) {
++    return ORCHESTRA_LINKADDR_HASH(addr) % ORCHESTRA_UNICAST_PERIOD;
++  } else {
++    return 0xffff;
++  }
++}
++/*---------------------------------------------------------------------------*/
++static uint16_t
++get_node_channel_offset(const linkaddr_t *addr)
++{
++  if(addr != NULL && ORCHESTRA_UNICAST_MAX_CHANNEL_OFFSET >= ORCHESTRA_UNICAST_MIN_CHANNEL_OFFSET) {
++    return ORCHESTRA_LINKADDR_HASH(addr) % (ORCHESTRA_UNICAST_MAX_CHANNEL_OFFSET - ORCHESTRA_UNICAST_MIN_CHANNEL_OFFSET + 1)
++        + ORCHESTRA_UNICAST_MIN_CHANNEL_OFFSET;
++  } else {
++    return 0xffff;
++  }
++}
++/*---------------------------------------------------------------------------*/
++static void
++child_added(const linkaddr_t *linkaddr)
++{
++}
++/*---------------------------------------------------------------------------*/
++static void
++child_removed(const linkaddr_t *linkaddr)
++{
++}
++/*---------------------------------------------------------------------------*/
++static int
++select_packet(uint16_t *slotframe, uint16_t *timeslot, uint16_t *channel_offset)
++{
++  /* Select data packets we have a unicast link to */
++  const linkaddr_t *dest = packetbuf_addr(PACKETBUF_ADDR_RECEIVER);
++  if(packetbuf_attr(PACKETBUF_ATTR_FRAME_TYPE) == FRAME802154_DATAFRAME
++     && !linkaddr_cmp(dest, &linkaddr_null)) {
++    if(slotframe != NULL) {
++      *slotframe = slotframe_handle;
++    }
++    if(timeslot != NULL) {
++      *timeslot = get_node_timeslot(dest);
++    }
++    /* set per-packet channel offset */
++    if(channel_offset != NULL) {
++      *channel_offset = get_node_channel_offset(dest);
++    }
++    return 1;
++  }
++  return 0;
++}
++/*---------------------------------------------------------------------------*/
++static void
++new_time_source(const struct tsch_neighbor *old, const struct tsch_neighbor *new)
++{
++}
++/*---------------------------------------------------------------------------*/
++static void
++init(uint16_t sf_handle)
++{
++  int i;
++  uint16_t rx_timeslot;
++  linkaddr_t *local_addr = &linkaddr_node_addr;
++
++  slotframe_handle = sf_handle;
++  /* Slotframe for unicast transmissions */
++  sf_unicast = tsch_schedule_add_slotframe(slotframe_handle, ORCHESTRA_UNICAST_PERIOD);
++  rx_timeslot = get_node_timeslot(local_addr);
++  /* Add a Tx link at each available timeslot. Make the link Rx at our own timeslot.
++   * This allows any node to transmit to us at their own computed timeslot,
++   * while we can transmit to any node at their computed timeslot. */
++  for(i = 0; i < ORCHESTRA_UNICAST_PERIOD; i++) {
++    tsch_schedule_add_link(sf_unicast,
++        LINK_OPTION_SHARED | LINK_OPTION_TX | ( i == rx_timeslot ? LINK_OPTION_RX : 0 ),
++        LINK_TYPE_NORMAL, &tsch_broadcast_address,
++        i, get_node_channel_offset(local_addr));
++  }
++}
++/*---------------------------------------------------------------------------*/
++struct orchestra_rule unicast_per_neighbor_link_based = {
++  init,
++  new_time_source,
++  select_packet,
++  child_added,
++  child_removed,
++  "unicast per neighbor link based",
++};
+diff --git a/os/services/orchestra/orchestra-rule-unicast-per-neighbor-rpl-storing.c b/os/services/orchestra/orchestra-rule-unicast-per-neighbor-rpl-storing.c
+index 0524936..8e58c9c 100644
+--- a/os/services/orchestra/orchestra-rule-unicast-per-neighbor-rpl-storing.c
++++ b/os/services/orchestra/orchestra-rule-unicast-per-neighbor-rpl-storing.c
+@@ -219,18 +219,26 @@ new_time_source(const struct tsch_neighbor *old, const struct tsch_neighbor *new
+ static void
+ init(uint16_t sf_handle)
+ {
+-  uint16_t timeslot;
++  int i;
++  uint16_t rx_timeslot;
+   linkaddr_t *local_addr = &linkaddr_node_addr;
+ 
+   slotframe_handle = sf_handle;
+   local_channel_offset = get_node_channel_offset(local_addr);
+   /* Slotframe for unicast transmissions */
+   sf_unicast = tsch_schedule_add_slotframe(slotframe_handle, ORCHESTRA_UNICAST_PERIOD);
+-  timeslot = get_node_timeslot(local_addr);
+-  tsch_schedule_add_link(sf_unicast,
+-            ORCHESTRA_UNICAST_SENDER_BASED ? LINK_OPTION_TX | UNICAST_SLOT_SHARED_FLAG: LINK_OPTION_RX,
+-            LINK_TYPE_NORMAL, &tsch_broadcast_address,
+-            timeslot, local_channel_offset);
++  rx_timeslot = get_node_timeslot(local_addr);
++
++  /* Add a Tx link at each available timeslot. Make the link Rx at our own timeslot.
++   * This allows any node to transmit to us at their own computed timeslot,
++   * which is needed for the root to receive DAO messages from all nodes in the network.
++   * For non-root nodes, this also allows communication with any neighbor. */
++  for(i = 0; i < ORCHESTRA_UNICAST_PERIOD; i++) {
++    tsch_schedule_add_link(sf_unicast,
++        LINK_OPTION_SHARED | LINK_OPTION_TX | ( i == rx_timeslot ? LINK_OPTION_RX : 0 ),
++        LINK_TYPE_NORMAL, &tsch_broadcast_address,
++        i, local_channel_offset);
++  }
+ }
+ /*---------------------------------------------------------------------------*/
+ struct orchestra_rule unicast_per_neighbor_rpl_storing = {
+diff --git a/os/services/orchestra/orchestra.h b/os/services/orchestra/orchestra.h
+index 1b67fdc..60866dc 100644
+--- a/os/services/orchestra/orchestra.h
++++ b/os/services/orchestra/orchestra.h
+@@ -54,6 +54,7 @@ struct orchestra_rule {
+ struct orchestra_rule eb_per_time_source;
+ struct orchestra_rule unicast_per_neighbor_rpl_storing;
+ struct orchestra_rule unicast_per_neighbor_rpl_ns;
++struct orchestra_rule unicast_per_neighbor_link_based;
+ struct orchestra_rule default_common;
+ 
+ extern linkaddr_t orchestra_parent_linkaddr;

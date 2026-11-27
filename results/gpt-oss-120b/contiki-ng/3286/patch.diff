@@ -1,0 +1,154 @@
+diff --git a/arch/platform/native/platform.c b/arch/platform/native/platform.c
+index 4d75748..1f313c1 100644
+--- a/arch/platform/native/platform.c
++++ b/arch/platform/native/platform.c
+@@ -307,10 +307,30 @@ platform_main_loop()
+     int retval;
+     struct timeval tv;
+ 
++    /* Run pending processes first. */
+     retval = process_run();
+ 
+-    tv.tv_sec = retval ? 0 : SELECT_TIMEOUT / 1000;
+-    tv.tv_usec = retval ? 1 : (SELECT_TIMEOUT * 1000) % 1000000;
++    /* Determine select timeout based on pending etimers.
++       If an etimer will expire sooner than the default SELECT_TIMEOUT
++       we sleep only until that expiration to avoid latency.
++       The native platform ticks are 1u202fms (CLOCK_CONF_SECOND == 1000),
++       so the remaining time directly maps to milliseconds. */
++    int timeout_ms = SELECT_TIMEOUT;
++    if(etimer_pending()) {
++      clock_time_t next = etimer_next_expiration_time();
++      clock_time_t now = clock_time();
++      if(CLOCK_LT(next, now)) {
++        timeout_ms = 0; /* Expired already, poll immediately */
++      } else {
++        clock_time_t remaining = next - now; /* ticks == ms */
++        if(remaining < timeout_ms) {
++          timeout_ms = (int)remaining;
++        }
++      }
++    }
++
++    tv.tv_sec = retval ? 0 : timeout_ms / 1000;
++    tv.tv_usec = retval ? 1 : (timeout_ms * 1000) % 1000000;
+ 
+     FD_ZERO(&fdr);
+     FD_ZERO(&fdw);
+diff --git a/diff.patch b/diff.patch
+new file mode 100644
+index 0000000..6931087
+--- /dev/null
++++ b/diff.patch
+@@ -0,0 +1,31 @@
++--- a/arch/platform/native/platform.c
+++++ b/arch/platform/native/platform.c
++@@
++-    retval = process_run();
++-
++-    tv.tv_sec = retval ? 0 : SELECT_TIMEOUT / 1000;
++-    tv.tv_usec = retval ? 1 : (SELECT_TIMEOUT * 1000) % 1000000;
+++    /* Run pending processes first. */
+++    retval = process_run();
+++
+++    /* Determine select timeout based on pending etimers.
+++       If an etimer will expire sooner than the default SELECT_TIMEOUT
+++       we sleep only until that expiration to avoid latency.
+++       The native platform ticks are 1\u202fms (CLOCK_CONF_SECOND == 1000),
+++       so the remaining time directly maps to milliseconds. */
+++    int timeout_ms = SELECT_TIMEOUT;
+++    if(etimer_pending()) {
+++      clock_time_t next = etimer_next_expiration_time();
+++      clock_time_t now = clock_time();
+++      if(CLOCK_LT(next, now)) {
+++        timeout_ms = 0; /* Expired already, poll immediately */
+++      } else {
+++        clock_time_t remaining = next - now; /* ticks == ms */
+++        if(remaining < timeout_ms) {
+++          timeout_ms = (int)remaining;
+++        }
+++      }
+++    }
+++
+++    tv.tv_sec = retval ? 0 : timeout_ms / 1000;
+++    tv.tv_usec = retval ? 1 : (timeout_ms * 1000) % 1000000;
+diff --git a/diff2.patch b/diff2.patch
+new file mode 100644
+index 0000000..6931087
+--- /dev/null
++++ b/diff2.patch
+@@ -0,0 +1,31 @@
++--- a/arch/platform/native/platform.c
+++++ b/arch/platform/native/platform.c
++@@
++-    retval = process_run();
++-
++-    tv.tv_sec = retval ? 0 : SELECT_TIMEOUT / 1000;
++-    tv.tv_usec = retval ? 1 : (SELECT_TIMEOUT * 1000) % 1000000;
+++    /* Run pending processes first. */
+++    retval = process_run();
+++
+++    /* Determine select timeout based on pending etimers.
+++       If an etimer will expire sooner than the default SELECT_TIMEOUT
+++       we sleep only until that expiration to avoid latency.
+++       The native platform ticks are 1\u202fms (CLOCK_CONF_SECOND == 1000),
+++       so the remaining time directly maps to milliseconds. */
+++    int timeout_ms = SELECT_TIMEOUT;
+++    if(etimer_pending()) {
+++      clock_time_t next = etimer_next_expiration_time();
+++      clock_time_t now = clock_time();
+++      if(CLOCK_LT(next, now)) {
+++        timeout_ms = 0; /* Expired already, poll immediately */
+++      } else {
+++        clock_time_t remaining = next - now; /* ticks == ms */
+++        if(remaining < timeout_ms) {
+++          timeout_ms = (int)remaining;
+++        }
+++      }
+++    }
+++
+++    tv.tv_sec = retval ? 0 : timeout_ms / 1000;
+++    tv.tv_usec = retval ? 1 : (timeout_ms * 1000) % 1000000;
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..239fc66
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,37 @@
++*** Begin Patch
++*** Update File: arch/platform/native/platform.c
++@@
++-    retval = process_run();
++-
++-    tv.tv_sec = retval ? 0 : SELECT_TIMEOUT / 1000;
++-    tv.tv_usec = retval ? 1 : (SELECT_TIMEOUT * 1000) % 1000000;
+++    /* Run pending processes first. */
+++    retval = process_run();
+++
+++    /* Determine the timeout for select(). On the native platform we used to
+++       always wait for the fixed SELECT_TIMEOUT (1000 ms) when no process had
+++       work.  This caused a problem with event timers (etimers) because they are
+++       only polled after select() returns – a short‑lived timer could therefore
+++       be delayed by up to a full second.  To fix this we compute the remaining
+++       time until the next etimer expiration (if any) and use the smaller of
+++       that value and the default SELECT_TIMEOUT.  The system tick on the native
+++       platform is defined as 1 ms (CLOCK_CONF_SECOND == 1000), so the remaining
+++       time in clock ticks maps directly to milliseconds.
+++    */
+++    int timeout_ms = SELECT_TIMEOUT;
+++    if(etimer_pending()) {
+++      clock_time_t next = etimer_next_expiration_time();
+++      clock_time_t now = clock_time();
+++      if(CLOCK_LT(next, now)) {
+++        timeout_ms = 0; /* Already expired – poll immediately */
+++      } else {
+++        clock_time_t remaining = next - now; /* ticks == ms */
+++        if(remaining < timeout_ms) {
+++          timeout_ms = (int)remaining;
+++        }
+++      }
+++    }
+++
+++    tv.tv_sec = retval ? 0 : timeout_ms / 1000;
+++    tv.tv_usec = retval ? 1 : (timeout_ms * 1000) % 1000000;
++*** End Patch

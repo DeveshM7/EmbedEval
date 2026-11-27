@@ -1,0 +1,136 @@
+diff --git a/diff.patch b/diff.patch
+new file mode 100644
+index 0000000..85b369c
+--- /dev/null
++++ b/diff.patch
+@@ -0,0 +1,39 @@
++--- a/os/net/app-layer/mqtt/mqtt-prop.c
+++++ b/os/net/app-layer/mqtt/mqtt-prop.c
++@@
++-  prop_len = parse_prop(conn, *prop_id, conn->in_packet.curr_props_pos + 1, data);
++-
++-  DBG("MQTT - Decoded property len %i bytes\n", prop_len);
++-
++-  conn->in_packet.curr_props_pos += prop_id_len_bytes + prop_len;
++-
++-  return prop_len;
+++  /* Decode the property value. The parse_* helpers only validate the
+++     syntactic length (e.g., the length field of a UTF‑8 string) but they do
+++     not verify that the declared length fits into the remaining property
+++     buffer. This caused malformed properties that over‑run the buffer to be
+++     accepted. */
+++  prop_len = parse_prop(conn, *prop_id,
+++                        conn->in_packet.curr_props_pos + prop_id_len_bytes,
+++                        data);
+++
+++  DBG("MQTT - Decoded property len %i bytes\n", prop_len);
+++
+++  /* Determine remaining bytes for the value part (excluding the identifier). */
+++  uint32_t available = conn->in_packet.properties_len -
+++                       (conn->in_packet.curr_props_pos - conn->in_packet.props_start) -
+++                       prop_id_len_bytes;
+++
+++  if(prop_len == 0 || prop_len > available) {
+++    /* Malformed property – reject it but still consume the identifier bytes.
+++       According to the specification a rejected property consumes only the
+++       identifier when it is a single byte. */
+++    DBG("MQTT - Property %i malformed or overruns buffer, rejecting\n", *prop_id);
+++    conn->in_packet.curr_props_pos += prop_id_len_bytes; /* consume only ID */
+++    return 0;
+++  }
+++
+++  /* Well‑formed property – advance over identifier and value. */
+++  conn->in_packet.curr_props_pos += prop_id_len_bytes + prop_len;
+++  return prop_len;
++*** End Patch
+diff --git a/os/net/app-layer/mqtt/mqtt-prop.c b/os/net/app-layer/mqtt/mqtt-prop.c
+index 881a56b..c7e48a4 100644
+--- a/os/net/app-layer/mqtt/mqtt-prop.c
++++ b/os/net/app-layer/mqtt/mqtt-prop.c
+@@ -512,13 +512,34 @@ mqtt_get_next_in_prop(struct mqtt_connection *conn,
+ 
+   DBG("MQTT - Decoded property ID %i (encoded using %i bytes)\n", *prop_id, prop_id_len_bytes);
+ 
+-  prop_len = parse_prop(conn, *prop_id, conn->in_packet.curr_props_pos + 1, data);
+-
+-  DBG("MQTT - Decoded property len %i bytes\n", prop_len);
+-
+-  conn->in_packet.curr_props_pos += prop_id_len_bytes + prop_len;
++/* Decode the property value. The parse_* helpers only validate the
++   syntactic length (e.g., the length field of a UTF‑8 string) but they do
++   not verify that the declared length fits into the remaining property
++   buffer. This caused malformed properties that over‑run the buffer to be
++   accepted. */
++prop_len = parse_prop(conn, *prop_id,
++                      conn->in_packet.curr_props_pos + prop_id_len_bytes,
++                      data);
++
++DBG("MQTT - Decoded property len %i bytes\n", prop_len);
++
++/* Determine remaining bytes for the value part (excluding the identifier). */
++uint32_t available = conn->in_packet.properties_len -
++                     (conn->in_packet.curr_props_pos - conn->in_packet.props_start) -
++                     prop_id_len_bytes;
++
++if(prop_len == 0 || prop_len > available) {
++  /* Malformed property – reject it but still consume the identifier bytes.
++     According to the specification a rejected property consumes only the
++     identifier when it is a single byte. */
++  DBG("MQTT - Property %i malformed or overruns buffer, rejecting\n", *prop_id);
++  conn->in_packet.curr_props_pos += prop_id_len_bytes; /* consume only ID */
++  return 0;
++}
+ 
+-  return prop_len;
++/* Well‑formed property – advance over identifier and value. */
++conn->in_packet.curr_props_pos += prop_id_len_bytes + prop_len;
++return prop_len;
+ }
+ /*---------------------------------------------------------------------------*/
+ void
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..5b189eb
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,40 @@
++*** Begin Patch
++*** Update File: os/net/app-layer/mqtt/mqtt-prop.c
++@@
++-  prop_len = parse_prop(conn, *prop_id, conn->in_packet.curr_props_pos + 1, data);
++-
++-  DBG("MQTT - Decoded property len %i bytes\n", prop_len);
++-
++-  conn->in_packet.curr_props_pos += prop_id_len_bytes + prop_len;
++-
++-  return prop_len;
+++  /* Decode the property value. The parse_* helpers only validate the
+++     syntactic length (e.g., the length field of a UTF‑8 string) but they do
+++     not verify that the declared length fits into the remaining property
+++     buffer. This caused malformed properties that over‑run the buffer to be
+++     accepted. */
+++  prop_len = parse_prop(conn, *prop_id,
+++                        conn->in_packet.curr_props_pos + prop_id_len_bytes,
+++                        data);
+++
+++  DBG("MQTT - Decoded property len %i bytes\n", prop_len);
+++
+++  /* Determine remaining bytes for the value part (excluding the identifier). */
+++  uint32_t available = conn->in_packet.properties_len -
+++                       (conn->in_packet.curr_props_pos - conn->in_packet.props_start) -
+++                       prop_id_len_bytes;
+++
+++  if(prop_len == 0 || prop_len > available) {
+++    /* Malformed property – reject it but still consume the identifier bytes.
+++       According to the specification a rejected property consumes only the
+++       identifier when it is a single byte. */
+++    DBG("MQTT - Property %i malformed or overruns buffer, rejecting\n", *prop_id);
+++    conn->in_packet.curr_props_pos += prop_id_len_bytes; /* consume only ID */
+++    return 0;
+++  }
+++
+++  /* Well‑formed property – advance over identifier and value. */
+++  conn->in_packet.curr_props_pos += prop_id_len_bytes + prop_len;
+++  return prop_len;
++ }
++*** End Patch

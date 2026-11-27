@@ -1,0 +1,98 @@
+diff --git a/os/net/mac/tsch/tsch-schedule.c b/os/net/mac/tsch/tsch-schedule.c
+index 1476312..402135f 100644
+--- a/os/net/mac/tsch/tsch-schedule.c
++++ b/os/net/mac/tsch/tsch-schedule.c
+@@ -468,7 +468,43 @@ tsch_schedule_get_next_active_link(struct tsch_asn_t *asn, uint16_t *time_offset
+         }
+ 
+         l = list_item_next(l);
++if(backup_link != NULL) {
++    /*
++     * The original implementation only set a backup link when an overlapping
++     * link with the RX flag was encountered *and* `curr_backup` was still NULL.
++     * This works for the common case where a Tx\u2011only link and a single Rx
++     * link share the same timeslot. However, when there are multiple candidate
++     * links for the same timeslot (e.g., several Rx links from different
++     * neighbors) or when the Tx link also has the RX flag (sender\u2011based mode),
++     * `curr_backup` can remain NULL. In such situations the TSCH slot operation
++     * thread will not switch to a backup link even though a suitable Rx slot
++     * exists, leading to missed reception windows and unacknowledged packets.
++     *
++     * To fix this we perform a second pass when `curr_backup` is NULL and the
++     * chosen best link does not have the RX flag. We look for any link that
++     * occurs at the same absolute timeslot (same slotframe and timeslot) and
++     * has the `LINK_OPTION_RX` flag. The first such link is used as the backup.
++     * This ensures a backup is always available when a pure Tx link is selected
++     * as the best candidate, regardless of the number of overlapping links.
++     */
++    if(curr_backup == NULL && curr_best != NULL && !(curr_best->link_options & LINK_OPTION_RX)) {
++      /* Find a suitable RX backup link for the same timeslot */
++      struct tsch_slotframe *sf = list_head(slotframe_list);
++      while(sf != NULL) {
++        struct tsch_link *l = list_head(sf->links_list);
++        while(l != NULL) {
++          if(l->timeslot == curr_best->timeslot && l->channel_offset == curr_best->channel_offset &&
++             (l->link_options & LINK_OPTION_RX)) {
++            curr_backup = l;
++            sf = NULL; /* break outer loop */
++            break;
++          }
++          l = list_item_next(l);
++        }
+       }
++    }
++    *backup_link = curr_backup;
++}
+       sf = list_item_next(sf);
+     }
+     if(time_offset != NULL) {
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..8a912c3
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,44 @@
++*** Begin Patch
++*** Update File: os/net/mac/tsch/tsch-schedule.c
++@@
++   if(backup_link != NULL) {
++-    *backup_link = curr_backup;
+++    /*
+++     * The original implementation only set a backup link when an overlapping
+++     * link with the RX flag was encountered *and* `curr_backup` was still NULL.
+++     * This works for the common case where a Tx‑only link and a single Rx
+++     * link share the same timeslot. However, when there are multiple candidate
+++     * links for the same timeslot (e.g., several Rx links from different
+++     * neighbors) or when the Tx link also has the RX flag (sender‑based mode),
+++     * `curr_backup` can remain NULL. In such situations the TSCH slot operation
+++     * thread will not switch to a backup link even though a suitable Rx slot
+++     * exists, leading to missed reception windows and unacknowledged packets.
+++     *
+++     * To fix this we perform a second pass when `curr_backup` is NULL and the
+++     * chosen best link does not have the RX flag. We look for any link that
+++     * occurs at the same absolute timeslot (same slotframe and timeslot) and
+++     * has the `LINK_OPTION_RX` flag. The first such link is used as the backup.
+++     * This ensures a backup is always available when a pure Tx link is selected
+++     * as the best candidate, regardless of the number of overlapping links.
+++     */
+++    if(curr_backup == NULL && curr_best != NULL && !(curr_best->link_options & LINK_OPTION_RX)) {
+++      /* Find a suitable RX backup link for the same timeslot */
+++      struct tsch_slotframe *sf = list_head(slotframe_list);
+++      while(sf != NULL) {
+++        struct tsch_link *l = list_head(sf->links_list);
+++        while(l != NULL) {
+++          if(l->timeslot == curr_best->timeslot && l->channel_offset == curr_best->channel_offset &&
+++             (l->link_options & LINK_OPTION_RX)) {
+++            curr_backup = l;
+++            sf = NULL; /* break outer loop */
+++            break;
+++          }
+++          l = list_item_next(l);
+++        }
+++      }
+++    }
+++    *backup_link = curr_backup;
++   }
++   return curr_best;
++ }
++*** End Patch

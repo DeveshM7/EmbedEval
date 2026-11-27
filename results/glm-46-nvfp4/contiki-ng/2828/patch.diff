@@ -1,0 +1,97 @@
+diff --git a/os/lib/heapmem.c b/os/lib/heapmem.c
+index 99a879f..5640f4e 100644
+--- a/os/lib/heapmem.c
++++ b/os/lib/heapmem.c
+@@ -168,6 +168,7 @@ typedef struct chunk {
+    statically allocated with a configurable size. */
+ static char heap_base[HEAPMEM_ARENA_SIZE] CC_ALIGN(HEAPMEM_ALIGNMENT);
+ static size_t heap_usage;
++static size_t max_heap_usage;
+ 
+ static chunk_t *first_chunk = (chunk_t *)heap_base;
+ static chunk_t *free_list;
+@@ -187,6 +188,9 @@ extend_space(size_t size)
+ 
+   char *old_usage = &heap_base[heap_usage];
+   heap_usage += size;
++  if(heap_usage > max_heap_usage) {
++    max_heap_usage = heap_usage;
++  }
+ 
+   return old_usage;
+ }
+@@ -604,6 +608,7 @@ heapmem_stats(heapmem_stats_t *stats)
+   stats->available += HEAPMEM_ARENA_SIZE - heap_usage;
+   stats->footprint = heap_usage;
+   stats->chunks = stats->overhead / sizeof(chunk_t);
++  stats->max_footprint = max_heap_usage;
+ }
+ 
+ /* heapmem_alignment: return the minimum alignment of allocated addresses. */
+diff --git a/os/lib/heapmem.h b/os/lib/heapmem.h
+index fff3574..2053865 100644
+--- a/os/lib/heapmem.h
++++ b/os/lib/heapmem.h
+@@ -90,6 +90,7 @@ typedef struct heapmem_stats {
+   size_t available;
+   size_t footprint;
+   size_t chunks;
++  size_t max_footprint;
+ } heapmem_stats_t;
+ /*****************************************************************************/
+ typedef uint8_t heapmem_zone_t;
+diff --git a/test_max_footprint_final.c b/test_max_footprint_final.c
+new file mode 100644
+index 0000000..4724bff
+--- /dev/null
++++ b/test_max_footprint_final.c
+@@ -0,0 +1,49 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include "contiki.h"
++#include "lib/heapmem.h"
++
++int main() {
++  heapmem_stats_t stats;
++  
++  // Get initial stats
++  heapmem_stats(&stats);
++  printf("Initial stats:\n");
++  printf("  Max footprint: %zu\n", stats.max_footprint);
++  printf("  Available: %zu\n", stats.available);
++  
++  // Allocate a large chunk
++  void *ptr = heapmem_alloc(stats.available - 1000);
++  if (!ptr) {
++    printf("Failed to allocate\n");
++    return 1;
++  }
++  
++  // Get stats after allocation
++  heapmem_stats_t stats_after;
++  heapmem_stats(&stats_after);
++  printf("\nAfter allocation:\n");
++  printf("  Max footprint: %zu (should be > %zu)\n", stats_after.max_footprint, stats.max_footprint);
++  printf("  Footprint: %zu\n", stats_after.footprint);
++  
++  // Free the memory
++  heapmem_free(ptr);
++  
++  // Get stats after free
++  heapmem_stats_t stats_final;
++  heapmem_stats(&stats_final);
++  printf("\nAfter free:\n");
++  printf("  Max footprint: %zu (should remain high)\n", stats_final.max_footprint);
++  printf("  Footprint: %zu\n", stats_final.footprint);
++  
++  // Check requirements
++  if (stats_after.max_footprint > stats.max_footprint && 
++      stats_final.max_footprint > stats.max_footprint &&
++      stats_final.max_footprint >= stats_after.max_footprint) {
++    printf("\n✓ All tests passed!\n");
++    return 0;
++  } else {
++    printf("\n✗ Test failed!\n");
++    return 1;
++  }
++}

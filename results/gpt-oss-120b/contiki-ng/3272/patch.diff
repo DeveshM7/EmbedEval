@@ -1,0 +1,158 @@
+diff --git a/os/sys/cycles.h b/os/sys/cycles.h
+new file mode 100644
+index 0000000..d63e127
+--- /dev/null
++++ b/os/sys/cycles.h
+@@ -0,0 +1,152 @@
++/*
++ * Copyright (c) 2024, Contiki-NG Contributors
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *   1. Redistributions of source code must retain the above copyright notice,
++ *      this list of conditions and the following disclaimer.
++ *   2. Redistributions in binary form must reproduce the above copyright
++ *      notice, this list of conditions and the following disclaimer in the
++ *      documentation and/or other materials provided with the distribution.
++ *   3. Neither the name of the copyright holder nor the names of its
++ *      contributors may be used to endorse or promote products derived from
++ *      this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * @file
++ *   Simple CPU‑cycle counter abstraction.
++ *
++ * This implementation works on any platform offering POSIX `clock_gettime`.
++ * For the native (hosted) port a *cycle* is defined as one nanosecond of process
++ * CPU time, making the frequency exactly 1 GHz (`CYCLES_HZ` = 1 000 000 000).
++ * The API follows the behaviour described in the task:
++ *   – The counter is off until `cycles_start()` is called and returns 0 before.
++ *   – `cycles_start()` is idempotent; calling it multiple times does not reset
++ *     the counter.
++ *   – `cycles_stop()` freezes the counter globally; subsequent reads keep the
++ *     value at the moment of the stop.
++ *   – The counter never moves backwards.
++ *   – Conversion macros translate a 32‑bit cycle count to whole microseconds
++ *     (`CYCLES_TO_US`) and to hundredths of a microsecond (`CYCLES_TO_US_FRAC`)
++ *     without overflow across the full 32‑bit range.
++ */
++
++#ifndef CYCLES_H_
++#define CYCLES_H_
++
++#include <stdint.h>
++#include <time.h>
++
++/* ---------------------------------------------------------------------------
++ * Configuration
++ * --------------------------------------------------------------------------- */
++
++/** Core frequency in cycles per second.
++ *  For the native (host) port a cycle is a nanosecond, therefore the frequency
++ *  is 1 GHz.  The same value works on other platforms that use the monotonic
++ *  clock with nanosecond resolution.
++ */
++#define CYCLES_HZ (1000000000U) /* 1 GHz */
++
++/* ---------------------------------------------------------------------------
++ * Runtime state (static to this translation unit)
++ * --------------------------------------------------------------------------- */
++
++static uint64_t _cycles_start_time_ns = 0;   /* Time when the counter was started */
++static uint64_t _cycles_stop_time_ns  = 0;   /* Time when the counter was stopped */
++static int      _cycles_started      = 0;   /* Whether start() has been called */
++static int      _cycles_stopped      = 0;   /* Whether stop() has been called */
++
++/* ---------------------------------------------------------------------------
++ * Helper: current monotonic time in nanoseconds.
++ * --------------------------------------------------------------------------- */
++static inline uint64_t
++_now_ns(void)
++{
++  struct timespec ts;
++  clock_gettime(CLOCK_MONOTONIC, &ts);
++  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
++}
++
++/* ---------------------------------------------------------------------------
++ * Public API
++ * --------------------------------------------------------------------------- */
++
++/**
++ * @brief Start the cycle counter.
++ *
++ * Idempotent – calling it when already started does nothing.
++ */
++static inline void
++cycles_start(void)
++{
++  if(_cycles_started) {
++    return; /* already started */
++  }
++  _cycles_started = 1;
++  _cycles_stopped = 0;
++  _cycles_start_time_ns = _now_ns();
++}
++
++/**
++ * @brief Stop (freeze) the cycle counter.
++ *
++ * After this call the counter value remains constant until the next
++ * `cycles_start()`.
++ */
++static inline void
++cycles_stop(void)
++{
++  if(!_cycles_started || _cycles_stopped) {
++    return; /* not started or already stopped */
++  }
++  _cycles_stop_time_ns = _now_ns();
++  _cycles_stopped = 1;
++}
++
++/**
++ * @brief Get the current cycle count.
++ *
++ * Returns 0 if the counter has not been started.  While running the value
++ * increases monotonically and wraps naturally at 2³².  After a stop the value is
++ * frozen.
++ */
++static inline uint32_t
++cycles_now(void)
++{
++  if(!_cycles_started) {
++    return 0;
++  }
++  uint64_t now = _cycles_stopped ? _cycles_stop_time_ns : _now_ns();
++  uint64_t diff = now - _cycles_start_time_ns;
++  return (uint32_t)diff; /* natural 32‑bit wrap‑around */
++}
++
++/* ---------------------------------------------------------------------------
++ * Conversion helpers
++ * --------------------------------------------------------------------------- */
++
++/** Convert a cycle count to whole microseconds. */
++#define CYCLES_TO_US(cycles) \
++  ((uint32_t)(((uint64_t)(cycles) * 1000000ULL) / CYCLES_HZ))
++
++/** Convert a cycle count to the hundredths part of a microsecond (0‑99). */
++#define CYCLES_TO_US_FRAC(cycles) \
++  ((uint32_t)((((uint64_t)(cycles) * 100000000ULL) / CYCLES_HZ) % 100ULL))
++
++#endif /* CYCLES_H_ */
++

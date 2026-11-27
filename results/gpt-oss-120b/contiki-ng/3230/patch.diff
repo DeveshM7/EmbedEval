@@ -1,0 +1,138 @@
+diff --git a/os/net/app-layer/mqtt/mqtt.c b/os/net/app-layer/mqtt/mqtt.c
+index 7389b34..4c84cac 100644
+--- a/os/net/app-layer/mqtt/mqtt.c
++++ b/os/net/app-layer/mqtt/mqtt.c
+@@ -392,7 +392,7 @@ mqtt_decode_var_byte_int(const uint8_t *input_data_ptr,
+   *dest = 0;
+ 
+   do {
+-    if(*input_pos >= input_data_len) {
++    if(*input_pos >= (uint32_t)input_data_len) {
+       return 0;
+     }
+ 
+@@ -403,13 +403,16 @@ mqtt_decode_var_byte_int(const uint8_t *input_data_ptr,
+     }
+     read_bytes++;
+     DBG("MQTT - Read Variable Byte Integer byte %i\n", byte_in);
+-
+-    if(read_bytes > 4) {
++    if(read_bytes == 4 && (byte_in & 0x80)) {
+       DBG("Received more than 4 byte 'Variable Byte Integer'.");
+       return 0;
+     }
+-
+-    *dest += (byte_in & 127) * multiplier;
++    uint32_t addition = (byte_in & 0x7F) * multiplier;
++    if(*dest + addition > 0xFFFF) {
++      DBG("Variable Byte Integer exceeds 16‑bit limit.");
++      return 0;
++    }
++    *dest += addition;
+     multiplier *= 128;
+   } while((byte_in & 128) != 0);
+ 
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..2ae69f9
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,54 @@
++*** Begin Patch
++*** Update File: os/net/app-layer/mqtt/mqtt.c
++@@
++   uint8_t read_bytes = 0;
++   uint8_t byte_in;
++   uint32_t multiplier = 1;
++   uint32_t input_pos_0 = 0;
++@@
++-  *dest = 0;
+++  /* The MQTT specification limits Variable Byte Integers to a maximum of four
+++   * bytes and a maximum value of 268435455. For the Remaining Length field we
+++   * store the result in a 16‑bit integer, so the effective maximum we can
+++   * represent is 65535. The original implementation accepted any value and
+++   * silently truncated it, which could lead to out‑of‑bounds parsing. We now
+++   * enforce the 16‑bit limit and reject oversized values.
+++   */
+++  *dest = 0;
++@@
++-    if(*input_pos >= input_data_len) {
++-      return 0;
++-    }
+++    /* When no bytes are available we must fail without consuming any input. */
+++    if(*input_pos >= (uint32_t)input_data_len) {
+++      return 0;
+++    }
++@@
++-    if(read_bytes > 4) {
++-      DBG("Received more than 4 byte 'Variable Byte Integer'.");
++-      return 0;
++-    }
+++    /* Reject encodings that would require more than four bytes. The MQTT spec
+++       defines that the continuation bit of the fourth byte must be zero. If it
+++       is set we consider the encoding invalid, but we must not consume the
+++       (non‑existent) fifth byte. At this point we have already consumed the
+++       fourth byte, which is correct – we simply abort without reading further.
+++    */
+++    if(read_bytes == 4 && (byte_in & 0x80)) {
+++      DBG("Received more than 4 byte 'Variable Byte Integer'.");
+++      return 0;
+++    }
++@@
++-    *dest += (byte_in & 127) * multiplier;
++-    multiplier *= 128;
+++    uint32_t addition = (byte_in & 0x7F) * multiplier;
+++    if(*dest + addition > 0xFFFF) {
+++      /* Value does not fit into the 16‑bit destination. Reject without
+++         consuming further bytes.
+++      */
+++      DBG("Variable Byte Integer exceeds 16‑bit limit.");
+++      return 0;
+++    }
+++    *dest += addition;
+++    multiplier *= 128;
++*** End Patch
+diff --git a/proper.patch b/proper.patch
+new file mode 100644
+index 0000000..896ad6d
+--- /dev/null
++++ b/proper.patch
+@@ -0,0 +1,38 @@
++diff --git a/os/net/app-layer/mqtt/mqtt.c b/os/net/app-layer/mqtt/mqtt.c
++index 0000000..1111111 100644
++--- a/os/net/app-layer/mqtt/mqtt.c
+++++ b/os/net/app-layer/mqtt/mqtt.c
++@@
++   uint32_t input_pos_0 = 0;
++@@
++-  *dest = 0;
+++  /* Enforce 16‑bit limit for Remaining Length. Original code allowed any
+++   * value and truncated it, which could cause parsing errors. */
+++  *dest = 0;
++@@
++-    if(*input_pos >= input_data_len) {
++-      return 0;
++-    }
+++    if(*input_pos >= (uint32_t)input_data_len) {
+++      return 0;
+++    }
++@@
++-    if(read_bytes > 4) {
++-      DBG("Received more than 4 byte 'Variable Byte Integer'.");
++-      return 0;
++-    }
+++    if(read_bytes == 4 && (byte_in & 0x80)) {
+++      DBG("Received more than 4 byte 'Variable Byte Integer'.");
+++      return 0;
+++    }
++@@
++-    *dest += (byte_in & 127) * multiplier;
++-    multiplier *= 128;
+++    uint32_t addition = (byte_in & 0x7F) * multiplier;
+++    if(*dest + addition > 0xFFFF) {
+++      DBG("Variable Byte Integer exceeds 16‑bit limit.");
+++      return 0;
+++    }
+++    *dest += addition;
+++    multiplier *= 128;
++*** End Patch

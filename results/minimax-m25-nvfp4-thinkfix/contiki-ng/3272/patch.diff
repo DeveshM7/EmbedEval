@@ -1,0 +1,288 @@
+diff --git a/os/sys/cycles.c b/os/sys/cycles.c
+new file mode 100644
+index 0000000..1ee2e05
+--- /dev/null
++++ b/os/sys/cycles.c
+@@ -0,0 +1,149 @@
++/*
++ * Copyright (c) 2023 Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/**
++ * \file
++ *         Implementation of the CPU cycle counter module.
++ * \author
++ *         Contiki-NG
++ *
++ */
++
++#include "sys/cycles.h"
++#include <time.h>
++#include <sys/time.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++/*---------------------------------------------------------------------------*/
++
++/**
++ * Cycle counter state
++ */
++typedef struct {
++  uint32_t start_time;     /**< Time when counter was started */
++  uint32_t stopped_time;   /**< Time when counter was stopped */
++  bool started;            /**< Whether the counter has been started */
++  bool stopped;            /**< Whether the counter has been stopped */
++} cycles_state_t;
++
++/* Global cycle counter state */
++static cycles_state_t state = { .start_time = 0, .stopped_time = 0, .started = false, .stopped = false };
++
++/*---------------------------------------------------------------------------*/
++
++/**
++ * Get current time in nanoseconds (using monotonic clock for elapsed time)
++ */
++static uint32_t
++get_time_nanos(void)
++{
++  struct timespec ts;
++
++  /* Use CLOCK_MONOTONIC to get elapsed time */
++  if(clock_gettime(CLOCK_MONOTONIC, &ts) == -1) {
++    /* Fallback if CLOCK_MONOTONIC is not available */
++    clock_gettime(CLOCK_REALTIME, &ts);
++  }
++
++  /* Convert to nanoseconds and fit in 32 bits */
++  return (uint32_t)(ts.tv_sec * 1000000000UL + ts.tv_nsec);
++}
++
++/*---------------------------------------------------------------------------*/
++
++uint32_t
++cycles_now(void)
++{
++  uint32_t current_time;
++
++  /* If not started, return 0 */
++  if(!state.started) {
++    return 0;
++  }
++
++  /* If stopped, return the frozen value */
++  if(state.stopped) {
++    return state.stopped_time;
++  }
++
++  /* Get current time */
++  current_time = get_time_nanos();
++
++  /* Calculate elapsed time since start (in nanoseconds = cycles) */
++  /* Handle wrap-around: if current < start, assume wrap and don't go backwards */
++  if(current_time >= state.start_time) {
++    return current_time - state.start_time;
++  } else {
++    /* Wrap-around case - return 0 to avoid going backwards */
++    return 0;
++  }
++}
++
++/*---------------------------------------------------------------------------*/
++
++void
++cycles_start(void)
++{
++  /* Idempotent: if already started (and not stopped), do nothing */
++  if(state.started && !state.stopped) {
++    return;
++  }
++
++  /* Record start time */
++  state.start_time = get_time_nanos();
++  state.started = true;
++  state.stopped = false;
++  state.stopped_time = 0;
++}
++
++/*---------------------------------------------------------------------------*/
++
++void
++cycles_stop(void)
++{
++  /* If not started, do nothing */
++  if(!state.started) {
++    return;
++  }
++
++  /* If already stopped, do nothing */
++  if(state.stopped) {
++    return;
++  }
++
++  /* Record stopped time */
++  state.stopped_time = get_time_nanos() - state.start_time;
++  state.stopped = true;
++}
++
++/*---------------------------------------------------------------------------*/
+diff --git a/os/sys/cycles.h b/os/sys/cycles.h
+new file mode 100644
+index 0000000..852973e
+--- /dev/null
++++ b/os/sys/cycles.h
+@@ -0,0 +1,127 @@
++/*
++ * Copyright (c) 2023 Contiki-NG
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file is part of the Contiki operating system.
++ *
++ */
++
++/**
++ * \file
++ *         Header file for the CPU cycle counter module.
++ * \author
++ *         Contiki-NG
++ *
++ */
++
++/** \addtogroup sys
++ * @{ */
++
++/**
++ * \defgroup cycles Cycle counter
++ *
++ * The cycle counter module provides a CPU cycle counter for timing
++ * very short code paths that are too fast for the rtimer.
++ *
++ * On a hosted port, a cycle is a nanosecond of process CPU time.
++ *
++ * @{
++ */
++
++#ifndef CYCLES_H_
++#define CYCLES_H_
++
++#include <stdint.h>
++#include <stdbool.h>
++
++/*---------------------------------------------------------------------------*/
++
++/**
++ * \brief Get the current cycle count
++ *
++ * This function returns the current cycle count. Before the counter
++ * is started, it returns 0. After the counter is stopped, it returns
++ * the frozen value at the time of stopping.
++ *
++ * \return The current cycle count
++ */
++uint32_t cycles_now(void);
++
++/**
++ * \brief Start the cycle counter
++ *
++ * This function starts the cycle counter. It is idempotent, meaning
++ * calling it multiple times does not disturb an in-progress count.
++ */
++void cycles_start(void);
++
++/**
++ * \brief Stop the cycle counter
++ *
++ * This function stops the cycle counter and freezes the reading.
++ * After stopping, cycles_now() will return the frozen value.
++ */
++void cycles_stop(void);
++
++/*---------------------------------------------------------------------------*/
++
++/**
++ * Core frequency in cycles per second.
++ *
++ * On a hosted port, a cycle is a nanosecond of process CPU time,
++ * so the frequency is 1e9.
++ */
++#define CYCLES_HZ 1000000000UL
++
++/**
++ * \brief Convert cycle count to whole microseconds
++ *
++ * This macro converts a cycle count to whole microseconds.
++ * It works across the full 32-bit range without overflow.
++ *
++ * \param cycles The cycle count
++ * \return The whole microseconds
++ */
++#define CYCLES_TO_US(cycles) ((cycles) / 1000UL)
++
++/**
++ * \brief Convert cycle count to hundredths of a microsecond
++ *
++ * This macro converts a cycle count to hundredths of a microsecond.
++ * It works across the full 32-bit range without overflow.
++ *
++ * \param cycles The cycle count
++ * \return The hundredths of a microsecond (0-99)
++ */
++#define CYCLES_TO_US_FRAC(cycles) (((cycles) % 1000UL) / 10UL)
++
++/*---------------------------------------------------------------------------*/
++
++#endif /* CYCLES_H_ */
++
++/** @} */
++/** @} */

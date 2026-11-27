@@ -1,0 +1,265 @@
+diff --git a/os/net/ipv6/uiplib.c b/os/net/ipv6/uiplib.c
+index 39960ea..06036e4 100644
+--- a/os/net/ipv6/uiplib.c
++++ b/os/net/ipv6/uiplib.c
+@@ -55,6 +55,82 @@
+ #define LOG_MODULE "uiplib"
+ #define LOG_LEVEL  LOG_LEVEL_NONE
+ 
++/*---------------------------------------------------------------------------*/
++/*
++ * Check if address is a NAT64 address with the well-known prefix 64:ff9b::/96
++ * (RFC 6052). The first 96 bits (6 16-bit groups) must be 64:ff9b::.
++ */
++static int
++addr_is_nat64(const uip_ip6addr_t *addr)
++{
++  return addr->u8[0] == 0x64 && addr->u8[1] == 0xff &&
++         addr->u8[2] == 0x9b && addr->u8[3] == 0 &&
++         addr->u8[4] == 0 && addr->u8[5] == 0;
++}
++
++/*---------------------------------------------------------------------------*/
++/*
++ * Check if we're at an IPv4 suffix in the string.
++ * Returns 1 if the position AFTER the dot looks like the start of an IPv4 address.
++ */
++static int
++is_ipv4_suffix(const char *p)
++{
++  /* IPv4 suffix starts with a digit after the dot */
++  p++;
++  if(*p >= '0' && *p <= '9') {
++    /* Count digits at start */
++    int digits = 0;
++    const char *q = p;
++    while(*q >= '0' && *q <= '9' && digits < 3) {
++      digits++;
++      q++;
++    }
++    /* Must be followed by a dot */
++    if(*q == '.') {
++      return 1;
++    }
++  }
++  return 0;
++}
++
++/*---------------------------------------------------------------------------*/
++/*
++ * Parse an IPv4 address in dotted-decimal notation.
++ * Returns 1 on success, 0 on error.
++ */
++static int
++parse_ipv4_suffix(const char *addrstr, uip_ip6addr_t *ipaddr, int offset)
++{
++  unsigned char tmp;
++  char c;
++  unsigned char i, j;
++
++  tmp = 0;
++
++  for(i = 0; i < 4; ++i) {
++    j = 0;
++    do {
++      c = *addrstr;
++      ++j;
++      if(j > 4) {
++        return 0;
++      }
++      if(c == '.' || c == '\0' || c == ']' || c == '/' || c == ':') {
++        ipaddr->u8[offset + i] = tmp;
++        tmp = 0;
++      } else if(c >= '0' && c <= '9') {
++        tmp = (tmp * 10) + (c - '0');
++      } else {
++        return 0;
++      }
++      ++addrstr;
++    } while(c != '.' && c != '\0' && c != ']' && c != '/' && c != ':');
++
++  }
++  return 1;
++}
++
+ /*---------------------------------------------------------------------------*/
+ int
+ uiplib_ip6addrconv(const char *addrstr, uip_ip6addr_t *ipaddr)
+@@ -63,9 +139,15 @@ uiplib_ip6addrconv(const char *addrstr, uip_ip6addr_t *ipaddr)
+   int tmp, zero;
+   unsigned int len;
+   char c = 0;  //gcc warning if not initialized
++  const char *ipv4_start;
++  int has_ipv4_suffix = 0;
++  int groups_parsed = 0;
++  int had_zero_compression = 0;
++  int zero_len = 0;  /* Length of zero compression in bytes */
+ 
+   value = 0;
+   zero = -1;
++  ipv4_start = NULL;
+   if(*addrstr == '[') addrstr++;
+ 
+   for(len = 0; len < sizeof(uip_ip6addr_t) - 1; addrstr++) {
+@@ -74,6 +156,7 @@ uiplib_ip6addrconv(const char *addrstr, uip_ip6addr_t *ipaddr)
+       ipaddr->u8[len] = (value >> 8) & 0xff;
+       ipaddr->u8[len + 1] = value & 0xff;
+       len += 2;
++      groups_parsed++;
+       value = 0;
+ 
+       if(c == '\0' || c == ']' || c == '/') {
+@@ -84,9 +167,58 @@ uiplib_ip6addrconv(const char *addrstr, uip_ip6addr_t *ipaddr)
+         /* Zero compression */
+         if(zero < 0) {
+           zero = len;
++          had_zero_compression = 1;
+         }
+         addrstr++;
+       }
++    } else if(c == '.' && is_ipv4_suffix(addrstr)) {
++      /* Check if this could be an IPv4 suffix.
++       * IPv6 address with IPv4 suffix has 8 groups total.
++       * With zero compression: we need 6 effective groups of hex.
++       */
++      int effective_groups = groups_parsed;
++      if(had_zero_compression) {
++        int explicit_groups = groups_parsed;
++        int total_groups_needed = 8;
++        int zero_groups = total_groups_needed - explicit_groups - 2;  /* -2 for IPv4 */
++        if(zero_groups > 0) {
++          effective_groups = explicit_groups + zero_groups;
++          zero_len = zero_groups * 2;  /* Convert groups to bytes */
++        }
++      }
++      
++      if(effective_groups == 6 && groups_parsed >= 1 && groups_parsed <= 6) {
++        /* Valid IPv4 suffix pattern */
++        has_ipv4_suffix = 1;
++        ipv4_start = addrstr + 1;  /* Skip the dot, start at the first digit */
++        
++        /* For IPv4 suffix, we need to place it at the end (offset 12)
++         * First, handle zero compression: move existing data to make room */
++        if(had_zero_compression && zero_len > 0) {
++          /* Move the explicitly parsed groups to make room for zeros */
++          /* The zeros go at the beginning, then hex groups, then IPv4 at end */
++          /* We need to rearrange: [zeros][hex groups][IPv4] */
++          /* Currently we have: [hex groups] at position zero_len */
++          /* We want: [zeros at 0][hex groups at zero_len][IPv4 at 12] */
++          
++          /* Move the hex groups to their correct position */
++          memmove(&ipaddr->u8[zero_len], ipaddr->u8, len);
++          /* Fill zeros at the beginning */
++          memset(ipaddr->u8, 0, zero_len);
++          /* Update len to account for zeros */
++          len = zero_len + 4;  /* zeros + IPv4 */
++        } else {
++          /* No zero compression: just remove last hex group, IPv4 goes at len-2+4-2 = len+2? */
++          /* Actually, simpler: IPv4 goes at offset 12 */
++          len = 12;
++        }
++        groups_parsed += 2;  /* For zero handling below */
++        break;
++      } else {
++        LOG_ERR("unexpected dot: groups_parsed=%d, effective=%d, had_zc=%d\n", 
++               groups_parsed, effective_groups, had_zero_compression);
++        return 0;
++      }
+     } else {
+       if(c >= '0' && c <= '9') {
+         tmp = c - '0';
+@@ -101,11 +233,34 @@ uiplib_ip6addrconv(const char *addrstr, uip_ip6addr_t *ipaddr)
+       value = (value << 4) + (tmp & 0xf);
+     }
+   }
++
++  /* Check for IPv4 suffix after the main loop */
++  if(has_ipv4_suffix && ipv4_start != NULL) {
++    if(!parse_ipv4_suffix(ipv4_start, ipaddr, 12)) {
++      LOG_ERR("invalid IPv4 suffix\n");
++      return 0;
++    }
++    len = 16;  /* Full IPv6 address */
++    
++    /* Skip to end of IPv4 */
++    while(*addrstr != '\0' && *addrstr != ']' && *addrstr != '/') {
++      addrstr++;
++    }
++    c = *addrstr;
++  }
++
+   if(c != '\0' && c != ']' && c != '/') {
+     LOG_ERR("too large address\n");
+     return 0;
+   }
+-  if(len < sizeof(uip_ip6addr_t)) {
++
++  if(has_ipv4_suffix) {
++    /* IPv4 suffix already parsed, just validate length */
++    if(len != 16) {
++      LOG_ERR("invalid IPv4 suffix address length: len=%d\n", len);
++      return 0;
++    }
++  } else if(len < sizeof(uip_ip6addr_t)) {
+     if(zero < 0) {
+       LOG_ERR("too short address\n");
+       return 0;
+@@ -190,6 +345,13 @@ uiplib_ipaddr_snprint(char *buf, size_t size, const uip_ipaddr_t *addr)
+      */
+     return snprintf(buf, size, "::FFFF:%u.%u.%u.%u", addr->u8[12],
+                     addr->u8[13], addr->u8[14], addr->u8[15]);
++  } else if(addr_is_nat64(addr)) {
++    /*
++     * Printing NAT64 addresses with the well-known prefix 64:ff9b::/96
++     * (RFC 6052) in the compressed mixed notation: 64:ff9b::d.d.d.d
++     */
++    return snprintf(buf, size, "64:ff9b::%u.%u.%u.%u", addr->u8[12],
++                    addr->u8[13], addr->u8[14], addr->u8[15]);
+   } else {
+     int f = 0;
+     for(size_t i = 0; i < sizeof(uip_ipaddr_t); i += 2) {
+diff --git a/os/net/ipv6/uiplib.h b/os/net/ipv6/uiplib.h
+index 791118b..d0c142e 100644
+--- a/os/net/ipv6/uiplib.h
++++ b/os/net/ipv6/uiplib.h
+@@ -96,6 +96,40 @@ void uiplib_ipaddr_print(const uip_ipaddr_t *addr);
+  */
+ int uiplib_ipaddr_snprint(char *buffer, size_t size, const uip_ipaddr_t *addr);
+ 
++/**
++ * \brief Set a NAT64 IPv6 address from an IPv4 address
++ *
++ * This macro takes a pointer to a uip_ip6addr_t and four IPv4 octets
++ * and sets the address to the NAT64 well-known-prefix form 64:ff9b::/96
++ * (RFC 6052) with the given IPv4 address placed in the low 32 bits.
++ *
++ * \param addr A pointer to a uip_ip6addr_t that will be set.
++ * \param a The first octet of the IPv4 address.
++ * \param b The second octet of the IPv4 address.
++ * \param c The third octet of the IPv4 address.
++ * \param d The fourth octet of the IPv4 address.
++ *
++ * Example: uip_nat64addr(&addr, 8, 8, 8, 8) yields 64:ff9b::8.8.8.8
++ */
++#define uip_nat64addr(addr, a, b, c, d) do { \
++  (addr)->u8[0] = 0x64; \
++  (addr)->u8[1] = 0xff; \
++  (addr)->u8[2] = 0x9b; \
++  (addr)->u8[3] = 0; \
++  (addr)->u8[4] = 0; \
++  (addr)->u8[5] = 0; \
++  (addr)->u8[6] = 0; \
++  (addr)->u8[7] = 0; \
++  (addr)->u8[8] = 0; \
++  (addr)->u8[9] = 0; \
++  (addr)->u8[10] = 0; \
++  (addr)->u8[11] = 0; \
++  (addr)->u8[12] = (a); \
++  (addr)->u8[13] = (b); \
++  (addr)->u8[14] = (c); \
++  (addr)->u8[15] = (d); \
++} while(0)
++
+ #endif /* UIPLIB_H_ */
+ /**
+  * @}

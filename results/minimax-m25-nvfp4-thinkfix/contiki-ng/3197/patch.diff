@@ -1,0 +1,248 @@
+diff --git a/os/net/app-layer/mqtt/mqtt-prop.c b/os/net/app-layer/mqtt/mqtt-prop.c
+index 881a56b..e1d6f1b 100644
+--- a/os/net/app-layer/mqtt/mqtt-prop.c
++++ b/os/net/app-layer/mqtt/mqtt-prop.c
+@@ -294,14 +294,26 @@ mqtt_prop_decode_input_props(struct mqtt_connection *conn)
+ static uint32_t
+ decode_prop_utf8(struct mqtt_connection *conn,
+                  uint8_t *buf_in,
++                 uint32_t buf_len,
+                  uint8_t *data)
+ {
+   uint32_t len;
+ 
++  if(buf_len < MQTT_STRING_LEN_SIZE) {
++    DBG("MQTT - Error, not enough bytes for UTF8 string length\n");
++    return 0;
++  }
++
+   len = (buf_in[0] << 8) + buf_in[1];
+ 
+   DBG("MQTT - Decoding %d-char UTF8 string property\n", len);
+ 
++  /* Check if we have enough bytes for the declared length */
++  if((len + MQTT_STRING_LEN_SIZE) > buf_len) {
++    DBG("MQTT - Error, not enough bytes for UTF8 string property\n");
++    return 0;
++  }
++
+   /* Include NULL terminator in destination */
+   if((len + MQTT_STRING_LEN_SIZE + 1) > MQTT_PROP_MAX_PROP_LENGTH) {
+     DBG("MQTT - Error, property too long (max %i bytes)", MQTT_PROP_MAX_PROP_LENGTH);
+@@ -317,7 +329,7 @@ decode_prop_utf8(struct mqtt_connection *conn,
+ /*---------------------------------------------------------------------------*/
+ static uint32_t
+ decode_prop_fixed_len_int(struct mqtt_connection *conn,
+-                          uint8_t *buf_in, int len,
++                          uint8_t *buf_in, uint32_t buf_len, int len,
+                           uint8_t *data)
+ {
+   int8_t i;
+@@ -325,6 +337,12 @@ decode_prop_fixed_len_int(struct mqtt_connection *conn,
+ 
+   DBG("MQTT - Decoding %d-byte int property\n", len);
+ 
++  /* Check if we have enough bytes */
++  if((uint32_t)len > buf_len) {
++    DBG("MQTT - Error, not enough bytes for fixed-length int property\n");
++    return 0;
++  }
++
+   if(len > MQTT_PROP_MAX_PROP_LENGTH) {
+     DBG("MQTT - Error, property too long (max %i bytes)", MQTT_PROP_MAX_PROP_LENGTH);
+     return 0;
+@@ -349,6 +367,7 @@ decode_prop_fixed_len_int(struct mqtt_connection *conn,
+ static uint32_t
+ decode_prop_vbi(struct mqtt_connection *conn,
+                 uint8_t *buf_in,
++                uint32_t buf_len,
+                 uint8_t *data)
+ {
+   uint8_t prop_len_bytes;
+@@ -359,7 +378,7 @@ decode_prop_vbi(struct mqtt_connection *conn,
+   memset(data, 0, 4);
+ 
+   prop_len_bytes =
+-    mqtt_decode_var_byte_int(buf_in, 4, NULL, NULL, (uint16_t *)data);
++    mqtt_decode_var_byte_int(buf_in, buf_len, NULL, NULL, (uint16_t *)data);
+ 
+   if(prop_len_bytes == 0) {
+     DBG("MQTT - Error decoding Variable Byte Integer\n");
+@@ -377,12 +396,18 @@ decode_prop_vbi(struct mqtt_connection *conn,
+ static uint32_t
+ decode_prop_binary_data(struct mqtt_connection *conn,
+                         uint8_t *buf_in,
++                        uint32_t buf_len,
+                         uint8_t *data)
+ {
+   uint8_t data_len;
+ 
+   DBG("MQTT - Decoding Binary Data property\n");
+ 
++  if(buf_len < MQTT_STRING_LEN_SIZE) {
++    DBG("MQTT - Error, not enough bytes for binary data length\n");
++    return 0;
++  }
++
+   data_len = (buf_in[0] << 8) + buf_in[1];
+ 
+   if(data_len == 0) {
+@@ -390,6 +415,12 @@ decode_prop_binary_data(struct mqtt_connection *conn,
+     return 0;
+   }
+ 
++  /* Check if we have enough bytes for the declared length */
++  if((data_len + MQTT_STRING_LEN_SIZE) > buf_len) {
++    DBG("MQTT - Error, not enough bytes for binary data property\n");
++    return 0;
++  }
++
+   if((data_len + 2) > MQTT_PROP_MAX_PROP_LENGTH) {
+     DBG("MQTT - Error, property too long (max %i bytes)", MQTT_PROP_MAX_PROP_LENGTH);
+     return 0;
+@@ -403,18 +434,37 @@ decode_prop_binary_data(struct mqtt_connection *conn,
+ static uint32_t
+ decode_prop_utf8_pair(struct mqtt_connection *conn,
+                       uint8_t *buf_in,
++                      uint32_t buf_len,
+                       uint8_t *data)
+ {
+   uint32_t len1;
+   uint32_t len2;
+   uint32_t total_len;
+ 
++  if(buf_len < MQTT_STRING_LEN_SIZE) {
++    DBG("MQTT - Error, not enough bytes for UTF8 string pair first length\n");
++    return 0;
++  }
++
+   len1 = (buf_in[0] << 8) + buf_in[1];
++
++  /* Need at least 2 more bytes for the second length field */
++  if((len1 + MQTT_STRING_LEN_SIZE + MQTT_STRING_LEN_SIZE) > buf_len) {
++    DBG("MQTT - Error, not enough bytes for UTF8 string pair\n");
++    return 0;
++  }
++
+   len2 = (buf_in[len1 + MQTT_STRING_LEN_SIZE] << 8) + buf_in[len1 + MQTT_STRING_LEN_SIZE + 1];
+   total_len = len1 + len2;
+ 
+   DBG("MQTT - Decoding %d-char UTF8 string pair property (%i + %i)\n", total_len, len1, len2);
+ 
++  /* Check if we have enough bytes for the declared length */
++  if((total_len + 2 * MQTT_STRING_LEN_SIZE) > buf_len) {
++    DBG("MQTT - Error, not enough bytes for UTF8 string pair property\n");
++    return 0;
++  }
++
+   if((total_len + 2 * MQTT_STRING_LEN_SIZE) > MQTT_PROP_MAX_PROP_LENGTH) {
+     DBG("MQTT - Error, property too long (max %i bytes)", MQTT_PROP_MAX_PROP_LENGTH);
+     return 0;
+@@ -428,7 +478,7 @@ decode_prop_utf8_pair(struct mqtt_connection *conn,
+ /*---------------------------------------------------------------------------*/
+ uint32_t
+ parse_prop(struct mqtt_connection *conn,
+-           mqtt_vhdr_prop_t prop_id, uint8_t *buf_in, uint8_t *data)
++           mqtt_vhdr_prop_t prop_id, uint8_t *buf_in, uint32_t buf_len, uint8_t *data)
+ {
+   switch(prop_id) {
+   case MQTT_VHDR_PROP_PAYLOAD_FMT_IND:
+@@ -439,18 +489,18 @@ parse_prop(struct mqtt_connection *conn,
+   case MQTT_VHDR_PROP_WILD_SUB_AVAIL:
+   case MQTT_VHDR_PROP_SUB_ID_AVAIL:
+   case MQTT_VHDR_PROP_SHARED_SUB_AVAIL: {
+-    return decode_prop_fixed_len_int(conn, buf_in, 1, data);
++    return decode_prop_fixed_len_int(conn, buf_in, buf_len, 1, data);
+   }
+   case MQTT_VHDR_PROP_RECEIVE_MAX:
+   case MQTT_VHDR_PROP_TOPIC_ALIAS_MAX:
+   case MQTT_VHDR_PROP_SERVER_KEEP_ALIVE: {
+-    return decode_prop_fixed_len_int(conn, buf_in, 2, data);
++    return decode_prop_fixed_len_int(conn, buf_in, buf_len, 2, data);
+   }
+   case MQTT_VHDR_PROP_MSG_EXP_INT:
+   case MQTT_VHDR_PROP_SESS_EXP_INT:
+   case MQTT_VHDR_PROP_WILL_DELAY_INT:
+   case MQTT_VHDR_PROP_MAX_PKT_SZ: {
+-    return decode_prop_fixed_len_int(conn, buf_in, 4, data);
++    return decode_prop_fixed_len_int(conn, buf_in, buf_len, 4, data);
+   }
+   case MQTT_VHDR_PROP_CONTENT_TYPE:
+   case MQTT_VHDR_PROP_RESP_TOPIC:
+@@ -459,17 +509,17 @@ parse_prop(struct mqtt_connection *conn,
+   case MQTT_VHDR_PROP_RESP_INFO:
+   case MQTT_VHDR_PROP_SERVER_REFERENCE:
+   case MQTT_VHDR_PROP_REASON_STRING: {
+-    return decode_prop_utf8(conn, buf_in, data);
++    return decode_prop_utf8(conn, buf_in, buf_len, data);
+   }
+   case MQTT_VHDR_PROP_CORRELATION_DATA:
+   case MQTT_VHDR_PROP_AUTH_DATA: {
+-    return decode_prop_binary_data(conn, buf_in, data);
++    return decode_prop_binary_data(conn, buf_in, buf_len, data);
+   }
+   case MQTT_VHDR_PROP_SUB_ID: {
+-    return decode_prop_vbi(conn, buf_in, data);
++    return decode_prop_vbi(conn, buf_in, buf_len, data);
+   }
+   case MQTT_VHDR_PROP_USER_PROP: {
+-    return decode_prop_utf8_pair(conn, buf_in, data);
++    return decode_prop_utf8_pair(conn, buf_in, buf_len, data);
+   }
+   default:
+     DBG("MQTT - Error, no such property '%i'", prop_id);
+@@ -487,6 +537,7 @@ mqtt_get_next_in_prop(struct mqtt_connection *conn,
+   uint32_t prop_len;
+   uint8_t prop_id_len_bytes;
+   uint16_t prop_id_decode;
++  uint32_t available_bytes;
+ 
+   if(!conn->in_packet.has_props) {
+     DBG("MQTT - Message has no input properties");
+@@ -503,19 +554,44 @@ mqtt_get_next_in_prop(struct mqtt_connection *conn,
+     return 0;
+   }
+ 
++  /* Calculate actual available bytes in the input buffer */
++  available_bytes = conn->in_packet.payload_pos - (conn->in_packet.curr_props_pos - conn->in_packet.payload);
++
+   prop_id_len_bytes =
+     mqtt_decode_var_byte_int(conn->in_packet.curr_props_pos,
+-                             conn->in_packet.properties_len - (conn->in_packet.curr_props_pos - conn->in_packet.props_start),
++                             available_bytes,
+                              NULL, NULL, (uint16_t *)&prop_id_decode);
+ 
++  /* If property ID decode fails (not enough bytes), reject this property */
++  if(prop_id_len_bytes == 0) {
++    DBG("MQTT - Error, not enough bytes for property ID\n");
++    /* Only consume one byte if there's at least one byte available;
++     * if no bytes available, consume nothing */
++    if(available_bytes > 0) {
++      conn->in_packet.curr_props_pos += 1;
++    }
++    return 0;
++  }
++
+   *prop_id = prop_id_decode;
+ 
+   DBG("MQTT - Decoded property ID %i (encoded using %i bytes)\n", *prop_id, prop_id_len_bytes);
+ 
+-  prop_len = parse_prop(conn, *prop_id, conn->in_packet.curr_props_pos + 1, data);
++  /* Calculate available bytes for property value (subtract prop ID bytes) */
++  available_bytes -= prop_id_len_bytes;
++
++  prop_len = parse_prop(conn, *prop_id, conn->in_packet.curr_props_pos + 1, available_bytes, data);
+ 
+   DBG("MQTT - Decoded property len %i bytes\n", prop_len);
+ 
++  /* If property value decode fails (not enough bytes), reject this property */
++  if(prop_len == 0) {
++    DBG("MQTT - Rejected property due to insufficient bytes\n");
++    /* Consume only the property ID bytes */
++    conn->in_packet.curr_props_pos += prop_id_len_bytes;
++    return 0;
++  }
++
+   conn->in_packet.curr_props_pos += prop_id_len_bytes + prop_len;
+ 
+   return prop_len;

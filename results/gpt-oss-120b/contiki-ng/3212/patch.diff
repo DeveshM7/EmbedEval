@@ -1,0 +1,136 @@
+diff --git a/add_rt_defs.patch b/add_rt_defs.patch
+new file mode 100644
+index 0000000..8257598
+--- /dev/null
++++ b/add_rt_defs.patch
+@@ -0,0 +1,24 @@
++*** Begin Patch
++*** Update File: arch/cpu/native/rtimer-arch.h
++@@
++ #define RTIMER_ARCH_SECOND CLOCK_CONF_SECOND
++ 
++ #define rtimer_arch_now() (rtimer_clock_t)clock_time()
+++
+++/* The native platform does not provide the usual radio timing macros.
+++   Define them as generic conversions based on the rtimer clock frequency.
+++   These definitions are sufficient for the unit‑tests that run on the native
+++   target and mirror the behavior of the real platforms where the macros are
+++   defined in the architecture‑specific rtimer‑arch.h files. */
+++#ifndef US_TO_RTIMERTICKS
+++#define US_TO_RTIMERTICKS(us) ((rtimer_clock_t)(((uint64_t)(us) * RTIMER_ARCH_SECOND + 500000ULL) / 1000000ULL))
+++#endif
+++
+++#ifndef RTIMERTICKS_TO_US
+++#define RTIMERTICKS_TO_US(t) ((uint32_t)(((uint64_t)(t) * 1000000ULL + (RTIMER_ARCH_SECOND / 2ULL)) / RTIMER_ARCH_SECOND))
+++#endif
+++
+++#ifndef RTIMERTICKS_TO_US_64
+++#define RTIMERTICKS_TO_US_64(t) ((uint32_t)(((uint64_t)(t) * 1000000ULL + (RTIMER_ARCH_SECOND / 2ULL)) / RTIMER_ARCH_SECOND))
+++#endif
++*** End Patch
+diff --git a/arch/cpu/native/rtimer-arch.h b/arch/cpu/native/rtimer-arch.h
+index 6488229..fa180ef 100644
+--- a/arch/cpu/native/rtimer-arch.h
++++ b/arch/cpu/native/rtimer-arch.h
+@@ -47,3 +47,20 @@
+ #define rtimer_arch_now() (rtimer_clock_t)clock_time()
+ 
+ #endif /* RTIMER_ARCH_H_ */
++
++/* The native platform does not provide the usual radio timing macros.
++   Define them as generic conversions based on the rtimer clock frequency.
++   These definitions are sufficient for the unit‑tests that run on the native
++   target and mirror the behavior of the real platforms where the macros are
++   defined in the architecture‑specific rtimer‑arch.h files. */
++#ifndef US_TO_RTIMERTICKS
++#define US_TO_RTIMERTICKS(us) ((rtimer_clock_t)(((uint64_t)(us) * RTIMER_ARCH_SECOND + 500000ULL) / 1000000ULL))
++#endif
++
++#ifndef RTIMERTICKS_TO_US
++#define RTIMERTICKS_TO_US(t) ((uint32_t)(((uint64_t)(t) * 1000000ULL + (RTIMER_ARCH_SECOND / 2ULL)) / RTIMER_ARCH_SECOND))
++#endif
++
++#ifndef RTIMERTICKS_TO_US_64
++#define RTIMERTICKS_TO_US_64(t) ((uint32_t)(((uint64_t)(t) * 1000000ULL + (RTIMER_ARCH_SECOND / 2ULL)) / RTIMER_ARCH_SECOND))
++#endif
+diff --git a/os/net/mac/tsch/tsch-const.h b/os/net/mac/tsch/tsch-const.h
+index c661cea..76af0d0 100644
+--- a/os/net/mac/tsch/tsch-const.h
++++ b/os/net/mac/tsch/tsch-const.h
+@@ -87,3 +87,22 @@
+ 
+ #endif /* TSCH_CONST_H_ */
+ /** @} */
++
++/* Compatibility definitions for native builds where radio timing
++   constants are not defined. */
++#ifndef RADIO_BYTE_AIR_TIME
++#define RADIO_BYTE_AIR_TIME RADIO_CONST_BYTE_AIR_TIME
++#endif
++#ifndef RADIO_PHY_OVERHEAD
++#define RADIO_PHY_OVERHEAD RADIO_CONST_PHY_OVERHEAD
++#endif
++
++#ifndef RADIO_DELAY_BEFORE_RX
++#define RADIO_DELAY_BEFORE_RX RADIO_CONST_DELAY_BEFORE_RX
++#endif
++#ifndef RADIO_DELAY_BEFORE_TX
++#define RADIO_DELAY_BEFORE_TX RADIO_CONST_DELAY_BEFORE_TX
++#endif
++#ifndef RADIO_DELAY_BEFORE_DETECT
++#define RADIO_DELAY_BEFORE_DETECT RADIO_CONST_DELAY_BEFORE_DETECT
++#endif
+diff --git a/os/net/mac/tsch/tsch-slot-operation.c b/os/net/mac/tsch/tsch-slot-operation.c
+index 507c102..eaf1521 100644
+--- a/os/net/mac/tsch/tsch-slot-operation.c
++++ b/os/net/mac/tsch/tsch-slot-operation.c
+@@ -390,6 +390,10 @@ get_packet_and_neighbor_for_link(struct tsch_link *link, struct tsch_neighbor **
+         if(p == NULL && n == n_broadcast) {
+           p = tsch_queue_get_unicast_packet_for_any(&n, link);
+         }
++        /* New behavior: for shared TX slots (including those with a null\n           address) also try to fetch any pending unicast packet. This enables\n           link\u2011local unicast traffic to reachable siblings without dedicated\n           cells to be transmitted. */
++        if(p == NULL && (link->link_options & LINK_OPTION_SHARED)) {
++          p = tsch_queue_get_unicast_packet_for_any(&n, link);
++        }
+       }
+     }
+   }
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..c190886
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,33 @@
++*** Begin Patch
++*** Update File: os/net/mac/tsch/tsch-slot-operation.c
++@@
++-        if(p == NULL && n == n_broadcast) {
++-          p = tsch_queue_get_unicast_packet_for_any(&n, link);
++-        }
+++        /* If there is no packet for the specific neighbor and the slot is a
+++           broadcast slot, we already try to fetch any unicast packet for a
+++           neighbor without a dedicated link (the standard behavior for
+++           receiver‑based TSCH). However, when using receiver‑based scheduling
+++           a shared TX slot may have its address set to the null address
+++           (linkaddr_null). In that case ``n`` will be ``NULL`` (no neighbor
+++           entry matches the null address) and the above condition will not be
+++           triggered, causing packets destined for a reachable sibling that
+++           does not have a dedicated unicast cell to be stuck in the queue.
+++
+++           To fix this, we also attempt to fetch an arbitrary unicast packet
+++           when the slot is a shared TX slot, regardless of the address. The
+++           helper ``tsch_queue_get_unicast_packet_for_any`` already ensures
+++           that we only select neighbors with ``tx_links_count == 0`` (i.e., no
+++           dedicated cell), which matches the required semantics.
+++        */
+++        if(p == NULL && n == n_broadcast) {
+++          p = tsch_queue_get_unicast_packet_for_any(&n, link);
+++        }
+++        /* New behavior: for shared TX slots (including those with a null
+++           address) also try to fetch any pending unicast packet. This enables
+++           link‑local unicast traffic to reachable siblings without dedicated
+++           cells to be transmitted. */
+++        if(p == NULL && (link->link_options & LINK_OPTION_SHARED)) {
+++          p = tsch_queue_get_unicast_packet_for_any(&n, link);
+++        }
++*** End Patch

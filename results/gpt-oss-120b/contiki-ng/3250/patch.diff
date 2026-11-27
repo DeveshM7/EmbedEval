@@ -1,0 +1,123 @@
+diff --git a/os/services/lwm2m/lwm2m-tlv.c b/os/services/lwm2m/lwm2m-tlv.c
+index 6e51e5f..c7ed627 100644
+--- a/os/services/lwm2m/lwm2m-tlv.c
++++ b/os/services/lwm2m/lwm2m-tlv.c
+@@ -45,6 +45,8 @@
+ #include <string.h>
+ #include <stdint.h>
+ #include <inttypes.h>
++#include <math.h>
++#include <limits.h>
+ #include "lwm2m-tlv.h"
+ 
+ /* Log configuration */
+@@ -319,41 +321,74 @@ lwm2m_tlv_float32_to_fix(const lwm2m_tlv_t *tlv, int32_t *value, int bits)
+   /* TLV needs to be 4 bytes */
+   int e, i;
+   int32_t val;
+-  int sign;
+-
+-  /* The IEEE 754 single-precision representation requires exactly 4 bytes.
+-     Reject anything shorter to avoid reading past the value. */
+-  if(tlv->length < 4) {
+-    *value = 0;
+-    return 0;
+-  }
+-
+-  sign = (tlv->value[0] & 0x80) != 0;
+-  e = ((tlv->value[0] << 1) & 0xff) | (tlv->value[1] >> 7);
+-  val = (((long)tlv->value[1] & 0x7f) << 16) | (tlv->value[2] << 8) | tlv->value[3];
+-
+-  LOG_DBG("Sign: %d, Fraction: %06"PRIx32"  0b", val < 0, val);
+-  for(i = 0; i < 23; i++) {
+-    LOG_DBG_("%"PRId32"", ((val >> (22 - i)) & 1));
+-  }
+-  LOG_DBG("\nExp:%d => %d\n", e, e - 127);
+-
+-  e = e - 127 + bits;
+-
+-  /* e corresponds to the number of times we need to roll the number */
+-
+-  LOG_DBG("Actual e=%d\n", e);
+-  e = e - 23;
+-  LOG_DBG("E after sub %d\n", e);
+-  val = val | 1L << 23;
+-  if(e > 0) {
+-    val = val << e;
+-  } else {
+-    val = val >> -e;
+-  }
+-
+-  *value = sign ? -val : val;
+-  return 4;
++/**
++ * @brief Convert an IEEE-754 floating-point TLV to a signed 32-bit fix-point value.
++ *
++ * The LWM2M specification permits only 4-byte (binary32) or 8-byte (binary64)
++ * encodings for Float resources. The original implementation only handled the
++ * 4-byte case, accepted malformed lengths and did not guard against special IEEE
++ * values or overflow/under-flow. This re-implementation follows the required
++ * behaviour:
++ *   * Accept only length 4 or 8 – otherwise reject.
++ *   * Reject NaN and infinities.
++ *   * Convert the floating-point value to the requested fix-point format:
++ *       – scale by 2^bits,
++ *       – truncate toward zero,
++ *       – saturate to ±INT32_MAX (INT32_MIN is never produced).
++ *   * Values whose magnitude is below the resolution (|scaled| < 1) yield zero.
++ *   * Return the number of bytes consumed (4 or 8) on success, 0 on rejection.
++ */
++size_t
+++lwm2m_tlv_float32_to_fix(const lwm2m_tlv_t *tlv, int32_t *value, int bits)
+++{
+++  if(tlv->length != 4 && tlv->length != 8) {
+++    *value = 0;
+++    return 0;
+++  }
+++
+++  double d;
+++  if(tlv->length == 4) {
+++    uint32_t u = ((uint32_t)tlv->value[0] << 24) |
+++                 ((uint32_t)tlv->value[1] << 16) |
+++                 ((uint32_t)tlv->value[2] << 8) |
+++                 ((uint32_t)tlv->value[3]);
+++    float f;
+++    memcpy(&f, &u, sizeof(f));
+++    d = (double)f;
+++  } else {
+++    uint64_t u = ((uint64_t)tlv->value[0] << 56) |
+++                 ((uint64_t)tlv->value[1] << 48) |
+++                 ((uint64_t)tlv->value[2] << 40) |
+++                 ((uint64_t)tlv->value[3] << 32) |
+++                 ((uint64_t)tlv->value[4] << 24) |
+++                 ((uint64_t)tlv->value[5] << 16) |
+++                 ((uint64_t)tlv->value[6] << 8) |
+++                 ((uint64_t)tlv->value[7]);
+++    double f64;
+++    memcpy(&f64, &u, sizeof(f64));
+++    d = f64;
+++  }
+++
+++  if(isnan(d) || isinf(d)) {
+++    *value = 0;
+++    return 0;
+++  }
+++
+++  double scale = ldexp(1.0, bits);
+++  double scaled = d * scale;
+++  const double max = (double)INT32_MAX;
+++  const double min = -(double)INT32_MAX;
+++  if(scaled > max) {
+++    *value = INT32_MAX;
+++    return tlv->length;
+++  }
+++  if(scaled < min) {
+++    *value = -INT32_MAX;
+++    return tlv->length;
+++  }
+++  *value = (int32_t)scaled;
+++  return tlv->length;
+++}
+ }
+ /*---------------------------------------------------------------------------*/
+ /** @} */

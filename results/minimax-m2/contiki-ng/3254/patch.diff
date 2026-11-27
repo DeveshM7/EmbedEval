@@ -1,0 +1,393 @@
+diff --git a/os/services/ip64/ip64-dns64.c b/os/services/ip64/ip64-dns64.c
+index 586f85e..443126a 100644
+--- a/os/services/ip64/ip64-dns64.c
++++ b/os/services/ip64/ip64-dns64.c
+@@ -18,14 +18,14 @@
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+  * FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE
+- * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+  * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+  * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+- * OF THE POSSIBILITY OF SUCH DAMAGE.
++ * STRICT LIABILITY, OR TORT (INCLUDING, OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
++ * OF SUCH DAMAGE.
+  *
+  */
+ 
+@@ -87,16 +87,21 @@ struct dns_answer {
+ #define DNS_CLASS_ANY 255
+ 
+ /*---------------------------------------------------------------------------*/
+-void
++int
+ ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+                 uint8_t *ipv4data, int ipv4datalen)
+ {
+   int i, j;
+   int qlen;
+-  uint8_t *qdata;
++  const uint8_t *qdata;
+   uint8_t *q;
+   struct dns_hdr *hdr;
+ 
++  /* Basic validation: need at least header */
++  if(ipv4datalen < (int)sizeof(struct dns_hdr)) {
++    return IP64_DNS64_DROP;
++  }
++
+   hdr = (struct dns_hdr *)ipv4data;
+   LOG_DBG("dns64_6to4 id: %02x%02x\n", hdr->id[0], hdr->id[1]);
+   LOG_DBG("dns64_6to4 flags1: 0x%02x\n", hdr->flags1);
+@@ -115,17 +120,29 @@ ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+   qdata = ipv4data + sizeof(struct dns_hdr);
+   for(i = 0; i < ((hdr->numquestions[0] << 8) + hdr->numquestions[1]); i++) {
+     do {
++      if(qdata >= ipv4data + ipv4datalen) {
++        LOG_WARN("dns64_6to4: Packet ended while parsing\n");
++        return IP64_DNS64_DROP;
++      }
+       qlen = *qdata;
+       qdata++;
++      /* Check if we have enough space for the label data */
++      if(qdata + qlen > ipv4data + ipv4datalen) {
++        LOG_WARN("dns64_6to4: Packet ended while parsing label\n");
++        return IP64_DNS64_DROP;
++      }
+       for(j = 0; j < qlen; j++) {
+         qdata++;
+-        if(qdata > ipv4data + ipv4datalen) {
+-          LOG_WARN("dns64_6to4: Packet ended while parsing\n");
+-          return;
+-        }
+       }
+     } while(qlen != 0);
+-    q = qdata;
++    
++    /* Check if we have enough space for the question type and class */
++    if(qdata + DNS_QUESTION_SIZE > ipv4data + ipv4datalen) {
++      LOG_WARN("dns64_6to4: Packet too short for question\n");
++      return IP64_DNS64_DROP;
++    }
++    
++    q = (uint8_t *)qdata;
+     if(q[DNS_QUESTION_CLASS0] == 0 && q[DNS_QUESTION_CLASS1] == DNS_CLASS_IN &&
+        q[DNS_QUESTION_TYPE0] == 0 && q[DNS_QUESTION_TYPE1] == DNS_TYPE_AAAA) {
+       q[DNS_QUESTION_TYPE1] = DNS_TYPE_A;
+@@ -133,6 +150,9 @@ ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+ 
+     qdata += DNS_QUESTION_SIZE;
+   }
++  
++  /* Return the actual length of the message processed */
++  return (int)(qdata - ipv4data);
+ }
+ /*---------------------------------------------------------------------------*/
+ int
+@@ -146,6 +166,12 @@ ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+   uint8_t *qcopy, *acopy, *lenptr;
+   uint8_t *q;
+   struct dns_hdr *hdr;
++  int out_len;
++
++  /* Basic validation: need at least header */
++  if(ipv4datalen < (int)sizeof(struct dns_hdr)) {
++    return IP64_DNS64_DROP;
++  }
+ 
+   hdr = (struct dns_hdr *)ipv4data;
+   LOG_DBG("dns64_4to6 id: %02x%02x\n", hdr->id[0], hdr->id[1]);
+@@ -160,24 +186,56 @@ ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+   LOG_DBG("dns64_4to6 numextrarr: 0x%02x\n",
+       ((hdr->numextrarr[0] << 8) + hdr->numextrarr[1]));
+ 
++  /* Check if we have space for the header in output */
++  if(ipv6datalen < (int)sizeof(struct dns_hdr)) {
++    return IP64_DNS64_DROP;
++  }
++
+   /* Find the DNS answer header by scanning through the question
+      labels. */
+   qdata = ipv4data + sizeof(struct dns_hdr);
+   qcopy = ipv6data + sizeof(struct dns_hdr);
++  out_len = sizeof(struct dns_hdr);
++  
+   for(i = 0; i < ((hdr->numquestions[0] << 8) + hdr->numquestions[1]); i++) {
+     do {
++      if(qdata >= ipv4data + ipv4datalen) {
++        LOG_WARN("dns64_4to6: packet ended while parsing\n");
++        return IP64_DNS64_DROP;
++      }
+       qlen = *qdata;
+       qdata++;
+-      qcopy++;
+-      for(j = 0; j < qlen; j++) {
+-        qdata++;
+-        qcopy++;
+-        if(qdata > ipv4data + ipv4datalen) {
+-          LOG_WARN("dns64_4to6: packet ended while parsing\n");
+-          return ipv6datalen;
+-        }
++      
++      /* Check if we have enough space for the label data */
++      if(qdata + qlen > ipv4data + ipv4datalen) {
++        LOG_WARN("dns64_4to6: packet ended while parsing label\n");
++        return IP64_DNS64_DROP;
+       }
++      
++      /* Check if we have space in output buffer */
++      if(out_len + 1 + qlen > ipv6datalen) {
++        LOG_WARN("dns64_4to6: output buffer too small\n");
++        return IP64_DNS64_DROP;
++      }
++      
++      *qcopy++ = *qdata;
++      qdata += qlen;
++      qcopy += qlen;
++      out_len += 1 + qlen;
+     } while(qlen != 0);
++    
++    /* Check if we have space for the question type and class in output */
++    if(out_len + DNS_QUESTION_SIZE > ipv6datalen) {
++      LOG_WARN("dns64_4to6: output buffer too small for question\n");
++      return IP64_DNS64_DROP;
++    }
++    
++    /* Also check input buffer has enough space */
++    if(qdata + DNS_QUESTION_SIZE > ipv4data + ipv4datalen) {
++      LOG_WARN("dns64_4to6: packet too short for question\n");
++      return IP64_DNS64_DROP;
++    }
++    
+     q = qcopy;
+     if(q[DNS_QUESTION_CLASS0] == 0 && q[DNS_QUESTION_CLASS1] == DNS_CLASS_IN &&
+        q[DNS_QUESTION_TYPE0] == 0 && q[DNS_QUESTION_TYPE1] == DNS_TYPE_AAAA) {
+@@ -186,6 +244,7 @@ ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+ 
+     qdata += DNS_QUESTION_SIZE;
+     qcopy += DNS_QUESTION_SIZE;
++    out_len += DNS_QUESTION_SIZE;
+   }
+ 
+   adata = qdata;
+@@ -193,72 +252,174 @@ ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+ 
+   /* Go through the answers section and update the answers. */
+   for(i = 0; i < ((hdr->numanswers[0] << 8) + hdr->numanswers[1]); i++) {
++    /* Check if we have enough input data for the name pointer */
++    if(adata >= ipv4data + ipv4datalen) {
++      LOG_WARN("dns64_4to6: packet ended while parsing answer\n");
++      return IP64_DNS64_DROP;
++    }
+ 
+     n = *adata;
+     if(n & 0xc0) {
+       /* Short-hand name format: 2 bytes */
++      if(adata + 2 > ipv4data + ipv4datalen) {
++        LOG_WARN("dns64_4to6: packet too short for compression pointer\n");
++        return IP64_DNS64_DROP;
++      }
++      if(out_len + 2 > ipv6datalen) {
++        LOG_WARN("dns64_4to6: output buffer too small for name pointer\n");
++        return IP64_DNS64_DROP;
++      }
+       *acopy++ = *adata++;
+       *acopy++ = *adata++;
++      out_len += 2;
+     } else {
+       /* Name spelled out */
+       do {
++        if(adata >= ipv4data + ipv4datalen) {
++          LOG_WARN("dns64_4to6: packet ended while parsing answer name\n");
++          return IP64_DNS64_DROP;
++        }
+         n = *adata;
+         adata++;
+-        acopy++;
++        
++        /* Check if we have enough space for the label data */
++        if(adata + n > ipv4data + ipv4datalen) {
++          LOG_WARN("dns64_4to6: answer name runs past packet\n");
++          return IP64_DNS64_DROP;
++        }
++        
++        /* Check if we have space in output buffer */
++        if(out_len + 1 + n > ipv6datalen) {
++          LOG_WARN("dns64_4to6: output buffer too small for name label\n");
++          return IP64_DNS64_DROP;
++        }
++        
++        *acopy++ = n;
+         for(j = 0; j < n; j++) {
+           *acopy++ = *adata++;
+         }
++        out_len += 1 + n;
+       } while(n != 0);
+     }
+ 
++    /* Check if we have enough input data for type, class, ttl, and len */
++    if(adata + 10 > ipv4data + ipv4datalen) {
++      LOG_WARN("dns64_4to6: packet too short for answer header\n");
++      return IP64_DNS64_DROP;
++    }
++
+     if(adata[0] == 0 && adata[1] == DNS_TYPE_A) {
+       /* Update the type field from A to AAAA */
++      if(out_len + 2 > ipv6datalen) {
++        LOG_WARN("dns64_4to6: output buffer too small for type field\n");
++        return IP64_DNS64_DROP;
++      }
+       *acopy = *adata;
+       acopy++;
+       adata++;
+       *acopy = DNS_TYPE_AAAA;
+       acopy++;
+       adata++;
++      out_len += 2;
+ 
+       /* Get the length of the address record. Should be 4. */
+       lenptr = &acopy[6];
+       len = (adata[6] << 8) + adata[7];
+ 
++      /* Check if we have enough input data for class, ttl, and len */
++      if(adata + 8 > ipv4data + ipv4datalen) {
++        LOG_WARN("dns64_4to6: packet too short for answer header\n");
++        return IP64_DNS64_DROP;
++      }
++
++      /* Check if we have space for class, ttl, and len in output */
++      if(out_len + 8 > ipv6datalen) {
++        LOG_WARN("dns64_4to6: output buffer too small for answer header\n");
++        return IP64_DNS64_DROP;
++      }
++
+       /* Copy the class, the TTL, and the data length */
+       memcpy(acopy, adata, 2 + 4 + 2);
+       acopy += 8;
+       adata += 8;
++      out_len += 8;
+ 
+       if(len == 4) {
++        /* Check if we have enough input data for the IPv4 address */
++        if(adata + 4 > ipv4data + ipv4datalen) {
++          LOG_WARN("dns64_4to6: packet too short for IPv4 address\n");
++          return IP64_DNS64_DROP;
++        }
++        
++        /* Check if we have space in output buffer for the IPv6 address */
++        if(out_len + 16 > ipv6datalen) {
++          LOG_WARN("dns64_4to6: output buffer too small for IPv6 address\n");
++          return IP64_DNS64_DROP;
++        }
++        
+         uip_ip4addr_t addr;
+         uip_ipaddr(&addr, adata[0], adata[1], adata[2], adata[3]);
+         ip64_addr_4to6(&addr, (uip_ip6addr_t *)acopy);
+ 
+         adata += len;
+         acopy += 16;
++        out_len += 16;
+         lenptr[0] = 0;
+         lenptr[1] = 16;
+-        ipv6datalen += 12;
+ 
+       } else {
++        /* Check if the length claim is valid */
++        if(adata + len > ipv4data + ipv4datalen) {
++          LOG_WARN("dns64_4to6: answer length runs past packet\n");
++          return IP64_DNS64_DROP;
++        }
++        
++        /* Check if we have space in output buffer */
++        if(out_len + len > ipv6datalen) {
++          LOG_WARN("dns64_4to6: output buffer too small for answer data\n");
++          return IP64_DNS64_DROP;
++        }
++        
+         memcpy(acopy, adata, len);
+         acopy += len;
+         adata += len;
++        out_len += len;
+       }
+     } else {
++      /* Check if we have the length field */
++      if(adata + 8 > ipv4data + ipv4datalen) {
++        LOG_WARN("dns64_4to6: packet too short for answer header\n");
++        return IP64_DNS64_DROP;
++      }
++      
+       len = (adata[8] << 8) + adata[9];
+ 
++      /* Check if we have enough input data for the answer */
++      if(adata + 10 + len > ipv4data + ipv4datalen) {
++        LOG_WARN("dns64_4to6: answer data runs past packet\n");
++        return IP64_DNS64_DROP;
++      }
++
++      /* Check if we have space in output buffer */
++      if(out_len + 10 + len > ipv6datalen) {
++        LOG_WARN("dns64_4to6: output buffer too small for answer\n");
++        return IP64_DNS64_DROP;
++      }
++
+       /* Copy the type, class, the TTL, and the data length */
+       memcpy(acopy, adata, 2 + 2 + 4 + 2);
+       acopy += 10;
+       adata += 10;
++      out_len += 10;
+ 
+       /* Copy the data */
+       memcpy(acopy, adata, len);
+       acopy += len;
+       adata += len;
++      out_len += len;
+     }
+   }
+-  return ipv6datalen;
++  
++  return out_len;
+ }
+ /*---------------------------------------------------------------------------*/
+diff --git a/os/services/ip64/ip64-dns64.h b/os/services/ip64/ip64-dns64.h
+index 27eb731..11c91a5 100644
+--- a/os/services/ip64/ip64-dns64.h
++++ b/os/services/ip64/ip64-dns64.h
+@@ -18,22 +18,26 @@
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+  * FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE
+- * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+  * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+  * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+- * OF THE POSSIBILITY OF SUCH DAMAGE.
++ * STRICT LIABILITY, OR TORT (INCLUDING, OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
++ * OF SUCH DAMAGE.
+  *
+  */
+ 
+ #ifndef IP64_DNS64_H_
+ #define IP64_DNS64_H_
+ 
+-void ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
+-                     uint8_t *ipv4data, int ipv4datalen);
++#include <stdint.h>
++
++#define IP64_DNS64_DROP (-1)
++
++int ip64_dns64_6to4(const uint8_t *ipv6data, int ipv6datalen,
++                    uint8_t *ipv4data, int ipv4datalen);
+ int ip64_dns64_4to6(const uint8_t *ipv4data, int ipv4datalen,
+                     uint8_t *ipv6data, int ipv6datalen);
+ 

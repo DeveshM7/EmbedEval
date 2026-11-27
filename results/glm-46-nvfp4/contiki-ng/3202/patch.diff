@@ -1,0 +1,241 @@
+diff --git a/os/storage/antelope/index-maxheap.c b/os/storage/antelope/index-maxheap.c
+index 1209149..28953b6 100644
+--- a/os/storage/antelope/index-maxheap.c
++++ b/os/storage/antelope/index-maxheap.c
+@@ -78,11 +78,11 @@
+ #define EMPTY_NODE(node)	((node)->min == 0 && (node)->max == 0)
+ #define EMPTY_PAIR(pair)	((pair)->key == 0 && (pair)->value == 0)
+ 
+-typedef uint16_t maxheap_key_t;
+-typedef uint16_t maxheap_value_t;
++typedef uint32_t maxheap_key_t;
++typedef uint32_t maxheap_value_t;
+ 
+ #define KEY_MIN 0
+-#define KEY_MAX 65535
++#define KEY_MAX 0xffffffff
+ 
+ struct heap_node {
+   maxheap_key_t min;
+@@ -142,6 +142,12 @@ static db_result_t insert(index_t *, attribute_value_t *, tuple_id_t);
+ static db_result_t delete(index_t *, attribute_value_t *);
+ static tuple_id_t get_next(index_iterator_t *);
+ 
++void
++maxheap_init(void)
++{
++  memb_init(&heaps);
++}
++
+ index_api_t index_maxheap = {
+   INDEX_MAXHEAP,
+   INDEX_API_EXTERNAL,
+@@ -542,6 +548,16 @@ create(index_t *index)
+ 
+   /* Initialize the heap. */
+   memset(&heap->next_free_slot, 0, sizeof(heap->next_free_slot));
++  /* Invalidate bucket cache to clear stale data */
++  invalidate_cache();
++  /* Initialize root node for fresh insertion */
++  heap_node_t root_node;
++  if(heap_read(heap, 0, &root_node) == 0) {
++    /* If heap is empty or corrupted, reinitialize it */
++    root_node.min = KEY_MIN;
++    root_node.max = KEY_MAX;
++    heap_write(heap, 0, &root_node);
++  }
+ 
+   heap->heap_storage = storage_open(index->descriptor_file);
+   heap->bucket_storage = storage_open(bucket_filename);
+@@ -620,6 +636,16 @@ load(index_t *index)
+   heap->bucket_storage = storage_open(bucket_file);
+ 
+   memset(&heap->next_free_slot, 0, sizeof(heap->next_free_slot));
++  /* Invalidate bucket cache to clear stale data */
++  invalidate_cache();
++  /* Initialize root node for fresh insertion */
++  heap_node_t root_node;
++  if(heap_read(heap, 0, &root_node) == 0) {
++    /* If heap is empty or corrupted, reinitialize it */
++    root_node.min = KEY_MIN;
++    root_node.max = KEY_MAX;
++    heap_write(heap, 0, &root_node);
++  }
+ 
+   PRINTF("DB: Loaded max-heap index from file %s and bucket file %s\n",
+ 	 index->descriptor_file, bucket_file);
+diff --git a/os/storage/antelope/index.c b/os/storage/antelope/index.c
+index 33d6ab0..68c3b9f 100644
+--- a/os/storage/antelope/index.c
++++ b/os/storage/antelope/index.c
+@@ -30,6 +30,7 @@
+ /**
+  * \file
+  *	This component forwards index calls using the generic index
++void maxheap_init(void);
+  *      API to specific implementations.
+  * \author
+  * 	Nicolas Tsiftes <nvt@sics.se>
+@@ -74,9 +75,11 @@ find_index_api(index_type_t index_type)
+ 
+ void
+ index_init(void)
++
+ {
+   list_init(indices);
+   memb_init(&index_memb);
++  maxheap_init();
+   process_start(&db_indexer, NULL);
+ }
+ 
+diff --git a/os/storage/antelope/index.h b/os/storage/antelope/index.h
+index ccc3e99..fbd02da 100644
+--- a/os/storage/antelope/index.h
++++ b/os/storage/antelope/index.h
+@@ -33,6 +33,7 @@
+  * 	Nicolas Tsiftes <nvt@sics.se>
+  */
+ 
++void maxheap_init(void);
+ #ifndef INDEX_H
+ #define INDEX_H
+ 
+diff --git a/os/storage/antelope/relation.c b/os/storage/antelope/relation.c
+index 0e939a0..b8b2d27 100644
+--- a/os/storage/antelope/relation.c
++++ b/os/storage/antelope/relation.c
+@@ -27,6 +27,7 @@
+  * SUCH DAMAGE.
+  */
+ 
++#include <stdlib.h>
+ /**
+  * \file
+  *	Logic for relational databases.
+@@ -571,19 +572,43 @@ aggregate(attribute_t *attr, attribute_value_t *value)
+     attr->aggregation_value += long_value;
+     break;
+   case AQL_MEAN:
++    {
++      long count = (attr->flags >> 4) & 0xfff;  /* Use upper 4 bits of flags for count */
++      long sum = attr->aggregation_value;
++      count++;
++      sum += long_value;
++      attr->aggregation_value = sum;
++      attr->flags = (attr->flags & 0x0f) | ((count & 0xfff) << 4);
++    }
+     break;
+-  case AQL_MEDIAN:
+     break;
+   case AQL_MAX:
+     if(long_value > attr->aggregation_value) {
+       attr->aggregation_value = long_value;
+     }
+     break;
+-  case AQL_MIN:
+-    if(long_value < attr->aggregation_value) {
+-      attr->aggregation_value = long_value;
++  case AQL_MEDIAN:
++    {
++      /* For MEDIAN, use the index field to store values */
++      long *median_buf = (long *)attr->index;
++      if(median_buf == NULL) {
++        /* Allocate buffer for up to 64 values */
++        median_buf = (long *)malloc(64 * sizeof(long));
++        if(median_buf == NULL) {
++          return;  /* Out of memory */
++        }
++        attr->index = median_buf;
++        memset(median_buf, 0, 64 * sizeof(long));
++        median_buf[0] = 0;  /* Use first element as count */
++      }
++      long count = median_buf[0] + 1;
++      if(count <= 64) {
++        median_buf[count] = long_value;  /* Store the value */
++        median_buf[0] = count;  /* Update count */
++      }
+     }
+     break;
++    break;
+   default:
+     break;
+   }
+@@ -833,6 +858,37 @@ relation_process_select(void *handle_ptr)
+     } else {
+       if(AQL_GET_FLAGS(adt) & AQL_FLAG_ASSIGN) {
+         if(DB_ERROR(storage_put_row(handle->result_rel, result_row))) {
++    /* Calculate final MEDIAN value if this is a MEDIAN aggregate */
++    if(result_attr->aggregator == AQL_MEDIAN) {
++      long *median_buf = (long *)result_attr->index;
++      if(median_buf != NULL && median_buf[0] > 0) {
++        long count = median_buf[0];
++        
++        /* Simple bubble sort for the values */
++        for(long i = 1; i <= count; i++) {
++          for(long j = 1; j <= count - i; j++) {
++            if(median_buf[j] > median_buf[j+1]) {
++              long temp = median_buf[j];
++              median_buf[j] = median_buf[j+1];
++              median_buf[j+1] = temp;
++            }
++          }
++        }
++        
++        /* Calculate median */
++        if(count % 2 == 1) {
++          /* Odd count - middle value */
++          result_attr->aggregation_value = median_buf[count/2 + 1];
++        } else {
++          /* Even count - average of two middle values */
++          result_attr->aggregation_value = (median_buf[count/2] + median_buf[count/2 + 1]) / 2;
++        }
++        
++        /* Free the median buffer */
++        free(median_buf);
++        result_attr->index = NULL;
++      }
++    }
+           PRINTF("DB: Failed to store a row in the result relation!\n");
+           return DB_STORAGE_ERROR;
+         }
+@@ -850,8 +906,20 @@ end_aggregation:
+     result_attr = attr_map_ptr->to_attr;
+     to_ptr = result_row + attr_map_ptr->to_offset;
+ 
+-    intbuf[0] = result_attr->aggregation_value >> 8;
+-    intbuf[1] = result_attr->aggregation_value & 0xff;
++    /* Calculate final MEAN value if this is a MEAN aggregate */
++    if(result_attr->aggregator == AQL_MEAN) {
++      long count = (result_attr->flags >> 4) & 0xfff;
++      if(count > 0) {
++        result_attr->aggregation_value = result_attr->aggregation_value / count;
++      }
++    }
++    intbuf[0] = (result_attr->aggregation_value >> 24) & 0xff;
++    intbuf[1] = (result_attr->aggregation_value >> 16) & 0xff;
++    intbuf[2] = (result_attr->aggregation_value >> 8) & 0xff;
++    intbuf[3] = result_attr->aggregation_value & 0xff;
++    if(result_attr->element_size < 4) {
++      result_attr->element_size = 4;
++    }
+     from_ptr = intbuf;
+     memcpy(to_ptr, from_ptr, result_attr->element_size);
+   }
+@@ -903,6 +971,7 @@ relation_select(void *handle_ptr, relation_t *rel, void *adt_ptr)
+     return DB_ALLOCATION_ERROR;
+   }
+ 
++  int median_count = 0;
+   for(i = normal_attributes = 0; i < AQL_ATTRIBUTE_COUNT(adt); i++) {
+     attribute_name = adt->attributes[i].name;
+ 
+@@ -927,6 +996,9 @@ relation_select(void *handle_ptr, relation_t *rel, void *adt_ptr)
+     }
+ 
+     attr->aggregator = adt->aggregators[i];
++    if(attr->aggregator == AQL_MEDIAN) {
++      median_count++;
++    }
+     switch(attr->aggregator) {
+     case AQL_NONE:
+       if(!(adt->attributes[i].flags & ATTRIBUTE_FLAG_NO_STORE)) {

@@ -1,0 +1,165 @@
+diff --git a/os/services/lwm2m/lwm2m-tlv.c b/os/services/lwm2m/lwm2m-tlv.c
+index 6e51e5f..f464886 100644
+--- a/os/services/lwm2m/lwm2m-tlv.c
++++ b/os/services/lwm2m/lwm2m-tlv.c
+@@ -316,45 +316,140 @@ lwm2m_tlv_write_float32(uint8_t type, int16_t id, int32_t value, int bits,
+ size_t
+ lwm2m_tlv_float32_to_fix(const lwm2m_tlv_t *tlv, int32_t *value, int bits)
+ {
+-  /* TLV needs to be 4 bytes */
++  /* TLV needs to be 4 bytes (binary32) or 8 bytes (binary64) */
+   int e, i;
+   int32_t val;
+   int sign;
++  int bias;
+ 
+-  /* The IEEE 754 single-precision representation requires exactly 4 bytes.
+-     Reject anything shorter to avoid reading past the value. */
+-  if(tlv->length < 4) {
++  /* Reject invalid lengths - only 4 (binary32) or 8 (binary64) allowed */
++  if(tlv->length != 4 && tlv->length != 8) {
+     *value = 0;
+     return 0;
+   }
+ 
+-  sign = (tlv->value[0] & 0x80) != 0;
+-  e = ((tlv->value[0] << 1) & 0xff) | (tlv->value[1] >> 7);
+-  val = (((long)tlv->value[1] & 0x7f) << 16) | (tlv->value[2] << 8) | tlv->value[3];
++  /* Determine format: binary32 (4 bytes) or binary64 (8 bytes) */
++  if(tlv->length == 8) {
++    /* Binary64: 1 sign bit, 11 exponent bits, 52 fraction bits */
++    uint64_t fraction;
++    
++    sign = (tlv->value[0] & 0x80) != 0;
++    bias = 1023;
++    
++    /* Extract exponent (bits 62-52) */
++    e = ((tlv->value[0] << 4) & 0x7ff) | (tlv->value[1] >> 4);
++    
++    /* Extract 52-bit fraction */
++    fraction = ((uint64_t)(tlv->value[1] & 0x0f) << 48) |
++               ((uint64_t)tlv->value[2] << 40) |
++               ((uint64_t)tlv->value[3] << 32) |
++               ((uint64_t)tlv->value[4] << 24) |
++               ((uint64_t)tlv->value[5] << 16) |
++               ((uint64_t)tlv->value[6] << 8) |
++               (uint64_t)tlv->value[7];
++    
++    /* Check for special values: infinity and NaN */
++    /* For binary64: exponent = 2047 (all 1s) */
++    if(e == 2047) {
++      /* Either infinity or NaN - reject both */
++      *value = 0;
++      return 0;
++    }
++    
++    /* Check for zero (exponent = 0 and fraction = 0) */
++    if(e == 0 && fraction == 0) {
++      *value = 0;
++      return 8;
++    }
++    
++    /* For denormalized numbers, the exponent is treated as 1 - bias */
++    /* and there's no implicit leading 1 bit */
++    if(e == 0) {
++      /* Denormalized number */
++      /* Value is 0.fraction * 2^(1-bias) */
++      /* Get top 24 bits for int32 precision (52 fraction + 1 implicit = 53 bits) */
++      val = (int32_t)(fraction >> (52 + 1 - 24));
++      e = 1 - bias + bits - 52;
++    } else {
++      /* Normalized number - add implicit leading 1 bit */
++      fraction = fraction | (1ULL << 52);
++      /* Get top 24 bits for int32 precision (52 fraction + 1 implicit = 53 bits, shift by 29) */
++      val = (int32_t)(fraction >> (52 + 1 - 24));
++      e = e - bias + bits - 23;
++    }
++  } else {
++    /* Binary32: 1 sign bit, 8 exponent bits, 23 fraction bits */
++    sign = (tlv->value[0] & 0x80) != 0;
++    bias = 127;
++    
++    /* Extract exponent (bits 30-23) */
++    e = ((tlv->value[0] << 1) & 0xff) | (tlv->value[1] >> 7);
++    
++    /* Extract fraction (lower 23 bits) */
++    val = (((long)tlv->value[1] & 0x7f) << 16) | (tlv->value[2] << 8) | tlv->value[3];
++    
++    /* Check for special values: infinity and NaN */
++    /* For binary32: exponent = 255 (all 1s) */
++    if(e == 255) {
++      /* Either infinity or NaN - reject both */
++      *value = 0;
++      return 0;
++    }
++    
++    /* Check for zero (exponent = 0 and fraction = 0) */
++    if(e == 0 && val == 0) {
++      *value = 0;
++      return 4;
++    }
++    
++    /* For denormalized numbers, the exponent is treated as 1 - bias */
++    /* and there's no implicit leading 1 bit */
++    if(e == 0) {
++      /* Denormalized number */
++      /* Value is 0.fraction * 2^(1-bias) */
++      val = val >> 1;
++      e = 1 - bias + bits - 22;
++    } else {
++      /* Normalized number - add implicit leading 1 bit */
++      val = val | (1L << 23);
++      e = e - bias + bits - 23;
++    }
++  }
+ 
+   LOG_DBG("Sign: %d, Fraction: %06"PRIx32"  0b", val < 0, val);
+-  for(i = 0; i < 23; i++) {
+-    LOG_DBG_("%"PRId32"", ((val >> (22 - i)) & 1));
++  for(i = 0; i < 24; i++) {
++    LOG_DBG_("%"PRId32"", ((val >> (23 - i)) & 1));
+   }
+-  LOG_DBG("\nExp:%d => %d\n", e, e - 127);
+-
+-  e = e - 127 + bits;
+-
+-  /* e corresponds to the number of times we need to roll the number */
++  LOG_DBG("\nExp:%d\n", e);
+ 
+-  LOG_DBG("Actual e=%d\n", e);
+-  e = e - 23;
+-  LOG_DBG("E after sub %d\n", e);
+-  val = val | 1L << 23;
++  /* Handle the shift: shift left if e > 0, shift right if e < 0 */
+   if(e > 0) {
++    /* Check for potential overflow before shifting */
++    /* We need to check: val << e > INT32_MAX */
++    /* Or equivalently: val > INT32_MAX >> e */
++    if(val > (INT32_MAX >> e)) {
++      /* Would overflow - saturate */
++      *value = sign ? -INT32_MAX : INT32_MAX;
++      return tlv->length;
++    }
+     val = val << e;
+-  } else {
++  } else if(e < 0) {
++    /* Shift right to get fractional part - this truncates toward zero */
+     val = val >> -e;
++    /* After shifting, if val is 0, it means the value was below resolution */
++    if(val == 0) {
++      *value = 0;
++      return tlv->length;
++    }
+   }
++  /* If e == 0, no shift needed */
+ 
+   *value = sign ? -val : val;
+-  return 4;
++  return tlv->length;
+ }
++
++
++
+ /*---------------------------------------------------------------------------*/
+ /** @} */
+ 

@@ -1,0 +1,1053 @@
+diff --git a/os/lib/heapmem.c b/os/lib/heapmem.c
+index 44eab9d..771e1a3 100644
+--- a/os/lib/heapmem.c
++++ b/os/lib/heapmem.c
+@@ -51,6 +51,23 @@
+ #include "lib/heapmem.h"
+ #include "lib/assert.h"
+ #include "sys/cc.h"
++/* Zone configuration */
++#ifdef HEAPMEM_CONF_MAX_ZONES
++#define HEAPMEM_MAX_ZONES HEAPMEM_CONF_MAX_ZONES
++#else
++#define HEAPMEM_MAX_ZONES 1
++#endif
++
++typedef struct {
++  char name[16];
++  size_t reserved_size;
++  size_t allocated_size;
++  heapmem_zone_t id;
++  bool in_use;
++} zone_info_t;
++
++static zone_info_t zones[HEAPMEM_MAX_ZONES];
++static heapmem_zone_t next_zone_id = 1;
+ 
+ /* The HEAPMEM_CONF_ARENA_SIZE parameter determines the size of the
+    space that will be statically allocated in this module. */
+@@ -132,6 +149,7 @@
+  * list removals.
+  */
+ typedef struct chunk {
++  heapmem_zone_t zone;
+   struct chunk *prev;
+   struct chunk *next;
+   size_t size;
+@@ -335,6 +353,7 @@ heapmem_alloc(size_t size)
+   }
+ 
+   chunk->flags = CHUNK_FLAG_ALLOCATED;
++  chunk->zone = HEAPMEM_ZONE_GENERAL;
+ 
+ #if HEAPMEM_DEBUG
+   chunk->file = file;
+@@ -528,3 +547,100 @@ heapmem_alignment(void)
+ {
+   return HEAPMEM_ALIGNMENT;
+ }
++
++/* Zone functions implementation */
++void
++heapmem_zone_reset(void)
++{
++  for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++    zones[i].in_use = false;
++    zones[i].allocated_size = 0;
++  }
++  next_zone_id = 1;
++}
++
++heapmem_zone_t
++heapmem_zone_register(const char *name, size_t zone_size)
++{
++  if(name == NULL || zone_size == 0) {
++    return HEAPMEM_ZONE_INVALID;
++  }
++
++  /* Check for duplicate names */
++  for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++    if(zones[i].in_use && strcmp(zones[i].name, name) == 0) {
++      return HEAPMEM_ZONE_INVALID;
++    }
++  }
++
++  /* Find a free slot */
++  for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++    if(!zones[i].in_use) {
++      zones[i].in_use = true;
++      strncpy(zones[i].name, name, sizeof(zones[i].name) - 1);
++      zones[i].name[sizeof(zones[i].name) - 1] = '\0';
++      zones[i].reserved_size = zone_size;
++      zones[i].allocated_size = 0;
++      zones[i].id = next_zone_id++;
++      return zones[i].id;
++    }
++  }
++
++  return HEAPMEM_ZONE_INVALID;
++}
++
++void *
++heapmem_zone_alloc(heapmem_zone_t zone, size_t size)
++{
++  if(HEAPMEM_MAX_ZONES == 1) {
++    /* Only general zone available */
++    if(zone != HEAPMEM_ZONE_GENERAL) {
++      return NULL;
++    }
++    return heapmem_alloc(size);
++  }
++
++  /* Find the zone */
++  zone_info_t *zone_info = NULL;
++  for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++    if(zones[i].in_use && zones[i].id == zone) {
++      zone_info = &zones[i];
++      break;
++    }
++  }
++
++  if(zone_info == NULL) {
++    /* Zone not found or general zone allocation */
++    if(zone == HEAPMEM_ZONE_GENERAL) {
++      return heapmem_alloc(size);
++    }
++    return NULL;
++  }
++
++  /* Check if allocation would exceed the zone's reserved size */
++  size_t aligned_size = ALIGN(size);
++  if(zone_info->allocated_size + aligned_size > zone_info->reserved_size) {
++    return NULL;
++  }
++
++  /* Manual allocation to set zone tracking */
++  if(size > HEAPMEM_ARENA_SIZE) {
++    return NULL;
++  }
++
++  chunk_t *chunk = get_free_chunk(size);
++  if(chunk == NULL) {
++    chunk = extend_space(sizeof(chunk_t) + size);
++    if(chunk == NULL) {
++      return NULL;
++    }
++    chunk->size = aligned_size;
++  }
++
++  chunk->flags = CHUNK_FLAG_ALLOCATED;
++  chunk->zone = zone;
++
++  zone_info->allocated_size += aligned_size;
++
++  return GET_PTR(chunk);
++}
+diff --git a/os/lib/heapmem.c.backup2 b/os/lib/heapmem.c.backup2
+new file mode 100644
+index 0000000..2733d6c
+--- /dev/null
++++ b/os/lib/heapmem.c.backup2
+@@ -0,0 +1,686 @@
++/*
++ * Copyright (c) 2005, Nicolas Tsiftes
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the author nor the names of the contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
++ * PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
++ * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
++ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/**
++ * \file
++ * 	Dynamic memory allocation module.
++ * \author
++ * 	Nicolas Tsiftes <nvt@acm.org>
++ */
++
++/* Log configuration */
++#include "sys/log.h"
++#define LOG_MODULE "HeapMem"
++#define LOG_LEVEL LOG_LEVEL_WARN
++
++#ifndef HEAPMEM_DEBUG
++#define HEAPMEM_DEBUG 0
++#endif
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "lib/heapmem.h"
++#include "lib/assert.h"
++#include "sys/cc.h"
++
++/* The HEAPMEM_CONF_ARENA_SIZE parameter determines the size of the
++   space that will be statically allocated in this module. */
++#ifdef HEAPMEM_CONF_ARENA_SIZE
++#define HEAPMEM_ARENA_SIZE HEAPMEM_CONF_ARENA_SIZE
++#else
++/* If the heap size is not set, we use a minimal size that will ensure
++   that all allocation attempts fail. */
++#define HEAPMEM_ARENA_SIZE 1
++#endif
++/* HEAPMEM_CONF_ARENA_SIZE */
++
++/*
++ * The HEAPMEM_CONF_SEARCH_MAX parameter limits the time spent on
++ * chunk allocation and defragmentation. The lower this number is, the
++ * faster the operations become. The cost of this speedup, however, is
++ * that the space overhead might increase.
++ */
++#ifdef HEAPMEM_CONF_SEARCH_MAX
++#define CHUNK_SEARCH_MAX HEAPMEM_CONF_SEARCH_MAX
++#else
++#define CHUNK_SEARCH_MAX 16
++#endif /* HEAPMEM_CONF_SEARCH_MAX */
++
++/*
++ * The HEAPMEM_CONF_REALLOC parameter determines whether heapmem_realloc() is
++ * enabled (non-zero value) or not (zero value).
++ */
++#ifdef HEAPMEM_CONF_REALLOC
++#define HEAPMEM_REALLOC HEAPMEM_CONF_REALLOC
++#else
++#define HEAPMEM_REALLOC 1
++#endif /* HEAPMEM_CONF_REALLOC */
++
++#if __STDC_VERSION__ >= 201112L
++#include <stdalign.h>
++#define HEAPMEM_DEFAULT_ALIGNMENT alignof(max_align_t)
++#else
++#define HEAPMEM_DEFAULT_ALIGNMENT sizeof(size_t)
++#endif
++
++/*
++ * The HEAPMEM_CONF_ALIGNMENT parameter decides what the minimum alignment
++ * for allocated data should be.
++ */
++#ifdef HEAPMEM_CONF_ALIGNMENT
++#define HEAPMEM_ALIGNMENT HEAPMEM_CONF_ALIGNMENT
++#else
++#define HEAPMEM_ALIGNMENT HEAPMEM_DEFAULT_ALIGNMENT
++#endif /* HEAPMEM_CONF_ALIGNMENT */
++
++/* Zone configuration */
++#ifdef HEAPMEM_CONF_MAX_ZONES
++#define HEAPMEM_MAX_ZONES HEAPMEM_CONF_MAX_ZONES
++#else
++#define HEAPMEM_MAX_ZONES 1
++#endif
++
++typedef struct {
++  char name[16];
++  size_t reserved_size;
++  size_t allocated_size;
++  heapmem_zone_t id;
++  bool in_use;
++} zone_info_t;
++
++static zone_info_t zones[HEAPMEM_MAX_ZONES];
++static heapmem_zone_t next_zone_id = 1;
++
++#define ALIGN(size)						\
++  (((size) + (HEAPMEM_ALIGNMENT - 1)) & ~(HEAPMEM_ALIGNMENT - 1))
++
++/* Macros for chunk iteration. */
++#define NEXT_CHUNK(chunk)						\
++  ((chunk_t *)((char *)(chunk) + sizeof(chunk_t) + (chunk)->size))
++#define IS_LAST_CHUNK(chunk)			\
++  ((char *)NEXT_CHUNK(chunk) == &heap_base[heap_usage])
++
++/* Macros for retrieving the data pointer from a chunk,
++   and the other way around. */
++#define GET_CHUNK(ptr)				\
++  ((chunk_t *)((char *)(ptr) - sizeof(chunk_t)))
++#define GET_PTR(chunk)				\
++  (char *)((chunk) + 1)
++
++/* Macros for determining the status of a chunk. */
++#define CHUNK_FLAG_ALLOCATED		0x1
++
++#define CHUNK_ALLOCATED(chunk)			\
++  ((chunk)->flags & CHUNK_FLAG_ALLOCATED)
++#define CHUNK_FREE(chunk)			\
++  (~(chunk)->flags & CHUNK_FLAG_ALLOCATED)
++
++/*
++ * We use a double-linked list of chunks, with a slight space overhead compared
++ * to a single-linked list, but with the advantage of having much faster
++ * list removals.
++ */
++typedef struct chunk {
++  heapmem_zone_t zone;  /* Zone this chunk belongs to */
++  struct chunk *prev;
++  struct chunk *next;
++  size_t size;
++  uint8_t flags;
++#if HEAPMEM_DEBUG
++  const char *file;
++  unsigned line;
++#endif
++} chunk_t;
++
++/* All allocated space is located within an "heap", which is statically
++   allocated with a pre-configured size. */
++static char heap_base[HEAPMEM_ARENA_SIZE] CC_ALIGN(HEAPMEM_ALIGNMENT);
++static size_t heap_usage;
++
++static chunk_t *first_chunk = (chunk_t *)heap_base;
++static chunk_t *free_list;
++
++#define IN_HEAP(ptr) ((char *)(ptr) >= (char *)heap_base) && \
++                     ((char *)(ptr) < (char *)heap_base + heap_usage)
++
++/* extend_space: Increases the current footprint used in the heap, and
++   returns a pointer to the old end. */
++static void *
++extend_space(size_t size)
++{
++  if(size > HEAPMEM_ARENA_SIZE - heap_usage) {
++    return NULL;
++  }
++
++  char *old_usage = &heap_base[heap_usage];
++  heap_usage += size;
++
++  return old_usage;
++}
++
++/* free_chunk: Mark a chunk as being free, and put it on the free list. */
++static void
++free_chunk(chunk_t * const chunk)
++{
++  chunk->flags &= ~CHUNK_FLAG_ALLOCATED;
++
++  if(IS_LAST_CHUNK(chunk)) {
++    /* Release the chunk back into the wilderness. */
++    heap_usage -= sizeof(chunk_t) + chunk->size;
++  } else {
++    /* Put the chunk on the free list. */
++    chunk->prev = NULL;
++    chunk->next = free_list;
++    if(free_list != NULL) {
++      free_list->prev = chunk;
++    }
++    free_list = chunk;
++  }
++}
++
++/* remove_chunk_from_free_list: Mark a chunk as being allocated, and remove it
++   from the free list. */
++static void
++remove_chunk_from_free_list(chunk_t * const chunk)
++{
++  if(chunk == free_list) {
++    free_list = chunk->next;
++    if(free_list != NULL) {
++      free_list->prev = NULL;
++    }
++  } else {
++    chunk->prev->next = chunk->next;
++  }
++
++  if(chunk->next != NULL) {
++    chunk->next->prev = chunk->prev;
++  }
++}
++
++/*
++ * split_chunk: When allocating a chunk, we may have found one that is
++ * larger than needed, so this function is called to keep the rest of
++ * the original chunk free.
++ */
++static void
++split_chunk(chunk_t * const chunk, size_t offset)
++{
++  offset = ALIGN(offset);
++
++  if(offset + sizeof(chunk_t) < chunk->size) {
++    chunk_t *new_chunk = (chunk_t *)(GET_PTR(chunk) + offset);
++    new_chunk->size = chunk->size - sizeof(chunk_t) - offset;
++    new_chunk->flags = 0;
++    free_chunk(new_chunk);
++
++    chunk->size = offset;
++    chunk->next = chunk->prev = NULL;
++  }
++}
++
++/* coalesce_chunks: Coalesce a specific free chunk with as many adjacent
++   free chunks as possible. */
++static void
++coalesce_chunks(chunk_t *chunk)
++{
++  for(chunk_t *next = NEXT_CHUNK(chunk);
++      (char *)next < &heap_base[heap_usage] && CHUNK_FREE(next);
++      next = NEXT_CHUNK(next)) {
++    chunk->size += sizeof(chunk_t) + next->size;
++    LOG_DBG("Coalesce chunk of %zu bytes\n", next->size);
++    remove_chunk_from_free_list(next);
++  }
++}
++
++/* defrag_chunks: Scan the free list for chunks that can be coalesced,
++   and stop within a bounded time. */
++static void
++defrag_chunks(void)
++{
++  /* Limit the time we spend on searching the free list. */
++  int i = CHUNK_SEARCH_MAX;
++  for(chunk_t *chunk = free_list; chunk != NULL; chunk = chunk->next) {
++    if(i-- == 0) {
++      break;
++    }
++    coalesce_chunks(chunk);
++  }
++}
++
++/* get_free_chunk: Search the free list for the most suitable chunk, as
++   determined by its size, to satisfy an allocation request. */
++static chunk_t *
++get_free_chunk(const size_t size)
++{
++  /* Defragment chunks only right before they are needed for allocation. */
++  defrag_chunks();
++
++  chunk_t *best = NULL;
++  /* Limit the time we spend on searching the free list. */
++  int i = CHUNK_SEARCH_MAX;
++  for(chunk_t *chunk = free_list; chunk != NULL; chunk = chunk->next) {
++    if(i-- == 0) {
++      break;
++    }
++
++    /*
++     * To avoid fragmenting large chunks, we select the chunk with the
++     * smallest size that is larger than or equal to the requested size.
++     */
++    if(size <= chunk->size) {
++      if(best == NULL || chunk->size < best->size) {
++        best = chunk;
++      }
++      if(best->size == size) {
++        /* We found a perfect chunk -- stop the search. */
++        break;
++      }
++    }
++  }
++
++  if(best != NULL) {
++    /* We found a chunk for the allocation. Split it if necessary. */
++    remove_chunk_from_free_list(best);
++    split_chunk(best, size);
++  }
++
++  return best;
++}
++
++/*
++ * heapmem_alloc: Allocate an object of the specified size, returning
++ * a pointer to it in case of success, and NULL in case of failure.
++ *
++ * When allocating memory, heapmem_alloc() will first try to find a
++ * free chunk of the same size and the requested one. If none can be
++ * find, we pick a larger chunk that is as close in size as possible,
++ * and possibly split it so that the remaining part becomes a chunk
++ * available for allocation.  At most CHUNK_SEARCH_MAX chunks on the
++ * free list will be examined.
++ *
++ * As a last resort, heapmem_alloc() will try to extend the heap
++ * space, and thereby create a new chunk available for use.
++ */
++void *
++#if HEAPMEM_DEBUG
++heapmem_alloc_debug(size_t size, const char *file, const unsigned line)
++#else
++heapmem_alloc(size_t size)
++#endif
++{
++  /* Fail early on too large allocation requests to prevent wrapping values. */
++  if(size > HEAPMEM_ARENA_SIZE) {
++    return NULL;
++  }
++
++  size = ALIGN(size);
++
++  chunk_t *chunk = get_free_chunk(size);
++  if(chunk == NULL) {
++    chunk = extend_space(sizeof(chunk_t) + size);
++    if(chunk == NULL) {
++      return NULL;
++    }
++    chunk->size = size;
++  }
++
++  chunk->flags = CHUNK_FLAG_ALLOCATED;
++  chunk->zone = HEAPMEM_ZONE_GENERAL;  /* Default to general zone */
++
++#if HEAPMEM_DEBUG
++#endif
++
++  LOG_DBG("%s ptr %p size %zu\n", __func__, GET_PTR(chunk), size);
++
++  return GET_PTR(chunk);
++}
++
++/*
++ * heapmem_free: Deallocate a previously allocated object.
++ *
++ * The pointer must exactly match one returned from an earlier call
++ * from heapmem_alloc or heapmem_realloc, without any call to
++ * heapmem_free in between.
++ *
++ * When performing a deallocation of a chunk, the chunk will be put on
++ * a list of free chunks internally. All free chunks that are adjacent
++ * in memory will be merged into a single chunk in order to mitigate
++ * fragmentation.
++ */
++bool
++#if HEAPMEM_DEBUG
++heapmem_free_debug(void *ptr, const char *file, const unsigned line)
++#else
++heapmem_free(void *ptr)
++#endif
++{
++  if(!IN_HEAP(ptr)) {
++    LOG_WARN("%s: ptr %p is not in the heap\n", __func__, ptr);
++    return false;
++  }
++
++  chunk_t *chunk = GET_CHUNK(ptr);
++
++  /* Update zone allocation tracking */
++  if(chunk->zone != HEAPMEM_ZONE_GENERAL) {
++    for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++      if(zones[i].in_use && zones[i].id == chunk->zone) {
++        zones[i].allocated_size -= chunk->size;
++        break;
++      }
++    }
++  }
++  if(!CHUNK_ALLOCATED(chunk)) {
++    LOG_WARN("%s: ptr %p has already been deallocated\n", __func__, ptr);
++    return false;
++  }
++
++#if HEAPMEM_DEBUG
++  LOG_DBG("%s: ptr %p, allocated at %s:%u\n", __func__, ptr,
++         chunk->file, chunk->line);
++#endif
++
++  free_chunk(chunk);
++  return true;
++}
++
++#if HEAPMEM_REALLOC
++/*
++ * heapmem_realloc: Reallocate an object with a different size,
++ * possibly moving it in memory. In case of success, the function
++ * returns a pointer to the objects new location. In case of failure,
++ * it returns NULL.
++ *
++ * If the size of the new chunk is larger than that of the allocated
++ * chunk, heapmem_realloc() will first attempt to extend the currently
++ * allocated chunk. If that memory is not free, heapmem_ralloc() will
++ * attempt to allocate a completely new chunk, copy the old data to
++ * the new chunk, and deallocate the old chunk.
++ *
++ * If the size of the new chunk is smaller than the allocated one, we
++ * split the allocated chunk if the remaining chunk would be large
++ * enough to justify the overhead of creating a new chunk.
++ */
++void *
++#if HEAPMEM_DEBUG
++heapmem_realloc_debug(void *ptr, size_t size,
++		      const char *file, const unsigned line)
++#else
++heapmem_realloc(void *ptr, size_t size)
++#endif
++{
++  /* Allow the special case of ptr being NULL as an alias
++     for heapmem_alloc(). */
++  if(ptr != NULL && !IN_HEAP(ptr)) {
++    LOG_WARN("%s: ptr %p is not in the heap\n", __func__, ptr);
++    return NULL;
++  }
++
++#if HEAPMEM_DEBUG
++  LOG_DBG("%s: ptr %p size %zu at %s:%u\n",
++           __func__, ptr, size, file, line);
++#endif
++
++  /* Fail early on too large allocation requests to prevent wrapping values. */
++  if(size > HEAPMEM_ARENA_SIZE) {
++    return NULL;
++  }
++
++  /* Special cases in which we can hand off the execution to other functions. */
++  if(ptr == NULL) {
++    chunk = get_free_chunk(size);
++  if(chunk == NULL) {
++    chunk = extend_space(sizeof(chunk_t) + size);
++    if(chunk == NULL) {
++      zone_info->allocated_size += allocated_before;
++      return NULL;
++    }
++    chunk->size = size;
++  }
++
++  chunk->flags = CHUNK_FLAG_ALLOCATED;
++  chunk->zone = zone;
++
++  zone_info->allocated_size += size;
++
++  return GET_PTR(chunk);
++  } else if(size == 0) {
++    heapmem_free(ptr);
++    return NULL;
++  }
++
++  chunk_t *chunk = GET_CHUNK(ptr);
++
++  /* Update zone allocation tracking */
++  if(chunk->zone != HEAPMEM_ZONE_GENERAL) {
++    for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++      if(zones[i].in_use && zones[i].id == chunk->zone) {
++        zones[i].allocated_size -= chunk->size;
++        break;
++      }
++    }
++  }
++  if(!CHUNK_ALLOCATED(chunk)) {
++    LOG_WARN("%s: ptr %p is not allocated\n", __func__, ptr);
++    return false;
++  }
++
++#if HEAPMEM_DEBUG
++#endif
++
++  size = ALIGN(size);
++  int size_adj = size - chunk->size;
++
++  if(size_adj <= 0) {
++    /* Request to make the object smaller or to keep its size.
++       In the former case, the chunk will be split if possible. */
++    split_chunk(chunk, size);
++    return ptr;
++  }
++
++  /* Request to make the object larger. (size_adj > 0) */
++  if(IS_LAST_CHUNK(chunk)) {
++    /*
++     * If the object is within the last allocated chunk (i.e., the
++     * one before the end of the heap footprint, we just attempt to
++     * extend the heap.
++     */
++    if(extend_space(size_adj) != NULL) {
++      chunk->size = size;
++      return ptr;
++    }
++  } else {
++    /*
++     * Here we attempt to enlarge an allocated object, whose
++     * adjacent space may already be allocated. We attempt to
++     * coalesce chunks in order to make as much room as possible.
++     */
++    coalesce_chunks(chunk);
++    if(chunk->size >= size) {
++      /* There was enough free adjacent space to extend the chunk in
++	 its current place. */
++      split_chunk(chunk, size);
++      return ptr;
++    }
++  }
++
++  /*
++   * Failed to enlarge the object in its current place, since the
++   * adjacent chunk is allocated. Hence, we try to place the new
++   * object elsewhere in the heap, and remove the old chunk that was
++   * holding it.
++   */
++  void *newptr = heapmem_alloc(size);
++  if(newptr == NULL) {
++    return NULL;
++  }
++
++  memcpy(newptr, ptr, chunk->size);
++  free_chunk(chunk);
++
++  return newptr;
++}
++#endif /* HEAPMEM_REALLOC */
++
++/* heapmem_stats: Calculate statistics regarding memory usage. */
++void
++heapmem_stats(heapmem_stats_t *stats)
++{
++  memset(stats, 0, sizeof(*stats));
++
++  for(chunk_t *chunk = first_chunk;
++      (char *)chunk < &heap_base[heap_usage];
++      chunk = NEXT_CHUNK(chunk)) {
++    if(CHUNK_ALLOCATED(chunk)) {
++      stats->allocated += chunk->size;
++      stats->overhead += sizeof(chunk_t);
++    } else {
++      coalesce_chunks(chunk);
++      stats->available += chunk->size;
++    }
++  }
++  stats->available += HEAPMEM_ARENA_SIZE - heap_usage;
++  stats->footprint = heap_usage;
++  stats->chunks = stats->overhead / sizeof(chunk_t);
++}
++
++/* heapmem_alignment: return the minimum alignment of allocated addresses. */
++size_t
++heapmem_alignment(void)
++{
++  return HEAPMEM_ALIGNMENT;
++}
++
++
++
++/* Zone functions implementation */
++heapmem_zone_t
++heapmem_zone_register(const char *name, size_t zone_size)
++{
++  if(name == NULL || zone_size == 0) {
++    return HEAPMEM_ZONE_INVALID;
++  }
++
++  /* Check for duplicate names */
++  for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++    if(zones[i].in_use && strcmp(zones[i].name, name) == 0) {
++      return HEAPMEM_ZONE_INVALID;
++    }
++  }
++
++  /* Find a free slot */
++  for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++    if(!zones[i].in_use) {
++      zones[i].in_use = true;
++      strncpy(zones[i].name, name, sizeof(zones[i].name) - 1);
++      zones[i].name[sizeof(zones[i].name) - 1] = '\0';
++      zones[i].reserved_size = zone_size;
++      zones[i].allocated_size = 0;
++      zones[i].id = next_zone_id++;
++      return zones[i].id;
++    }
++  }
++
++  return HEAPMEM_ZONE_INVALID;
++}
++
++void *
++heapmem_zone_alloc(heapmem_zone_t zone, size_t size)
++{
++  if(HEAPMEM_MAX_ZONES == 1) {
++    /* Only general zone available */
++    if(zone != HEAPMEM_ZONE_GENERAL) {
++      return NULL;
++    }
++    chunk = get_free_chunk(size);
++  if(chunk == NULL) {
++    chunk = extend_space(sizeof(chunk_t) + size);
++    if(chunk == NULL) {
++      zone_info->allocated_size += allocated_before;
++      return NULL;
++    }
++    chunk->size = size;
++  }
++
++  chunk->flags = CHUNK_FLAG_ALLOCATED;
++  chunk->zone = zone;
++
++  zone_info->allocated_size += size;
++
++  return GET_PTR(chunk);
++  }
++
++  /* Find the zone */
++  zone_info_t *zone_info = NULL;
++  for(size_t i = 0; i < HEAPMEM_MAX_ZONES; i++) {
++    if(zones[i].in_use && zones[i].id == zone) {
++      zone_info = &zones[i];
++      break;
++    }
++  }
++
++  if(zone_info == NULL) {
++    /* Zone not found or general zone allocation */
++    if(zone == HEAPMEM_ZONE_GENERAL) {
++      chunk = get_free_chunk(size);
++  if(chunk == NULL) {
++    chunk = extend_space(sizeof(chunk_t) + size);
++    if(chunk == NULL) {
++      zone_info->allocated_size += allocated_before;
++      return NULL;
++    }
++    chunk->size = size;
++  }
++
++  chunk->flags = CHUNK_FLAG_ALLOCATED;
++  chunk->zone = zone;
++
++  zone_info->allocated_size += size;
++
++  return GET_PTR(chunk);
++    }
++    return NULL;
++  }
++
++  /* Check if allocation would exceed the zone's reserved size */
++  if(zone_info->allocated_size + size > zone_info->reserved_size) {
++    return NULL;
++  }
++
++  /* Try to allocate from the general heap */
++  void *ptr = heapmem_alloc(size);
++  if(ptr != NULL) {
++    zone_info->allocated_size += size;
++  }
++
++  return ptr;
++}
+diff --git a/os/lib/heapmem.h b/os/lib/heapmem.h
+index 17941d7..cc662b5 100644
+--- a/os/lib/heapmem.h
++++ b/os/lib/heapmem.h
+@@ -75,6 +75,30 @@
+ #define HEAPMEM_H
+ 
+ #include <stdlib.h>
++typedef size_t heapmem_zone_t;
++
++#define HEAPMEM_ZONE_INVALID ((heapmem_zone_t)-1)
++#define HEAPMEM_ZONE_GENERAL ((heapmem_zone_t)0)
++
++heapmem_zone_t heapmem_zone_register(const char *name, size_t zone_size);
++void *heapmem_zone_alloc(heapmem_zone_t zone, size_t size);
++void heapmem_zone_reset(void);
++typedef size_t heapmem_zone_t;
++
++#define HEAPMEM_ZONE_INVALID ((heapmem_zone_t)-1)
++#define HEAPMEM_ZONE_GENERAL ((heapmem_zone_t)0)
++
++heapmem_zone_t heapmem_zone_register(const char *name, size_t zone_size);
++void *heapmem_zone_alloc(heapmem_zone_t zone, size_t size);
++void heapmem_zone_reset(void);
++typedef size_t heapmem_zone_t;
++
++#define HEAPMEM_ZONE_INVALID ((heapmem_zone_t)-1)
++#define HEAPMEM_ZONE_GENERAL ((heapmem_zone_t)0)
++
++heapmem_zone_t heapmem_zone_register(const char *name, size_t zone_size);
++void *heapmem_zone_alloc(heapmem_zone_t zone, size_t size);
++void heapmem_zone_reset(void);
+ 
+ typedef struct heapmem_stats {
+   size_t allocated;
+diff --git a/os/lib/heapmem.h.backup b/os/lib/heapmem.h.backup
+new file mode 100644
+index 0000000..17941d7
+--- /dev/null
++++ b/os/lib/heapmem.h.backup
+@@ -0,0 +1,175 @@
++/*
++ * Copyright (c) 2005, Nicolas Tsiftes
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the author nor the names of the contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/**
++ * \addtogroup mem
++ * @{
++ */
++
++/**
++ * \defgroup heapmem heapmem: Dynamic heap memory allocator
++ *
++ * The heapmem module is a dynamic heap memory allocator similar to
++ * malloc() in standard C. The heap memory is managed in a block of
++ * static memory, whose size is determined at compile-time by setting
++ * HEAPMEM_CONF_ARENA_SIZE parameter. By default, the heap memory is
++ * only 1 bytes, which entails that this parameter must be set
++ * explicitly in order to be possible to use this module.
++ *
++ * Each allocated memory object is referred to as a "chunk". The
++ * allocator manages free chunks in a double-linked list. While this
++ * adds some memory overhead compared to a single-linked list, it
++ * improves the performance of list management.
++ *
++ * Internally, allocated chunks can be retrieved using the pointer to
++ * the allocated memory returned by heapmem_alloc() and
++ * heapmem_realloc(), because the chunk structure immediately precedes
++ * the memory of the chunk.
++ *
++ * \note This module does not contain a corresponding function to the
++ *       standard C function calloc().
++ *
++ * \note Dynamic memory should be used carefully on
++ *       memory-constrained, embedded systems, because fragmentation
++ *       may be induced through various allocation/deallocation
++ *       patterns, and no guarantees are given regarding the
++ *       availability of memory.
++ *
++ * @{
++ */
++
++/**
++ * \file
++ *         Header file for the dynamic heap memory allocator.
++ * \author
++ *         Nicolas Tsiftes <nvt@acm.org>
++ */
++
++#ifndef HEAPMEM_H
++#define HEAPMEM_H
++
++#include <stdlib.h>
++
++typedef struct heapmem_stats {
++  size_t allocated;
++  size_t overhead;
++  size_t available;
++  size_t footprint;
++  size_t chunks;
++} heapmem_stats_t;
++
++#if HEAPMEM_DEBUG
++
++#define heapmem_alloc(size) heapmem_alloc_debug((size), __FILE__, __LINE__)
++#define heapmem_realloc(ptr, size) heapmem_realloc_debug((ptr), (size), __FILE__, __LINE__)
++#define heapmem_free(ptr) heapmem_free_debug((ptr), __FILE__, __LINE__)
++
++void *heapmem_alloc_debug(size_t size,
++			  const char *file, const unsigned line);
++void *heapmem_realloc_debug(void *ptr, size_t size,
++			    const char *file, const unsigned line);
++void heapmem_free_debug(void *ptr,
++			const char *file, const unsigned line);
++
++#else
++
++/**
++ * \brief      Allocate a chunk of memory in the heap.
++ * \param size The number of bytes to allocate.
++ * \return     A pointer to the allocated memory chunk,
++ *             or NULL if the allocation failed.
++ *
++ * \sa         heapmem_realloc
++ * \sa         heapmem_free
++ */
++
++void *heapmem_alloc(size_t size);
++
++/**
++ * \brief      Reallocate a chunk of memory in the heap.
++ * \param ptr  A pointer to a chunk that has been allocated using
++ *             heapmem_alloc() or heapmem_realloc().
++ * \param size The number of bytes to allocate.
++ * \return     A pointer to the allocated memory chunk,
++ *             or NULL if the allocation failed.
++ *
++ * \note If ptr is NULL, this function behaves the same as heapmem_alloc.
++ * \note If ptr is not NULL and size is zero, the function deallocates
++ *       the chunk and returns NULL.
++ *
++ * \sa         heapmem_alloc
++ * \sa         heapmem_free
++ */
++
++void *heapmem_realloc(void *ptr, size_t size);
++
++/**
++ * \brief      Deallocate a chunk of memory.
++ * \param ptr  A pointer to a chunk that has been allocated using
++ *             heapmem_alloc() or heapmem_realloc().
++ * \return     A boolean indicating whether the memory could be deallocated.
++ *
++ * \note If ptr is NULL, this function will return immediately without
++ *       without performing any action.
++ *
++ * \sa         heapmem_alloc
++ * \sa         heapmem_realloc
++ */
++
++bool heapmem_free(void *ptr);
++
++#endif /* HEAMMEM_DEBUG */
++
++/**
++ * \brief       Obtain internal heapmem statistics regarding the
++ *              allocated chunks.
++ * \param stats A pointer to an object of type heapmem_stats_t, which
++ *              will be filled when calling this function.
++ *
++ * This function makes it possible to gain visibility into the internal
++ * structure of the heap. One can thus obtain information regarding
++ * the amount of memory allocated, overhead used for memory management,
++ * and the number of chunks allocated. By using this information, developers
++ * can tune their software to use the heapmem allocator more efficiently.
++ *
++ */
++
++void heapmem_stats(heapmem_stats_t *stats);
++
++/**
++ * \brief       Obtain the minimum alignment of allocated addresses.
++ * \return      The alignment value, which is a power of two.
++ */
++
++size_t heapmem_alignment(void);
++
++#endif /* !HEAPMEM_H */
++
++/** @} */
++/** @} */

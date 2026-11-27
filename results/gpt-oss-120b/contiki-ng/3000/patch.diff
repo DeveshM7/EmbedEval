@@ -1,0 +1,221 @@
+diff --git a/os/lib/cbor.c b/os/lib/cbor.c
+new file mode 100644
+index 0000000..dd4f405
+--- /dev/null
++++ b/os/lib/cbor.c
+@@ -0,0 +1,153 @@
++#include "lib/cbor.h"
++
++/* Helper to write a single byte, returns false on overflow. */
++static bool write_byte(cbor_writer_state_t *s, uint8_t b) {
++  if(s->pos >= s->buffer_size) return false;
++  s->buffer[s->pos++] = b;
++  return true;
++}
++
++void cbor_init_writer(cbor_writer_state_t *state, uint8_t *buffer,
++                      size_t buffer_size) {
++  state->buffer = buffer;
++  state->buffer_size = buffer_size;
++  state->pos = 0;
++  state->array_start_pos = 0;
++  state->element_count = 0;
++  state->in_array = false;
++}
++
++void cbor_open_array(cbor_writer_state_t *state) {
++  /* Reserve space for array header – will be back‑patched on close. */
++  state->array_start_pos = state->pos;
++  write_byte(state, 0); // placeholder
++  state->element_count = 0;
++  state->in_array = true;
++}
++
++static void encode_uint(cbor_writer_state_t *state, uint64_t value) {
++  if(value < 24) {
++    write_byte(state, (uint8_t)((CBOR_MAJOR_TYPE_UNSIGNED << 5) | value));
++  } else if(value <= 0xFF) {
++    write_byte(state, (CBOR_MAJOR_TYPE_UNSIGNED << 5) | 24);
++    write_byte(state, (uint8_t)value);
++  } else if(value <= 0xFFFF) {
++    write_byte(state, (CBOR_MAJOR_TYPE_UNSIGNED << 5) | 25);
++    write_byte(state, (uint8_t)(value >> 8));
++    write_byte(state, (uint8_t)value);
++  } else if(value <= 0xFFFFFFFF) {
++    write_byte(state, (CBOR_MAJOR_TYPE_UNSIGNED << 5) | 26);
++    for(int i = 3; i >= 0; --i) {
++      write_byte(state, (uint8_t)(value >> (8 * i)));
++    }
++  } else {
++    write_byte(state, (CBOR_MAJOR_TYPE_UNSIGNED << 5) | 27);
++    for(int i = 7; i >= 0; --i) {
++      write_byte(state, (uint8_t)(value >> (8 * i)));
++    }
++  }
++}
++
++void cbor_write_unsigned(cbor_writer_state_t *state, uint64_t value) {
++  encode_uint(state, value);
++  if(state->in_array) state->element_count++;
++}
++
++void cbor_write_data(cbor_writer_state_t *state, const uint8_t *data,
++                     size_t data_size) {
++  if(data_size < 24) {
++    write_byte(state, (uint8_t)((CBOR_MAJOR_TYPE_BYTE_STRING << 5) | data_size));
++  } else {
++    write_byte(state, (CBOR_MAJOR_TYPE_BYTE_STRING << 5) | 31); // indefinite (not used)
++  }
++  for(size_t i = 0; i < data_size; i++) {
++    if(!write_byte(state, data[i])) break;
++  }
++  if(state->in_array) state->element_count++;
++}
++
++void cbor_close_array(cbor_writer_state_t *state) {
++  if(!state->in_array) return;
++  if(state->element_count < 24) {
++    state->buffer[state->array_start_pos] = (uint8_t)((CBOR_MAJOR_TYPE_ARRAY << 5) | state->element_count);
++  } else {
++    state->buffer[state->array_start_pos] = (uint8_t)((CBOR_MAJOR_TYPE_ARRAY << 5) | 31);
++  }
++  state->in_array = false;
++}
++
++size_t cbor_end_writer(cbor_writer_state_t *state) {
++  return (state->pos <= state->buffer_size) ? state->pos : 0;
++}
++
++/* ----------------------- Reader implementation -------------------------- */
++
++static inline uint8_t peek_byte(const cbor_reader_state_t *s) {
++  return s->buffer[s->pos];
++}
++
++void cbor_init_reader(cbor_reader_state_t *state, const uint8_t *cbor,
++                      size_t cbor_size) {
++  state->buffer = cbor;
++  state->buffer_size = cbor_size;
++  state->pos = 0;
++}
++
++cbor_major_type_t cbor_peek_next(cbor_reader_state_t *state) {
++  if(state->pos >= state->buffer_size) return (cbor_major_type_t)0xFF;
++  uint8_t b = peek_byte(state);
++  return (cbor_major_type_t)(b >> 5);
++}
++
++static uint64_t read_uint(cbor_reader_state_t *state, uint8_t additional) {
++  uint64_t v = 0;
++  if(additional < 24) {
++    v = additional;
++  } else if(additional == 24) {
++    state->pos++;
++    v = state->buffer[state->pos];
++  } else if(additional == 25) {
++    state->pos++;
++    uint8_t hi = state->buffer[state->pos];
++    state->pos++;
++    uint8_t lo = state->buffer[state->pos];
++    v = ((uint64_t)hi << 8) | lo;
++  } else if(additional == 26) {
++    for(int i = 0; i < 4; i++) {
++      state->pos++;
++      v = (v << 8) | state->buffer[state->pos];
++    }
++  } else if(additional == 27) {
++    for(int i = 0; i < 8; i++) {
++      state->pos++;
++      v = (v << 8) | state->buffer[state->pos];
++    }
++  }
++  return v;
++}
++
++size_t cbor_read_array(cbor_reader_state_t *state) {
++  uint8_t b = state->buffer[state->pos++];
++  uint8_t additional = b & 0x1F;
++  return (size_t)additional;
++}
++
++const uint8_t *cbor_read_data(cbor_reader_state_t *state, size_t *data_size) {
++  uint8_t b = state->buffer[state->pos++];
++  uint8_t additional = b & 0x1F;
++  *data_size = (size_t)additional;
++  const uint8_t *ptr = &state->buffer[state->pos];
++  state->pos += *data_size;
++  return ptr;
++}
++
++cbor_size_t cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value) {
++  uint8_t b = state->buffer[state->pos++];
++  uint8_t additional = b & 0x1F;
++  *value = read_uint(state, additional);
++  return 0; // success (non‑CBOR_SIZE_NONE)
++}
++
++bool cbor_end_reader(cbor_reader_state_t *state) {
++  return state->pos == state->buffer_size;
++}
+diff --git a/os/lib/cbor.h b/os/lib/cbor.h
+new file mode 100644
+index 0000000..59f049f
+--- /dev/null
++++ b/os/lib/cbor.h
+@@ -0,0 +1,56 @@
++/* Simple CBOR encoder/decoder library for Contiki-NG. */
++
++#ifndef LIB_CBOR_H_
++#define LIB_CBOR_H_
++
++#include <stddef.h>
++#include <stdint.h>
++#include <stdbool.h>
++
++typedef enum {
++  CBOR_MAJOR_TYPE_UNSIGNED = 0,
++  CBOR_MAJOR_TYPE_NEGATIVE = 1,
++  CBOR_MAJOR_TYPE_BYTE_STRING = 2,
++  CBOR_MAJOR_TYPE_TEXT_STRING = 3,
++  CBOR_MAJOR_TYPE_ARRAY = 4,
++  CBOR_MAJOR_TYPE_MAP = 5,
++  CBOR_MAJOR_TYPE_TAG = 6,
++  CBOR_MAJOR_TYPE_SIMPLE_OR_FLOAT = 7,
++} cbor_major_type_t;
++
++typedef size_t cbor_size_t;
++#define CBOR_SIZE_NONE ((cbor_size_t)-1)
++
++typedef struct {
++  uint8_t *buffer;
++  size_t buffer_size;
++  size_t pos;
++  size_t array_start_pos;
++  size_t element_count;
++  bool in_array;
++} cbor_writer_state_t;
++
++typedef struct {
++  const uint8_t *buffer;
++  size_t buffer_size;
++  size_t pos;
++} cbor_reader_state_t;
++
++void cbor_init_writer(cbor_writer_state_t *state, uint8_t *buffer,
++                      size_t buffer_size);
++void cbor_open_array(cbor_writer_state_t *state);
++void cbor_write_data(cbor_writer_state_t *state, const uint8_t *data,
++                     size_t data_size);
++void cbor_write_unsigned(cbor_writer_state_t *state, uint64_t value);
++void cbor_close_array(cbor_writer_state_t *state);
++size_t cbor_end_writer(cbor_writer_state_t *state);
++
++void cbor_init_reader(cbor_reader_state_t *state, const uint8_t *cbor,
++                      size_t cbor_size);
++cbor_major_type_t cbor_peek_next(cbor_reader_state_t *state);
++size_t cbor_read_array(cbor_reader_state_t *state);
++const uint8_t *cbor_read_data(cbor_reader_state_t *state, size_t *data_size);
++cbor_size_t cbor_read_unsigned(cbor_reader_state_t *state, uint64_t *value);
++bool cbor_end_reader(cbor_reader_state_t *state);
++
++#endif /* LIB_CBOR_H_ */

@@ -1,0 +1,160 @@
+diff --git a/dbg-io-width.patch b/dbg-io-width.patch
+new file mode 100644
+index 0000000..0cf0c2b
+--- /dev/null
++++ b/dbg-io-width.patch
+@@ -0,0 +1,27 @@
++*** Begin Patch
++*** Update File: os/lib/dbg-io/strformat.c
++@@
++-    } else if(*pos == '*') {
++-      int w = va_arg(ap, int);
++-
++-      if(w < 0) {
++-        flags |= JUSTIFY_LEFT;
++-        minwidth = w;
++-      } else {
++-        minwidth = w;
++-      }
++-
++-      pos++;
++-    }
+++    } else if(*pos == '*') {
+++      int w = va_arg(ap, int);
+++      /* Negative width means left justification and absolute width. */
+++      if(w < 0) {
+++        flags |= JUSTIFY_LEFT;
+++        minwidth = -w;
+++      } else {
+++        minwidth = w;
+++      }
+++      pos++;
+++    }
++*** End Patch
+diff --git a/os/lib/dbg-io/snprintf.c b/os/lib/dbg-io/snprintf.c
+index e4ec35d..6cd7c41 100644
+--- a/os/lib/dbg-io/snprintf.c
++++ b/os/lib/dbg-io/snprintf.c
+@@ -46,10 +46,17 @@ static strformat_result
+ buffer_str(void *user_data, const char *data, unsigned int len)
+ {
+   struct fmt_buffer *buffer = (struct fmt_buffer *)user_data;
++  if(buffer->left == 0) {
++    return STRFORMAT_OK;
++  }
+   if(len >= buffer->left) {
+-    len = buffer->left;
+-    len--;
++    len = buffer->left - 1;
+   }
++  memcpy(buffer->pos, data, len);
++  buffer->pos += len;
++  buffer->left -= len;
++  return STRFORMAT_OK;
++}
+ 
+   memcpy(buffer->pos, data, len);
+   buffer->pos += len;
+@@ -79,7 +86,9 @@ vsnprintf(char *str, size_t size, const char *format, va_list ap)
+   buffer.pos = str;
+   buffer.left = size;
+   res = format_str_v(&ctxt, format, ap);
+-  *buffer.pos = '\0';
++    if(size > 0) {
++        *buffer.pos = 0;
++    }
+   return res;
+ }
+ /*---------------------------------------------------------------------------*/
+diff --git a/os/lib/dbg-io/strformat.c b/os/lib/dbg-io/strformat.c
+index 4e55966..413e043 100644
+--- a/os/lib/dbg-io/strformat.c
++++ b/os/lib/dbg-io/strformat.c
+@@ -350,11 +350,13 @@ format_str_v(const strformat_context_t *ctxt, const char *format, va_list ap)
+ 
+       if(*pos >= '0' && *pos <= '9') {
+         precision = parse_uint(&pos);
+-      } else if(*pos == '*') {
+-        pos++;
+-        precision = va_arg(ap, int);
+-      }
+-    }
++        else if(*pos == *) {
++            pos++;
++            precision = va_arg(ap, int);
++            if(precision < 0) {
++                precision = -1;
++            }
++        }
+ 
+     if(*pos == 'l') {
+       pos++;
+@@ -667,9 +669,9 @@ format_str_v(const strformat_context_t *ctxt, const char *format, va_list ap)
+ 
+       *--conv_pos = 'x';
+       *--conv_pos = '0';
+-      *--conv_pos = '#';
+-      conv_len += 3;
+-
++      *--conv_pos = 'x';
++      *--conv_pos = '0';
++      conv_len += 2;
+       field_fill = (minwidth > conv_len) ? minwidth - conv_len : 0;
+ 
+       if((flags & JUSTIFY_MASK) == JUSTIFY_RIGHT) {
+@@ -687,13 +689,13 @@ format_str_v(const strformat_context_t *ctxt, const char *format, va_list ap)
+     }
+     break;
+     case CONV_CHAR:
++    case CONV_CHAR:
+     {
+       char ch = va_arg(ap, int);
+       unsigned int field_fill = (minwidth > 1) ? minwidth - 1 : 0;
+ 
+       if((flags & JUSTIFY_MASK) == JUSTIFY_RIGHT) {
+         CHECKCB(fill_space(ctxt, field_fill));
+-        written += field_fill;
+       }
+ 
+       CHECKCB(ctxt->write_str(ctxt->user_data, &ch, 1));
+@@ -702,13 +704,19 @@ format_str_v(const strformat_context_t *ctxt, const char *format, va_list ap)
+       if((flags & JUSTIFY_MASK) == JUSTIFY_LEFT) {
+         CHECKCB(fill_space(ctxt, field_fill));
+       }
+-      written += field_fill;
++      /* Padding does not contribute to the return length for %c */
++    }
++    case CONV_FLOAT:
++    {
++      (void)va_arg(ap, double); /* consume double argument */
+     }
+     break;
++    break;
++    break;
++    case CONV_WRITTEN:
+     case CONV_WRITTEN:
+     {
+-      int *p = va_arg(ap, int *);
+-      *p = written;
++      (void)va_arg(ap, int *); /* consume argument but do not write */
+     }
+     break;
+     }
+diff --git a/tmp_test.c b/tmp_test.c
+new file mode 100644
+index 0000000..e24a662
+--- /dev/null
++++ b/tmp_test.c
+@@ -0,0 +1,12 @@
++#include <stdio.h>
++#include <string.h>
++int main(){
++    char buf[5];
++    int len = snprintf(buf, 0, "Hello %d", 123);
++    printf("len=%d\n", len);
++    // buffer should remain unchanged
++    char buf2[5] = {0xAA,0xAA,0xAA,0xAA,0xAA};
++    int len2 = snprintf(buf2, 1, "XYZ");
++    printf("len2=%d buf2[0]=%02x\n", len2, (unsigned char)buf2[0]);
++    return 0;
++}

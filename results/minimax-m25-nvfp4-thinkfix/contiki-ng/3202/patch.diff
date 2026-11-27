@@ -1,0 +1,157 @@
+diff --git a/os/storage/antelope/attribute.h b/os/storage/antelope/attribute.h
+index 0327891..47111ef 100644
+--- a/os/storage/antelope/attribute.h
++++ b/os/storage/antelope/attribute.h
+@@ -61,6 +61,8 @@ struct attribute {
+   struct attribute *next;
+   void *index;
+   long aggregation_value;
++  long aggregation_count;
++  long *median_values;
+   uint8_t aggregator;
+   uint8_t domain;
+   uint8_t element_size;
+diff --git a/os/storage/antelope/index-maxheap.c b/os/storage/antelope/index-maxheap.c
+index 1209149..2f9410e 100644
+--- a/os/storage/antelope/index-maxheap.c
++++ b/os/storage/antelope/index-maxheap.c
+@@ -637,7 +637,7 @@ release(index_t *index)
+   storage_close(heap->bucket_storage);
+   storage_close(heap->heap_storage);
+   memb_free(&heaps, index->opaque_data);
+-  return DB_INDEX_ERROR;
++  return DB_OK;
+ }
+ 
+ static db_result_t
+diff --git a/os/storage/antelope/relation.c b/os/storage/antelope/relation.c
+index 0e939a0..023ab2b 100644
+--- a/os/storage/antelope/relation.c
++++ b/os/storage/antelope/relation.c
+@@ -35,6 +35,7 @@
+  */
+ 
+ #include <limits.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ #include "lib/crc16.h"
+@@ -571,8 +572,27 @@ aggregate(attribute_t *attr, attribute_value_t *value)
+     attr->aggregation_value += long_value;
+     break;
+   case AQL_MEAN:
++    attr->aggregation_value += long_value;
++    attr->aggregation_count++;
+     break;
+   case AQL_MEDIAN:
++    /* Allocate more space if needed */
++    if(attr->median_values == NULL) {
++      attr->median_values = malloc(sizeof(long) * 10);
++      if(attr->median_values == NULL) {
++        break;
++      }
++      attr->aggregation_count = 0;
++    }
++    /* Expand if needed (simple implementation: expand by 10) */
++    if(attr->aggregation_count > 0 && attr->aggregation_count % 10 == 0) {
++      long *new_values = realloc(attr->median_values, sizeof(long) * (attr->aggregation_count + 10));
++      if(new_values == NULL) {
++        break;
++      }
++      attr->median_values = new_values;
++    }
++    attr->median_values[attr->aggregation_count++] = long_value;
+     break;
+   case AQL_MAX:
+     if(long_value > attr->aggregation_value) {
+@@ -743,7 +763,7 @@ relation_process_select(void *handle_ptr)
+   unsigned char *from_ptr;
+   unsigned char *to_ptr;
+   operand_value_t operand_value;
+-  uint8_t intbuf[2];
++  
+   attribute_value_t value;
+   lvm_status_t wanted_result;
+ 
+@@ -850,10 +870,41 @@ end_aggregation:
+     result_attr = attr_map_ptr->to_attr;
+     to_ptr = result_row + attr_map_ptr->to_offset;
+ 
+-    intbuf[0] = result_attr->aggregation_value >> 8;
+-    intbuf[1] = result_attr->aggregation_value & 0xff;
+-    from_ptr = intbuf;
+-    memcpy(to_ptr, from_ptr, result_attr->element_size);
++    /* Compute MEAN and MEDIAN before outputting */
++    if(result_attr->aggregator == AQL_MEAN) {
++      if(result_attr->aggregation_count > 0) {
++        result_attr->aggregation_value = result_attr->aggregation_value / result_attr->aggregation_count;
++      }
++    } else if(result_attr->aggregator == AQL_MEDIAN) {
++      if(result_attr->aggregation_count > 0 && result_attr->median_values != NULL) {
++        int i, j;
++        long tmp;
++        /* Simple insertion sort */
++        for(i = 1; i < result_attr->aggregation_count; i++) {
++          tmp = result_attr->median_values[i];
++          j = i - 1;
++          while(j >= 0 && result_attr->median_values[j] > tmp) {
++            result_attr->median_values[j + 1] = result_attr->median_values[j];
++            j--;
++          }
++          result_attr->median_values[j + 1] = tmp;
++        }
++        /* Find median */
++        if(result_attr->aggregation_count % 2 == 1) {
++          /* Odd number of values: take middle element */
++          result_attr->aggregation_value = result_attr->median_values[result_attr->aggregation_count / 2];
++        } else {
++          /* Even number of values: average of two middle elements */
++          result_attr->aggregation_value = (result_attr->median_values[result_attr->aggregation_count / 2 - 1] +
++                                            result_attr->median_values[result_attr->aggregation_count / 2]) / 2;
++        }
++        /* Free median values */
++        free(result_attr->median_values);
++        result_attr->median_values = NULL;
++      }
++    }
++
++    memcpy(to_ptr, &result_attr->aggregation_value, result_attr->element_size);
+   }
+ 
+   if(AQL_GET_FLAGS(adt) & AQL_FLAG_ASSIGN) {
+@@ -940,14 +991,35 @@ relation_select(void *handle_ptr, relation_t *rel, void *adt_ptr)
+     case AQL_MIN:
+       attr->aggregation_value = LONG_MAX;
+       break;
++    case AQL_MEDIAN:
++      attr->aggregation_value = 0;
++      attr->aggregation_count = 0;
++      attr->median_values = NULL;
++      break;
+     default:
+       attr->aggregation_value = 0;
++      attr->aggregation_count = 0;
++      attr->median_values = NULL;
+       break;
+     }
+ 
+     attr->flags = adt->attributes[i].flags;
+   }
+ 
++  /* Check for multiple MEDIAN aggregates - only one is allowed */
++  {
++    int median_count = 0;
++    for(i = 0; i < AQL_ATTRIBUTE_COUNT(adt); i++) {
++      if(adt->aggregators[i] == AQL_MEDIAN) {
++        median_count++;
++      }
++    }
++    if(median_count > 1) {
++      PRINTF("DB: More than one MEDIAN aggregate is not supported\n");
++      return DB_RELATIONAL_ERROR;
++    }
++  }
++
+   /* Preclude mixes of normal attributes and aggregated ones in 
+      selection results. */
+   if(normal_attributes > 0 &&

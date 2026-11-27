@@ -1,0 +1,762 @@
+diff --git a/os/services/lwm2m/lwm2m-tlv.c b/os/services/lwm2m/lwm2m-tlv.c
+index 6e51e5f..a3ef844 100644
+--- a/os/services/lwm2m/lwm2m-tlv.c
++++ b/os/services/lwm2m/lwm2m-tlv.c
+@@ -316,44 +316,104 @@ lwm2m_tlv_write_float32(uint8_t type, int16_t id, int32_t value, int bits,
+ size_t
+ lwm2m_tlv_float32_to_fix(const lwm2m_tlv_t *tlv, int32_t *value, int bits)
+ {
+-  /* TLV needs to be 4 bytes */
+-  int e, i;
+-  int32_t val;
+-  int sign;
+-
+-  /* The IEEE 754 single-precision representation requires exactly 4 bytes.
+-     Reject anything shorter to avoid reading past the value. */
+-  if(tlv->length < 4) {
++  /* Reject lengths other than exactly 4 or 8 bytes */
++  if(tlv->length != 4 && tlv->length != 8) {
+     *value = 0;
+     return 0;
+   }
+ 
+-  sign = (tlv->value[0] & 0x80) != 0;
+-  e = ((tlv->value[0] << 1) & 0xff) | (tlv->value[1] >> 7);
+-  val = (((long)tlv->value[1] & 0x7f) << 16) | (tlv->value[2] << 8) | tlv->value[3];
+-
+-  LOG_DBG("Sign: %d, Fraction: %06"PRIx32"  0b", val < 0, val);
+-  for(i = 0; i < 23; i++) {
+-    LOG_DBG_("%"PRId32"", ((val >> (22 - i)) & 1));
+-  }
+-  LOG_DBG("\nExp:%d => %d\n", e, e - 127);
+-
+-  e = e - 127 + bits;
+-
+-  /* e corresponds to the number of times we need to roll the number */
+-
+-  LOG_DBG("Actual e=%d\n", e);
+-  e = e - 23;
+-  LOG_DBG("E after sub %d\n", e);
+-  val = val | 1L << 23;
+-  if(e > 0) {
+-    val = val << e;
++  /* Create a union to easily access the float/double as bytes */
++  typedef union {
++    float f;
++    double d;
++    uint8_t bytes[8];
++    uint32_t u32;
++    uint64_t u64;
++  } float_union_t;
++
++  float_union_t fu;
++  
++  if(tlv->length == 4) {
++    /* Single precision (binary32) */
++    memcpy(&fu.f, tlv->value, 4);
++    
++    /* Check for NaN or infinity */
++    /* In IEEE 754, exponent of all 1s indicates special values (NaN or infinity) */
++    if((fu.u32 & 0x7F800000) == 0x7F800000) {
++      /* This is NaN or infinity - reject */
++      *value = 0;
++      return 0;
++    }
++    
++    /* Convert to double for easier handling of edge cases */
++    double d = (double)fu.f;
++    
++    /* Check for value that's too small - becomes zero */
++    double scaled = d * (1 << bits);
++    if(scaled > -1.0 && scaled < 1.0) {
++      *value = 0;
++      return 4;
++    }
++    
++    /* Check for overflow and saturate */
++    if(d > 0) {
++      double max_val = (double)INT32_MAX / (1 << bits);
++      if(d >= max_val) {
++        *value = INT32_MAX;
++        return 4;
++      }
++    } else if(d < 0) {
++      double max_val = (double)-INT32_MAX / (1 << bits);
++      if(d <= max_val) {
++        *value = -INT32_MAX;
++        return 4;
++      }
++    }
++    
++    /* Normal conversion - truncate toward zero */
++    *value = (int32_t)(d * (1 << bits));
++    return 4;
++    
+   } else {
+-    val = val >> -e;
++    /* Double precision (binary64) */
++    memcpy(&fu.d, tlv->value, 8);
++    
++    /* Check for NaN or infinity */
++    /* In IEEE 754, exponent of all 1s indicates special values (NaN or infinity) */
++    if((fu.u64 & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL) {
++      /* This is NaN or infinity - reject */
++      *value = 0;
++      return 0;
++    }
++    
++    double d = fu.d;
++    
++    /* Check for value that's too small - becomes zero */
++    double scaled = d * (1 << bits);
++    if(scaled > -1.0 && scaled < 1.0) {
++      *value = 0;
++      return 8;
++    }
++    
++    /* Check for overflow and saturate */
++    if(d > 0) {
++      double max_val = (double)INT32_MAX / (1 << bits);
++      if(d >= max_val) {
++        *value = INT32_MAX;
++        return 8;
++      }
++    } else if(d < 0) {
++      double max_val = (double)-INT32_MAX / (1 << bits);
++      if(d <= max_val) {
++        *value = -INT32_MAX;
++        return 8;
++      }
++    }
++    
++    /* Normal conversion - truncate toward zero */
++    *value = (int32_t)(d * (1 << bits));
++    return 8;
+   }
+-
+-  *value = sign ? -val : val;
+-  return 4;
+ }
+ /*---------------------------------------------------------------------------*/
+ /** @} */
+diff --git a/os/services/lwm2m/lwm2m-tlv.c.bak b/os/services/lwm2m/lwm2m-tlv.c.bak
+new file mode 100644
+index 0000000..6e51e5f
+--- /dev/null
++++ b/os/services/lwm2m/lwm2m-tlv.c.bak
+@@ -0,0 +1,376 @@
++/*
++ * Copyright (c) 2015-2018, Yanzi Networks AB.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the copyright holder nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/**
++ * \addtogroup lwm2m
++ * @{
++ *
++ */
++
++/**
++ * \file
++ *         Implementation of the Contiki OMA LWM2M TLV
++ * \author
++ *         Joakim Eriksson <joakime@sics.se>
++ *         Niclas Finne <nfi@sics.se>
++ */
++
++#include <string.h>
++#include <stdint.h>
++#include <inttypes.h>
++#include "lwm2m-tlv.h"
++
++/* Log configuration */
++#include "coap-log.h"
++#define LOG_MODULE "lwm2m-tlv"
++#define LOG_LEVEL  LOG_LEVEL_NONE
++
++/*---------------------------------------------------------------------------*/
++static inline uint8_t
++get_len_type(const lwm2m_tlv_t *tlv)
++{
++  if(tlv->length < 8) {
++    return 0;
++  } else if(tlv->length < 256) {
++    return 1;
++  } else if(tlv->length < 0x10000) {
++    return 2;
++  } else {
++    return 3;
++  }
++}
++/*---------------------------------------------------------------------------*/
++size_t
++lwm2m_tlv_read(lwm2m_tlv_t *tlv, const uint8_t *buffer, size_t len)
++{
++  uint8_t len_type;
++  uint8_t len_pos = 1;
++  size_t tlv_len;
++
++  /* A TLV needs at least the type byte and a single ID byte. */
++  if(len < 2) {
++    LOG_WARN("Truncated TLV header (%u bytes available).\n", (unsigned)len);
++    return 0;
++  }
++
++  tlv->type = (buffer[0] >> 6) & 3;
++  len_type = (buffer[0] >> 3) & 3;
++  len_pos = 1 + (((buffer[0] & (1 << 5)) != 0) ? 2 : 1);
++
++  /* len_pos is the offset of the length field (== header size when there
++     is no separate length field). Ensure the ID bytes and any length
++     bytes are within the buffer before reading them. */
++  if(len < (size_t)len_pos + len_type) {
++    LOG_WARN("Truncated TLV header (need %u bytes, have %u).\n",
++             (unsigned)(len_pos + len_type), (unsigned)len);
++    return 0;
++  }
++
++  tlv->id = buffer[1];
++  /* if len_pos is larger than two it means that there is more ID to read */
++  if(len_pos > 2) {
++    tlv->id = (tlv->id << 8) + buffer[2];
++  }
++
++  if(len_type == 0) {
++    tlv_len = buffer[0] & 7;
++  } else {
++    /* read the length */
++    tlv_len = 0;
++    while(len_type > 0) {
++      tlv_len = tlv_len << 8 | buffer[len_pos++];
++      len_type--;
++    }
++  }
++
++  /* Ensure the value fits within the remaining buffer. len_pos now points
++     to the first value byte and is guaranteed to be <= len. */
++  if(tlv_len > len - len_pos) {
++    LOG_WARN("Truncated TLV value (need %u bytes, have %u).\n",
++             (unsigned)tlv_len, (unsigned)(len - len_pos));
++    return 0;
++  }
++
++  /* and read out the data??? */
++  tlv->length = tlv_len;
++  tlv->value = &buffer[len_pos];
++
++  return len_pos + tlv_len;
++}
++/*---------------------------------------------------------------------------*/
++size_t
++lwm2m_tlv_get_size(const lwm2m_tlv_t *tlv)
++{
++  size_t size;
++  /* first hdr + len size */
++  size = 1 + get_len_type(tlv);
++  /* id size */
++  size += (tlv->id > 255) ? 2 : 1;
++
++  /* and the length */
++  size += tlv->length;
++  return size;
++}
++/*---------------------------------------------------------------------------*/
++/* If the tlv->value is NULL - only the header will be generated - useful for
++ * large strings or opaque streaming (block transfer)
++ */
++size_t
++lwm2m_tlv_write(const lwm2m_tlv_t *tlv, uint8_t *buffer, size_t buffersize)
++{
++  int pos;
++  uint8_t len_type;
++
++  /* len type is the same as number of bytes required for length */
++  len_type = get_len_type(tlv);
++  pos = 1 + len_type;
++  /* ensure that we do not write too much */
++  if(tlv->value != NULL && buffersize < tlv->length + pos) {
++    LOG_WARN("Could not write the TLV - buffer overflow.\n");
++    return 0;
++  }
++
++  if(buffersize < pos + 2) {
++    return 0;
++  }
++
++  /* first type byte in TLV header */
++  buffer[0] = (tlv->type << 6) |
++    (tlv->id > 255 ? (1 << 5) : 0) |
++    (len_type << 3) |
++    (len_type == 0 ? tlv->length : 0);
++
++  pos = 1;
++  /* The ID */
++  if(tlv->id > 255) {
++    buffer[pos++] = (tlv->id >> 8) & 0xff;
++  }
++  buffer[pos++] = tlv->id & 0xff;
++  /* Add length if needed - unrolled loop ? */
++  if(len_type > 2) {
++    buffer[pos++] = (tlv->length >> 16) & 0xff;
++  }
++  if(len_type > 1) {
++    buffer[pos++] = (tlv->length >> 8) & 0xff;
++  }
++  if(len_type > 0) {
++    buffer[pos++] = tlv->length & 0xff;
++  }
++
++  /* finally add the value */
++  if(tlv->value != NULL && tlv->length > 0) {
++    memcpy(&buffer[pos], tlv->value, tlv->length);
++  }
++
++  if(LOG_DBG_ENABLED) {
++    int i;
++    LOG_DBG("TLV: ");
++    for(i = 0; i < pos + ((tlv->value != NULL) ? tlv->length : 0); i++) {
++      LOG_DBG_("%02x", buffer[i]);
++    }
++    LOG_DBG_("\n");
++  }
++
++  return pos + ((tlv->value != NULL) ? tlv->length : 0);
++}
++/*---------------------------------------------------------------------------*/
++int32_t
++lwm2m_tlv_get_int32(const lwm2m_tlv_t *tlv)
++{
++  int i;
++  int32_t value = 0;
++
++  /* A zero-length integer represents the value 0. Returning here also
++     avoids reading tlv->value[0] below when there is no value at all. */
++  if(tlv->length == 0) {
++    return 0;
++  }
++
++  for(i = 0; i < tlv->length; i++) {
++    value = (value << 8) | tlv->value[i];
++  }
++
++  /* Ensure that we set all the bits above what we read in */
++  if(tlv->value[0] & 0x80) {
++    while(i < 4) {
++      value = value | (0xff << (i * 8));
++      i++;
++    }
++  }
++
++  return value;
++}
++/*---------------------------------------------------------------------------*/
++size_t
++lwm2m_tlv_write_int32(uint8_t type, int16_t id, int32_t value, uint8_t *buffer, size_t len)
++{
++  lwm2m_tlv_t tlv;
++  uint8_t buf[4];
++  int i;
++  int v;
++  int last_bit;
++  LOG_DBG("Exporting int32 %d %"PRId32" ", id, value);
++
++  v = value < 0 ? -1 : 0;
++  i = 0;
++  do {
++    buf[3 - i] = value & 0xff;
++    /* check if the last MSB indicates that we need another byte */
++    last_bit = (v == 0 && (value & 0x80) > 0) || (v == -1 && (value & 0x80) == 0);
++    value = value >> 8;
++    i++;
++  } while((value != v || last_bit) && i < 4);
++
++  /* export INT as TLV */
++  LOG_DBG("len: %d\n", i);
++  tlv.type = type;
++  tlv.length = i;
++  tlv.value = &buf[3 - (i - 1)];
++  tlv.id = id;
++  return lwm2m_tlv_write(&tlv, buffer, len);
++}
++/*---------------------------------------------------------------------------*/
++/* convert fixpoint 32-bit to a IEEE Float in the byte array*/
++size_t
++lwm2m_tlv_write_float32(uint8_t type, int16_t id, int32_t value, int bits,
++                      uint8_t *buffer, size_t len)
++{
++  int i;
++  int e = 0;
++  int32_t val = 0;
++  int32_t v;
++  uint8_t b[4];
++  lwm2m_tlv_t tlv;
++
++  v = value;
++  if(v < 0) {
++    v = -v;
++  }
++
++  while(v > 1) {
++    val = (val >> 1);
++    if (v & 1) {
++      val = val | (1L << 22);
++    }
++    v = (v >> 1);
++    e++;
++  }
++
++  LOG_DBG("Sign: %d, Fraction: %06"PRIx32"  0b", value < 0, val);
++  for(i = 0; i < 23; i++) {
++    LOG_DBG_("%"PRId32"", ((val >> (22 - i)) & 1));
++  }
++  LOG_DBG_("\nExp:%d\n", e);
++
++  /* convert to the thing we should have */
++  e = e - bits + 127;
++
++  if(value == 0) {
++    e = 0;
++  }
++
++  /* is this the right byte order? */
++  b[0] = (value < 0 ? 0x80 : 0) | (e >> 1);
++  b[1] = ((e & 1) << 7) | ((val >> 16) & 0x7f);
++  b[2] = (val >> 8) & 0xff;
++  b[3] = val & 0xff;
++
++  LOG_DBG("B=%02x%02x%02x%02x\n", b[0], b[1], b[2], b[3]);
++  /* construct the TLV */
++  tlv.type = type;
++  tlv.length = 4;
++  tlv.value = b;
++  tlv.id = id;
++
++  return lwm2m_tlv_write(&tlv, buffer, len);
++}
++/*---------------------------------------------------------------------------*/
++/* convert float to fixpoint */
++size_t
++lwm2m_tlv_float32_to_fix(const lwm2m_tlv_t *tlv, int32_t *value, int bits)
++{
++  /* TLV needs to be 4 bytes */
++  int e, i;
++  int32_t val;
++  int sign;
++
++  /* The IEEE 754 single-precision representation requires exactly 4 bytes.
++     Reject anything shorter to avoid reading past the value. */
++  if(tlv->length < 4) {
++    *value = 0;
++    return 0;
++  }
++
++  sign = (tlv->value[0] & 0x80) != 0;
++  e = ((tlv->value[0] << 1) & 0xff) | (tlv->value[1] >> 7);
++  val = (((long)tlv->value[1] & 0x7f) << 16) | (tlv->value[2] << 8) | tlv->value[3];
++
++  LOG_DBG("Sign: %d, Fraction: %06"PRIx32"  0b", val < 0, val);
++  for(i = 0; i < 23; i++) {
++    LOG_DBG_("%"PRId32"", ((val >> (22 - i)) & 1));
++  }
++  LOG_DBG("\nExp:%d => %d\n", e, e - 127);
++
++  e = e - 127 + bits;
++
++  /* e corresponds to the number of times we need to roll the number */
++
++  LOG_DBG("Actual e=%d\n", e);
++  e = e - 23;
++  LOG_DBG("E after sub %d\n", e);
++  val = val | 1L << 23;
++  if(e > 0) {
++    val = val << e;
++  } else {
++    val = val >> -e;
++  }
++
++  *value = sign ? -val : val;
++  return 4;
++}
++/*---------------------------------------------------------------------------*/
++/** @} */
++
++#if 0
++int main(int argc, char *argv[])
++{
++  lwm2m_tlv_t tlv;
++  uint8_t data[24];
++  /* Make -1 */
++  tlv.length = 2;
++  tlv.value = data;
++  data[0] = 0x00;
++  data[1] = 0x80,
++
++  printf("TLV:%d\n", lwm2m_tlv_get_int32(&tlv));
++
++  printf("Len: %d\n", lwm2m_tlv_write_int32(0, 1, -0x88987f, data, 24));
++}
++#endif
+diff --git a/test_float_fix b/test_float_fix
+new file mode 100755
+index 0000000000000000000000000000000000000000..8fbe4e941e74093f62555c52a65383166f4383f9
+GIT binary patch
+literal 20624
+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
+azGZW+>Q%b5{h!VL&^Dp5*k)iO+5Z5hD%IWq
+
+literal 0
+HcmV?d00001
+
+diff --git a/test_float_fix.c b/test_float_fix.c
+new file mode 100644
+index 0000000..2540df7
+--- /dev/null
++++ b/test_float_fix.c
+@@ -0,0 +1,120 @@
++#include <stdio.h>
++#include <stdint.h>
++#include <string.h>
++#include <math.h>
++#include <float.h>
++#include "/testbed/os/services/lwm2m/lwm2m-tlv.h"
++
++int main() {
++    // Test various float values
++    float test_floats[] = {
++        0.0f,           // Zero
++        1.0f,           // One
++        -1.0f,          // Negative one
++        3.14159f,       // Pi
++        -3.14159f,      // Negative pi
++        1e10f,          // Large - should saturate
++        -1e10f,         // Large negative - should saturate
++        1e-10f,         // Small - should become zero
++        -1e-10f,        // Small negative - should become zero
++        INFINITY,       // Infinity - should be rejected
++        -INFINITY,      // Negative infinity - should be rejected
++        NAN,            // NaN - should be rejected
++    };
++    
++    const char* test_names[] = {
++        "Zero", "One", "Negative one", "Pi", "Negative pi",
++        "Large positive", "Large negative", "Small positive", "Small negative",
++        "Infinity", "Negative infinity", "NaN"
++    };
++    
++    int num_tests = sizeof(test_floats) / sizeof(test_floats[0]);
++    int bits = 8; // 8 fractional bits
++    
++    printf("Testing float to fixpoint conversion with %d fractional bits:\n", bits);
++    printf("=====================================\n");
++    
++    for (int i = 0; i < num_tests; i++) {
++        lwm2m_tlv_t tlv;
++        tlv.type = 0;
++        tlv.id = 1;
++        tlv.length = 4;
++        tlv.value = (uint8_t*)&test_floats[i];
++        
++        int32_t fixed;
++        size_t result = lwm2m_tlv_float32_to_fix(&tlv, &fixed, bits);
++        
++        printf("%-18s: ", test_names[i]);
++        if (result == 0) {
++            printf("REJECTED (returned 0)");
++        } else {
++            printf("fixed=%d (0x%08x)", fixed, fixed);
++        }
++        printf("\n");
++    }
++    
++    // Test invalid lengths
++    printf("\nTesting invalid lengths:\n");
++    printf("=======================\n");
++    
++    uint8_t data[10];
++    for (int len = 0; len < 10; len++) {
++        if (len != 4 && len != 8) {  // Skip valid lengths
++            lwm2m_tlv_t tlv;
++            tlv.type = 0;
++            tlv.id = 1;
++            tlv.length = len;
++            tlv.value = data;
++            
++            int32_t fixed;
++            size_t result = lwm2m_tlv_float32_to_fix(&tlv, &fixed, bits);
++            
++            printf("Length %2d: %s\n", len, 
++                   (result == 0) ? "REJECTED (GOOD)" : "ACCEPTED (BAD)");
++        }
++    }
++    
++    // Test double precision (8 bytes)
++    printf("\nTesting double precision (8 bytes):\n");
++    printf("===================================\n");
++    
++    double test_doubles[] = {
++        0.0,           // Zero
++        1.0,           // One
++        -1.0,          // Negative one
++        3.14159,       // Pi
++        -3.14159,      // Negative pi
++        1e100,         // Very large - should saturate
++        -1e100,        // Very large negative - should saturate
++        1e-100,        // Very small - should become zero
++        -1e-100,       // Very small negative - should become zero
++    };
++    
++    const char* double_names[] = {
++        "Zero", "One", "Negative one", "Pi", "Negative pi",
++        "Very large", "Very large negative", "Very small", "Very small negative"
++    };
++    
++    int num_double_tests = sizeof(test_doubles) / sizeof(test_doubles[0]);
++    
++    for (int i = 0; i < num_double_tests; i++) {
++        lwm2m_tlv_t tlv;
++        tlv.type = 0;
++        tlv.id = 1;
++        tlv.length = 8;
++        tlv.value = (uint8_t*)&test_doubles[i];
++        
++        int32_t fixed;
++        size_t result = lwm2m_tlv_float32_to_fix(&tlv, &fixed, bits);
++        
++        printf("%-18s: ", double_names[i]);
++        if (result == 0) {
++            printf("REJECTED (returned 0)");
++        } else {
++            printf("fixed=%d (0x%08x)", fixed, fixed);
++        }
++        printf("\n");
++    }
++    
++    return 0;
++}

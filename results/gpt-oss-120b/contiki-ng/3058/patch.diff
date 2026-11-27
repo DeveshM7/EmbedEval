@@ -1,0 +1,196 @@
+diff --git a/os/lib/random.h b/os/lib/random.h
+index cb206e2..259a9c8 100644
+--- a/os/lib/random.h
++++ b/os/lib/random.h
+@@ -31,6 +31,7 @@
+  */
+ #ifndef RANDOM_H_
+ #define RANDOM_H_
++#include <stdint.h>
+ 
+ /*
+  * Initialize the pseudo-random generator.
+@@ -49,4 +50,12 @@ unsigned short random_rand(void);
+ /* Since random_rand casts to unsigned short, we'll use this maxmimum */
+ #define RANDOM_RAND_MAX 65535U
+ 
++
++/* PRNG interface for sfc generators */
++struct random_prng {
++  void (*seed)(uint64_t seed);
++  uint_fast16_t (*rand)(void);
++};
++extern const struct random_prng sfc32_prng;
++extern const struct random_prng sfc16_prng;
+ #endif /* RANDOM_H_ */
+diff --git a/os/lib/sfc_prng.c b/os/lib/sfc_prng.c
+new file mode 100644
+index 0000000..12d801f
+--- /dev/null
++++ b/os/lib/sfc_prng.c
+@@ -0,0 +1,78 @@
++/*
++ * Small Fast Counter (SFC) PRNG implementations – 32‑bit and 16‑bit variants.
++ * Based on the reference implementation by Chris Doty‑Humphrey (see
++ * https://github.com/lemire/testingRNG).
++ * The generator is seeded with a 64‑bit value which is expanded using
++ * SplitMix64.
++ */
++
++#include "random.h"
++#include <stdint.h>
++
++/* -------------------------------------------------------------------------- */
++/* SplitMix64 – deterministic 64‑bit RNG used for seeding. */
++static uint64_t splitmix_state;
++
++static uint64_t
++splitmix_next(void)
++{
++  uint64_t z = (splitmix_state += 0x9e3779b97f4a7c15ULL);
++  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
++  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
++  return z ^ (z >> 31);
++}
++
++/* -------------------------------------------------------------------------- */
++/* sfc32 – 32‑bit state, lower 16‑bit output. */
++static uint32_t sfc32_a, sfc32_b, sfc32_c, sfc32_d;
++
++static void
++sfc32_seed(uint64_t seed)
++{
++  splitmix_state = seed;
++  sfc32_a = (uint32_t)splitmix_next();
++  sfc32_b = (uint32_t)splitmix_next();
++  sfc32_c = (uint32_t)splitmix_next();
++  sfc32_d = (uint32_t)splitmix_next();
++}
++
++static uint_fast16_t
++sfc32_rand(void)
++{
++  uint32_t e = sfc32_a + sfc32_b + sfc32_d++;
++  sfc32_a = sfc32_b ^ (sfc32_b >> 9);
++  sfc32_b = sfc32_c + (sfc32_c << 3);
++  sfc32_c = (sfc32_c << 21) | (sfc32_c >> (32 - 21));
++  sfc32_d = e;
++  return (uint_fast16_t)(e & 0xFFFFU);
++}
++
++/* -------------------------------------------------------------------------- */
++/* sfc16 – 16‑bit state, full 16‑bit output. */
++static uint16_t sfc16_a, sfc16_b, sfc16_c, sfc16_d;
++
++static void
++sfc16_seed(uint64_t seed)
++{
++  splitmix_state = seed;
++  sfc16_a = (uint16_t)splitmix_next();
++  sfc16_b = (uint16_t)splitmix_next();
++  sfc16_c = (uint16_t)splitmix_next();
++  sfc16_d = (uint16_t)splitmix_next();
++}
++
++static uint_fast16_t
++sfc16_rand(void)
++{
++  uint16_t e = sfc16_a + sfc16_b + sfc16_d++;
++  sfc16_a = sfc16_b ^ (sfc16_b >> 5);
++  sfc16_b = sfc16_c + (sfc16_c << 2);
++  sfc16_c = (sfc16_c << 13) | (sfc16_c >> (16 - 13));
++  sfc16_d = e;
++  return e;
++}
++
++/* Export the PRNG structs */
++const struct random_prng sfc32_prng = { .seed = sfc32_seed, .rand = sfc32_rand };
++const struct random_prng sfc16_prng = { .seed = sfc16_seed, .rand = sfc16_rand };
++
+diff --git a/sfc_test b/sfc_test
+new file mode 100755
+index 0000000000000000000000000000000000000000..84873579dec1a3f535e7460dc5a1eca2b836e194
+GIT binary patch
+literal 16624
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/sfc_test.c b/sfc_test.c
+new file mode 100644
+index 0000000..fafe125
+--- /dev/null
++++ b/sfc_test.c
+@@ -0,0 +1,10 @@
++#include <stdio.h>
++#include "os/lib/random.h"
++int main(){
++    const struct random_prng *prng = &sfc32_prng;
++    prng->seed(0ULL);
++    for(int i=0;i<8;i++){
++        printf("0x%04x\n", prng->rand());
++    }
++    return 0;
++}

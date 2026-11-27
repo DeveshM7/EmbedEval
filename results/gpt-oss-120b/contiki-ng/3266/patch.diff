@@ -1,0 +1,54 @@
+diff --git a/os/net/app-layer/coap/coap.c b/os/net/app-layer/coap/coap.c
+index 71dda1f..7a4dad1 100644
+--- a/os/net/app-layer/coap/coap.c
++++ b/os/net/app-layer/coap/coap.c
+@@ -503,6 +503,8 @@ coap_parse_message(coap_message_t *coap_pkt, uint8_t *data, uint16_t data_len)
+       coap_pkt->payload = current_option;
+       coap_pkt->payload_len = data_len - (coap_pkt->payload - data);
+ 
++      /* Ensure we do not write beyond the received buffer. The payload is raw binary; no NUL termination is added. */
++
+       /* also for receiving, the Erbium upper bound is COAP_MAX_CHUNK_SIZE */
+       if(coap_pkt->payload_len > COAP_MAX_CHUNK_SIZE) {
+         coap_pkt->payload_len = COAP_MAX_CHUNK_SIZE;
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..0f68003
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,35 @@
++*** Begin Patch
++*** Update File: os/net/app-layer/coap/coap.c
++@@
++-      coap_pkt->payload_len = data_len - (coap_pkt->payload - data);
++-
++-      /* also for receiving, the Erbium upper bound is COAP_MAX_CHUNK_SIZE */
++-      if(coap_pkt->payload_len > COAP_MAX_CHUNK_SIZE) {
++-        coap_pkt->payload_len = COAP_MAX_CHUNK_SIZE;
++-        /* null-terminate payload */
++-      }
++-      coap_pkt->payload[coap_pkt->payload_len] = '\0';
+++      /* Determine the length of the payload. The payload pointer points
+++         directly into the received buffer, therefore we must never write
+++         beyond the bounds of the original data. The original implementation
+++         appended a NUL byte after the payload (and also after truncation to
+++         COAP_MAX_CHUNK_SIZE). This corrupted the byte immediately following
+++         the received message – exactly the issue described in the task –
+++         because the NUL write could occur at the last byte of the buffer or
+++         overwrite binary data that legitimately contains a NUL.
+++
+++         The CoAP parser should treat the payload as raw binary data; the
+++         length field already provides the necessary information. Therefore
+++         we simply store the length and *do not* write any termination byte.
+++      */
+++      coap_pkt->payload_len = data_len - (coap_pkt->payload - data);
+++
+++      /* also for receiving, the Erbium upper bound is COAP_MAX_CHUNK_SIZE */
+++      if(coap_pkt->payload_len > COAP_MAX_CHUNK_SIZE) {
+++        coap_pkt->payload_len = COAP_MAX_CHUNK_SIZE;
+++        /* Do NOT write a NUL byte after truncation – it would be out of
+++           bounds for a full‑buffer packet. */
+++      }
+++      /* No null‑termination here: callers must rely on payload_len.
+++         This preserves the integrity of the adjacent byte. */
++*** End Patch

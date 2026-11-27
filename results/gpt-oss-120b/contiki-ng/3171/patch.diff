@@ -1,0 +1,196 @@
+diff --git a/os/net/mac/framer/frame802154.c b/os/net/mac/framer/frame802154.c
+index 1fc9839..aef28a5 100644
+--- a/os/net/mac/framer/frame802154.c
++++ b/os/net/mac/framer/frame802154.c
+@@ -565,6 +565,25 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+ 
+   /* decode the FCF */
+   p += frame802154_parse_fcf(p, &pf->fcf);
++  int needed = p - data; /* bytes consumed so far (FCF) */
++  if(pf->fcf.sequence_number_suppression == 0) {
++    needed += 1;
++  }
++  frame802154_has_panid(&pf->fcf, &has_src_panid, &has_dest_panid);
++  if(has_dest_panid) {
++    needed += 2; /* Destination PAN ID */
++  }
++  needed += addr_len(pf->fcf.dest_addr_mode);
++  if(has_src_panid) {
++    needed += 2; /* Source PAN ID */
++  }
++  needed += addr_len(pf->fcf.src_addr_mode);
++  if(pf->fcf.security_enabled) {
++    needed += 1; /* minimum aux security header byte */
++  }
++  if(len < needed) {
++    return 0;
++  }
+ 
+   if(pf->fcf.sequence_number_suppression == 0) {
+     pf->seq = p[0];
+@@ -639,7 +658,13 @@ frame802154_parse(uint8_t *data, int len, frame802154_t *pf)
+     pf->aux_hdr.security_control.frame_counter_suppression = p[0] >> 5;
+     pf->aux_hdr.security_control.frame_counter_size = p[0] >> 6;
+     p += 1;
++    int sec_rem = len - (p - data);
++    if(pf->aux_hdr.security_control.frame_counter_suppression == 0) {
++      if(sec_rem < 4) return 0;
++    }
+ 
++      int sec_rem2 = len - (p - data);
++      if(sec_rem2 < 4) return 0;
+     if(pf->aux_hdr.security_control.frame_counter_suppression == 0) {
+       memcpy(pf->aux_hdr.frame_counter.u8, p, 4);
+       p += 4;
+diff --git a/os/net/mac/framer/frame802154e-ie.c b/os/net/mac/framer/frame802154e-ie.c
+index 344260a..0cfefd0 100644
+--- a/os/net/mac/framer/frame802154e-ie.c
++++ b/os/net/mac/framer/frame802154e-ie.c
+@@ -491,6 +491,7 @@ frame802154e_parse_mlme_long_ie(const uint8_t *buf, int len,
+   switch(sub_id) {
+     case MLME_LONG_IE_TSCH_CHANNEL_HOPPING_SEQUENCE:
+       if(len > 0) {
++    if(len < 12) return -1;
+         if(ies != NULL) {
+           ies->ie_channel_hopping_sequence_id = buf[0];
+           if(len > 1) {
+diff --git a/patch.diff b/patch.diff
+new file mode 100644
+index 0000000..0ff35e9
+--- /dev/null
++++ b/patch.diff
+@@ -0,0 +1,134 @@
++*** Begin Patch
++*** Update File: os/net/mac/framer/frame802154.c
++@@
++   p = data;
++ 
++   /* decode the FCF */
++   p += frame802154_parse_fcf(p, &pf->fcf);
+++
+++  /* ---------------------------------------------------------------
+++   * Defensive length checking
+++   * ---------------------------------------------------------------
+++   * The original implementation accessed the input buffer without
+++   * ensuring that enough bytes were available. This caused truncated
+++   * frames (e.g., frames that advertised a long address but were cut
+++   * off) to be parsed as valid, returning a non‑zero header length.
+++   *
+++   * For every subsequent field we now verify that the remaining length
+++   * of the input buffer is sufficient. If not, the function returns 0
+++   * (the documented failure value) and leaves the output structure
+++   * untouched.
+++   */
+++  int remaining = len - (p - data);
++@@
++-  if(pf->fcf.sequence_number_suppression == 0) {
++-    pf->seq = p[0];
++-    p++;
++-  }
+++  if(pf->fcf.sequence_number_suppression == 0) {
+++    if(remaining < 1) {
+++      return 0;
+++    }
+++    pf->seq = p[0];
+++    p++;
+++    remaining--;
+++  }
++@@
++-    if(has_dest_panid) {
++-      /* Destination PAN */
++-      pf->dest_pid = p[0] + (p[1] << 8);
++-      p += 2;
++-    } else {
++-      pf->dest_pid = 0;
++-    }
+++    if(has_dest_panid) {
+++      if(remaining < 2) {
+++        return 0;
+++      }
+++      /* Destination PAN */
+++      pf->dest_pid = p[0] + (p[1] << 8);
+++      p += 2;
+++      remaining -= 2;
+++    } else {
+++      pf->dest_pid = 0;
+++    }
++@@
++-    if(pf->fcf.dest_addr_mode == FRAME802154_SHORTADDRMODE) {
++-      linkaddr_copy((linkaddr_t *)&(pf->dest_addr), &linkaddr_null);
++-      pf->dest_addr[0] = p[1];
++-      pf->dest_addr[1] = p[0];
++-      p += 2;
++-    } else if(pf->fcf.dest_addr_mode == FRAME802154_LONGADDRMODE) {
++-      for(c = 0; c < 8; c++) {
++-        pf->dest_addr[c] = p[7 - c];
++-      }
++-      p += 8;
++-    }
+++    uint8_t dest_addr_len = addr_len(pf->fcf.dest_addr_mode);
+++    if(remaining < dest_addr_len) {
+++      return 0;
+++    }
+++    if(pf->fcf.dest_addr_mode == FRAME802154_SHORTADDRMODE) {
+++      linkaddr_copy((linkaddr_t *)&(pf->dest_addr), &linkaddr_null);
+++      pf->dest_addr[0] = p[1];
+++      pf->dest_addr[1] = p[0];
+++      p += 2;
+++    } else if(pf->fcf.dest_addr_mode == FRAME802154_LONGADDRMODE) {
+++      for(c = 0; c < 8; c++) {
+++        pf->dest_addr[c] = p[7 - c];
+++      }
+++      p += 8;
+++    }
+++    remaining -= dest_addr_len;
++@@
++-    if(has_src_panid) {
++-      pf->src_pid = p[0] + (p[1] << 8);
++-      p += 2;
++-      if(!has_dest_panid) {
++-        pf->dest_pid = pf->src_pid;
++-      }
++-    } else {
++-      pf->src_pid = pf->dest_pid;
++-    }
+++    if(has_src_panid) {
+++      if(remaining < 2) {
+++        return 0;
+++      }
+++      pf->src_pid = p[0] + (p[1] << 8);
+++      p += 2;
+++      remaining -= 2;
+++      if(!has_dest_panid) {
+++        pf->dest_pid = pf->src_pid;
+++      }
+++    } else {
+++      pf->src_pid = pf->dest_pid;
+++    }
++@@
++-    if(pf->fcf.src_addr_mode == FRAME802154_SHORTADDRMODE) {
++-      linkaddr_copy((linkaddr_t *)&(pf->src_addr), &linkaddr_null);
++-      pf->src_addr[0] = p[1];
++-      pf->src_addr[1] = p[0];
++-      p += 2;
++-    } else if(pf->fcf.src_addr_mode == FRAME802154_LONGADDRMODE) {
++-      for(c = 0; c < 8; c++) {
++-        pf->src_addr[c] = p[7 - c];
++-      }
++-      p += 8;
++-    }
+++    uint8_t src_addr_len = addr_len(pf->fcf.src_addr_mode);
+++    if(remaining < src_addr_len) {
+++      return 0;
+++    }
+++    if(pf->fcf.src_addr_mode == FRAME802154_SHORTADDRMODE) {
+++      linkaddr_copy((linkaddr_t *)&(pf->src_addr), &linkaddr_null);
+++      pf->src_addr[0] = p[1];
+++      pf->src_addr[1] = p[0];
+++      p += 2;
+++    } else if(pf->fcf.src_addr_mode == FRAME802154_LONGADDRMODE) {
+++      for(c = 0; c < 8; c++) {
+++        pf->src_addr[c] = p[7 - c];
+++      }
+++      p += 8;
+++    }
+++    remaining -= src_addr_len;
++*** End Patch
