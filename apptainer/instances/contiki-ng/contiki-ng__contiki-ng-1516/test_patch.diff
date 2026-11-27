@@ -283,10 +283,28 @@ index 3ac43a91c..6d1cc7964 100644
  #define UIP_CONF_BUFFER_SIZE BUFSIZE
  #endif /* BUFSIZE */
 diff --git a/tests/07-simulation-base/code-ipv6/receiver/udp-receiver.c b/tests/07-simulation-base/code-ipv6/receiver/udp-receiver.c
-index 86d7a4a42..1dcf87c16 100644
+index 86d7a4a42..9b7c71231 100644
 --- a/tests/07-simulation-base/code-ipv6/receiver/udp-receiver.c
 +++ b/tests/07-simulation-base/code-ipv6/receiver/udp-receiver.c
-@@ -41,6 +41,9 @@ PROCESS_THREAD(udp_process, ev, data)
+@@ -1,6 +1,7 @@
+ #include "contiki.h"
+ #include "contiki-lib.h"
+ #include "contiki-net.h"
++#include "net/routing/routing.h"
+ 
+ #include <stdio.h>
+ 
+@@ -12,7 +13,8 @@ static struct simple_udp_connection broadcast_connection;
+ 
+ /*---------------------------------------------------------------------------*/
+ PROCESS(udp_process, "UDP broadcast process");
+-AUTOSTART_PROCESSES(&udp_process);
++PROCESS(routing_check_process, "Routing check");
++AUTOSTART_PROCESSES(&udp_process, &routing_check_process);
+ /*---------------------------------------------------------------------------*/
+ static void
+ receiver(struct simple_udp_connection *c,
+@@ -41,6 +43,9 @@ PROCESS_THREAD(udp_process, ev, data)
  
    default_prefix = uip_ds6_default_prefix();
    uip_ip6addr_copy(&addr, default_prefix);
@@ -296,6 +314,37 @@ index 86d7a4a42..1dcf87c16 100644
    addr.u16[7] = UIP_HTONS(2);
    uip_ds6_addr_add(&addr, 0, ADDR_AUTOCONF);
  
+@@ -66,3 +71,30 @@ PROCESS_THREAD(udp_process, ev, data)
+   PROCESS_END();
+ }
+ /*---------------------------------------------------------------------------*/
++/*
++ * Added by EmbedEval: the scenario's failure, seen through the public routing
++ * API instead of RPL's own log. Once the receiver has joined the DAG it must
++ * stay joined, i.e. keep a preferred parent.
++ */
++PROCESS_THREAD(routing_check_process, ev, data)
++{
++  static struct etimer check_timer;
++  static int joined;
++
++  PROCESS_BEGIN();
++
++  etimer_set(&check_timer, CLOCK_SECOND / 4);
++  while(1) {
++    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&check_timer));
++    etimer_reset(&check_timer);
++    if(NETSTACK_ROUTING.node_has_joined()) {
++      joined = 1;
++    } else if(joined) {
++      printf("Routing check: left the DAG after joining\n");
++      joined = 0;
++    }
++  }
++
++  PROCESS_END();
++}
++/*---------------------------------------------------------------------------*/
 diff --git a/tests/07-simulation-base/code-ipv6/sender/project-conf.h b/tests/07-simulation-base/code-ipv6/sender/project-conf.h
 index 3ac43a91c..6d1cc7964 100644
 --- a/tests/07-simulation-base/code-ipv6/sender/project-conf.h
@@ -346,10 +395,10 @@ index 95cfc8e49..2d4aa8276 100644
    }
 diff --git a/tests/07-simulation-base/ipv6.js b/tests/07-simulation-base/ipv6.js
 new file mode 100644
-index 000000000..864404e38
+index 000000000..310441610
 --- /dev/null
 +++ b/tests/07-simulation-base/ipv6.js
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,18 @@
 +TIMEOUT(3665000);
 +
 +while(true) {
@@ -359,6 +408,10 @@ index 000000000..864404e38
 +  }
 +  if (msg.indexOf('parent switch:') != -1 && msg.indexOf('-> (NULL IP addr)') != -1) {
 +    /* root instability: should not happen in the simple test */
++    log.testFailed();
++  }
++  if (msg.indexOf('Routing check: left the DAG') != -1) {
++    /* added by EmbedEval: the same failure, seen through the routing API */
 +    log.testFailed();
 +  }
 +
